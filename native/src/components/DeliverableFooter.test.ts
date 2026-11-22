@@ -15,6 +15,14 @@ vi.mock("@/lib/convex", () => ({
   api: { sessions: { ensureActivitySetup: "ensureActivitySetup" } },
 }));
 vi.mock("./FlairChips", () => ({ FlairChips: () => null }));
+let confirmAnswer = true;
+let confirmCalls = 0;
+vi.mock("@/lib/confirmFinishAndSend", () => ({
+  confirmFinishAndSend: () => {
+    confirmCalls += 1;
+    return Promise.resolve(confirmAnswer);
+  },
+}));
 vi.mock("@/theme", () => ({
   fonts: { semibold: "s" },
   useColors: () => new Proxy({}, { get: () => "#000" }),
@@ -29,18 +37,25 @@ vi.mock("react-native", async () => {
   return {
     ActivityIndicator: host("spinner"),
     Pressable: host("pressable"),
+    ScrollView: host("scrollview"),
     Text: host("text"),
     View: host("view"),
     StyleSheet: { create: <T,>(styles: T) => styles, hairlineWidth: 1 },
   };
 });
 
-import { DeliverableFooter, criteriaFor } from "./DeliverableFooter";
+import {
+  DeliverableFooter,
+  criteriaFor,
+  type DeliverableFooterProps,
+} from "./DeliverableFooter";
+import { QuestSessionContext, type QuestSession } from "@/lib/questSession";
 
 const base = {
   kind: "text" as const,
   mode: "manual" as const,
   flairKey: "doc",
+  sessionId: null,
   criteria: [],
   resolved: true,
   criteriaPending: false,
@@ -51,7 +66,7 @@ const base = {
   onRetry: vi.fn(),
 };
 
-function button(over: Partial<typeof base>) {
+function button(over: Partial<DeliverableFooterProps>) {
   let tree!: ReturnType<typeof create>;
   act(() => {
     tree = create(createElement(DeliverableFooter, { ...base, ...over }));
@@ -68,10 +83,71 @@ describe("DeliverableFooter", () => {
     expect(onCheck).toHaveBeenCalledOnce();
   });
 
-  it("hands work in without a rubric as 'Send this work'", () => {
-    expect(button({ mode: "none" }).props.accessibilityLabel).toBe(
-      "Send this work",
-    );
+  it("hands work in without a rubric as 'Finish and send this work', asking first", async () => {
+    const onCheck = vi.fn();
+    const b = button({ mode: "none", onCheck });
+    expect(b.props.accessibilityLabel).toBe("Finish and send this work");
+
+    // Declined: nothing is sent and the activity stays open.
+    confirmAnswer = false;
+    b.props.onPress();
+    await Promise.resolve();
+    expect(onCheck).not.toHaveBeenCalled();
+
+    // Confirmed: the work goes in.
+    confirmAnswer = true;
+    b.props.onPress();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onCheck).toHaveBeenCalledOnce();
+  });
+
+  it("checks rubric work without asking", () => {
+    confirmCalls = 0;
+    const onCheck = vi.fn();
+    button({ onCheck }).props.onPress();
+    expect(onCheck).toHaveBeenCalledOnce();
+    expect(confirmCalls).toBe(0);
+  });
+
+  it.each([
+    { criteriaPending: false, criteriaFailed: false },
+    { criteriaPending: true, criteriaFailed: false },
+    { criteriaPending: false, criteriaFailed: true },
+  ])("finish-only asks and sends without waiting for criteria: %o", async (state) => {
+    const onCheck = vi.fn();
+    const onRetry = vi.fn();
+    const b = button({
+      ...state,
+      mode: "auto",
+      finishOnly: true,
+      onCheck,
+      onRetry,
+    });
+    expect(b.props.accessibilityLabel).toBe("Finish and send this work");
+    expect(b.props.accessibilityState).toEqual({ disabled: false });
+    expect(b.findByType("text" as never).children).toEqual(["Finish and send"]);
+    expect(b.findAllByType("spinner" as never)).toHaveLength(0);
+
+    confirmAnswer = false;
+    b.props.onPress();
+    await Promise.resolve();
+    expect(onCheck).not.toHaveBeenCalled();
+
+    confirmAnswer = true;
+    b.props.onPress();
+    await Promise.resolve();
+    expect(onCheck).toHaveBeenCalledOnce();
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it("finish-only still respects busy or unavailable work", () => {
+    for (const over of [{ busy: true }, { disabled: true }]) {
+      const b = button({ ...over, finishOnly: true, criteriaFailed: true });
+      expect(b.props.onPress).toBeUndefined();
+      expect(b.props.accessibilityState).toEqual({ disabled: true });
+      expect(b.props.accessibilityLabel).toBe("Finish and send this work");
+    }
   });
 
   it("is inert while busy, preparing, or disabled", () => {
@@ -93,6 +169,43 @@ describe("DeliverableFooter", () => {
     expect(button({ criteriaFailed: true }).props.accessibilityLabel).toBe(
       "Try preparing the rubric check again",
     );
+  });
+
+  describe("on a Quest's session (TRA-720)", () => {
+    // The header's "I'm ready to show" is a Quest's one hand-in.
+    function footerIn(
+      quest: QuestSession["quest"],
+      over: Partial<DeliverableFooterProps>,
+    ) {
+      let tree!: ReturnType<typeof create>;
+      act(() => {
+        tree = create(
+          createElement(
+            QuestSessionContext.Provider,
+            { value: { quest, openReadyToShow: () => {} } },
+            createElement(DeliverableFooter, { ...base, ...over }),
+          ),
+        );
+      });
+      return tree.root.findAllByProps({ accessibilityRole: "button" });
+    }
+    const quest = { unitId: "unit-1" } as unknown as NonNullable<QuestSession["quest"]>;
+
+    it("offers no Finish and send, nor while the Quest is still being looked up", () => {
+      expect(footerIn(quest, { mode: "none" })).toHaveLength(0);
+      expect(footerIn(quest, { mode: "auto", finishOnly: true })).toHaveLength(0);
+      expect(footerIn(undefined, { mode: "none" })).toHaveLength(0);
+    });
+
+    it("keeps Check my work, which hands nothing in", () => {
+      const [check] = footerIn(quest, { mode: "manual" });
+      expect(check.props.accessibilityLabel).toBe("Check my work");
+    });
+
+    it("leaves every other session its Finish and send", () => {
+      const [send] = footerIn(null, { mode: "none" });
+      expect(send.props.accessibilityLabel).toBe("Finish and send this work");
+    });
   });
 });
 

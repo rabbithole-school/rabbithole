@@ -14,11 +14,14 @@
 // internal functions these call (`deviceLock.listForAgent` /
 // `deviceLock.setFromAgent` / `deviceLock.freezeFromAgent` /
 // `managedDeviceClaims.listForAgent` /
-// `simplemdm.restartDeviceFromAgent`), each of which re-resolves the caller
+// `simplemdm.restartDeviceFromAgent` / `simplemdm.assignDeviceFromAgent`,
+// and for check-in links `admissionsKiosk.listForAgent` / `endFromAgent`,
+// which allow only the primary school), each of which re-resolves the caller
 // and refuses the whole batch if any id falls outside their school:operations
 // institutions. A model that skips the confirmation step still cannot reach
 // another school's iPad. The restart runs the SAME guard sequence as the
-// devices console's Restart button (`simplemdm.runDeviceRestart`).
+// devices console's Restart button (`simplemdm.runDeviceRestart`), and the
+// reassign runs the devices drawer's assign + claim push.
 //
 // DELIBERATELY ABSENT: `deviceAppUnlock:configureDedicatedProfile`. Rebinding
 // a device's allowlist baseline resets the live SimpleMDM profile to a
@@ -82,7 +85,7 @@ export async function makeDeviceOpsTools(
     betaTool({
       name: "list_managed_devices",
       description:
-        "Inventory of the school's managed (MDM-enrolled) iPads: which scholar each serial is assigned to, its claim state, whether sign-in is currently held, whether a session is live, and — per managed app — whether the scholar can actually open it. Use this to answer 'which iPad is scholar X on?' and 'can X open <app>, and if not what is stopping it?'. Each appAccess row gives granted (the scholar holds the app), allowed (the device's MDM allowlist admits it), installed (SimpleMDM last saw it on the device), tiled (it has a home-screen tile), onDevice (the one-line answer), and blocker — the FIRST fact standing in the way: scholar, binding, grant, allowlist, inventory, install, or tile. Read blocker before proposing a fix; 'grant' means the scholar needs the app added, while 'install' means the app is granted but has not landed on the device yet. appAccessError is the last error updating the iPad's app-access profile (null if none); it retries on its own. A row with scholarDeleted true is the iPad of a scholar who has since been deleted: it has no scholar, and staff need to reassign it on the devices page. The SimpleMDM figures are the last hourly snapshot, not a live device read. Optionally search by scholar name/username, serial, device label, or id.",
+        "Inventory of the school's managed (MDM-enrolled) iPads: which scholar each serial is assigned to, its claim state, whether sign-in is currently held, whether a session is live, and — per managed app — whether the scholar can actually open it. Use this to answer 'which iPad is scholar X on?' and 'can X open <app>, and if not what is stopping it?'. Each appAccess row gives granted (the scholar holds the app), allowed (the device's MDM allowlist admits it), installed (SimpleMDM last saw it on the device), tiled (it has a home-screen tile), onDevice (the one-line answer), and blocker — the FIRST fact standing in the way: scholar, binding, grant, allowlist, inventory, install, or tile. Read blocker before proposing a fix; 'install' means the app is granted but has not landed on the device yet. 'grant' means nothing gives the scholar the app at this moment. schedule is the configured class blocks for this scholar this week (subject, block, weekdays with 1 = Monday, and the school-local window opensLocal-closesLocal, which includes the lead-in before the bell and the grace after). It is configuration, not a promise of access: a teacher can cancel one day's push, and the schedule still lists that day's window while blocker stays 'grant'. A block-scoped app has no standing grant by design, so with 'grant' and a non-empty schedule do not propose adding a standing grant; call get_external_app_access with the scholar to see which openings are actually live or cancelled. grantThroughDay is the last day (YYYY-MM-DD, the school's calendar) of a grant someone opened for a day or until a date, and it ends at the midnight after; null means nothing granted ends on its own. appAccessError is the last error updating the iPad's app-access profile (null if none); it retries on its own. A row with scholarDeleted true is the iPad of a scholar who has since been deleted: it has no scholar, and needs reassigning (reassign_managed_device). managedDeviceId is the handle reassign_managed_device takes. The SimpleMDM figures are the last hourly snapshot, not a live device read. Optionally search by scholar name/username, serial, device label, or id.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -206,7 +209,7 @@ export async function makeDeviceOpsTools(
     betaTool({
       name: "set_freeze_mode",
       description:
-        "Freeze or unfreeze one or more paired school iPads. Freeze Mode is a staff-set pause: it arms Rabbithole Lock so the scholar can't leave the app and covers Rabbithole with a screen reading that the iPad is frozen until a stated time and to ask a teacher to unfreeze it. It thaws on its own after `minutes`, or when staff unfreeze it. You MUST call list_rabbithole_lock_devices first, show the requester the exact scholars and iPads you resolved plus the action (and for a freeze, how long), and get confirmation before calling this. Never pass an id you inferred from a name without having listed it. Freeze Mode is not a fix for an unresponsive or crashed iPad — that is restart_managed_device. Unfreezing leaves Rabbithole Lock armed.",
+        "Freeze or unfreeze one or more paired school iPads. Freeze Mode is a staff-set pause: it arms Rabbithole Lock so the scholar can't leave the app and covers Rabbithole with a screen reading that the iPad is frozen until a stated time and to ask a teacher to unfreeze it. It thaws on its own at the end you set (any time from 5 minutes to 96 hours away), or when staff unfreeze it. You MUST call list_rabbithole_lock_devices first, show the requester the exact scholars and iPads you resolved plus the action (and for a freeze, when it ends), and get confirmation before calling this. Never pass an id you inferred from a name without having listed it. After freezing, read the end time in the result and check it matches the request; if it's off, call again with the corrected time before telling the requester it's done. Freeze Mode is not a fix for an unresponsive or crashed iPad — that is restart_managed_device. Unfreezing leaves Rabbithole Lock armed.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -223,7 +226,12 @@ export async function makeDeviceOpsTools(
           minutes: {
             type: "number" as const,
             description:
-              "Required when freezing: how many minutes from now the iPad stays frozen (integer, 5-480). Re-freezing a frozen iPad replaces its end time. Ignored when unfreezing.",
+              "How many minutes from now the iPad stays frozen (integer, 5-5760). When freezing, pass this or until_ms, not both. Re-freezing a frozen iPad replaces its end time. Ignored when unfreezing.",
+          },
+          until_ms: {
+            type: "number" as const,
+            description:
+              "The exact instant the freeze ends, in epoch milliseconds, 5 minutes to 96 hours from now. Use this for a stated end time (\"until Monday at 8am\"). When freezing, pass this or minutes, not both. Ignored when unfreezing.",
           },
         },
         required: ["paired_device_ids", "frozen"] as const,
@@ -238,6 +246,7 @@ export async function makeDeviceOpsTools(
               []) as Id<"pairedDevices">[],
             frozen: input.frozen === true,
             minutes: input.minutes as number | undefined,
+            untilMs: input.until_ms as number | undefined,
           },
         );
         if (result.ok) {
@@ -298,5 +307,101 @@ export async function makeDeviceOpsTools(
         return result.message;
       },
     }),
+
+    betaTool({
+      name: "play_find_sound",
+      description:
+        "Make one or more paired school iPads play a loud find sound (\"Find my BunnyPad\"), for an iPad someone can't locate. It sends a notification that plays a shrill tone for about 30 seconds at the iPad's alert volume. It does not break through Do Not Disturb: an iPad with Do Not Disturb on stays silent, so silence does not mean the iPad is somewhere else. Nothing on the iPad changes: no lock, no freeze, no location is collected. You MUST call list_rabbithole_lock_devices first, show the requester the exact scholars and iPads you resolved, and get confirmation before calling this. Never pass an id you inferred from a name without having listed it. The iPad must be on and online; an iPad that hasn't registered for find sounds (an older Rabbithole) is reported, not reached. Report the result's message as it is: 'sent' means Apple accepted it, not that anyone heard it.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          paired_device_ids: {
+            type: "array" as const,
+            description:
+              "Exact pairedDeviceId values returned by list_rabbithole_lock_devices.",
+            items: { type: "string" as const },
+          },
+        },
+        required: ["paired_device_ids"] as const,
+      },
+      run: async (input) => {
+        let result;
+        try {
+          result = await ctx.runAction(internal.bunnypadFindPush.findFromAgent, {
+            callerUserId,
+            source,
+            pairedDeviceIds: (input.paired_device_ids ??
+              []) as Id<"pairedDevices">[],
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          return `Failed: the find sound did not run (${reason}). Pass pairedDeviceIds exactly as list_rabbithole_lock_devices returned them.`;
+        }
+        if (result.ok) {
+          emit({
+            toolComplete: { name: "play_find_sound", result: result.message },
+          });
+        }
+        return result.message;
+      },
+    }),
+
+    // One device per call, like the drawer's Assign. A reassignment signs the
+    // previous scholar's session off that iPad, so a batch would multiply the
+    // cost of one wrong match.
+    betaTool({
+      name: "reassign_managed_device",
+      description:
+        "Assign ONE managed school iPad to a scholar, or reassign it from its current scholar to another — the same action as Assign/Reassign in the devices page's drawer. It mints the new owner's sign-in claim and pushes it to SimpleMDM; the iPad switches over once it picks the claim up, and is signed out of the previous scholar meanwhile. You MUST call list_managed_devices to resolve the iPad (managedDeviceId) and list_scholars to resolve the scholar (id), tell the requester the exact iPad (label and serial), its current scholar, and the new scholar, and get an explicit yes in this conversation before calling this. Never pass an id you inferred from a name without having listed it. If the new scholar already has an iPad, say so before asking: they will have two, which is allowed. Apps need no action — they are granted to the scholar, not the iPad. It refuses, changing nothing, an iPad not managed through SimpleMDM (staff reassign that one on the devices page). If the result says the claim was not pushed, the assignment still stands; staff finish it with Push on the devices page.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          managed_device_id: {
+            type: "string" as const,
+            description:
+              "The exact managedDeviceId of ONE iPad, as list_managed_devices returned it.",
+          },
+          scholar_id: {
+            type: "string" as const,
+            description:
+              "The exact id of the scholar who should own the iPad, as list_scholars returned it.",
+          },
+        },
+        required: ["managed_device_id", "scholar_id"] as const,
+      },
+      run: async (input) => {
+        const managedDeviceId = input.managed_device_id?.trim();
+        const scholarId = input.scholar_id?.trim();
+        if (!managedDeviceId || !scholarId) {
+          return "Failed: pass one managedDeviceId exactly as list_managed_devices returned it and one scholar id exactly as list_scholars returned it.";
+        }
+        let result;
+        try {
+          result = await ctx.runAction(
+            internal.simplemdm.assignDeviceFromAgent,
+            {
+              callerUserId,
+              source,
+              managedDeviceId: managedDeviceId as Id<"managedDeviceClaims">,
+              scholarId: scholarId as Id<"users">,
+            },
+          );
+        } catch (error) {
+          // Refusals come back as { ok: false }; a throw here is argument
+          // validation — a malformed or invented id.
+          const reason = error instanceof Error ? error.message : String(error);
+          return `Failed: the reassignment did not run (${reason}). Pass ids exactly as list_managed_devices and list_scholars returned them.`;
+        }
+        if (!result.ok) return `Failed: ${result.message}`;
+        emit({
+          toolComplete: {
+            name: "reassign_managed_device",
+            result: result.message,
+          },
+        });
+        return result.message;
+      },
+    }),
+
   ];
 }

@@ -6,7 +6,9 @@
 // the status guard). Email is the only channel here; sms/whatsapp land in a
 // later phase behind the same `deliver` seam.
 //
-// FAMILY ONLY. A mentor/workshop thread never reaches this dispatcher (a
+// TO THE FAMILY ONLY. The teachers' copy of a family message is
+// parentMessageStaffEmail.ts (its rows are never `queued`, so they never
+// reach here). A mentor/workshop thread never reaches this dispatcher (a
 // mentor's email is batched by scholarMessages.sendMentorEmailBatch), and no
 // recipient here can be a scholar: kid-safe delivery is in-app only.
 
@@ -23,6 +25,7 @@ import {
 import {
   deliverOffPortal,
   renderOffPortalText,
+  rowCarriesTeacherMessages,
   welcomeMessage,
   whatsAppWindowOpen,
   type OffPortalChannel,
@@ -72,7 +75,16 @@ export const getDispatchInfo = internalQuery({
     const thread = await ctx.db.get(message.threadId);
     // Never render or route a non-family thread's queued rows from here.
     if (!thread || !isFamilyThread(thread)) return null;
-    const teacher = thread?.teacherId ? await ctx.db.get(thread.teacherId) : null;
+    // The email is signed by whoever wrote this message — a co-teacher
+    // answering from the app, Slack or their email copy is not the thread's
+    // opener. The opener stands in only for a message with no staff author.
+    const staffAuthor =
+      message.authorType === "teacher" && message.authorUserId
+        ? await ctx.db.get(message.authorUserId)
+        : null;
+    const teacher =
+      staffAuthor ??
+      (thread?.teacherId ? await ctx.db.get(thread.teacherId) : null);
     const child = thread?.scholarId ? await ctx.db.get(thread.scholarId) : null;
     const teacherName = teacher?.name ?? "Your teacher";
     const threadMessages = thread
@@ -126,7 +138,7 @@ export const getDispatchInfo = internalQuery({
             .withIndex("by_parent", (q) => q.eq("parentUserId", d.parentUserId))
             .collect();
           const row = ids.find(
-            (r) => r.channel === d.channel && !!r.optInAt && r.stopState !== true,
+            (r) => r.channel === d.channel && rowCarriesTeacherMessages(r),
           );
           channelIdentity = row?.identity ?? null;
           channelOptedIn = !!channelIdentity;

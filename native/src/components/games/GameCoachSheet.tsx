@@ -7,6 +7,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  type TextInput,
   View,
 } from "react-native";
 import { Modal } from "@/components/FreezableModal";
@@ -17,6 +18,7 @@ import { SymbolView } from "expo-symbols";
 import { convexSiteUrl } from "@/lib/convex";
 import { fonts, type Colors, useColors } from "@/theme";
 import { AppTextInput } from "@/components/AppTextInput";
+import { NO_MIC, useVoiceKeyTarget } from "@/lib/voiceKey";
 
 export type GameCoachMessage = {
   role: "user" | "assistant";
@@ -53,6 +55,7 @@ export function GameCoachSheet({
   const authToken = useAuthToken();
   const authTokenRef = useRef(authToken);
   const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +63,13 @@ export function GameCoachSheet({
   useEffect(() => {
     authTokenRef.current = authToken;
   }, [authToken]);
+
+  // ⌘/ (src/lib/voiceKey.ts) focuses the coach's composer while it is open.
+  // It has no mic, so the voice key does nothing here.
+  useVoiceKeyTarget(
+    { ...NO_MIC, compose: () => inputRef.current?.focus() },
+    visible && !ended,
+  );
 
   useEffect(() => {
     if (!visible) return;
@@ -181,6 +191,7 @@ export function GameCoachSheet({
           ) : (
             <View style={styles.composer}>
               <AppTextInput
+                ref={inputRef}
                 value={input}
                 onChangeText={setInput}
                 onSubmitEditing={() => void send()}

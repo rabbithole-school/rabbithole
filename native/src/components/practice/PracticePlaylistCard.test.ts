@@ -60,4 +60,11 @@ describe("PracticePlaylistCard pending highlight", () => {
     // Without that manual interaction, the same late result still auto-selects.
     expect(pendingHighlightMatch(highlightDomain, null, [fraction, probability])).toBe(probability);
   });
+
+  it("applies a second hand-off to the same domain on a Home that stayed mounted", () => {
+    const probability = { domain: "probability" };
+    const consumed = "probability@1000";
+    expect(pendingHighlightMatch("probability", consumed, [probability], "probability@1000")).toBeUndefined();
+    expect(pendingHighlightMatch("probability", consumed, [probability], "probability@2000")).toBe(probability);
+  });
 });

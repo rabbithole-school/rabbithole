@@ -4,7 +4,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useQuery, useMutation } from "convex/react";
-import { Box, HStack, Text, Button, Menu, VisuallyHidden } from "@chakra-ui/react";
+import { Box, HStack, Text, Button, Menu, Skeleton, SkeletonCircle, VisuallyHidden } from "@chakra-ui/react";
 import {
   SignOut,
   Gear,
@@ -19,6 +19,8 @@ import {
   Plugs,
   Bug,
   ChatsCircle,
+  SlidersHorizontal,
+  GraduationCap,
 } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -162,6 +164,14 @@ interface AccountMenuProps {
    * use yet). Account details, bug report and sign out stay.
    */
   applicantMode?: boolean;
+  /**
+   * An enrolled family on the parent portal: adds "Apply for a sibling"
+   * (/parent/admissions), which lives here instead of the portal's tab row.
+   */
+  siblingApplication?: boolean;
+  /** An enrolled family on the parent portal, not a staff preview: adds
+   *  "Settings" (/parent/settings). */
+  parentSettings?: boolean;
 }
 
 /**
@@ -217,8 +227,10 @@ function waitForAccountMenuGone(
 export function AccountMenu({
   onSignOut,
   applicantMode = false,
+  siblingApplication = false,
+  parentSettings = false,
 }: AccountMenuProps) {
-  const { user } = useCurrentUser();
+  const { user, isLoading: userLoading } = useCurrentUser();
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -285,14 +297,19 @@ export function AccountMenu({
   const isParentRole = role === "parent";
   // Gates the staff-only "Connect an AI assistant" entry.
   const isStaff = role === "staff" || isStaffRole(role as Role | undefined);
-  // Scholar Messages (mentor + Workshop conversations). The entry exists only
-  // once an adult has opened a conversation or an idea has a thread — never an
+  // Scholar Messages (mentor + Workshop conversations). The entry exists once
+  // the scholar has a conversation or a teacher they can write to — never an
   // empty door — and carries the unread count.
   const scholarThreads = useQuery(
     api.scholarMessages.listThreads,
     isScholar ? {} : "skip",
   );
-  const showScholarMessages = (scholarThreads?.threads.length ?? 0) > 0;
+  const scholarTeachers = useQuery(
+    api.scholarMessages.listTeachersForScholar,
+    isScholar ? {} : "skip",
+  );
+  const showScholarMessages =
+    (scholarThreads?.threads.length ?? 0) > 0 || (scholarTeachers?.length ?? 0) > 0;
   const scholarUnread = scholarThreads?.unreadCount ?? 0;
   const userName = user?.name ?? "User";
   const userUsername = user?.username;
@@ -401,10 +418,33 @@ export function AccountMenu({
     pathname,
   });
   const isRemoteMode = viewingMode === "inspect";
-  const remoteScholar = useQuery(
-    api.users.getUser,
-    isRemoteMode ? { userId: remoteParam as Id<"users"> } : "skip",
+  // The parent-view preview can switch to a sibling (`&child=`). The pill
+  // names the child on screen, taken from the same access-checked family
+  // list the page renders (the parent page shares this query), never the
+  // raw `child` param: users.getUser doesn't check the school.
+  const isParentPreview = isRemoteMode && !!pathname?.startsWith("/parent");
+  const previewFamily = useQuery(
+    api.parents.previewFamilyForStaff,
+    isParentPreview ? { scholarId: remoteParam as string } : "skip",
   );
+  const childParam = searchParams?.get("child") ?? null;
+  const previewChild =
+    previewFamily?.find((child) => child._id === childParam) ??
+    previewFamily?.[0];
+  const remoteUser = useQuery(
+    api.users.getUser,
+    isRemoteMode && !isParentPreview
+      ? { userId: remoteParam as Id<"users"> }
+      : "skip",
+  );
+  const remoteScholar = isParentPreview
+    ? previewFamily === undefined
+      ? undefined
+      : (previewChild ?? null)
+    : remoteUser;
+  const pillScholarId = isParentPreview
+    ? (previewChild?._id ?? remoteParam)
+    : remoteParam;
   const scholarName = remoteScholar?.name ?? "scholar";
   const scholarImage = remoteScholar?.image ?? undefined;
 
@@ -437,6 +477,17 @@ export function AccountMenu({
       }
     }
   };
+
+  // Until the user loads there is no name to draw initials from; a pulsing
+  // circle holds the avatar's place instead of a placeholder initial.
+  if (userLoading) {
+    return (
+      <Box px={2} py={1} flexShrink={0} role="status">
+        <SkeletonCircle size="6" aria-hidden="true" />
+        <VisuallyHidden>Loading account</VisuallyHidden>
+      </Box>
+    );
+  }
 
   return (
     <Menu.Root positioning={{ placement: "bottom-end" }}>
@@ -471,8 +522,9 @@ export function AccountMenu({
                 />
               )}
             </Box>
-            {/* Remote-mode pill: "Viewing as [scholarAvatar] scholarName" */}
-            {isRemoteMode && (
+            {/* Remote-mode pill: "Viewing as [scholarAvatar] scholarName".
+                A parent preview has the ViewingAsBar above the nav instead. */}
+            {isRemoteMode && !isParentPreview && (
               <HStack
                 gap={1.5}
                 pl={2}
@@ -486,10 +538,19 @@ export function AccountMenu({
                 <Text fontFamily="heading" fontWeight="600" fontSize="xs">
                   Viewing as
                 </Text>
-                <Avatar size="xs" name={scholarName} src={scholarImage} colorKey={remoteParam ?? undefined} />
-                <Text fontFamily="heading" fontWeight="700" fontSize="xs" color="violet.700">
-                  {scholarName}
-                </Text>
+                {remoteScholar === undefined ? (
+                  <>
+                    <SkeletonCircle size="6" aria-hidden="true" />
+                    <Skeleton h={3} w={14} aria-hidden="true" />
+                  </>
+                ) : (
+                  <>
+                    <Avatar size="xs" name={scholarName} src={scholarImage} colorKey={pillScholarId ?? undefined} />
+                    <Text fontFamily="heading" fontWeight="700" fontSize="xs" color="violet.700">
+                      {scholarName}
+                    </Text>
+                  </>
+                )}
               </HStack>
             )}
             {/* Impersonation pill: 🕵️ Viewing as <target> (orange = caution;
@@ -724,6 +785,25 @@ export function AccountMenu({
               <Link href="/how-it-works" style={{ textDecoration: "none", color: "inherit" }}>
                 <Eye />
                 How it works
+              </Link>
+            </Menu.Item>
+          )}
+          {/* The family's settings (message emails, contact details), on the
+              parent portal only: it lives at /parent/settings, out of the tab
+              row (parent portal decision board, 2026-11-18). */}
+          {parentSettings && (
+            <Menu.Item value="parent-settings" cursor="pointer" asChild>
+              <Link href="/parent/settings" style={{ textDecoration: "none", color: "inherit" }}>
+                <SlidersHorizontal />
+                Settings
+              </Link>
+            </Menu.Item>
+          )}
+          {siblingApplication && (
+            <Menu.Item value="sibling-application" cursor="pointer" asChild>
+              <Link href="/parent/admissions" style={{ textDecoration: "none", color: "inherit" }}>
+                <GraduationCap />
+                Apply for a sibling
               </Link>
             </Menu.Item>
           )}

@@ -18,6 +18,7 @@ import {
   type KeyValueStorageAdapter,
 } from "@/shared/practicePersistenceCore";
 import { withPracticeSubmitTimeout } from "@/shared/practiceOutboxRetry";
+import { FORM_NUDGE_CAP } from "@/convex/lib/practice/answers";
 
 export type WebPracticeSubmitArgs = FunctionArgs<
   typeof api.practiceSkills.submitAnswer
@@ -290,6 +291,11 @@ export function createWebPracticeSubmitter<T>(
         : {}),
       ...(args.thinkTimeMs !== undefined
         ? { elapsedMs: args.thinkTimeMs }
+        : {}),
+      // Form nudges already received on this item. A drained (queued) answer goes at the cap: nobody is at that item
+      // to see a nudge, so it is graded as after the nudges are spent.
+      ...(args.formNudgesUsed !== undefined
+        ? { formNudgesUsed: args.fromOutbox ? FORM_NUDGE_CAP : args.formNudgesUsed }
         : {}),
     } satisfies WebPracticeSubmitArgs;
     // `satisfies` checks missing keys and value types, but TypeScript skips

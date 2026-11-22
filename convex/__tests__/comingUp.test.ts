@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -111,8 +112,8 @@ async function seedAssignment(
     schedule: ScheduleEntry[];
   },
 ) {
-  return await t.run((ctx) =>
-    ctx.db.insert("assignments", {
+  const __mirrored = await t.run((ctx) =>
+    insertAssignmentWithSchedule(ctx, {
       teacherId: args.teacherId,
       unitId: args.unitId,
       scholarIds: [args.scholarId],
@@ -120,24 +121,25 @@ async function seedAssignment(
       activitySchedule: args.schedule,
     }),
   );
+  return __mirrored;
 }
 
 describe("comingUpForSelf", () => {
-  test("boundary: homework due on the next open school day is excluded; due after is included", async () => {
+  test("homework never appears here (it lives on Your list); planned class work does", async () => {
     const t = convexTest(schema, modules);
     const { scholarId, teacherId, unitId, lessonId } = await seedWorld(t);
-    const tonight = await makeActivity(t, lessonId, "Due tomorrow (tonight owns)");
-    const wed = await makeActivity(t, lessonId, "Tide-pool field notes");
+    const hwTue = await makeActivity(t, lessonId, "Due on the next open day");
+    const hwWed = await makeActivity(t, lessonId, "Tide-pool field notes");
+    const plannedWed = await makeActivity(t, lessonId, "Map story: why here?");
 
     await seedAssignment(t, {
       teacherId,
       scholarId,
       unitId,
       schedule: [
-        // due Tue 08-25 = next open school day → tonight card owns it.
-        { activityId: tonight, mode: "homework", setAt: NOW - 1000, dueAt: at("2026-08-25") },
-        // due Wed 08-26 = after the next open school day → Coming up.
-        { activityId: wed, mode: "homework", setAt: NOW - 1000, dueAt: at("2026-08-26") },
+        { activityId: hwTue, mode: "homework", setAt: NOW - 1000, dueAt: at("2026-08-25") },
+        { activityId: hwWed, mode: "homework", setAt: NOW - 1000, dueAt: at("2026-08-26") },
+        { activityId: plannedWed, mode: "classFocus", startsAt: at("2026-08-26") },
       ],
     });
 
@@ -150,9 +152,9 @@ describe("comingUpForSelf", () => {
     expect(result.nextOpenSchoolDayKey).toBe("2026-08-25");
     expect(result.groups).toHaveLength(1);
     expect(result.groups[0].dayKey).toBe("2026-08-26");
-    expect(result.groups[0].entries).toHaveLength(1);
-    expect(result.groups[0].entries[0].kind).toBe("homework");
-    expect(result.groups[0].entries[0].activityId).toBe(wed);
+    expect(result.groups[0].entries.map((e) => e.activityId)).toEqual([
+      plannedWed,
+    ]);
   });
 
   test("horizon spans the next 5 open school days across a weekend", async () => {
@@ -240,9 +242,9 @@ describe("comingUpForSelf", () => {
       scholarId,
       unitId,
       schedule: [
-        { activityId: wedA, mode: "homework", setAt: NOW - 1000, dueAt: at("2026-08-26", 9) },
-        { activityId: wedB, mode: "homework", setAt: NOW - 1000, dueAt: at("2026-08-26", 14) },
-        { activityId: fri, mode: "homework", setAt: NOW - 1000, dueAt: at("2026-08-28") },
+        { activityId: wedA, mode: "classFocus", startsAt: at("2026-08-26", 9) },
+        { activityId: wedB, mode: "classFocus", startsAt: at("2026-08-26", 14) },
+        { activityId: fri, mode: "classFocus", startsAt: at("2026-08-28") },
       ],
     });
 
@@ -274,37 +276,30 @@ describe("comingUpForSelf", () => {
     expect(result.nextOpenSchoolDayKey).toBeNull();
   });
 
-  test("derives day + live-window from the client `now` in the INSTITUTION timezone (midnight + endsAt)", async () => {
+  test("derives the day from the client `now` in the INSTITUTION timezone", async () => {
     // A non-default institution timezone (Tokyo, UTC+9) far from the helper's
     // Pacific/Honolulu (UTC-10) default. The two `now` buckets below straddle
     // Tokyo-local midnight; the server must roll the horizon on the institution
-    // clock, and drop a live entry once the passed `now` crosses its `endsAt`.
+    // clock.
     const t = convexTest(schema, modules);
     const { scholarId, teacherId, unitId, lessonId } = await seedWorld(t, {
       timeZone: "Asia/Tokyo",
     });
-    const hw = await makeActivity(t, lessonId, "Thursday homework");
+    const hw = await makeActivity(t, lessonId, "Thursday class work");
 
     // now1 = Mon 2026-08-24 11:00 in Tokyo (= Sun 08-23 16:00 in Honolulu, so a
-    // default-timezone bug would report Sunday). endsAt is still in the future.
+    // default-timezone bug would report Sunday).
     const now1 = Date.parse("2026-08-24T02:00:00Z");
-    // now2 = Tue 2026-08-25 00:00 in Tokyo, 13h later — past `endsAt`.
+    // now2 = Tue 2026-08-25 00:00 in Tokyo, 13h later.
     const now2 = Date.parse("2026-08-24T15:00:00Z");
-    const endsAt = Date.parse("2026-08-24T10:00:00Z"); // between now1 and now2
+    // Planned for Wed 08-26 in Tokyo; inside the horizon at both nows.
+    const startsAt = Date.parse("2026-08-26T01:00:00Z");
 
     await seedAssignment(t, {
       teacherId,
       scholarId,
       unitId,
-      schedule: [
-        {
-          activityId: hw,
-          mode: "homework",
-          setAt: now1 - 1000,
-          endsAt,
-          dueAt: at("2026-08-27"), // Thu — after the next open day at BOTH nows
-        },
-      ],
+      schedule: [{ activityId: hw, mode: "classFocus", startsAt }],
     });
 
     const asScholar = await withUser(t, scholarId);
@@ -314,23 +309,21 @@ describe("comingUpForSelf", () => {
       includeWebActivities: true,
     });
     // Institution-local Monday → next open school day is Tue 08-25 (NOT Mon
-    // 08-24, which the Honolulu default would produce), and the still-live
-    // homework shows on Thu.
+    // 08-24, which the Honolulu default would produce), and the planned work
+    // shows on its Tokyo-local Wednesday.
     expect(before.dayKey).toBe("2026-08-24");
     expect(before.nextOpenSchoolDayKey).toBe("2026-08-25");
-    expect(before.groups).toHaveLength(1);
-    expect(before.groups[0].dayKey).toBe("2026-08-27");
+    expect(before.groups.map((g) => g.dayKey)).toEqual(["2026-08-26"]);
     expect(before.groups[0].entries[0].activityId).toBe(hw);
 
     const after = await asScholar.query(api.assignments.comingUpForSelf, {
       now: now2,
       includeWebActivities: true,
     });
-    // Crossed Tokyo midnight → the day rolled to Tue and the horizon shifted;
-    // the homework's live window (`endsAt`) has elapsed, so it drops.
+    // Crossed Tokyo midnight → the day rolled to Tue and the horizon shifted.
     expect(after.dayKey).toBe("2026-08-25");
     expect(after.nextOpenSchoolDayKey).toBe("2026-08-26");
-    expect(after.groups).toEqual([]);
+    expect(after.groups.map((g) => g.dayKey)).toEqual(["2026-08-26"]);
   });
 
   test("horizon jumps across a closure longer than 60 days", async () => {

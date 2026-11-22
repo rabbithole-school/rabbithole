@@ -3,6 +3,9 @@ import {
   closuresForWeek,
   dayKeyForWeekday,
   isClosedDay,
+  nonSchoolDayNote,
+  schoolDayKeysAfter,
+  schoolDayStatus,
   type SchoolClosure,
 } from "./schoolClosures";
 
@@ -73,5 +76,66 @@ describe("closuresForWeek", () => {
 
   it("is empty for an open week", () => {
     expect(closuresForWeek(AUG17_MON, HST, [day("2026-09-07")]).size).toBe(0);
+  });
+});
+
+describe("schoolDayStatus", () => {
+  // Wed 2026-11-11 (Veterans Day), Thu 11-12, Sat 11-14; Winter Break spans a weekend.
+  const closures = [
+    day("2026-11-11", "2026-11-11", { label: "Veterans Day" }),
+    day("2026-12-21", "2027-01-01", { label: "Winter Break" }),
+  ];
+
+  it("a weekday with no closure is a school day", () => {
+    expect(schoolDayStatus("2026-11-12", closures)).toEqual({ schoolDay: true });
+    expect(nonSchoolDayNote("2026-11-12", closures)).toBeNull();
+  });
+
+  it("a closure names itself", () => {
+    expect(schoolDayStatus("2026-11-11", closures)).toMatchObject({
+      schoolDay: false,
+      reason: "closure",
+      closure: { label: "Veterans Day" },
+    });
+    const note = nonSchoolDayNote("2026-11-11", closures);
+    expect(note).toContain("Wed, Nov 11");
+    expect(note).toContain("Veterans Day");
+  });
+
+  it("a weekend is a weekend", () => {
+    expect(schoolDayStatus("2026-11-14", closures)).toEqual({
+      schoolDay: false,
+      reason: "weekend",
+    });
+    expect(schoolDayStatus("2026-11-15", [])).toEqual({ schoolDay: false, reason: "weekend" });
+  });
+
+  it("a closure over a weekend wins over 'weekend'", () => {
+    expect(schoolDayStatus("2026-12-26", closures)).toMatchObject({
+      reason: "closure",
+      closure: { label: "Winter Break" },
+    });
+  });
+});
+
+describe("schoolDayKeysAfter", () => {
+  const closures = [
+    day("2026-11-11", "2026-11-11", { label: "Veterans Day" }),
+    day("2026-12-21", "2027-01-01", { label: "Winter Break" }),
+  ];
+
+  it("skips a closure and a weekend", () => {
+    expect(schoolDayKeysAfter("2026-11-10", closures, 1)).toEqual(["2026-11-12"]);
+    expect(schoolDayKeysAfter("2026-11-13", closures, 2)).toEqual([
+      "2026-11-16",
+      "2026-11-17",
+    ]);
+  });
+
+  it("jumps a long closure, and stops at the horizon", () => {
+    expect(schoolDayKeysAfter("2026-12-18", closures, 1)).toEqual(["2027-01-04"]);
+    expect(
+      schoolDayKeysAfter("2026-12-18", closures, 1, { maxCalendarDays: 7 }),
+    ).toEqual([]);
   });
 });

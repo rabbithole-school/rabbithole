@@ -4,8 +4,9 @@ import {
   closureForInstitutionOnDay,
   loadInstitutionClosures,
 } from "../masterSchedule";
-import { isClosedDay } from "../../shared/schoolClosures";
+import { schoolDayKeysAfter } from "../../shared/schoolClosures";
 import {
+  dayEndForDayKey,
   dayKeyForTimezone,
   dayStartForDayKey,
   shiftDayKey,
@@ -36,40 +37,12 @@ export async function nextOpenSchoolDayKeys(
   opts?: { maxCalendarDays?: number },
 ): Promise<string[]> {
   void timeZone;
-  const closures = await loadInstitutionClosures(ctx, institutionId);
-  const out: string[] = [];
-  // Optional calendar horizon: callers that encode a product contract like
-  // "tonight's boundary looks at most two weeks ahead" (the historical
-  // nextOpenSchoolDayKey behavior) pass maxCalendarDays; forecast/default
-  // callers omit it and search across closures of any length.
-  const lastCandidate =
-    opts?.maxCalendarDays != null
-      ? shiftDayKey(dayKey, opts.maxCalendarDays)
-      : null;
-  let candidate = shiftDayKey(dayKey, 1);
-  // Bound purely as a termination guard for a hypothetically always-closed
-  // institution; a normal search exits via `out.length >= count` long before.
-  for (let iterations = 0; iterations < 5000 && out.length < count; iterations += 1) {
-    if (lastCandidate != null && candidate > lastCandidate) break;
-    const weekday = weekdayForDayKey(candidate);
-    if (weekday === 0 || weekday === 6) {
-      candidate = shiftDayKey(candidate, 1);
-      continue;
-    }
-    const closure = isClosedDay(candidate, closures);
-    if (closure) {
-      // Jump past the whole closure range in one step, honoring closures of any
-      // length. `endDayKey` is inclusive, so resume the day after it (or after
-      // `candidate` when the row is stored end-before-start).
-      const jumpTo =
-        closure.endDayKey >= candidate ? closure.endDayKey : candidate;
-      candidate = shiftDayKey(jumpTo, 1);
-      continue;
-    }
-    out.push(candidate);
-    candidate = shiftDayKey(candidate, 1);
-  }
-  return out;
+  return schoolDayKeysAfter(
+    dayKey,
+    await loadInstitutionClosures(ctx, institutionId),
+    count,
+    opts,
+  );
 }
 
 /** The next weekday that is not closed for this institution, looking at most
@@ -119,9 +92,10 @@ export async function prevOpenSchoolDayKey(
   return null;
 }
 
-/** Last millisecond of an institution-local calendar day. */
+/** Last millisecond of an institution-local calendar day. The arithmetic
+ *  lives in shared/institutionDay.ts so pure shared code can use it. */
 export function schoolDayEndAt(dayKey: string, timeZone: string): number {
-  return dayStartForDayKey(shiftDayKey(dayKey, 1), timeZone) - 1;
+  return dayEndForDayKey(dayKey, timeZone);
 }
 
 /**

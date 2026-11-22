@@ -107,42 +107,21 @@ describe("courseNarratives — units derived from sessions", () => {
 });
 
 describe("courseNarratives — bot read/write internals", () => {
-  test("write section + set ratings round-trip through getForBot", async () => {
+  test("a new report is one prose section the bot can write", async () => {
     const t = convexTest(schema, modules);
     const w = await seedWorld(t);
     const narrativeId = await t.mutation(internal.courseNarratives.openInternal, {
       scholarId: w.scholarId, teacherId: w.teacherId, periodId: w.periodId, subject: "Science",
     });
     await t.mutation(internal.courseNarratives.setSectionInternal, {
-      narrativeId, key: "dim_connections", body: "Linked nitrogen cycle to ahupuaʻa.",
-    });
-    await t.mutation(internal.courseNarratives.setRatingInternal, {
-      narrativeId, dimension: "connections", value: 7,
-    });
-    await t.mutation(internal.courseNarratives.setRatingInternal, {
-      narrativeId, dimension: "overall", value: 5,
+      narrativeId, key: "report", body: "Linked the nitrogen cycle to the ahupuaʻa.",
     });
     const reports = await t.query(internal.courseNarratives.getForBot, {
       scholarId: w.scholarId, periodId: w.periodId, subject: "Science",
     });
     expect(reports).toHaveLength(1);
-    const r = reports[0];
-    expect(r.sections.find((s) => s.key === "dim_connections")?.body).toMatch(/nitrogen cycle/);
-    expect(r.pcmRatings?.connections).toBe(7);
-    expect(r.courseRating).toBe(5);
-  });
-
-  test("setRatingInternal rejects out-of-range + unknown dimensions", async () => {
-    const t = convexTest(schema, modules);
-    const w = await seedWorld(t);
-    const narrativeId = await t.mutation(internal.courseNarratives.openInternal, {
-      scholarId: w.scholarId, teacherId: w.teacherId, periodId: w.periodId, subject: "Science",
-    });
-    await expect(
-      t.mutation(internal.courseNarratives.setRatingInternal, { narrativeId, dimension: "core", value: 8 }),
-    ).rejects.toThrow(/1.?7/);
-    await expect(
-      t.mutation(internal.courseNarratives.setRatingInternal, { narrativeId, dimension: "bogus", value: 3 }),
-    ).rejects.toThrow(/dimension/i);
+    expect(reports[0].sections).toEqual([
+      { key: "report", title: "Report", body: "Linked the nitrogen cycle to the ahupuaʻa." },
+    ]);
   });
 });

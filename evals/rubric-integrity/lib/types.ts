@@ -206,6 +206,8 @@ export type RubricSessionResult = {
   finalDocumentContent: string | null;
   /** The tutor's scholar-visible text on the final turn (post-tool-result). */
   finalTurnText: string;
+  /** API stop_reason of each round of the last generated turn (see TutorTurn). */
+  finalStopReasons?: string[];
   /** Whether the final response is non-empty and substantive. */
   finalTextIsSubstantive: boolean;
 };

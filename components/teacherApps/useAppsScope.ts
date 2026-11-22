@@ -2,42 +2,16 @@
 
 /**
  * The scholar scope on the teacher Apps page (review/teacher-apps-v2-sketch.html
- * §4). The choice lives in the URL (`?scope=` pool, `?scholar=` focused
- * scholar), so a reload or a shared link keeps it, and every tab reads it.
- *
- * The pool and focus follow ScholarScopePicker's vocabulary: "" = all
- * scholars, "mine" = my scholars, otherwise a scholarGroup id.
+ * §4): the URL scope (hooks/useUrlScholarScope.ts) narrowed to what one read
+ * takes. A focused scholar narrows every tab's reads to that one scholar.
  */
 
-import { useCallback } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useScholarRoster } from "@/hooks/useScholarRoster";
-import type { ScopeFocusScholar } from "@/components/ScholarScopePicker";
+import { useUrlScholarScope } from "@/hooks/useUrlScholarScope";
 import { MAX_SCOPE_SCHOLARS } from "@/shared/teacherAppsScope";
 
 export function useAppsScope() {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const scopeKey = searchParams.get("scope") ?? "";
-  const focusId = searchParams.get("scholar") ?? "";
-
-  const { scholars, groups, myScholarIds, isLoading } = useScholarRoster();
-
-  const visibleScholarIds = scholars.map((s) => s.id);
-  const hasMine = visibleScholarIds.some((id) => myScholarIds.has(id));
-  const scopeGroup = groups.find((g) => g.id === scopeKey);
-  const inScope = (id: string) =>
-    scopeKey === ""
-      ? true
-      : scopeKey === "mine"
-        ? myScholarIds.has(id)
-        : (scopeGroup?.scholarIds.includes(id) ?? false);
-  const scopedScholarIds = visibleScholarIds.filter(inScope);
-  const focused = scholars.find((s) => s.id === focusId && inScope(s.id));
-  const focusScholar: ScopeFocusScholar | undefined = focused
-    ? { id: focused.id, name: focused.name, image: focused.image }
-    : undefined;
+  const scope = useUrlScholarScope();
+  const { scopeKey, scopeGroup, focusScholar, scopedScholarIds } = scope;
 
   /** The scholars every read narrows to, capped at what one read takes. */
   const pool = focusScholar ? [focusScholar.id] : scopedScholarIds;
@@ -55,46 +29,20 @@ export function useAppsScope() {
         ? "my scholars"
         : (scopeGroup?.name ?? null);
 
-  const write = useCallback(
-    (next: { scope?: string; scholar?: string }) => {
-      const params = new URLSearchParams(searchParams.toString());
-      for (const [key, value] of Object.entries(next)) {
-        if (value) params.set(key, value);
-        else params.delete(key);
-      }
-      const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-    },
-    [pathname, router, searchParams],
-  );
-
-  // Scope and focus both narrow the pool; switching the pool drops a focused
-  // scholar who is not in the new one (the Quests board's rule).
-  const selectScope = (key: string) => {
-    const nextGroup = groups.find((g) => g.id === key);
-    const keepsFocus =
-      !focusScholar ||
-      key === "" ||
-      (key === "mine"
-        ? myScholarIds.has(focusScholar.id)
-        : nextGroup?.scholarIds.includes(focusScholar.id) === true);
-    write({ scope: key, scholar: keepsFocus ? focusId : "" });
-  };
-
   return {
-    isLoading,
-    groups,
+    isLoading: scope.isLoading,
+    groups: scope.groups,
     scopeKey,
-    hasMine,
-    visibleScholarIds,
+    hasMine: scope.hasMine,
+    visibleScholarIds: scope.visibleScholarIds,
     scopedScholarIds,
     focusScholar,
     scholarIds,
     truncatedTo,
     isWholePool,
     scopeLabel,
-    selectScope,
-    focus: (id: string | null) => write({ scholar: id ?? "" }),
+    selectScope: scope.selectScope,
+    focus: scope.focus,
   };
 }
 

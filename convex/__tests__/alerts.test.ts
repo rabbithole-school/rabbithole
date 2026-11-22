@@ -201,6 +201,51 @@ describe("alerts.linkAlertsChannel", () => {
     expect(rows.find((row) => row.role === "improvement-loops")?.slackChannelId).toBe("C_LOOPS");
   });
 
+  test("claude-dispatch binds its own channel, leaves improvement-loops alone, and resolves through claudeDispatchChannelId", async () => {
+    const t = convexTest(schema, modules);
+    const admin = await seedUser(t, "platform_admin");
+
+    await t.mutation(internal.alerts.linkAlertsChannel, {
+      callerUserId: admin,
+      slackChannelId: "C_LOOPS",
+      unlink: false,
+      role: "improvement-loops",
+    });
+    expect(await t.query(internal.alerts.claudeDispatchChannelId, {})).toBeNull();
+
+    const linked = await t.mutation(internal.alerts.linkAlertsChannel, {
+      callerUserId: admin,
+      slackChannelId: "C_CLAUDE",
+      unlink: false,
+      role: "claude-dispatch",
+    });
+    expect(linked).toMatchObject({ ok: true, role: "claude-dispatch" });
+    expect(await t.query(internal.alerts.claudeDispatchChannelId, {})).toBe("C_CLAUDE");
+    expect(await t.query(internal.alerts.improvementLoopsChannelId, {})).toBe("C_LOOPS");
+
+    const unlinked = await t.mutation(internal.alerts.linkAlertsChannel, {
+      callerUserId: admin,
+      slackChannelId: "C_CLAUDE",
+      unlink: true,
+      role: "claude-dispatch",
+    });
+    expect(unlinked.ok).toBe(true);
+    expect(await t.query(internal.alerts.claudeDispatchChannelId, {})).toBeNull();
+  });
+
+  test("claude-dispatch refuses a non-admin caller", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const denied = await t.mutation(internal.alerts.linkAlertsChannel, {
+      callerUserId: teacher,
+      slackChannelId: "C_CLAUDE",
+      unlink: false,
+      role: "claude-dispatch",
+    });
+    expect(denied.ok).toBe(false);
+    expect(await t.query(internal.alerts.claudeDispatchChannelId, {})).toBeNull();
+  });
+
   test("scoped role requires an institution slug", async () => {
     const t = convexTest(schema, modules);
     const admin = await seedUser(t, "platform_admin");

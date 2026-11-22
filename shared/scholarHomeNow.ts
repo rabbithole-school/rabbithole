@@ -1,7 +1,4 @@
-import {
-  dayKeyForTimezone,
-  minuteOfDayForTimezone,
-} from "./institutionDay";
+import { minuteOfDayForTimezone } from "./institutionDay";
 
 export type ScholarHomeRow = {
   origin: "classFocus" | "homework" | "is";
@@ -9,7 +6,24 @@ export type ScholarHomeRow = {
   // The session holds an app the scholar built (a `type: "code"` artifact —
   // the same test the teacher archive uses). Such a row also shows on Apps.
   isApp?: boolean;
+  /** When an open-until row's window closes (shared/openUntil.ts), else
+   *  null. Optional for an older backend's rows (deploy skew). */
+  openUntil?: number | null;
 };
+
+/**
+ * Whether a row is on the scholar's list right now: homework (the Homework
+ * section), or open-until work whose window hasn't closed (the Open from
+ * class section, TRA-724; shared/homeworkList.ts splits the two). Open-until
+ * is stored as class focus, so after it closes a started row falls back to
+ * class work ("Pick up where you left off") and an unstarted one is gone.
+ */
+export function onYourList(row: ScholarHomeRow, nowMs: number): boolean {
+  return (
+    row.origin === "homework" ||
+    (row.origin === "classFocus" && row.openUntil != null && row.openUntil > nowMs)
+  );
+}
 
 export type ScholarHomeTab = {
   key: string;
@@ -120,10 +134,9 @@ export function deriveHomeTabs({
   const hasOther = assignedRows.some(
     (row) => foldedSubject(row.subject) === null,
   );
-  const tabs: ScholarHomeTab[] = [
-    { key: "now", label: "Now" },
-    { key: "all", label: "All" },
-  ];
+  // No "All" tab: Now's "Pick up where you left off" lists the open class
+  // work it used to hold, and each subject tab holds its own slice.
+  const tabs: ScholarHomeTab[] = [{ key: "now", label: "Now" }];
 
   if (presentTabs.length >= 2) {
     tabs.push(...presentTabs);
@@ -150,7 +163,7 @@ export function filterRowsForTab<T extends ScholarHomeRow>(
   }
   if (tabKey === "apps") return rows.filter((row) => row.isApp === true);
   if (tabKey === "prep") return [];
-  if (tabKey === "all" || tabKey === "now") return assignedRows;
+  if (tabKey === "now") return assignedRows;
   if (tabKey === "other") {
     return assignedRows.filter(
       (row) => foldedSubject(row.subject) === null,
@@ -169,63 +182,81 @@ export function filterRowsForTab<T extends ScholarHomeRow>(
 /**
  * The Archived filter's twin of `filterRowsForTab`: which archived rows
  * (sessions.finishedForScholar) a Home tab lists. Every tab places a row the
- * way it places an active one, with two differences. Now has no meaning for
- * archived work, so it lists the same rows as All. Scholar's Prep renders its
- * own sections when active, and lists archived homework here.
+ * way it places an active one, with one difference: Scholar's Prep renders
+ * its own sections when active, and lists archived homework here. Now lists
+ * every archived assigned row (what the retired All tab listed).
  */
 export function filterArchivedRowsForTab<T extends ScholarHomeRow>(
   rows: T[],
   tabKey: string,
 ): T[] {
   if (tabKey === "prep") return rows.filter((row) => row.origin === "homework");
-  return filterRowsForTab(rows, tabKey === "now" ? "all" : tabKey);
+  return filterRowsForTab(rows, tabKey);
 }
 
-export function shouldShowHomeworkInNow({
-  currentBlockKind,
-  isWithinSchoolHours,
-  isPrepTime,
-}: {
-  currentBlockKind?: string | null;
-  isWithinSchoolHours: boolean;
-  isPrepTime: boolean;
-}): boolean {
-  return currentBlockKind === "prep" || isPrepTime || !isWithinSchoolHours;
+/**
+ * The rows a tab's Open from class and Homework sections hold: every item on Now, that
+ * subject's slice on a subject (or Other) tab, nothing elsewhere. Same rows,
+ * grouped by shared/homeworkList.ts on every tab, so a subject whose only open work is
+ * homework still has something on its tab.
+ */
+export function yourListRowsForTab<T extends ScholarHomeRow>(
+  rows: T[],
+  tabKey: string,
+  nowMs: number,
+): T[] {
+  if (tabKey === "quests" || tabKey === "apps" || tabKey === "prep") return [];
+  return filterRowsForTab(rows, tabKey).filter((row) => onYourList(row, nowMs));
 }
+
+export const PICK_UP_HEADING = "Pick up where you left off";
+
+/**
+ * "Pick up where you left off" on Now: the open class work from Home's plate
+ * (started-but-unfinished, plus the next activities of units with open class
+ * work), minus the rows the class section above already shows and open-until
+ * work still in Open from class (it lands here once its window closes). Most recently
+ * touched first. It replaced the All tab and the quiet-day "Open work" block.
+ * It shows at any time of day whenever it has rows (Andy: nothing on Home
+ * appears or disappears by the clock).
+ */
+export function pickUpRows<T extends ScholarHomeRow & { lastTouched?: number }>(
+  rows: T[],
+  shownInClassSection: readonly T[],
+  nowMs: number,
+): T[] {
+  const shown = new Set(shownInClassSection);
+  return filterRowsForTab(rows, "now")
+    .filter(
+      (row) =>
+        row.origin === "classFocus" &&
+        !onYourList(row, nowMs) &&
+        !shown.has(row),
+    )
+    .map((row, index) => ({ row, index }))
+    .sort(
+      (a, b) =>
+        (b.row.lastTouched ?? 0) - (a.row.lastTouched ?? 0) || a.index - b.index,
+    )
+    .map(({ row }) => row);
+}
+
+// Homework on Now is the Homework section (shared/homeworkList.ts). It is
+// never hidden by time of day or by how far off a deadline is.
 
 type HomeworkForNowEntry = {
-  dueAt?: number | null;
   completedByMe?: boolean;
 };
 
 /**
- * The one deadline policy for the Home Now digest. Undated work stays visible;
- * dated work appears only once it is due, or when it is due on the next day
- * school is open.
+ * The one homework policy every server read shares with the Homework section: every live
+ * item the scholar hasn't finished, whatever its due date. (It used to hold
+ * back dated work until the next open school day; that window is gone.)
  */
 export function filterHomeworkForNow<T extends HomeworkForNowEntry>(
   homework: T[],
-  {
-    nowMs,
-    timeZone,
-    nextOpenSchoolDayKey,
-  }: {
-    nowMs: number;
-    timeZone: string;
-    nextOpenSchoolDayKey: string | null | undefined;
-  },
 ): T[] {
-  const todayKey = dayKeyForTimezone(nowMs, timeZone);
-  return homework.filter((entry) => {
-    if (entry.completedByMe) return false;
-    if (entry.dueAt == null) return true;
-
-    const dueDayKey = dayKeyForTimezone(entry.dueAt, timeZone);
-    return (
-      dueDayKey <= todayKey ||
-      (nextOpenSchoolDayKey != null && dueDayKey === nextOpenSchoolDayKey)
-    );
-  });
+  return homework.filter((entry) => !entry.completedByMe);
 }
 
 type FocusEntry = {
@@ -238,15 +269,10 @@ type PlannedEntry = {
   startsAt?: number | null;
 };
 
-type HomeworkEntry = {
-  completedByMe?: boolean;
-};
-
-export type NowDigestSection<Focus, Planned, Homework, Playlist> =
+export type NowDigestSection<Focus, Planned, Playlist> =
   | { key: "focus"; items: Focus[] }
   | { key: "planned"; items: Planned[] }
-  | { key: "practice"; playlist: Playlist }
-  | { key: "homework"; items: Homework[] };
+  | { key: "practice"; playlist: Playlist };
 
 type AssignmentActivityKey = {
   assignmentId?: string | null;
@@ -288,29 +314,33 @@ export function matchRowsToFocusOrder<
   return matches.filter((row): row is Row => row !== undefined);
 }
 
+/**
+ * The one name for the scholar's class-work section, on Now and the subject
+ * tabs, web and native: "In class now" during school hours, "From
+ * class today" after the last bell.
+ */
 export function focusSectionLabel(isWithinSchoolHours: boolean): string {
-  return isWithinSchoolHours ? "Right now" : "From today";
+  return isWithinSchoolHours ? "In class now" : "From class today";
 }
 
 export function buildNowDigest<
   Focus extends FocusEntry,
   Planned extends PlannedEntry,
-  Homework extends HomeworkEntry,
   Playlist,
 >({
   focusEntries,
   plannedToday,
-  homework,
   playlist,
   nowMs,
 }: {
   focusEntries: Focus[];
   plannedToday: Planned[];
-  homework: Homework[];
   playlist: Playlist | null | undefined;
   nowMs: number;
 }): {
-  sections: Array<NowDigestSection<Focus, Planned, Homework, Playlist>>;
+  sections: Array<NowDigestSection<Focus, Planned, Playlist>>;
+  /** No live class focus and no planned class work left today. Homework is
+   *  the Homework section (shared/homeworkList.ts) and never decides "quiet". */
   isQuiet: boolean;
 } {
   // Showing, not blocking. The upstream institution-clock query has already
@@ -327,24 +357,15 @@ export function buildNowDigest<
   const upcoming = plannedToday.filter(
     (entry) => entry.startsAt == null || entry.startsAt >= nowMs,
   );
-  const dueHomework = homework.filter((entry) => !entry.completedByMe);
-  const sections: Array<
-    NowDigestSection<Focus, Planned, Homework, Playlist>
-  > = [];
+  const sections: Array<NowDigestSection<Focus, Planned, Playlist>> = [];
 
   if (liveFocus.length > 0) sections.push({ key: "focus", items: liveFocus });
   if (upcoming.length > 0) sections.push({ key: "planned", items: upcoming });
   if (playlist != null) sections.push({ key: "practice", playlist });
-  if (dueHomework.length > 0) {
-    sections.push({ key: "homework", items: dueHomework });
-  }
 
   return {
     sections,
-    isQuiet:
-      liveFocus.length === 0 &&
-      upcoming.length === 0 &&
-      dueHomework.length === 0,
+    isQuiet: liveFocus.length === 0 && upcoming.length === 0,
   };
 }
 

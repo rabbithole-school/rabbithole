@@ -33,13 +33,6 @@
  *   • "core_drill"   — everything else (plain template/stored drill items,
  *                      including reviews).
  *
- * The union also carries "launchpad" (an ungraded instructional beat), which
- * this composer NEVER emits: a Launchpad is not a member of `items`, so it
- * cannot take part in a run-length pass over them. The clients splice it into a
- * DISPLAY list via `withLaunchpadSegment`, which is exactly what lets the
- * counts-sum-to-`items.length` invariant above stay true. See
- * `shared/practiceSegments.ts`.
- *
  * WHAT THE ANTI-SLOG RULE CAN GUARANTEE AT SIZE 6 (documented, not
  * aspirational):
  *   • Within one priority band (the review band, or the frontier/"other"

@@ -10,7 +10,7 @@ import { ONBOARDING_UNIT_SLUG } from "../onboardingData";
 import type { Id } from "../_generated/dataModel";
 
 export type ObserverOrigin = {
-  kind: "assigned" | "seed" | "scholarStarted" | "onboarding";
+  kind: "assigned" | "seed" | "wonder" | "scholarStarted" | "onboarding";
   label: string;
 };
 
@@ -19,6 +19,10 @@ export const OBSERVER_ORIGIN_LABELS: Record<ObserverOrigin["kind"], string> = {
     "Teacher-assigned activity. The session's topic was given to the scholar; enthusiasm inside it is NOT an interest unless they say so in their own words.",
   seed:
     'The scholar picked this exploration themselves from their Sky (a suggested star). Treat the session topic as "picked".',
+  // A chat opened from the "I wonder…" box (TRA-669): a seed with origin
+  // "wonder", which nobody suggested.
+  wonder:
+    'The scholar asked this question themselves, in their own words, in the "I wonder…" box; nobody suggested it. Treat the question as "said".',
   scholarStarted:
     'The scholar started this session on their own and chose the topic. Treat the session topic as "picked".',
   onboarding:
@@ -32,6 +36,9 @@ export function resolveObserverOrigin(session: {
   activityId?: Id<"activities"> | null;
   unitId?: Id<"units"> | null;
   unitForOrigin?: { authorScholarId?: Id<"users"> | null } | null;
+  // The session's seed, when it has one: a "wonder" seed is the scholar's own
+  // question, not a star they picked.
+  seedForOrigin?: { origin: string } | null;
 }): ObserverOrigin {
   let kind: ObserverOrigin["kind"];
   if (session.unitSlug === ONBOARDING_UNIT_SLUG) {
@@ -50,7 +57,9 @@ export function resolveObserverOrigin(session: {
       classified.origin === "assigned"
         ? "assigned"
         : classified.fromSeed && session.seedId
-          ? "seed"
+          ? session.seedForOrigin?.origin === "wonder"
+            ? "wonder"
+            : "seed"
           : "scholarStarted";
   }
   return { kind, label: OBSERVER_ORIGIN_LABELS[kind] };

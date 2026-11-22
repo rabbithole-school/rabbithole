@@ -2,23 +2,24 @@
 
 /**
  * Schedule (plan) an activity onto the calendar/agenda. The calendar
- * counterpart to the Run page's "push now" controls: here a teacher
- * picks an assignment (cohort × unit), an activity within it, a mode,
- * and a *future* time. It writes a PLANNED entry (startsAt set, setAt
- * null) via api.assignments.scheduleActivity — invisible to scholars
- * until it activates at startsAt (or the teacher hits Start now). A time
- * in the past stays planned and is called out as "won't auto-start".
+ * counterpart to the Run page's "Give…": here a teacher picks an assignment
+ * (cohort × unit), an activity within it, and answers the two give questions
+ * (components/GiveWindowFields.tsx, TRA-571): when it shows up and when they
+ * should finish it. A later time writes a PLANNED entry (startsAt set, setAt
+ * null) via api.assignments.scheduleActivity — invisible to scholars until it
+ * activates at startsAt (or the teacher hits Start now); "Now" goes live
+ * through pushActivity. A time in the past stays planned and is called out
+ * as "won't auto-start".
  *
  * Used both for fresh scheduling (from the agenda's "+ Schedule") and
  * for editing an existing entry (prefilled). Submitting always calls
  * scheduleActivity, which replaces any existing entry for that activity
  * (cancelling its pending job) — so "edit" is just "re-schedule".
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Box,
   Button,
-  chakra,
   Dialog,
   Flex,
   HStack,
@@ -32,9 +33,20 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { ActivityKindIcon } from "@/components/ActivityKindIcon";
-import { ActivityModeBadge, type ActivityMode } from "@/lib/activityMode";
+import type { ActivityMode } from "@/lib/activityMode";
+import {
+  GiveWindowFields,
+  giveButtonLabel,
+  showsUpAt,
+  usableGiveChoices,
+  useGiveChoices,
+  useMinuteNow,
+  type GiveFinish,
+  type ShowsUp,
+} from "@/components/GiveWindowFields";
 import { ScholarFacepile } from "@/components/ScholarFacepile";
 import { toaster } from "@/lib/toaster";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -50,18 +62,6 @@ function toLocalInputValue(ms: number): string {
 export function initialHomeworkDueInputValue(initialDueAt?: number): string {
   return initialDueAt ? toLocalInputValue(initialDueAt) : "";
 }
-
-function minuteRoundedNow(): number {
-  return Math.floor(Date.now() / MINUTE) * MINUTE;
-}
-
-const DURATIONS = [
-  { label: "30 min", min: 30 },
-  { label: "45 min", min: 45 },
-  { label: "1 hour", min: 60 },
-  { label: "90 min", min: 90 },
-  { label: "2 hours", min: 120 },
-];
 
 type ScheduleActivityDialogProps = {
   open: boolean;
@@ -128,26 +128,27 @@ function ScheduleActivityForm({
 }: ScheduleActivityDialogProps) {
   const assignments = useQuery(api.assignments.listForTeacher, {});
   const scheduleActivity = useMutation(api.assignments.scheduleActivity);
+  const pushActivity = useMutation(api.assignments.pushActivity);
 
   // This form is mounted fresh on every open (parent renders it only while
   // `open`), so these lazy initializers re-seed from props each time — no
   // reset effect needed. Date.now() is allowed in a lazy initializer, just
   // not the render body (impure-during-render lint).
   const [now0] = useState(() => Date.now());
+  const nowMs = useMinuteNow();
   const [assignmentId, setAssignmentId] = useState<Id<"assignments"> | null>(
     initialAssignmentId ?? null,
   );
   const [activityId, setActivityId] = useState<Id<"activities"> | null>(
     initialActivityId ?? null,
   );
-  const [mode, setMode] = useState<ActivityMode>(initialMode ?? "classFocus");
-  const [startsAt, setStartsAt] = useState<string>(() =>
-    toLocalInputValue(initialStartsAt ?? Date.now() + HOUR),
-  );
-  const [durationMin, setDurationMin] = useState(60);
-  const [dueAtOverride, setDueAtOverride] = useState<string | null>(() =>
-    initialDueAt ? initialHomeworkDueInputValue(initialDueAt) : null,
-  );
+  const [showsUp, setShowsUp] = useState<ShowsUp>(() => ({
+    kind: "at",
+    at: initialStartsAt ?? Date.now() + HOUR,
+  }));
+  // Nothing is pre-selected for a new give. Editing an existing homework
+  // entry starts from its due day (seeded once the school's zone is known).
+  const [finishPick, setFinishPick] = useState<GiveFinish | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Effective selection: the user's explicit pick, else auto-match the
@@ -162,68 +163,74 @@ function ScheduleActivityForm({
     return match?._id ?? null;
   }, [assignmentId, assignments, preferScholarIds]);
   const selectedAssignmentId = assignmentId ?? autoAssignmentId;
-  const [dueOptionsNowMs, setDueOptionsNowMs] = useState(minuteRoundedNow);
-  useEffect(() => {
-    const timer = setInterval(
-      () => setDueOptionsNowMs(minuteRoundedNow()),
-      MINUTE,
-    );
-    return () => clearInterval(timer);
-  }, []);
-  const dueDateOptions = useQuery(
-    api.assignments.homeworkDueDateOptions,
+  const startsMs = showsUpAt(showsUp, nowMs);
+  const choices = useGiveChoices(
     selectedAssignmentId
-      ? { assignmentId: selectedAssignmentId, nowMs: dueOptionsNowMs }
+      ? {
+          assignmentId: selectedAssignmentId,
+          activityId: activityId ?? undefined,
+          startsAt: startsMs,
+        }
       : "skip",
+    nowMs,
   );
-  const dueAt =
-    dueAtOverride ??
-    (dueDateOptions?.nextOpen.dueAt
-      ? toLocalInputValue(dueDateOptions.nextOpen.dueAt)
-      : "");
+  const seededFinish: GiveFinish | null =
+    initialMode === "homework" && initialDueAt && usableGiveChoices(choices)
+      ? {
+          kind: "by",
+          dayKey: new Intl.DateTimeFormat("en-CA", {
+            timeZone: usableGiveChoices(choices)!.timeZone,
+          }).format(new Date(initialDueAt)),
+        }
+      : null;
+  const finish = finishPick ?? seededFinish;
 
   const progress = useQuery(
     api.assignments.activityProgress,
     selectedAssignmentId ? { assignmentId: selectedAssignmentId } : "skip",
   );
 
-  const startsMs = useMemo(() => new Date(startsAt).getTime(), [startsAt]);
-  const dueMs = useMemo(() => new Date(dueAt).getTime(), [dueAt]);
-  const isPast = Number.isFinite(startsMs) && startsMs <= now0;
+  const isPast = showsUp.kind === "at" && startsMs <= now0;
   const editingExisting = initialActivityId != null;
 
   const canSubmit =
-    !!selectedAssignmentId &&
-    !!activityId &&
-    Number.isFinite(startsMs) &&
-    (mode !== "homework" || Number.isFinite(dueMs)) &&
-    !saving;
+    !!selectedAssignmentId && !!activityId && !!finish && !saving;
 
   const submit = async () => {
-    if (!selectedAssignmentId || !activityId || !Number.isFinite(startsMs))
-      return;
+    if (!selectedAssignmentId || !activityId || !finish) return;
     setSaving(true);
     try {
-      await scheduleActivity({
-        assignmentId: selectedAssignmentId,
-        activityId,
-        mode,
-        startsAt: startsMs,
-        endsAt:
-          mode === "classFocus" ? startsMs + durationMin * MINUTE : undefined,
-        dueAt: mode === "homework" ? dueMs : undefined,
-      });
+      if (showsUp.kind === "now") {
+        await pushActivity({
+          assignmentId: selectedAssignmentId,
+          activityId,
+          finish,
+        });
+      } else {
+        await scheduleActivity({
+          assignmentId: selectedAssignmentId,
+          activityId,
+          startsAt: showsUp.at,
+          finish,
+        });
+      }
       toaster.success({
-        title: editingExisting
-          ? "Schedule updated"
-          : isPast
-            ? "Scheduled (start it manually — time is in the past)"
-            : "Scheduled",
+        title:
+          showsUp.kind === "now"
+            ? "Given"
+            : editingExisting
+              ? "Schedule updated"
+              : isPast
+                ? "Scheduled (start it manually — time is in the past)"
+                : "Scheduled",
       });
       onScheduled?.();
       onClose();
     } catch (err) {
-      toaster.error({ title: "Couldn't schedule", description: String(err) });
+      toaster.error({
+        title: "Couldn't schedule",
+        description: serverErrorMessage(err, "Check your connection and try again."),
+      });
     } finally {
       setSaving(false);
     }
@@ -256,9 +263,6 @@ function ScheduleActivityForm({
                           onClick={() => {
                             setAssignmentId(a._id);
                             setActivityId(null);
-                            if (!initialDueAt) {
-                              setDueAtOverride(null);
-                            }
                           }}
                         >
                           <Text fontSize="md" lineHeight="1">
@@ -349,74 +353,17 @@ function ScheduleActivityForm({
                   </Field>
                 )}
 
-                {/* 3 — Mode */}
-                <Field label="Mode">
-                  <HStack gap={2}>
-                    {(["classFocus", "homework"] as ActivityMode[]).map((m) => (
-                      <Box
-                        as="button"
-                        key={m}
-                        onClick={() => setMode(m)}
-                        px={3}
-                        py={1.5}
-                        borderRadius="md"
-                        borderWidth="1px"
-                        borderColor={mode === m ? `${tone(m)}.300` : "gray.200"}
-                        bg={mode === m ? `${tone(m)}.50` : "white"}
-                        cursor="pointer"
-                        _hover={{ bg: mode === m ? `${tone(m)}.50` : "gray.50" }}
-                      >
-                        <ActivityModeBadge mode={m} variant="soft" />
-                      </Box>
-                    ))}
-                  </HStack>
-                </Field>
-
-                {/* 4 — Time */}
-                <HStack gap={4} align="flex-start" flexWrap="wrap">
-                  <Field
-                    label={mode === "homework" ? "Assign at" : "Starts"}
-                    flex={1}
-                    minW="200px"
-                  >
-                    <DateTimeInput value={startsAt} onChange={setStartsAt} />
-                  </Field>
-                  {mode === "classFocus" ? (
-                    <Field label="For" minW="140px">
-                      <chakra.select
-                        value={String(durationMin)}
-                        onChange={(e) =>
-                          setDurationMin(Number(e.target.value))
-                        }
-                        w="full"
-                        px={3}
-                        py={2}
-                        borderWidth="1px"
-                        borderColor="gray.200"
-                        borderRadius="md"
-                        fontFamily="heading"
-                        fontSize="sm"
-                        bg="white"
-                        cursor="pointer"
-                      >
-                        {DURATIONS.map((d) => (
-                          <option key={d.min} value={d.min}>
-                            {d.label}
-                          </option>
-                        ))}
-                      </chakra.select>
-                    </Field>
-                  ) : (
-                    <Field label="Due" flex={1} minW="200px">
-                      <DateTimeInput
-                        value={dueAt}
-                        onChange={(value) => {
-                          setDueAtOverride(value);
-                        }}
-                      />
-                    </Field>
-                  )}
-                </HStack>
+                {/* 3 — When it shows up, and when it's finished */}
+                {selectedAssignmentId && (
+                  <GiveWindowFields
+                    choices={choices}
+                    nowMs={nowMs}
+                    showsUp={showsUp}
+                    onShowsUpChange={setShowsUp}
+                    finish={finish}
+                    onFinishChange={setFinishPick}
+                  />
+                )}
 
                 {isPast && !editingExisting && (
                   <HStack
@@ -451,9 +398,9 @@ function ScheduleActivityForm({
                     {saving ? (
                       <Spinner size="sm" />
                     ) : initialActivityId ? (
-                      "Save changes"
+                      giveButtonLabel(finish, "Save changes")
                     ) : (
-                      "Schedule"
+                      giveButtonLabel(finish)
                     )}
                   </Button>
                 </Flex>
@@ -461,10 +408,6 @@ function ScheduleActivityForm({
             </Dialog.Body>
     </>
   );
-}
-
-function tone(m: ActivityMode) {
-  return m === "classFocus" ? "violet" : "orange";
 }
 
 function Field({
@@ -523,31 +466,6 @@ function PickRow({
     >
       {children}
     </HStack>
-  );
-}
-
-function DateTimeInput({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <chakra.input
-      type="datetime-local"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      w="full"
-      px={3}
-      py={2}
-      borderWidth="1px"
-      borderColor="gray.200"
-      borderRadius="md"
-      fontFamily="heading"
-      fontSize="sm"
-      bg="white"
-    />
   );
 }
 

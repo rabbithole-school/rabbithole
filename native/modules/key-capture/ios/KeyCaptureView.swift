@@ -234,7 +234,19 @@ class KeyCaptureView: ExpoView {
     case "/": return .key("/")
     case "^": return .key("^")
     case "x", "X": return .key("x")
-    default: return nil
+    default: break
+    }
+    // The algebra pad's vocabulary: letters (variables, i, e), operators,
+    // brackets, |, the decimal point, and `,`/`;` for "another answer". The
+    // number-pad model refuses each of these itself, so forwarding is safe
+    // there; Command/Control shortcuts are left to UIKit.
+    if key.modifierFlags.contains(.command) || key.modifierFlags.contains(.control) { return nil }
+    if ch.isASCII && ch.isLetter { return .key(String(ch)) }
+    switch ch {
+    case "+", "-", "*", "(", ")", "|", ".", ",", ";", "±", "×", "÷", "−":
+      return .key(String(ch))
+    default:
+      return nil
     }
   }
 

@@ -23,6 +23,8 @@ import type { Id, TableNames } from "./_generated/dataModel";
 import { deleteSessionAppStates } from "./appStates";
 import { detachScholarFromPortfolio } from "./lib/portfolioAttributions";
 import { scheduleClaimDecommissionLocksForScholar } from "./lib/deviceAppUnlockScheduling";
+import { scheduleDeferredScholarPurges } from "./lib/cascade";
+import { closeScheduleForAssignment } from "./lib/scheduleStore";
 
 // ─── Project cascade (shared by purgeSession + purgeUser) ────────────
 //
@@ -152,6 +154,8 @@ export const purgeUser = internalMutation({
       "portfolioItems",
       detached.orphanedItems.map((item) => item._id),
     );
+    // A Decibel meter take's sound file, waiting to be transcribed.
+    for (const storageId of detached.orphanedBlobIds) await ctx.storage.delete(storageId);
 
     // 5. Parent / guardianship / notifications
     await del("guardianships", (await ctx.db.query("guardianships").withIndex("by_scholar", (q) => q.eq("scholarUserId", uid)).collect()).map((r) => r._id));
@@ -165,8 +169,10 @@ export const purgeUser = internalMutation({
     await del("curriculumMessages", (await ctx.db.query("curriculumMessages").withIndex("by_teacher", (q) => q.eq("teacherId", uid)).collect()).map((r) => r._id));
     await del("curriculumMessages", (await ctx.db.query("curriculumMessages").withIndex("by_scholar_and_creation", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
 
-    // 7. Assignments authored as teacher
-    await del("assignments", (await ctx.db.query("assignments").withIndex("by_teacher", (q) => q.eq("teacherId", uid)).collect()).map((r) => r._id));
+    // 7. Assignments authored as teacher (their schedule rows close first)
+    const taught = await ctx.db.query("assignments").withIndex("by_teacher", (q) => q.eq("teacherId", uid)).collect();
+    for (const a of taught) await closeScheduleForAssignment(ctx, a._id);
+    await del("assignments", taught.map((r) => r._id));
 
     // 8. Independent-study units authored by this scholar (+ their lessons/activities)
     const isUnits = await ctx.db.query("units").withIndex("by_authorScholar", (q) => q.eq("authorScholarId", uid)).collect();
@@ -215,6 +221,7 @@ export const purgeUser = internalMutation({
     // tells an already-unlocked device to re-lock (mirrors the same guard in
     // users.deleteUserCore / adminCloneScholar / lib/cascade.ts).
     await scheduleClaimDecommissionLocksForScholar(ctx, uid);
+    await scheduleDeferredScholarPurges(ctx, uid);
 
     // 12. The user row
     await ctx.db.delete(uid);

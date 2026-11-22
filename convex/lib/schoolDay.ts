@@ -47,17 +47,13 @@ export function isWithinSchoolDay(
 }
 
 /**
- * Resolve whether an institution is currently within its school day, deriving the
- * span from the Master Schedule (scheduleBlocks) of its active reporting period.
- * Fails CLOSED (false) when there is no active period or no blocks scheduled for
- * today. Read-only.
+ * The bell blocks of an institution's active reporting period (the Master
+ * Schedule), or [] when there is no active period. Read-only.
  */
-export async function isInstitutionInSchoolDay(
+export async function activeScheduleBlocks(
   ctx: QueryCtx,
   institutionId: Id<"institutions">,
-  timeZone: string,
-  nowMs: number,
-): Promise<boolean> {
+): Promise<SchoolDayBlock[]> {
   // Active reporting period for this institution. Mirror reportingPeriods.current's
   // status preference ("writing" ?? "open") but WITHOUT the staffQuery auth wrapper,
   // scoped to the institution. A period with institutionId === undefined (a global
@@ -84,19 +80,57 @@ export async function isInstitutionInSchoolDay(
     visible.find((p) => p.status === "writing") ??
     visible.find((p) => p.status === "open") ??
     null;
-  if (!active) return false; // fail closed
+  if (!active) return [];
 
   const blocks = await ctx.db
     .query("scheduleBlocks")
     .withIndex("by_period", (q) => q.eq("periodId", active._id))
     .collect();
+  return blocks.map((b) => ({
+    startLocal: b.startLocal,
+    endLocal: b.endLocal,
+    weekdays: b.weekdays,
+  }));
+}
 
+/**
+ * The earliest bell-block start ("HH:MM") scheduled on an ISO weekday
+ * (1=Mon … 7=Sun), or null when no valid block meets that day.
+ */
+export function schoolDayStartLocal(
+  blocks: SchoolDayBlock[],
+  isoWeekday: number,
+): string | null {
+  let start: string | null = null;
+  for (const b of blocks) {
+    if (
+      Array.isArray(b.weekdays) &&
+      b.weekdays.includes(isoWeekday) &&
+      isValidHHMM(b.startLocal) &&
+      isValidHHMM(b.endLocal) &&
+      b.endLocal > b.startLocal &&
+      (start === null || b.startLocal < start)
+    ) {
+      start = b.startLocal;
+    }
+  }
+  return start;
+}
+
+/**
+ * Resolve whether an institution is currently within its school day, deriving the
+ * span from the Master Schedule (scheduleBlocks) of its active reporting period.
+ * Fails CLOSED (false) when there is no active period or no blocks scheduled for
+ * today. Read-only.
+ */
+export async function isInstitutionInSchoolDay(
+  ctx: QueryCtx,
+  institutionId: Id<"institutions">,
+  timeZone: string,
+  nowMs: number,
+): Promise<boolean> {
   return isWithinSchoolDay(
-    blocks.map((b) => ({
-      startLocal: b.startLocal,
-      endLocal: b.endLocal,
-      weekdays: b.weekdays,
-    })),
+    await activeScheduleBlocks(ctx, institutionId),
     timeZone,
     nowMs,
   );

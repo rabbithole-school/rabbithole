@@ -25,6 +25,10 @@ import {
   sessionBreadcrumb,
   sessionDateLabel,
 } from "@/components/parent/parentCoursePortfolio";
+import {
+  itemInPortfolioSubject,
+  subjectSlugFromSegment,
+} from "@/shared/portfolioSubject";
 
 export interface ParentCourseResource {
   _id: Id<"activityResources">;
@@ -49,8 +53,9 @@ export interface ParentCourseSession {
 /**
  * One course behind its tile: the program's scheduled sessions in schedule
  * order, each with the child's shared work and the teacher's family-visible
- * resources. `/parent/portfolio/other` reuses this shell for the work that
- * isn't filed to any course.
+ * resources. `/parent/portfolio/subject-<slug>` reuses this shell for one
+ * subject's work outside any course, and `/parent/portfolio/other` for the
+ * work with no course and no known subject.
  */
 export function ParentCourseView({
   scholarId,
@@ -64,6 +69,7 @@ export function ParentCourseView({
   preview?: boolean;
 }) {
   const isOther = groupId === "other";
+  const subjectSlug = subjectSlugFromSegment(groupId);
   // One subscription for the whole view. `courseForGuardian` takes the raw URL
   // segment (junk and "other" normalise to a null course) and carries the
   // media-release state, so the course view never re-runs the tile pipeline.
@@ -74,7 +80,7 @@ export function ParentCourseView({
   const course = result === undefined ? undefined : result.course;
   const backHref = `/parent/portfolio${hrefQuery}`;
 
-  if (isOther) {
+  if (isOther || subjectSlug) {
     return (
       <VStack align="stretch" gap={5}>
         <BackLink href={backHref} />
@@ -83,9 +89,20 @@ export function ParentCourseView({
           preview={preview}
         />
         <Heading size="lg" fontFamily="heading" color="navy.500">
-          Other work
+          {subjectSlug ? (
+            <SubjectName scholarId={scholarId} slug={subjectSlug} />
+          ) : (
+            "Other work"
+          )}
         </Heading>
-        <ParentPortfolioFlatGrid scholarId={scholarId} unfiledOnly />
+        <ParentPortfolioFlatGrid
+          scholarId={scholarId}
+          scope={
+            subjectSlug
+              ? { kind: "subject", slug: subjectSlug }
+              : { kind: "other" }
+          }
+        />
       </VStack>
     );
   }
@@ -163,6 +180,22 @@ export function ParentCourseView({
       )}
     </VStack>
   );
+}
+
+/** A subject page's heading: the subject as its work spells it. Shares the
+ *  grid's `listForGuardian` subscription, so it costs no second read. */
+function SubjectName({
+  scholarId,
+  slug,
+}: {
+  scholarId: Id<"users">;
+  slug: string;
+}) {
+  const items = useQuery(api.portfolio.listForGuardian, { scholarId });
+  const match = items?.find((item) => itemInPortfolioSubject(item, slug));
+  // Non-breaking space while loading keeps the heading's height steady; a
+  // stale link (the subject has no work any more) still gets a heading.
+  return <>{items === undefined ? "\u00a0" : (match?.subject ?? "This subject")}</>;
 }
 
 function BackLink({ href }: { href: string }) {

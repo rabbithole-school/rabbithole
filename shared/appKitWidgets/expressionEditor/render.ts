@@ -106,7 +106,9 @@ function slotChildren(slot: Slot, ctx: RenderCtx): Node[] {
     if (item.kind === "token") out.push(glyph(item.value, slot.id, i, ctx));
     else if (item.kind === "fraction") out.push(fractionView(item, ctx));
     else if (item.kind === "root") out.push(rootView(item, ctx));
-    else out.push(powerView(item, ctx));
+    else if (item.kind === "power") out.push(powerView(item, ctx));
+    // log / group items exist only in the algebra mode, which this widget
+    // never enables.
   }
   return out;
 }

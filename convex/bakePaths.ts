@@ -24,6 +24,7 @@ import { requireAnthropicApiKey } from "./lib/anthropic";
 import type { ActionCtx } from "./_generated/server";
 import { recordAnthropicUsage } from "./usage";
 import { buildUnitDesignerSystemText } from "./unitDesignerStream";
+import { SCHOLAR_LED_APP_BUILDING } from "../shared/missionCopy";
 
 export interface SuggestedPath {
   emoji: string;
@@ -155,7 +156,9 @@ async function proposePaths(
     levelsPromptLine(cx.readingLevel) ?? "Talk level: (elementary — pick a sensible default)",
     "",
     "Propose 2-4 GENUINELY DIFFERENT, concrete ways they could dive in — each a real, worthwhile gifted activity (not the same idea reworded, and NOT abstract labels like 'go deep' / 'go wide'). Make each one a specific angle or thing-they'd-do that a curious kid would actually want to pick, and that still leads to genuinely understanding the topic. Speak TO the kid (second person), warm and concrete. Use your judgment about what makes a good gifted activity. Call report_paths.",
-    "Do not propose a build-an-app/simulation path; that option is always offered separately.",
+    SCHOLAR_LED_APP_BUILDING
+      ? "Do not propose a build-an-app/simulation path; that option is always offered separately."
+      : "A Quest builds no app, game, or simulation: apps are made only in activities a teacher assigns. So never propose building one, and never mention one as the payoff (no 'your game', no 'for your game's levels'). If they described a game or app they want to make, offer ways into the real ideas inside it (the science, math, or story it runs on) that they explore and show in writing, slides, drawings, or a map.",
     "",
     "specific_build: read their words again. If they describe a SPECIFIC thing they want to MAKE — a game, app, simulation, or tool with its own idea, name, or mechanic (\"a game called X where…\", \"an app that…\", \"make a simulator of…\") — set it true: they don't need a menu, they need to start building. If they named a topic or question to explore, set it false, even if building could be one way in.",
   ]
@@ -194,7 +197,9 @@ async function proposePaths(
       }));
     return {
       paths: paths.length >= 2 ? paths : FALLBACK_PATHS,
-      specificBuild: input.specificBuild,
+      // No build-first hand-off while SCHOLAR_LED_APP_BUILDING is off: every
+      // client (an older iPad too) then shows the menu instead.
+      specificBuild: SCHOLAR_LED_APP_BUILDING && input.specificBuild,
     };
   } catch (err) {
     console.error("[suggestBakePaths] failed:", err);

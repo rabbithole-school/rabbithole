@@ -145,13 +145,11 @@ describe("localRunner:startTopicChat", () => {
     const runner = await shape(t, viaRunner.sessionId);
     expect(runner).toEqual(web);
     // The fields the opening turn reads, spelled out: an unheld, activity-less
-    // chat on the scholar's own quest, with the bake left off the live chat.
+    // chat on the scholar's own quest, with no bake scheduled.
     expect(runner.session.questBakeStatus).toBeUndefined();
     expect(runner.session.activityId).toBeUndefined();
     expect(runner.sessionOwnedByScholar).toBe(true);
-    expect(runner.scheduled).toEqual([
-      { name: "bakeUnitFromSeed:bakeCustomQuestUnit", args: ["unitId"] },
-    ]);
+    expect(runner.scheduled).toEqual([]);
   });
 
   test("validates the topic and the username", async () => {

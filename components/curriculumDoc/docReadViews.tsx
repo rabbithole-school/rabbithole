@@ -42,9 +42,15 @@ import type { Strand } from "@/lib/constants";
 import { NodeMaturityControls, RehearseButton } from "./NodeMaturityCta";
 import type { HubView } from "./MaturityHub";
 import type { RehearseFixField } from "@/components/nodeEditor/rehearseResult";
+import { OFF_LIST_SUBJECT_HINT } from "@/components/nodeEditor/SubjectInput";
+import { GradePicker, UNREADABLE_GRADE_HINT } from "@/components/nodeEditor/GradePicker";
+import { unitGradeDisplay, unitGradePickerState } from "@/shared/unitGrade";
+import { useSchoolSubjectOptions } from "@/hooks/useSchoolSubjectOptions";
+import { subjectPickerState } from "@/lib/subjects";
 import { InlineText, InlineProse } from "./InlineEditable";
 import {
   EditableChip,
+  PopoverEditorFrame,
   activityKindSelectOptions,
   sameValue,
   strandSelectOptions,
@@ -150,22 +156,6 @@ const SELECTION_MODE_OPTIONS: EditableChipSelectOption<"sequence" | "choice">[] 
 const PICK_COUNT_OPTIONS: EditableChipSelectOption<number>[] = [
   1, 2, 3, 4, 5, 6,
 ].map((n) => ({ value: n, label: `Pick ${n}` }));
-
-const DEFAULT_MODE_OPTIONS: EditableChipSelectOption<
-  "classFocus" | "homework" | "either"
->[] = [
-  { value: "either", label: "Either", description: "No auto-push on assign" },
-  {
-    value: "classFocus",
-    label: "In class",
-    description: "Dormant until pushed from the Run page",
-  },
-  {
-    value: "homework",
-    label: "Homework",
-    description: "Lands on each scholar on assign",
-  },
-];
 
 const RECIPE_OPTIONS: EditableChipSelectOption<
   "baseline" | "exitTicket" | null
@@ -553,11 +543,81 @@ function LoadingLines() {
 
 // ── UNIT ─────────────────────────────────────────────────────────────────────
 
+/** The unit's Subject chip as a pick from the school's classes (TRA-723).
+ *  A subject that is not one of them shows as-is, with a quiet prompt in the
+ *  menu, and stays until a teacher picks. */
+function SubjectChip({
+  subject,
+  options,
+  onCommit,
+}: {
+  subject: string | null | undefined;
+  /** Non-empty, or `undefined` while loading (disabled, current value shown). */
+  options: readonly string[] | undefined;
+  onCommit: (next: string) => void | Promise<unknown>;
+}) {
+  const loading = options === undefined;
+  const { selected, offList } = subjectPickerState(options ?? [], subject);
+  const choices: EditableChipSelectOption<string>[] = [
+    { value: "", label: "No subject" },
+    ...(offList
+      ? [
+          {
+            value: offList,
+            label: offList,
+            ...(loading ? {} : { description: OFF_LIST_SUBJECT_HINT }),
+          },
+        ]
+      : []),
+    ...(options ?? []).map((o) => ({ value: o, label: o })),
+  ];
+  // The "pick a class" line sits under the whole chip row (UnitReadView),
+  // so the chips stay on one line.
+  return (
+    <EditableChip<string>
+      type="select"
+      label="Subject"
+      value={selected || null}
+      placeholder="Add subject"
+      options={choices}
+      disabled={loading}
+      onCommit={onCommit}
+    />
+  );
+}
+
+/** The unit's Grade level chip: opens the grade picker (one grade, or a span
+ *  within K–8). A saved grade it can't read shows as-is, and the "pick the
+ *  grades" line sits under the chip row (UnitReadView), not in the picker. */
+function GradeChip({
+  gradeLevel,
+  onPick,
+}: {
+  gradeLevel: string | null | undefined;
+  onPick: (next: string | null) => unknown;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <PopoverEditorFrame
+      open={open}
+      setOpen={setOpen}
+      display={unitGradeDisplay(gradeLevel) ?? "Add grade"}
+      common={{ label: "Grade level", value: gradeLevel, placeholder: "Add grade" }}
+    >
+      <Text fontSize="sm" fontWeight="medium" mb={1.5}>
+        Grade level
+      </Text>
+      <GradePicker gradeLevel={gradeLevel} onPick={onPick} hint={false} />
+    </PopoverEditorFrame>
+  );
+}
+
 export function UnitReadView({ unitId }: { unitId: Id<"units"> }) {
   const unit = useQuery(api.units.get, { id: unitId });
   const counts = useQuery(api.units.structureCounts, { id: unitId });
   const updateUnit = useMutation(api.units.update);
   const setGranules = useMutation(api.units.setGranules);
+  const subjectOptions = useSchoolSubjectOptions(unitId);
 
   if (unit === undefined || counts === undefined) return <LoadingLines />;
   if (unit === null) {
@@ -568,6 +628,12 @@ export function UnitReadView({ unitId }: { unitId: Id<"units"> }) {
     );
   }
 
+  // A subject that is not one of the unit's school's classes (TRA-723);
+  // never while the options load.
+  const subjectOffList =
+    subjectOptions !== undefined && subjectOptions.length > 0
+      ? subjectPickerState(subjectOptions, unit.subject).offList
+      : null;
   const eqs = normalizeGranules(unit.essentialQuestions, "eq");
   const eus = normalizeGranules(unit.enduringUnderstandings, "eu");
 
@@ -604,21 +670,26 @@ export function UnitReadView({ unitId }: { unitId: Id<"units"> }) {
           }}
         />
         <MetaChipRow>
-          <EditableChip
-            type="text"
-            label="Subject"
-            value={unit.subject ?? null}
-            placeholder="Add subject"
-            trimOnCommit
-            onCommit={(v) => updateUnit({ id: unitId, subject: v || null })}
-          />
-          <EditableChip
-            type="text"
-            label="Grade level"
-            value={unit.gradeLevel ?? null}
-            placeholder="Add grade"
-            trimOnCommit
-            onCommit={(v) => updateUnit({ id: unitId, gradeLevel: v || null })}
+          {/* Free text only once the options answered empty (TRA-723). */}
+          {subjectOptions === undefined || subjectOptions.length > 0 ? (
+            <SubjectChip
+              subject={unit.subject}
+              options={subjectOptions}
+              onCommit={(v) => updateUnit({ id: unitId, subject: v || null })}
+            />
+          ) : (
+            <EditableChip
+              type="text"
+              label="Subject"
+              value={unit.subject ?? null}
+              placeholder="Add subject"
+              trimOnCommit
+              onCommit={(v) => updateUnit({ id: unitId, subject: v || null })}
+            />
+          )}
+          <GradeChip
+            gradeLevel={unit.gradeLevel}
+            onPick={(next) => updateUnit({ id: unitId, gradeLevel: next })}
           />
           <EditableChip
             type="text"
@@ -629,6 +700,19 @@ export function UnitReadView({ unitId }: { unitId: Id<"units"> }) {
             onCommit={(v) => updateUnit({ id: unitId, mathDomain: v || null })}
           />
         </MetaChipRow>
+        {subjectOffList && (
+          // Its own line under the chip row; MetaChipRow's ml={-2} offsets the
+          // chips' px={2}, so this starts where the Subject chip's text does.
+          <Text mt={1} fontSize="xs" color="charcoal.400" fontFamily="body">
+            {OFF_LIST_SUBJECT_HINT}
+          </Text>
+        )}
+        {/* A scholar's own unit has no grade rules, so no prompt there. */}
+        {!unit.authorScholarId && unitGradePickerState(unit.gradeLevel).unreadable && (
+          <Text mt={1} fontSize="xs" color="charcoal.400" fontFamily="body">
+            {UNREADABLE_GRADE_HINT}
+          </Text>
+        )}
         <MetaStrip items={passive} />
       </Box>
 
@@ -1213,24 +1297,6 @@ export function ActivityReadView({
     : undefined;
 
   const activityOptionRows: NodeOptionRow[] = [
-    {
-      label: "Default mode",
-      hint: "Where this lands for scholars when the unit is assigned.",
-      summary:
-        activity.defaultMode === "homework"
-          ? "Homework"
-          : activity.defaultMode === "classFocus"
-            ? "In class"
-            : undefined,
-      value: activity.defaultMode ?? "either",
-      valueLabel: selectValueLabel(
-        DEFAULT_MODE_OPTIONS,
-        activity.defaultMode ?? "either",
-        "Either",
-      ),
-      options: DEFAULT_MODE_OPTIONS,
-      onCommit: (v) => updateActivity({ id: activityId, defaultMode: v }),
-    },
     // An app activity is an online activity with this on (TRA-519).
     ...(isOnline || isApp
       ? [
@@ -1663,41 +1729,6 @@ export function ActivityReadView({
               ]}
               onCommit={handleScholarsStartFrom}
             />
-            <EditableChip<"silent" | "replies">
-              type="select"
-              label="Designer may stay silent until a question is answered"
-              value={
-                activity.allowSilence && activity.buildContract
-                  ? "silent"
-                  : "replies"
-              }
-              // Silence only applies under a mission (the server drops
-              // allowSilence without one), so the control waits for it.
-              readOnly={!activity.buildContract}
-              readOnlyHint="Needs a mission"
-              options={[
-                {
-                  value: "replies",
-                  label: "Always replies",
-                  description: "The designer answers every message.",
-                },
-                {
-                  value: "silent",
-                  label: "May stay silent",
-                  description:
-                    "After a learning question, it waits for a real answer instead of building past it.",
-                },
-              ]}
-              onCommit={(next) =>
-                void updateActivity({
-                  id: activityId,
-                  allowSilence: next === "silent",
-                }).catch((err: unknown) => {
-                  console.error(err);
-                  toaster.error({ title: "Couldn't change the setting" });
-                })
-              }
-            />
             {starterApp && (
               <>
                 <Text
@@ -1766,10 +1797,10 @@ export function ActivityReadView({
           }
         />
       )}
-      {/* The mission (TRA-519 B1): only where one applies. A discussion
-          (no deliverable) resolves no mission, so fields there would steer
-          nothing. A blank gate shows the default the tutor will use. */}
-      {(isOnline || isApp) && defaultGateFor(activity) != null && (
+      {/* An app always has a mission line; other activities show their
+          mission only when their deliverable supplies a default. A
+          discussion (no deliverable) resolves no mission. */}
+      {(isApp || (isOnline && defaultGateFor(activity) != null)) && (
         <>
           {isApp && (
             <EditableProseBlock
@@ -1792,10 +1823,14 @@ export function ActivityReadView({
             onCommit={(v) => void commitContract({ freedoms: contractLines(v) })}
           />
           <EditableProseBlock
-            label="Mission · gate"
+            label={isApp ? "Mission" : "Mission · gate"}
             value={activity.buildContract?.gate ?? ""}
-            placeholder={`Default: ${defaultGateFor(activity)}`}
-            ariaLabel="Gate"
+            placeholder={
+              isApp
+                ? "e.g. Understand escape velocity"
+                : `Default: ${defaultGateFor(activity)}`
+            }
+            ariaLabel={isApp ? "Mission" : "Gate"}
             onCommit={(v) => void commitContract({ gate: v })}
           />
         </>

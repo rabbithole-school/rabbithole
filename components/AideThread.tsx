@@ -10,6 +10,7 @@ import { PaperPlaneTilt, Square } from "@phosphor-icons/react";
 import { StreamingTurn } from "./StreamingTurn";
 import { DictationMicButton } from "./DictationMicButton";
 import type { ToolActivity } from "@/hooks/useAgentStream";
+import { useComposeKeyTarget } from "@/hooks/useComposeKey";
 import { useIsTouchDevice } from "@/hooks/useIsTouchDevice";
 
 /**
@@ -230,6 +231,7 @@ export function AideThread<M extends AideMessage = AideMessage>({
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useComposeKeyTarget(() => textareaRef.current?.focus());
   // Auto-scroll only when the user is already near the bottom, so reading
   // back through history isn't yanked down by an incoming stream.
   const pinnedToBottom = useRef(true);

@@ -35,6 +35,7 @@ import { SymbolView } from "expo-symbols";
 
 import { fonts, useColors } from "@/theme";
 import { useOfflineRecovery } from "@/hooks/useOfflineRecovery";
+import { useModalPresentationRetry } from "@/hooks/useModalPresentationRetry";
 import { openWifiSettings } from "@/lib/wifiRecovery/openWifiSettings";
 
 export function KioskWifiHelpOverlay() {
@@ -66,9 +67,16 @@ function FullOverlay({
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
+  // Mounted only while offline, so it always wants to be up.
+  const presentation = useModalPresentationRetry(true);
 
   return (
-    <Modal presentationStyle="fullScreen" animationType="fade">
+    <Modal
+      visible={presentation.visible}
+      onShow={presentation.markShown}
+      presentationStyle="fullScreen"
+      animationType="fade"
+    >
       <SafeAreaView style={styles.safe}>
         {/* One vertically-centered column: icon, copy, card, and the actions all
             sit together in the middle of the screen. `flexGrow: 1` +

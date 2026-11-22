@@ -3,18 +3,22 @@
 import type { ReactNode } from "react";
 import { Box, chakra, HStack, Text, VisuallyHidden } from "@chakra-ui/react";
 import {
+  Backpack,
   CalendarBlank,
   ChatsCircle,
+  DeviceTablet,
   Files,
+  House,
   GraduationCap,
   ImageSquare,
+  Notebook,
   TreeStructure,
 } from "@phosphor-icons/react";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Avatar } from "@/components/Avatar";
 import {
   parentVisibleTabs,
-  PARENT_TAB_LABELS,
+  parentTabLabel,
   type ParentPortalMode,
   type ParentTab,
 } from "@/components/parent/parentTabs";
@@ -31,12 +35,25 @@ export interface ParentChild {
 }
 
 const PARENT_TAB_ICONS: Record<
-  "records" | "portfolio" | "math" | "calendar" | "messages" | "admissions",
+  | "home"
+  | "bunnypad"
+  | "records"
+  | "portfolio"
+  | "reports"
+  | "math"
+  | "homework"
+  | "calendar"
+  | "messages"
+  | "admissions",
   ReactNode
 > = {
+  home: <House size={16} />,
+  bunnypad: <DeviceTablet size={16} />,
   records: <Files size={16} />,
   portfolio: <ImageSquare size={16} />,
+  reports: <Notebook size={16} />,
   math: <TreeStructure size={16} />,
+  homework: <Backpack size={16} />,
   calendar: <CalendarBlank size={16} />,
   messages: <ChatsCircle size={16} />,
   admissions: <GraduationCap size={16} />,
@@ -66,7 +83,7 @@ export function ParentNavTabs({
   const items: TopNavItem<ParentTab>[] = parentVisibleTabs(mode).map(
     (key) => ({
       key,
-      label: PARENT_TAB_LABELS[key] ?? `${key[0].toUpperCase()}${key.slice(1)}`,
+      label: parentTabLabel(key),
       icon: PARENT_TAB_ICONS[key as keyof typeof PARENT_TAB_ICONS],
       indicator:
         key === "messages" && messagesUnread ? (

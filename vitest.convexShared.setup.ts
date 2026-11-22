@@ -23,25 +23,12 @@
 //   3. clear every timer the file created, which cancels whatever is still
 //      queued.
 //
-// The other leak is console output. Work an action starts without awaiting it
-// is invisible to the scheduler, so it can outlive the drain, and its
-// `console.error` then lands after this file's `afterAll` — with no test to
-// belong to, vitest files it at file level, and a console call issued that
-// late races the worker's rpc teardown: "EnvironmentTeardownError: Closing
-// rpc while 'onUserConsoleLog' was pending", an unhandled error that fails
-// the whole shard while every test passes (hit twice on 2026-09-15 via
-// bakeUnitFromSeed's "[bake …] loop failed" line, on two unrelated PRs). So
-// console output with no running test is dropped, for the same reason the
-// timers are cleared: nothing after the last test is part of any verdict.
-// The gate is installed once per worker and never restored, because the
-// worker outlives the file.
-import { afterAll, beforeAll, TestRunner } from "vitest";
+// The other leak, console output a leaked job issues after the last test,
+// is gated for both Convex projects in vitest.convexConsole.setup.ts.
+import { afterAll, beforeAll } from "vitest";
 
 type TimerId = ReturnType<typeof setTimeout>;
 type TrackedInstance = NonNullable<typeof globalThis.__rhConvexTests> extends Set<infer T> ? T : never;
-const CONSOLE_METHODS = ["log", "info", "debug", "warn", "error"] as const;
-type ConsoleMethod = (typeof CONSOLE_METHODS)[number];
-type ConsoleFn = (...args: unknown[]) => void;
 
 declare global {
   var __rhConvexSharedOriginals:
@@ -50,23 +37,24 @@ declare global {
         setInterval: typeof setInterval;
         clearTimeout: typeof clearTimeout;
         clearInterval: typeof clearInterval;
-        console: Partial<Record<ConsoleMethod, ConsoleFn>>;
       }
     | undefined;
 }
 
 // vitest re-evaluates this module for every test file, but the worker's
-// globals outlive the file, so the real timers and console methods are
-// captured once per worker. A later file must never take an earlier file's
-// wrapper for the real thing: the console gate stays installed, and a drain
-// that outlives its hook's timeout is still running.
+// globals outlive the file, so the real timers are captured once per
+// worker. A later file must never take an earlier file's
+// wrapper for the real thing: a drain that outlives its hook's timeout is
+// still running.
 const real = (globalThis.__rhConvexSharedOriginals ??= {
   setTimeout: globalThis.setTimeout,
   setInterval: globalThis.setInterval,
   clearTimeout: globalThis.clearTimeout,
   clearInterval: globalThis.clearInterval,
-  console: {},
 });
+// The console gate drops output with no running test; this setup's own
+// diagnostics run after the last test, so they go to the real console.
+const realConsole = () => globalThis.__rhRealConsole ?? console;
 const {
   setTimeout: realSetTimeout,
   setInterval: realSetInterval,
@@ -121,17 +109,6 @@ beforeAll(() => {
   globalThis.setInterval = trackingSetInterval;
   globalThis.clearTimeout = trackingClearTimeout;
   globalThis.clearInterval = trackingClearInterval;
-
-  for (const method of CONSOLE_METHODS) {
-    if (real.console[method]) continue; // installed once per worker
-    const original = console[method] as ConsoleFn;
-    real.console[method] = original;
-    console[method] = (...args: unknown[]) => {
-      // Same attribution signal vitest's console uses: no current test means
-      // this line would be reported at file level — a leaked job's output.
-      if (TestRunner.getCurrentTest()) original(...args);
-    };
-  }
 });
 
 function clearPending() {
@@ -159,7 +136,7 @@ async function cancelQueuedJobs(t: TrackedInstance) {
       return { cancelled, running };
     });
   } catch (error) {
-    real.console.warn?.("[vitest.convexShared] could not cancel a test's queued scheduled functions:", error);
+    realConsole().warn?.("[vitest.convexShared] could not cancel a test's queued scheduled functions:", error);
     return { cancelled: 0, running: [] };
   }
 }
@@ -174,7 +151,7 @@ async function finishStartedJobs(t: TrackedInstance) {
       await t.finishInProgressScheduledFunctions();
       return;
     } catch (error) {
-      real.console.warn?.("[vitest.convexShared] leaked scheduled function failed while draining:", error);
+      realConsole().warn?.("[vitest.convexShared] leaked scheduled function failed while draining:", error);
     }
   }
 }
@@ -218,13 +195,10 @@ afterAll(async () => {
     if (globalThis.clearTimeout === trackingClearTimeout) globalThis.clearTimeout = realClearTimeout;
     if (globalThis.clearInterval === trackingClearInterval) globalThis.clearInterval = realClearInterval;
     if (process.env.RH_DRAIN_DEBUG) {
-      real.console.log?.(
+      realConsole().log?.(
         `[vitest.convexShared] ${instances.length} instance(s), ${rounds} round(s), ` +
           `cancelled ${cancelled} queued job(s), cleared ${leaked} timer(s)`,
       );
     }
   }
-  // Let any console rpc the last test issued reach the main thread before
-  // vitest tears the worker down.
-  await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
 }, DRAIN_TIMEOUT_MS);

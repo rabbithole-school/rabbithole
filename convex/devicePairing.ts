@@ -84,7 +84,7 @@ import { getAuthSessionId } from "@convex-dev/auth/server";
 import { sha256Hex } from "./lib/oauthCrypto";
 import { resolveInstitutionLens, scholarInLens } from "./lib/institutionLens";
 import { ROLES } from "./lib/roles";
-import { isEnrolledScholar } from "./lib/enrollmentStanding";
+import { isEnrolledScholar, isWithdrawn } from "./lib/enrollmentStanding";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   unassignedManagedClaimPatch,
@@ -995,12 +995,17 @@ export const listPairableScholars = authedQuery({
       .query("users")
       .withIndex("by_role", (q) => q.eq("role", ROLES.SCHOLAR))
       .collect();
-    return scholars
-      .filter(
-        (s) =>
-          scholarInLens(lens, s) &&
-          (args.includeProgramGuests === true || isEnrolledScholar(s)),
-      )
+    const inLens: typeof scholars = [];
+    for (const s of scholars) {
+      if (
+        !isWithdrawn(s) &&
+        (args.includeProgramGuests === true || isEnrolledScholar(s)) &&
+        (await scholarInLens(ctx, lens, s))
+      ) {
+        inLens.push(s);
+      }
+    }
+    return inLens
       .map((s) => ({
         _id: s._id,
         name: s.name ?? null,

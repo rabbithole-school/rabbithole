@@ -10,7 +10,7 @@
  *     copy, still with a switcher to any other started domain.
  *
  * Backed by the SAME read as web — `api.practiceSkills.domainsForScholar`.
- * Switching routes HOME with `?highlightDomain=` (router.replace) — the
+ * Switching routes HOME with `?highlightDomain=` (router.dismissTo, back to the existing Home) — the
  * scholar-home CHOOSER with that domain's tile preselected, never straight
  * into practice (raise-the-ceiling consolidation, f7: the summit hand-off is
  * a REDIRECT into the existing "You Pick" chooser, not its own destination).
@@ -31,6 +31,11 @@ import { api, type Id } from "@/lib/convex";
 import { fonts, useColors, type Colors } from "@/theme";
 import { selectSummitHandoff, selectMixedSummitHandoff } from "../../vendor/shared/practiceSummit";
 
+/** A fresh id per hand-off tap (called from the press handler, never render). */
+function handoffRequestId(): string {
+  return String(Date.now());
+}
+
 export function SummitHandoff({
   scholarId,
   domain,
@@ -49,7 +54,10 @@ export function SummitHandoff({
   const domains = useQuery(api.practiceSkills.domainsForScholar, { scholarId });
 
   const switchTo = (d: string) =>
-    router.replace({ pathname: "/", params: { highlightDomain: d } });
+    // `highlightAt` makes each hand-off its own request: Home persists across
+    // dismissTo, so a second hand-off to the same domain must not read as
+    // already consumed.
+    router.dismissTo({ pathname: "/", params: { highlightDomain: d, highlightAt: handoffRequestId() } });
 
   // Until the read resolves, keep the original gentle empty-state copy so there
   // is no celebratory flash before we know whether this is a real summit.

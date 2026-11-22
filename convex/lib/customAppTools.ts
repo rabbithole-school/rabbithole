@@ -36,11 +36,16 @@ import {
   withBase,
 } from "./channels";
 import {
-  assignAndPushActivityNow,
+  assignAndGiveActivity,
+  startQuestion,
+  FINISH_DESCRIPTION,
+  finishQuestion,
+  parseFinishInput,
+  finishDateNote,
+  readGiveChoices,
   makeAssignmentCohortResolver,
 } from "./assignmentTools";
 import {
-  allowSilenceSchemaFragment,
   buildContractSchemaFragment,
   scholarEditSchemaFragment,
   scholarEditToEditAccess,
@@ -60,6 +65,15 @@ import {
 import { APP_STATE_RULES } from "../prompts";
 import { appBaseUrl } from "./deploymentConfig";
 import { isAppActivity } from "../../shared/appSurface";
+import {
+  UNIT_SUBJECT_DESCRIPTION,
+  isUnitSubjectRequiredError,
+  unitSubjectAskAgain,
+  unitSubjectFiledNote,
+  unitSubjectInput,
+  unitSubjectNotAClass,
+  unitSubjectNotAClassDetails,
+} from "./unitSubject";
 
 const scholarNamesProp = {
   type: "array" as const,
@@ -113,18 +127,6 @@ function parseActivityReference(reference: string): ActivityReference {
   } catch {
     return { kind: "invalid_link" };
   }
-}
-
-/** kebab-case an app name into a URL/dir-safe route slug (bounded length). */
-function slugify(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 40)
-      .replace(/-+$/g, "") || "app"
-  );
 }
 
 /**
@@ -300,7 +302,7 @@ export async function makeCustomAppTools(
 ) {
   if (!isTeacherRole(opts.role)) return [];
 
-  const { callerUserId, sessionId, linkBase = "" } = opts;
+  const { callerUserId, linkBase = "" } = opts;
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
   );
@@ -313,7 +315,7 @@ export async function makeCustomAppTools(
   const installExternalAppTool = betaTool({
     name: "install_external_app",
     description:
-      "Install an EXISTING website or web app as a launcher tile on a scholar's (or group's) iPad — use this when the teacher gives or clearly references a URL. The tile opens the site in the locked in-app webview. Nothing is BUILT here (the site already exists on the web); this adds its catalog tile if we don't have one yet, reusing the existing tile when we do, and grants it to the scholars/groups you name. This is the DEFAULT path for 'give <site> to <someone>'. (For a brand-new app the teacher describes, use create_custom_app or dispatch_custom_app. To add a catalog entry WITHOUT granting it — or to set an icon, colour, default-for-new-scholars, or credential source — use create_external_app, then the enable_app_for_* tools.)",
+      "Install an EXISTING website or web app as a launcher tile on a scholar's (or group's) iPad — use this when the teacher gives or clearly references a URL. The tile opens the site in the locked in-app webview. Nothing is BUILT here (the site already exists on the web); this adds its catalog tile if we don't have one yet, reusing the existing tile when we do, and grants it to the scholars/groups you name. This is the DEFAULT path for 'give <site> to <someone>'. (For a brand-new app the teacher describes, use create_custom_app; one that needs a backend is a code change. To add a catalog entry WITHOUT granting it — or to set an icon, colour, default-for-new-scholars, or credential source — use create_external_app, then the enable_app_for_* tools.)",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -517,7 +519,7 @@ export async function makeCustomAppTools(
   const customAppOrigin = appBaseUrl().replace(/\/+$/, "");
   const createCustomAppTool = betaTool({
     name: "create_custom_app",
-    description: `STANDALONE TILES ONLY. Do NOT use this for an app scholars will use with the tutor (a coached activity, an assignment, "for my class", "report to the tutor"): you build blind here and cannot see the result — for those, call make_app_a_coached_activity with appRequest instead, which hands the build to the sighted Workshop. This tool creates and INSTANTLY installs a brand-new, self-contained STATIC app as a launcher tile — a tool, reference, or widget that needs NO saved data, NO login, NO coaching, and NO sharing between students (any state can live in memory for the session). Provide the ENTIRE app as a single self-contained HTML string (inline CSS + JS; no external build). It installs immediately at a private ${customAppOrigin}/custom-apps?token=… url — no PR, no waiting. IMPORTANT: it runs sandboxed, so it CANNOT persist data across reloads or connect students to each other — if the teacher needs saved progress, accounts, a database, or a shared/collaborative space, use dispatch_custom_app instead.`,
+    description: `STANDALONE TILES ONLY. Do NOT use this for an app scholars will use with the tutor (a coached activity, an assignment, "for my class", "report to the tutor"): you build blind here and cannot see the result — for those, call make_app_a_coached_activity with appRequest instead, which hands the build to the sighted Workshop. This tool creates and INSTANTLY installs a brand-new, self-contained STATIC app as a launcher tile — a tool, reference, or widget that needs NO login, NO coaching, and NO sharing between students. Provide the ENTIRE app as a single self-contained HTML string (inline CSS + JS; no external build). It installs immediately at a private ${customAppOrigin}/custom-apps?token=… url — no PR, no waiting. It CAN remember each scholar's own work: window.rabbithole.setState saves a small JSON document (up to 8 KB) for this app, and window.rabbithole.subscribe restores it after a reload. For a signed-in scholar the saved state is their own: it follows them to any iPad or browser they sign in on, other scholars don't see it, and the teacher who made the app can read it. Opened while signed out, it is kept for that iPad or browser only, and a browser that blocks site storage keeps nothing across reloads. IMPORTANT: it runs sandboxed, so it CANNOT reach the network, sign anyone in, or connect students to each other — if the teacher needs accounts, a database, or a shared/collaborative space, that is a code change: don't use this tool, follow the custom-app section's instructions for a backend app.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -556,7 +558,7 @@ export async function makeCustomAppTools(
         return "The app's HTML is empty — generate the full self-contained HTML first, then install it.";
       const bytes = new TextEncoder().encode(html).length;
       if (bytes > MAX_STATIC_HTML_BYTES) {
-        return `That HTML is too large (${bytes} bytes; max ${MAX_STATIC_HTML_BYTES}). A static app must be one small self-contained file — trim it, or build it as a coded app with dispatch_custom_app.`;
+        return `That HTML is too large (${bytes} bytes; max ${MAX_STATIC_HTML_BYTES}). A static app must be one small self-contained file — trim it. An app that can't fit in one file needs a code change, not this tool.`;
       }
       const targets = await resolveTargets(
         ctx,
@@ -664,7 +666,7 @@ export async function makeCustomAppTools(
   const makeAppACoachedActivityTool = betaTool({
     name: "make_app_a_coached_activity",
     description:
-      "Set up a coached vibecode activity — the tutor coaches a learning arc around a self-contained app. TWO shapes, pick one: (1) an EXISTING live static app the teacher already made → pass appName; the app is resolved by case-insensitive exact name inside the caller's institution lens, and with a roster it goes live now. (2) a NEW app the teacher wants BUILT FOR scholars to use → pass appRequest (the teacher's description of the app) and NO appName; this drafts the activity and hands off — the teacher builds the first version WITH the tutor in the Workshop, then promotes it with 'Use as activity starter'. Provide exactly ONE of appName / appRequest. During the activity the tutor reads the app's published state from window.rabbithole.setState, so an uninstrumented app gives the tutor nothing to coach on. This creates or reuses a unit, lesson, and activity; with appName + a roster it also creates or reuses an exact-roster assignment and pushes it live now. A roster is NOT allowed with appRequest (nothing is built yet — draft only). Do NOT call create_custom_app to build an app for scholars to USE with the tutor; use appRequest here instead. Reserve create_custom_app for a standalone app the teacher wants installed as a tile with no coaching, and create_scholar_activity with kind 'vibecode' for when scholars build the app themselves. ALWAYS settle scholarEdit (play vs build) before calling — from the request when it says so, otherwise by asking the teacher one short question first.",
+      "Set up a coached vibecode activity — the tutor coaches a learning arc around a self-contained app. TWO shapes, pick one: (1) an EXISTING live static app the teacher already made → pass appName; the app is resolved by case-insensitive exact name inside the caller's institution lens, and with a roster it goes live now. (2) a NEW app the teacher wants BUILT FOR scholars to use → pass appRequest (the teacher's description of the app) and NO appName; this drafts the activity and hands off — the teacher builds the first version WITH the tutor in the Workshop, and each change autosaves as the app scholars open. Provide exactly ONE of appName / appRequest. During the activity the tutor reads the app's published state from window.rabbithole.setState, so an uninstrumented app gives the tutor nothing to coach on. This creates or reuses a unit, lesson, and activity (a new unit needs subject: the broad school subject it teaches); with appName + a roster it also creates or reuses an exact-roster assignment and pushes it live now. A roster is NOT allowed with appRequest (nothing is built yet — draft only). Do NOT call create_custom_app to build an app for scholars to USE with the tutor; use appRequest here instead. Reserve create_custom_app for a standalone app the teacher wants installed as a tile with no coaching, and create_scholar_activity with kind 'vibecode' for when scholars build the app themselves. ALWAYS settle scholarEdit (play vs build) before calling — from the request when it says so, otherwise by asking the teacher one short question first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -688,6 +690,10 @@ export async function makeCustomAppTools(
           description:
             "Optional unit title. Defaults to '<app name> Lab' (or the app name itself when it already ends in Lab). Reuses a same-title unit already authored by this teacher.",
         },
+        subject: {
+          type: "string" as const,
+          description: `Required whenever this creates a NEW unit; ignored when it reuses a same-title unit you already made. ${UNIT_SUBJECT_DESCRIPTION}`,
+        },
         lessonTitle: {
           type: "string" as const,
           description:
@@ -708,15 +714,22 @@ export async function makeCustomAppTools(
           description:
             "Individual scholar names to receive the activity. Mutually exclusive with groupName.",
         },
-        mode: {
-          type: "string" as const,
-          enum: ["classFocus", "homework"] as const,
+        startsNow: {
+          type: "boolean" as const,
           description:
-            "classFocus = live in-the-room focus; homework = live on their plate. Defaults to classFocus.",
+            "With a group or scholarNames: true when the teacher wants it to show up now.",
+        },
+        startsAtMs: {
+          type: "number" as const,
+          description:
+            "With a group or scholarNames: when it shows up, for a later time (epoch ms). Omit when the teacher didn't say.",
+        },
+        finish: {
+          type: "string" as const,
+          description: `With a group or scholarNames: ${FINISH_DESCRIPTION}`,
         },
         tutorModel: tutorModelSchemaFragment(),
         buildContract: buildContractSchemaFragment(),
-        allowSilence: allowSilenceSchemaFragment(),
         scholarEdit: scholarEditSchemaFragment(
           "Here the teacher made (or is making) the app, so when the teacher doesn't say and doesn't answer, it defaults to `play` on a new activity; a reused activity keeps its setting unless you pass one.",
         ),
@@ -728,14 +741,16 @@ export async function makeCustomAppTools(
       appRequest?: string;
       title?: string;
       unitTitle?: string;
+      subject?: string;
       lessonTitle?: string;
       buildBrief: string;
       groupName?: string;
       scholarNames?: string[];
-      mode?: "classFocus" | "homework";
+      startsNow?: boolean;
+      startsAtMs?: number;
+      finish?: string;
       tutorModel?: "sonnet" | "fable";
       buildContract?: unknown;
-      allowSilence?: boolean;
       scholarEdit?: string;
     }) => {
       // Validate the model contract and the edit policy BEFORE any
@@ -773,10 +788,15 @@ export async function makeCustomAppTools(
         (input.groupName != null && input.groupName.trim() !== "") ||
         (Array.isArray(input.scholarNames) && input.scholarNames.length > 0);
       if (isBuildHandoff && hasRoster) {
-        return "There's nothing to send yet — this drafts an app for you to build with the tutor in the Workshop first. Leave the group/scholar names off; once you've built it and used 'Use as activity starter', tell me a group and I'll send it.";
+        return "There's nothing to send yet — this drafts an app for you to build with the tutor in the Workshop first. Leave the group/scholar names off; once you've built it (it saves as you go), tell me a group and I'll send it.";
       }
       const cohort = hasRoster ? await resolveCohort(input) : null;
       if (cohort && !cohort.ok) return cohort.message;
+      // Sending it to scholars is a give: it needs the teacher's finish
+      // (TRA-571), asked for just before the send below.
+      const finish = parseFinishInput(input.finish);
+      if (finish && "error" in finish) return finish.error;
+
 
       let app: Extract<CoachedAppResolution, { kind: "resolved" }> | null =
         null;
@@ -828,7 +848,6 @@ export async function makeCustomAppTools(
       const lessonTitle =
         input.lessonTitle?.trim() ||
         (app ? `Explore ${baseName}` : `Build ${baseName}`);
-      const mode = input.mode ?? "classFocus";
       const tutorModel = input.tutorModel;
       const appLink = app ? markdownLink(app.name, app.url) : "";
       const appSuffix = app ? ` ${appLink} is unchanged.` : "";
@@ -836,6 +855,8 @@ export async function makeCustomAppTools(
       let unit: {
         unitId: Id<"units">;
         existed: boolean;
+        /** Set when the subject was filed under a class by meaning (TRA-723). */
+        filedUnder?: string;
       };
       try {
         unit = await ctx.runMutation(
@@ -843,11 +864,29 @@ export async function makeCustomAppTools(
           {
             authorId: callerUserId,
             title: unitTitle,
+            subject: unitSubjectInput(input.subject) ?? undefined,
+            requireSubjectForNew: true,
           },
         );
       } catch (error) {
+        // The unit is the first write, so nothing else exists yet (TRA-723).
+        if (isUnitSubjectRequiredError(error)) {
+          return unitSubjectAskAgain("make_app_a_coached_activity");
+        }
+        const notAClass = unitSubjectNotAClassDetails(error);
+        if (notAClass) {
+          return unitSubjectNotAClass(
+            "make_app_a_coached_activity",
+            notAClass.given,
+            notAClass.options,
+          );
+        }
         return `Could not create or reuse the unit for ${appLink || "the coached activity"}: ${error instanceof Error ? error.message : String(error)}. No lesson, activity, or assignment was created.`;
       }
+      // Said once the tool succeeds, so the teacher learns the class it landed in.
+      const filedNote = unit.filedUnder
+        ? ` ${unitSubjectFiledNote(unit.filedUnder)}`
+        : "";
       const unitLink = markdownLink(
         unitTitle,
         withBase(linkBase, unitPath(unit.unitId)),
@@ -962,7 +1001,6 @@ export async function makeCustomAppTools(
             ...starterOrRequest,
             tutorModel,
             buildContract,
-            allowSilence: input.allowSilence === true ? true : undefined,
             editAccess,
           },
         );
@@ -1002,7 +1040,7 @@ export async function makeCustomAppTools(
             result: `${activityTitle} drafted for building`,
           },
         });
-        return `${activity.existed ? "Reused" : "Created"} ${rehearsalLink}. Open it and the tutor builds the first version with you in the Workshop; when it looks right, use 'Use as activity starter', then tell me a group and I'll send it.`;
+        return `${activity.existed ? "Reused" : "Created"} ${rehearsalLink}. Open it and the tutor builds the first version with you in the Workshop; every change saves automatically as the app scholars will open. When it looks right, tell me a group and I'll send it.${filedNote}`;
       }
 
       if (!cohort) {
@@ -1023,15 +1061,33 @@ export async function makeCustomAppTools(
             result: `${activityTitle} created, not sent`,
           },
         });
-        return `${activity.existed ? "Reused" : "Created"} coached activity ${rehearsalLink} from ${appLink}. Nothing was sent to scholars. Open that link and you land in the Workshop with the tutor; when ready, tell me a group or scholar names and I'll send it.`;
+        return `${activity.existed ? "Reused" : "Created"} coached activity ${rehearsalLink} from ${appLink}. Nothing was sent to scholars. Open that link and you land in the Workshop with the tutor; when ready, tell me a group or scholar names and I'll send it.${filedNote}`;
       }
 
-      const assignment = await assignAndPushActivityNow(ctx, {
+      // Sending it is a give: both answers, or the question (never a
+      // guessed "now").
+      const startsAt = input.startsNow ? Date.now() : input.startsAtMs;
+      if (startsAt === undefined || !finish) {
+        const choices = await readGiveChoices(ctx, {
+          callerUserId,
+          unitId: unit.unitId,
+          scholarIds: cohort.ids,
+          activityId: activity.activityId,
+          startsAt,
+        });
+        return `${activity.existed ? "Reused" : "Created"} coached activity ${activityLink} from ${appLink}; nothing was sent yet. ${
+          startsAt === undefined
+            ? startQuestion(choices, "startsNow:true")
+            : finishQuestion(choices)
+        }${filedNote}`;
+      }
+      const assignment = await assignAndGiveActivity(ctx, {
         callerUserId,
         unitId: unit.unitId,
         activityId: activity.activityId,
         scholarIds: cohort.ids,
-        mode,
+        startsAt,
+        finish,
       });
       if (assignment.status === "assign_failed") {
         return `PARTIAL: ${unitLink}, ${lessonLink}, and ${activityLink} exist (${activity.existed ? "reused" : "new"} activity) from ${appLink}, but no assignment was created: ${assignment.error}`;
@@ -1040,17 +1096,19 @@ export async function makeCustomAppTools(
         "assignment",
         withBase(linkBase, assignmentPath(assignment.assignmentId)),
       );
-      if (assignment.status === "push_failed") {
-        return `PARTIAL: ${activityLink} exists and the ${assignmentLink} exists (${assignment.created ? "new" : "reused"}) with the activity PLANNED, but the live push failed: ${assignment.error}. Scholars do NOT see it yet — retry with push_activity_now on that assignment, and tell the teacher exactly this state. ${appLink} is unchanged.`;
-      }
 
       emit({
         toolComplete: {
           name: "make_app_a_coached_activity",
-          result: `${activityTitle} live (${mode}) for ${cohort.ids.length} scholar${cohort.ids.length === 1 ? "" : "s"}`,
+          result: `${activityTitle} given to ${cohort.ids.length} scholar${cohort.ids.length === 1 ? "" : "s"}`,
         },
       });
-      return `${activity.existed ? "Reused" : "Created"} coached activity ${activityLink} from ${appLink} and sent it live as the ${assignmentLink} to ${cohort.audienceLabel} (${mode}).`;
+      const note = await finishDateNote(ctx, finish, {
+        callerUserId,
+        assignmentId: assignment.assignmentId,
+        startsAt,
+      });
+      return `${activity.existed ? "Reused" : "Created"} coached activity ${activityLink} from ${appLink} and gave it as the ${assignmentLink} to ${cohort.audienceLabel}: ${startsAt <= Date.now() ? "it shows up now" : `it shows up ${new Date(startsAt).toISOString()}`}.${note ? ` ${note}` : ""}${filedNote}`;
     },
   });
 
@@ -1063,7 +1121,6 @@ export async function makeCustomAppTools(
   ];
 }
 
-
 /** The system-prompt section that teaches the model the custom-app paths and
  * how to choose between them. Injected wherever the tools are (see
  * convex/http.ts and convex/slackBot.ts), gated by the same staff-role check
@@ -1075,20 +1132,26 @@ When a teacher asks you to "install an app" (or "add an app", "put an app on the
 
 1. **An existing website or app** — they give, paste, or clearly reference a URL. Call \`install_external_app\` with that URL. It becomes a launcher tile that opens the site in the locked in-app webview.
 
-2. **A new self-contained app the teacher will use on their own** (a tool, reference, or widget as a tile — no tutor coaching, no scholars using it in an activity) with no saved data, login, or shared state. Create it as one self-contained HTML file with inline CSS and JavaScript, then call \`create_custom_app\` with purpose "standalone_tile". If scholars will use the app with the tutor, this is NOT the path — see "Building an app FOR scholars" below.
+2. **A new self-contained app the teacher will use on their own** (a tool, reference, or widget as a tile — no tutor coaching, no scholars using it in an activity) with no login or shared state, and no saved data beyond a small save of each scholar's own work (create_custom_app explains it). Create it as one self-contained HTML file with inline CSS and JavaScript, then call \`create_custom_app\` with purpose "standalone_tile". If scholars will use the app with the tutor, this is NOT the path — see "Building an app FOR scholars" below.
 
 **Choosing:** a URL → case 1. Otherwise use case 2 only when the app can be fully self-contained.
 
-**Naming the students:** for all three, pass \`scholarNames\` and/or \`groupNames\` so the app actually lands on the right iPads. You can create an app with no targets to preview it, but say so — nobody receives it until it's installed for someone.
+**An app that needs a backend** (accounts, a database, or a space scholars share; more than a small save of each scholar's own work) is a code change, not something you can build or install. Tell the teacher that plainly, then give the code-change handoff your instructions describe, with the app described in plain words and no scholar names. If you have no code-change instructions, say it needs a code change and to ask Andy. Never say it is being built.
+
+**Naming the students:** for both, pass \`scholarNames\` and/or \`groupNames\` so the app actually lands on the right iPads. You can create an app with no targets to preview it, but say so — nobody receives it until it's installed for someone.
 
 **Editing an existing static app:** when the teacher asks to revise an app previously made with \`create_custom_app\`, generate the complete replacement HTML and call \`update_custom_app\` with its existing name. Update it in place rather than creating a duplicate; its private URL and installs stay unchanged.
 
 **Coaching with an existing app:** when the teacher wants kids to USE a live static app with the tutor coaching the learning arc, call \`make_app_a_coached_activity\` with \`appName\`; omit the roster to create a draft for manual rehearsal without sending it, or include a group/scholar roster to send it live.
 
-**Building an app FOR scholars to use (hand off to the Workshop):** when the teacher asks you to BUILD an app for their scholars to use with the tutor, do NOT call \`create_custom_app\` — YOU are a blind builder and can't see what you make. Instead call \`make_app_a_coached_activity\` with \`appRequest\` (the teacher's description of the app) and NO \`appName\`. That drafts the coached activity, carries the request into a teacher build session, and hands back one link: the teacher builds the first version WITH the tutor in the sighted Workshop, then promotes it with 'Use as activity starter'. Do NOT pass a roster — nothing is built yet. Once the teacher has built and promoted it, they'll ask you to send it to a group. Reserve \`create_custom_app\` for a standalone app the teacher explicitly wants installed as a tile with NO coaching, and \`create_scholar_activity\` with kind \`vibecode\` for when kids BUILD the app themselves.
+**Building an app FOR scholars to use (hand off to the Workshop):** when the teacher asks you to BUILD an app for their scholars to use with the tutor, do NOT call \`create_custom_app\` — YOU are a blind builder and can't see what you make. Instead call \`make_app_a_coached_activity\` with \`appRequest\` (the teacher's description of the app) and NO \`appName\`. That drafts the coached activity, carries the request into a teacher build session, and hands back one link: the teacher builds the first version WITH the tutor in the sighted Workshop, and it autosaves as the app scholars open. Do NOT pass a roster — nothing is built yet. Once the teacher has built it, they'll ask you to send it to a group. Reserve \`create_custom_app\` for a standalone app the teacher explicitly wants installed as a tile with NO coaching, and \`create_scholar_activity\` with kind \`vibecode\` for when kids BUILD the app themselves.
 
 **Play or build — settle it before you create.** Every coached app activity has a scholar edit policy (\`scholarEdit\`): \`play\` (scholars only use the app — no Edit control), \`build\` (scholars remix it / make their own), or \`afterCompletion\` (play first; Edit unlocks when they finish). When you hand an EXISTING app to scholars (\`appName\`) or set up an app FOR scholars to use (\`appRequest\`), decide it from the request: homework, practice, "just play", "a game for them to play", "the game is the main activity" → \`play\`; "they build / remix / vibecode / make their own" → \`build\` — set it without asking. When it is genuinely unclear, ASK the teacher one short question before creating ("Should scholars just play it, or be able to change it?") rather than defaulting silently. If the teacher doesn't answer, a teacher-built app is \`play\`; scholars building their own (\`create_scholar_activity\` with kind \`vibecode\` and no starter) is \`build\`. This is a real fork in what the activity IS, so it is a fair question — unlike translate-vs-park below, which you never ask.
 
-**Every vibecode activity gets a model contract.** Whenever you call \`make_app_a_coached_activity\` or \`create_scholar_activity\` with kind \`vibecode\`, write a \`buildContract\` in addition to the build brief, and set \`allowSilence: true\` with it: 2–3 \`invariants\` (what the app must be TRUE about, as testable mechanics — a cause and the effect you could check by running it — never topics), \`freedoms\` (what the scholar owns: setting, characters, genre, visuals, side quests — anything that doesn't break an invariant), and ONE \`gate\` (what must exist and have been run once before cosmetics; usually the core model, run once without the intervention). Derive it from the teacher's goal yourself. Do NOT ask the teacher whether off-topic scholar ideas should be translated, parked, or allowed — the designer translates them into the subject by default and parks the rest for free play.
+**What the app is for — ask when you can't tell.** Before you write the brief and contract, know what thinking the app should prompt: what scholars should figure out, explain or test by building or using it. Usually the request or the unit says so ("so they see how their defense fails", "so each place explains why it matters"); then work from that and don't ask. When the teacher names only a topic or a product ("an app about volcanoes", "have them build their world", "a game for the civilization unit"), ASK one short question before creating, with two or three concrete options drawn from the unit: "What should they figure out by building it: how a choice changes food and population, how the land shapes where people live, or why each place matters?" Your guess becomes the contract the builder enforces on every scholar, so a wrong guess steers the whole class the wrong way. Ask this; never ask how to handle scholars' off-topic ideas (below).
+
+**"Not a game" still lets things happen.** When a teacher rules out games or gamification, leave out points, scores, coins, levels, timers, lives, enemies and win/lose screens. Keep cause and effect: the world can still change because of rules the scholar sets (crops grow, the river floods, smoke from the factory reaches the farm), and that is often the thinking the app is for. If you can't tell whether the teacher wants the world to stay still, ask: "No points or winning, got it. Should their world still change over time, like crops growing or the river flooding, or stay still to explore?"
+
+**Every vibecode activity gets a model contract.** Whenever you call \`make_app_a_coached_activity\` or \`create_scholar_activity\` with kind \`vibecode\`, write a \`buildContract\` in addition to the build brief: 2–3 \`invariants\` (what the app must be TRUE about, as testable mechanics — a cause and the effect you could check by running it — never topics), \`freedoms\` (what the scholar owns: setting, characters, genre, visuals, side quests — anything that doesn't break an invariant), and a \`gate\`, which is the MISSION scholars see at the top of the builder: one open understanding goal in plain words, 60 characters or fewer ("Understand escape velocity", "Find out why the river floods"). Name the idea to understand, never a build step or a topic label. The mission never holds a build back: the builder experiments with the scholar from the first turn, and the invariants keep the science honest however wild the world gets. Derive it from the teacher's goal (settled above). Do NOT ask the teacher whether off-topic scholar ideas should be translated, parked, or allowed — the designer translates them into the subject by default.
 
 `;

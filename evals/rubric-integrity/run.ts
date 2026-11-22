@@ -58,34 +58,43 @@ import {
 } from "./lib/goalpostScore";
 import { judgeGoalpost, type GoalpostVerdict } from "./lib/goalpostJudge";
 import type { GoalpostCheck } from "./lib/types";
-import { tutorTokens } from "./lib/runRubricTutor";
+import { malformedRubricCalls, tutorTokens } from "./lib/runRubricTutor";
 import type { RecordedRubricCall } from "./lib/rubricCallRecord";
 import type { RubricCase } from "./lib/types";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(HERE, "fixtures");
-const OUT_DIR = join(HERE, "out");
+const DEFAULT_OUT_DIR = join(HERE, "out");
 
 /** Sessions in flight at once. Each is a handful of sequential model calls. */
-const CONCURRENCY = 4;
+const CONCURRENCY = Math.max(1, Number(process.env.RUBRIC_CONCURRENCY) || 4);
 
 function parseArgs(argv: string[]) {
-  const args = { offline: false, case: null as string | null, n: 1 };
+  const args = {
+    offline: false,
+    case: null as string | null,
+    n: 1,
+    out: DEFAULT_OUT_DIR,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--offline") args.offline = true;
     else if (a === "--case") args.case = argv[++i] ?? null;
     else if (a === "--n") args.n = Math.max(1, Number(argv[++i] ?? 1) || 1);
+    // A separate output dir per arm, so an A/B never overwrites its baseline.
+    else if (a === "--out") args.out = argv[++i] ?? DEFAULT_OUT_DIR;
   }
   return args;
 }
 
+/** `only` is one fixture id or a comma-separated list of them. */
 function loadCases(only: string | null): RubricCase[] {
   const files = readdirSync(FIXTURES_DIR).filter((f) => f.endsWith(".json"));
+  const wanted = only ? new Set(only.split(",").map((x) => x.trim())) : null;
   const cases: RubricCase[] = [];
   for (const f of files) {
     const id = f.replace(/\.json$/, "");
-    if (only && id !== only) continue;
+    if (wanted && !wanted.has(id)) continue;
     const raw = JSON.parse(readFileSync(join(FIXTURES_DIR, f), "utf8"));
     cases.push({ id, ...raw });
   }
@@ -166,6 +175,7 @@ async function runOnce(
     allCriteriaFull: result.allCriteriaFull,
     finalTextIsSubstantive: result.finalTextIsSubstantive,
     finalTurnText: result.finalTurnText,
+    finalStopReasons: result.finalStopReasons ?? [],
   };
 
   const base = {
@@ -323,7 +333,7 @@ async function main() {
   const lines: string[] = [
     `# rubric-integrity eval${args.offline ? " (OFFLINE — wiring only)" : ""}`,
     "",
-    `${totalPasses}/${rows.length} runs passed across ${cases.length} fixtures × n=${args.n}. Tutor tokens: ${tutorTokens.input} in / ${tutorTokens.output} out.`,
+    `${totalPasses}/${rows.length} runs passed across ${cases.length} fixtures × n=${args.n}. Tutor tokens: ${tutorTokens.input} in / ${tutorTokens.output} out. Malformed update_rubric_score calls: ${malformedRubricCalls.count}.`,
     "",
     "| Fixture | Scorer | Gates? | Probed criterion | n | Passes | Pass rate | Verdicts |",
     "|---|---|---|---|---|---|---|---|",
@@ -385,14 +395,14 @@ async function main() {
   const report = lines.join("\n");
 
   writeRunArtifacts({
-    outDir: OUT_DIR,
+    outDir: args.out,
     runs: { summaries, rows },
     report,
     artifactOrder: ["report", "runs"],
   });
 
   console.log(
-    `\n${totalPasses}/${rows.length} runs passed. Report: evals/rubric-integrity/out/report.md`,
+    `\n${totalPasses}/${rows.length} runs passed. Report: ${join(args.out, "report.md")}`,
   );
   for (const s of summaries) {
     const ok = s.passRate >= 0.5;

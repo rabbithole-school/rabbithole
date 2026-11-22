@@ -49,7 +49,7 @@ describe("buildSystemPrompt integration", () => {
   test("includes the notes section when documentNotes are present", () => {
     // documentNotes is the final positional arg of buildSystemPrompt.
     const prompt = buildSystemPrompt(
-      null, null, "Kai",
+      null, "Kai",
       null, null, null, null, null, null, null, null,
       null, null, null, null, null, null, null, null, null, null,
       false, false, null,
@@ -61,7 +61,7 @@ describe("buildSystemPrompt integration", () => {
   });
 
   test("omits the section entirely when there are no notes", () => {
-    const prompt = buildSystemPrompt(null, null, "Kai", null, null, null);
+    const prompt = buildSystemPrompt(null, "Kai", null, null, null);
     expect(prompt).not.toContain("Background notes from teachers");
   });
 });

@@ -241,7 +241,7 @@ describe("prior unit work in a vibecode session", () => {
     expect(c.priorUnitWork).toBeNull();
   });
 
-  test("skips a deliverable for the current activity, a rehearsal, and a non-vibecode session", async () => {
+  test("skips a deliverable for the current activity and a rehearsal", async () => {
     const t = convexTest(schema, modules);
     const w = await seedWorld(t);
     // Earlier session of the SAME vibecode activity with a deliverable.
@@ -259,10 +259,12 @@ describe("prior unit work in a vibecode session", () => {
     });
     expect((await contextFor(t, rehearsal)).priorUnitWork).toBeNull();
 
-    // A plain conversation session with no app gets nothing (builder
-    // features only; sessionAppContext.test.ts covers a chat with an app).
+    // A plain conversation session on another activity skips its own
+    // activity's deliverable too, but reads the rest of the unit.
     const chat = await seedSession(t, w, w.scholarId, w.onlineActivityId);
-    expect((await contextFor(t, chat)).priorUnitWork).toBeNull();
+    const chatSection = (await contextFor(t, chat)).priorUnitWork;
+    expect(chatSection).not.toContain("Real prior work in the unit.");
+    expect(chatSection).toContain("SAME-ACTIVITY");
 
     const sessionId = await seedSession(t, w, w.scholarId, w.vibecodeActivityId, {
       sessionMode: "vibecode",
@@ -270,6 +272,26 @@ describe("prior unit work in a vibecode session", () => {
     const section = (await contextFor(t, sessionId)).priorUnitWork;
     expect(section).toContain("Real prior work in the unit.");
     expect(section).not.toContain("SAME-ACTIVITY");
+  });
+});
+
+describe("priorUnitWork in a plain tutor session", () => {
+  test("carries a thin earlier draft, and never another scholar's work", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const earlier = await seedSession(t, w, w.scholarId, w.vibecodeActivityId, {
+      sessionMode: "vibecode",
+    });
+    await seedDeliverable(t, w, w.scholarId, earlier, w.vibecodeActivityId, "Just my role title.");
+    const others = await seedSession(t, w, w.otherScholarId, w.vibecodeActivityId, {
+      sessionMode: "vibecode",
+    });
+    await seedDeliverable(t, w, w.otherScholarId, others, w.vibecodeActivityId, "OTHER-SCHOLAR");
+
+    const chat = await seedSession(t, w, w.scholarId, w.onlineActivityId);
+    const section = (await contextFor(t, chat)).priorUnitWork;
+    expect(section).toContain("Just my role title.");
+    expect(section).not.toContain("OTHER-SCHOLAR");
   });
 });
 
@@ -437,5 +459,86 @@ describe("prior unit work keeps only the scholar's own words", () => {
     const section = await priorSection(t, w);
     expect(section).toContain("SCHOLAR-TYPED");
     expect(section).not.toContain("APP-BUTTON-PRESS");
+  });
+
+  test("staff-typed and read-aloud turns are not replayed as the scholar's words", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const prior = await seedSession(t, w, w.scholarId, w.onlineActivityId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("messages", {
+        sessionId: prior,
+        role: "user",
+        content: "STAFF-TYPED let me try this on their iPad",
+        byStaff: true,
+        flagged: false,
+      });
+      await ctx.db.insert("messages", {
+        sessionId: prior,
+        role: "user",
+        content: "READ-ALOUD a line of the tutor's reply",
+        readAloudOf: "A line of the tutor's reply",
+        flagged: false,
+      });
+      await ctx.db.insert("messages", {
+        sessionId: prior,
+        role: "user",
+        content: "SCHOLAR-TYPED the water pump is the source",
+        flagged: false,
+      });
+    });
+    const section = await priorSection(t, w);
+    expect(section).toContain("SCHOLAR-TYPED");
+    expect(section).not.toContain("STAFF-TYPED");
+    expect(section).not.toContain("READ-ALOUD");
+  });
+
+  test("a chat session keeps its latest turns, oldest of them first", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const prior = await seedSession(t, w, w.scholarId, w.onlineActivityId);
+    await t.run(async (ctx) => {
+      for (let i = 1; i <= 8; i++) {
+        await ctx.db.insert("messages", {
+          sessionId: prior,
+          role: "user",
+          content: `Scholar turn number ${i}`,
+          flagged: false,
+        });
+      }
+    });
+    const section = (await priorSection(t, w)) ?? "";
+    expect(section).not.toContain("turn number 2");
+    expect(section.indexOf("turn number 3")).toBeGreaterThan(-1);
+    expect(section.indexOf("turn number 3")).toBeLessThan(
+      section.indexOf("turn number 8"),
+    );
+  });
+
+  test("a session with a welfare alert is left out", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const prior = await seedSession(t, w, w.scholarId, w.onlineActivityId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("messages", {
+        sessionId: prior,
+        role: "user",
+        content: "WELFARE-SESSION-TURN something happened at home",
+        flagged: false,
+      });
+      await ctx.db.insert("alerts", {
+        kind: "welfare",
+        severity: "critical",
+        title: "Welfare alert",
+        body: "Fixture",
+        source: "observer",
+        scholarId: w.scholarId,
+        sessionId: prior,
+        dedupKey: `welfare:${w.scholarId}:${prior}`,
+        status: "open",
+        createdAt: Date.now(),
+      });
+    });
+    expect(await priorSection(t, w)).toBeNull();
   });
 });

@@ -29,13 +29,14 @@
     }
   },
   "include": [
-    "src/lib/skyLayout.ts",
     "src/lib/markdownParse.ts",
     "src/lib/kidSafePrinciples.ts",
     "src/lib/__tests__/**/*.ts",
     "src/components/unit-progress.test.ts",
     "src/components/games/**/*.test.ts",
     "src/components/PrepChooserCard.test.ts",
+    "src/components/DeliverableFooter.test.ts",
+    "src/components/vibecode/RuleCards.test.ts",
     "src/components/manipulatives/__tests__/**/*.test.ts",
     "src/components/slides/slidesEditorBackgroundCommit.test.ts",
     "src/components/slides/slidesEditorSlideSwitch.test.ts",

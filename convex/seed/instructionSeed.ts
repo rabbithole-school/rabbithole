@@ -29,6 +29,12 @@ import { INTEGERS_COORDINATES_DOMAIN } from "./integersCoordinatesGraph";
 import { EARLY_ALGEBRA_DOMAIN } from "./earlyAlgebraGraph";
 import { ALGEBRA_1_DOMAIN } from "./algebra1Graph";
 import type { MultiStepSequenceSpec } from "../../lib/manipulative/types";
+import {
+  ALGEBRA_2_ANCHOR_STRANDS,
+  ALGEBRA_2_NODE_LAUNCHPADS,
+  ALGEBRA_2_STRAND_LAUNCHPADS,
+} from "./algebra2Instruction";
+import { ALGORITHMS_ANCHOR_STRANDS, ALGORITHMS_STRAND_LAUNCHPADS } from "./algorithmsInstruction";
 
 export type SeedInstructionAtom =
   | { kind: "story_hook"; hook: string; fromKey?: string; toKey?: string }
@@ -46,7 +52,7 @@ export type SeedInstructionAtom =
       steps: string[];
       examplePrompt: string;
       exampleAnswer: string;
-      answerType?: "integer" | "decimal" | "fraction" | "expression" | "multipleChoice";
+      answerType?: "integer" | "decimal" | "fraction" | "expression" | "multipleChoice" | "solutionSet";
     }
   | { kind: "manipulative"; spec: string }
   | {
@@ -65,6 +71,10 @@ export type SeedLaunchpad = {
   strand: string;
   title: string;
   subtitle?: string;
+  /** When set, the entry is NODE grain: stored under `node:<nodeKey>` (the
+   *  seed passes it straight to `storeLaunchpad`). `domain`/`strand` are then
+   *  the node's own. Absent ⇒ a strand doorway, `strand:<domain>:<strand>`. */
+  nodeKey?: string;
   atoms: SeedInstructionAtom[];
 };
 
@@ -126,6 +136,8 @@ export const INSTRUCTION_ANCHOR_STRANDS: { domain: string; strand: string }[] = 
   { domain: ALGEBRA_1_DOMAIN, strand: "exponents-exponential" },
   { domain: ALGEBRA_1_DOMAIN, strand: "polynomials-factoring" },
   { domain: ALGEBRA_1_DOMAIN, strand: "quadratics" },
+  ...ALGEBRA_2_ANCHOR_STRANDS,
+  ...ALGORITHMS_ANCHOR_STRANDS,
 ];
 
 export const AUTHORED_LAUNCHPADS: SeedLaunchpad[] = [
@@ -2594,4 +2606,10 @@ export const AUTHORED_LAUNCHPADS: SeedLaunchpad[] = [
       },
     ],
   },
+  // Algebra 2: strand doorways, then node-grain entries (`nodeKey`), authored
+  // in convex/seed/algebra2Instruction.ts.
+  ...ALGEBRA_2_STRAND_LAUNCHPADS,
+  ...ALGEBRA_2_NODE_LAUNCHPADS,
+  // discrete-math: the algorithms strand's doorway (algorithmsInstruction.ts).
+  ...ALGORITHMS_STRAND_LAUNCHPADS,
 ];

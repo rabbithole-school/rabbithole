@@ -9,21 +9,39 @@
 import { v } from "convex/values";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { internalMutation, internalQuery, type MutationCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { requireUnitEditAccess } from "./lib/auth";
+import {
+  assertNotOwnQuestAppStep,
+  assertNotRelocatingProposedQuestLesson,
+  assertProposalTakesNoStructure,
+} from "./lib/questStructure";
 import { requireUnitAccess } from "./lib/unitAccess";
-import { markUnitBuiltInSession } from "./lib/independentStudy";
+import { markUnitBuiltInSession, sameQuestTitle } from "./lib/independentStudy";
 import { activityHasScholarWork, deleteActivityCascade } from "./lib/activityCascade";
+import { syncClassesForPlacements } from "./lib/classLink";
 import {
   duplicateActivitiesIntoLesson,
   duplicateLessonDesign,
   remapCopiedActivityReferences,
 } from "./lib/curriculumDuplication";
 
-/** Lean query accessible to all authenticated users (scholars need this for UnitPickerDialog). */
+/** Lean lesson list for anyone who can read the unit (same rule as `units.get`). */
 export const listByUnitPublic = authedQuery({
   args: { unitId: v.id("units") },
   handler: async (ctx, args) => {
+    // Same read rule as `units.get`; a stale unitId returns empty.
+    const unit = await ctx.db.get(args.unitId);
+    if (!unit) return [];
+    // Callers read this through useQuery, so an unreadable unit degrades to
+    // an empty list instead of crashing them. Only the access refusal is
+    // swallowed; anything else still throws.
+    try {
+      await requireUnitAccess(ctx, args.unitId);
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Forbidden")) return [];
+      throw e;
+    }
     const lessons = await ctx.db
       .query("lessons")
       .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
@@ -104,6 +122,14 @@ export const getPublic = authedQuery({
   },
 });
 
+/** A lesson's activities, for the app-copy guard on duplicate and move. */
+async function lessonActivities(ctx: MutationCtx, lessonId: Id<"lessons">) {
+  return await ctx.db
+    .query("activities")
+    .withIndex("by_lesson", (q) => q.eq("lessonId", lessonId))
+    .collect();
+}
+
 export const create = authedMutation({
   args: {
     unitId: v.id("units"),
@@ -117,7 +143,8 @@ export const create = authedMutation({
     durationMinutes: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { unitId: args.unitId });
+    const { unit } = await requireUnitEditAccess(ctx, { unitId: args.unitId });
+    assertProposalTakesNoStructure(unit);
     // Get next order number for this unit
     const existing = await ctx.db
       .query("lessons")
@@ -142,7 +169,13 @@ export const duplicate = authedMutation({
   handler: async (ctx, args) => {
     const source = await ctx.db.get(args.lessonId);
     if (!source) throw new Error("Lesson not found");
-    await requireUnitEditAccess(ctx, { lessonId: args.lessonId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      lessonId: args.lessonId,
+    });
+    assertProposalTakesNoStructure(unit);
+    // Copying a lesson copies its app activities: new apps in the scholar's
+    // own Quest (lib/questStructure.ts).
+    assertNotOwnQuestAppStep(unit, user._id, await lessonActivities(ctx, source._id));
 
     const siblings = await ctx.db
       .query("lessons")
@@ -240,9 +273,11 @@ export const remove = authedMutation({
         );
       }
     }
+    const removedPlacements: Doc<"schedulePlacements">[] = [];
     for (const a of acts) {
-      await deleteActivityCascade(ctx, a._id, { skipWorkGuard: true });
+      await deleteActivityCascade(ctx, a._id, { skipWorkGuard: true, removedPlacements });
     }
+    await syncClassesForPlacements(ctx, removedPlacements);
     await ctx.db.delete(args.id);
   },
 });
@@ -362,6 +397,15 @@ export async function moveLessonToUnitCore(
     };
   }
 
+  // Also the teacher aide's move: a waiting or declined Quest proposal takes
+  // no lesson from anyone, and no lesson moves into or out of any proposed
+  // Quest (lib/questStructure.ts).
+  const destination = await ctx.db.get(args.targetUnitId);
+  assertProposalTakesNoStructure(destination);
+  assertNotRelocatingProposedQuestLesson([
+    await ctx.db.get(lesson.unitId),
+    destination,
+  ]);
   const existingInTarget = await ctx.db
     .query("lessons")
     .withIndex("by_unit", (q) => q.eq("unitId", args.targetUnitId))
@@ -392,8 +436,17 @@ export const moveToUnit = authedMutation({
     targetUnitId: v.id("units"),
   },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { lessonId: args.id });
-    await requireUnitEditAccess(ctx, { unitId: args.targetUnitId });
+    const { unit: origin } = await requireUnitEditAccess(ctx, { lessonId: args.id });
+    const { user, unit: destination } = await requireUnitEditAccess(ctx, {
+      unitId: args.targetUnitId,
+    });
+    // Nothing moves out of or into a proposed Quest, so its one activity
+    // can't be edited elsewhere and carried back (TRA-685).
+    if (origin._id !== destination._id) {
+      assertNotRelocatingProposedQuestLesson([origin, destination]);
+    }
+    // An app activity moved into a scholar's own unit is a new app there.
+    assertNotOwnQuestAppStep(destination, user._id, await lessonActivities(ctx, args.id));
     return await moveLessonToUnitCore(ctx, args);
   },
 });
@@ -423,14 +476,23 @@ export const aiCreateForIsUnit = internalMutation({
     if (unit.authorScholarId !== args.scholarId) {
       throw new Error("Forbidden: not your IS unit");
     }
+    assertProposalTakesNoStructure(unit);
     const existing = await ctx.db
       .query("lessons")
       .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
       .collect();
+    const title = args.title.trim() || "New lesson";
+    // Idempotent on title: a tutor that re-runs "make these three lessons"
+    // (it cannot see its own earlier tool calls) gets the lesson it already
+    // made instead of a copy. Prod had seven copies of one three-lesson plan.
+    const sameTitle = existing.find(
+      (l) => sameQuestTitle(l.title, title),
+    );
+    if (sameTitle) return sameTitle._id;
     const maxOrder = existing.reduce((m, l) => Math.max(m, l.order), -1);
     const lessonId = await ctx.db.insert("lessons", {
       unitId: args.unitId,
-      title: args.title.trim() || "New lesson",
+      title,
       strand: args.strand,
       order: maxOrder + 1,
     });

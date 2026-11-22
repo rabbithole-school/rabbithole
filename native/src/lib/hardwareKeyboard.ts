@@ -4,5 +4,17 @@
 export {
   useHardwareKeyboard,
   isHardwareKeyboardConnected,
+  watchHardwareKeys,
+  watchHardwarePresses,
+  claimHardwarePresses,
+  watchKeyCommands,
+  isEditingText,
+  endEditing,
+  probeHardwareKeys,
+  hardwareKeyEventsAvailable,
   type HardwareKeyboardChangeEvent,
+  type WatchedKeyEvent,
+  type WatchedPressEvent,
+  type WatchedCommandEvent,
+  type KeyProbeEvent,
 } from "../../modules/hardware-keyboard";

@@ -32,6 +32,7 @@ import { useNow } from "@/hooks/useNow";
 import {
   closeEmbeddedWebContent,
   nativeCustomAppHeartbeatArgs,
+  openLink,
   useOpenEmbeddedWebContent,
   type OpenEmbeddedWebContent,
 } from "@/lib/externalAppHost";
@@ -50,6 +51,7 @@ import {
   webEmbedUrlError,
 } from "@/lib/webEmbedConfig";
 import { isAllowedYouTubeResourceUrl } from "@/lib/activityResourcePlayer";
+import { httpsForm, isFragmentJump, linkNavigationVerdict, linkSite } from "@/lib/linkViewer";
 import { PAUSE_MEDIA_SNIPPET } from "@/lib/pauseMediaSnippet";
 import { fonts, useColors } from "@/theme";
 import {
@@ -57,6 +59,10 @@ import {
   type CodeArtifactWebViewHandle,
 } from "@/components/CodeArtifactWebView";
 import { getStableDeviceId } from "@/lib/deviceIdentity";
+import {
+  HOMEWORK_DONE_LABEL,
+  HOMEWORK_DONE_UNDO,
+} from "../../vendor/shared/homeworkFraming";
 
 const CAPTURE_INTERVAL_MS = 25_000;
 const FIRST_CAPTURE_DELAY_MS = 2_000;
@@ -271,6 +277,8 @@ function contentKey(content: OpenEmbeddedWebContent) {
       return `activity:${content.activityId}:${content.assignmentId ?? ""}:${content.url}`;
     case "interactive":
       return `interactive:${content.id ?? content.url}:${content.url}`;
+    case "link":
+      return `link:${content.url}`;
   }
 }
 
@@ -417,6 +425,16 @@ export function ExternalAppHost() {
   const captureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const offDomainDeltaRef = useRef(0);
   const lastUrlRef = useRef<string>("");
+  // Link viewer (kind "link") only: whether a top-frame load it let start is
+  // still running and when the last one ended (hops then are redirects), a
+  // same-page anchor jump in progress, the extra sites redirects have
+  // reached, and the sites already reported as blocked.
+  const linkLoadInFlightRef = useRef(false);
+  const linkLoadEndedAtRef = useRef<number | null>(null);
+  const linkFragmentJumpRef = useRef<string | null>(null);
+  const linkSitesRef = useRef<Set<string>>(new Set());
+  const linkReportedRef = useRef<Set<string>>(new Set());
+  const reportBlockedLink = useMutation(api.alerts.reportBlockedLink);
 
   useEffect(() => {
     if (!requested) return;
@@ -438,6 +456,11 @@ export function ExternalAppHost() {
       prefilledFor.current = null;
       offDomainDeltaRef.current = 0;
       lastUrlRef.current = requested.url;
+      linkLoadInFlightRef.current = false;
+      linkLoadEndedAtRef.current = null;
+      linkFragmentJumpRef.current = null;
+      linkSitesRef.current = new Set();
+      linkReportedRef.current = new Set();
     } else {
       setMounted(requested);
     }
@@ -493,6 +516,8 @@ export function ExternalAppHost() {
     sourceHtml: string;
     html: string;
     assetUrls: Map<string, string>;
+    // The builder's first name when a teacher published a scholar's app.
+    credit: string | null;
   } | null>(null);
   const [customAppAssetAttempt, setCustomAppAssetAttempt] = useState(0);
   const rawStaticCustomAppHtml =
@@ -519,6 +544,7 @@ export function ExternalAppHost() {
             assetUrls: new Map(
               app.appAssets.map((asset) => [asset.id, asset.url]),
             ),
+            credit: app.credit,
           });
         }
       },
@@ -718,6 +744,24 @@ export function ExternalAppHost() {
     webViewRef.current?.injectJavaScript(EXTRACT_SNIPPET);
   }, [recordProgress, shouldCapture]);
 
+  // Record the page that failed on this app's session, so a "Couldn't open
+  // this activity" report can be traced to an address and status. The error
+  // usually fires before `start` resolves, so wait for this run's promise.
+  const reportLoadError = useCallback(
+    (loadError: { url: string; status?: number; message: string }) => {
+      if (!shouldCapture || !loadError.url) return;
+      const pending = pendingStartRef.current;
+      if (!pending) return;
+      void pending.promise
+        .then(({ sessionId }) => {
+          if (sessionRunIdRef.current !== pending.runId) return;
+          return recordProgress({ sessionId, loadError });
+        })
+        .catch(() => {});
+    },
+    [recordProgress, shouldCapture],
+  );
+
   const injectInteractiveGestureCss = useCallback(() => {
     if (interactive) webViewRef.current?.injectJavaScript(INTERACTIVE_GESTURE_SNIPPET);
   }, [interactive]);
@@ -864,10 +908,15 @@ export function ExternalAppHost() {
 
   const confirmClose = useCallback(() => {
     const title = mounted?.title ?? "this activity";
+    // A link holds no work to lose, so it closes on one tap.
+    if (mounted?.kind === "link") {
+      closeHost(false);
+      return;
+    }
     if (mounted?.kind === "webActivity") {
       Alert.alert(`Done with ${title}?`, "Close the web activity and mark it done.", [
-        { text: "Stay", style: "cancel" },
-        { text: "Done", onPress: () => closeHost(true) },
+        { text: HOMEWORK_DONE_UNDO, style: "cancel" },
+        { text: HOMEWORK_DONE_LABEL, onPress: () => closeHost(true) },
       ]);
       return;
     }
@@ -923,6 +972,8 @@ export function ExternalAppHost() {
   const autoLoginInspectorRef = useRef<() => void>(() => {});
 
   const handleLoadEnd = useCallback(() => {
+    linkLoadInFlightRef.current = false;
+    linkLoadEndedAtRef.current = Date.now();
     setLoading(false);
     setReady(true);
     autoLoginInspectorRef.current();
@@ -993,6 +1044,71 @@ export function ExternalAppHost() {
       // activity — only the top frame can — so only the top frame is gated.
       // (This is also why sub-frame URLs must not become `lastUrl`.)
       if (!request.isTopFrame) return true;
+      if (mounted?.kind === "link") {
+        const keep = (message: string) => {
+          setBlockedMessage(message);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          setTimeout(() => setBlockedMessage(null), 2800);
+          // A cancelled redirect hop fires no load-end or error event
+          // (react-native-webview swallows WebKit 102 and -999), so clear the
+          // loading state here or the spinner never goes away.
+          if (linkLoadInFlightRef.current) {
+            linkLoadInFlightRef.current = false;
+            setLoading(false);
+            setReady(true);
+          }
+          const site = linkSite(url) ?? url.split(":")[0];
+          if (!linkReportedRef.current.has(site)) {
+            linkReportedRef.current.add(site);
+            reportBlockedLink({ fromUrl: lastUrlRef.current || mounted.url, toUrl: url }).catch(
+              (e: unknown) => console.warn("[linkViewer] report failed", e),
+            );
+          }
+          return false;
+        };
+        const verdictFor = (target: string) =>
+          linkNavigationVerdict({
+            url: target,
+            navigationType: request.navigationType,
+            loadInFlight: linkLoadInFlightRef.current,
+            msSinceLoadEnd:
+              linkLoadEndedAtRef.current === null
+                ? null
+                : Date.now() - linkLoadEndedAtRef.current,
+            allowedSites: [...allowedHosts, ...linkSitesRef.current],
+          });
+        // An http:// hop (a shortener whose target predates the site's https)
+        // would be refused as an embed, so reopen the viewer on its https form.
+        if (/^http:\/\//i.test(url)) {
+          const secure = httpsForm(url);
+          if (verdictFor(secure) === "block") {
+            return keep("That link goes to another website, so Rabbithole kept you here.");
+          }
+          openLink({ url: secure, title: mounted.title });
+          return false;
+        }
+        if (webEmbedNavigationUrlError(url)) {
+          return keep("That link can't open on this iPad, so Rabbithole kept you here.");
+        }
+        // A jump to an anchor on the same page loads nothing: no loading
+        // overlay, and it must not open the redirect window.
+        if (isFragmentJump(lastUrlRef.current, url)) {
+          linkFragmentJumpRef.current = url;
+          lastUrlRef.current = url;
+          return true;
+        }
+        const verdict = verdictFor(url);
+        if (verdict === "block") {
+          return keep("That link goes to another website, so Rabbithole kept you here.");
+        }
+        if (verdict === "widen") {
+          const site = linkSite(url);
+          if (site) linkSitesRef.current.add(site);
+        }
+        linkLoadInFlightRef.current = true;
+        lastUrlRef.current = url;
+        return true;
+      }
       if (lockedYouTube) {
         if (isAllowedYouTubeResourceUrl(url)) {
           lastUrlRef.current = url;
@@ -1022,7 +1138,7 @@ export function ExternalAppHost() {
       setTimeout(() => setBlockedMessage(null), 2800);
       return false;
     },
-    [allowedHosts, lockedYouTube],
+    [allowedHosts, lockedYouTube, mounted, reportBlockedLink],
   );
 
   const handleNavigationChange = useCallback(
@@ -1099,6 +1215,11 @@ export function ExternalAppHost() {
           <Text style={styles.title} numberOfLines={1}>{mounted.title}</Text>
           {mounted.kind === "interactive" && mounted.subtitle ? (
             <Text style={styles.subtitle} numberOfLines={1}>{mounted.subtitle}</Text>
+          ) : nativeStaticCustomApp?.credit ? (
+            // Same words as the web launcher's credit bar (app/custom-apps).
+            <Text style={styles.subtitle} numberOfLines={1}>
+              Made by {nativeStaticCustomApp.credit}
+            </Text>
           ) : null}
         </View>
         {creds && !useNativeCustomApp ? (
@@ -1194,20 +1315,70 @@ export function ExternalAppHost() {
             allowsBackForwardNavigationGestures={!interactive}
             injectedJavaScript={injectedJavaScript}
             injectedJavaScriptBeforeContentLoaded={interactive ? INTERACTIVE_GESTURE_SNIPPET : undefined}
-            onLoadStart={() => {
+            onLoadStart={(event: { nativeEvent: { url?: string } }) => {
+              // react-native-webview reports a same-page anchor jump as a load
+              // start but never ends it, so the link viewer skips the overlay.
+              if (
+                linkFragmentJumpRef.current !== null &&
+                event.nativeEvent.url === linkFragmentJumpRef.current
+              ) {
+                linkFragmentJumpRef.current = null;
+                return;
+              }
               setLoading(true);
               setError(null);
               setReady(false);
             }}
             onLoadEnd={handleLoadEnd}
-            onError={(event: { nativeEvent: { description?: string } }) => {
+            onError={(event: { nativeEvent: { description?: string; url?: string } }) => {
+              linkLoadInFlightRef.current = false;
               setLoading(false);
               setReady(false);
-              setError(event.nativeEvent.description ?? "The web page could not be loaded.");
+              const message =
+                event.nativeEvent.description ?? "The web page could not be loaded.";
+              setError(message);
+              reportLoadError({
+                url: event.nativeEvent.url || lastUrlRef.current || sourceUri || "",
+                message,
+              });
             }}
-            onHttpError={(event: { nativeEvent: { statusCode?: number } }) => {
+            onHttpError={(event: { nativeEvent: { statusCode?: number; url?: string } }) => {
               const code = event.nativeEvent.statusCode;
-              if (code && code >= 400) setError(`The web page returned HTTP ${code}.`);
+              if (code && code >= 400) {
+                const message = `The web page returned HTTP ${code}.`;
+                setError(message);
+                reportLoadError({
+                  url: event.nativeEvent.url || lastUrlRef.current || sourceUri || "",
+                  status: code,
+                  message,
+                });
+              }
+            }}
+            onContentProcessDidTerminate={(event: { nativeEvent: { url?: string } }) => {
+              // iOS killed the page's web process, almost always for memory
+              // (a Python-in-the-browser app like marimo runs a whole Pyodide
+              // runtime). react-native-webview handles the delegate call, so
+              // WebKit does not reload on its own and the scholar is left with
+              // a blank page and lost work, which reads as "it restarted".
+              // Say so, offer Try again, and record it on the session so the
+              // next report can be told apart from the site's own restarts.
+              //
+              // react-native-webview 14 ALSO fires this on every teardown
+              // (removeFromSuperview / destroyWebView: Try again, Reload, a new
+              // app, closing the host), after setting `_webView = nil`, so that
+              // event's `url` is always "". A real kill keeps the page's URL.
+              // Ignore the empty one, or every close would read as a crash.
+              if (!event.nativeEvent.url) return;
+              linkLoadInFlightRef.current = false;
+              setLoading(false);
+              setReady(false);
+              const message =
+                "This app used more memory than the BunnyPad could give it, so it stopped. Unsaved work may be lost.";
+              setError(message);
+              reportLoadError({
+                url: event.nativeEvent.url || lastUrlRef.current || sourceUri || "",
+                message: "Web content process terminated (likely out of memory).",
+              });
             }}
             onMessage={handleMessage}
             onShouldStartLoadWithRequest={handleShouldStartLoad}

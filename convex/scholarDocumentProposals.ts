@@ -3,7 +3,7 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import { authedMutation, authedQuery, teacherMutation } from "./lib/customFunctions";
 import { internal } from "./_generated/api";
 import { isTeacherRole } from "./lib/roles";
-import { plantTeacherSeed } from "./lib/seeds";
+import { plantTeacherSeed, withoutWonders } from "./lib/seeds";
 import { requireActiveScholarAccess } from "./lib/access";
 import { institutionPromptProfileForScholar } from "./lib/institutionPromptProfile";
 
@@ -29,12 +29,15 @@ export const aiGetProposalContext = internalQuery({
       .withIndex("by_scholar", (q) => q.eq("scholarId", doc.scholarId))
       .collect();
 
-    const seeds = await ctx.db
-      .query("seeds")
-      .withIndex("by_scholar_status", (q) =>
-        q.eq("scholarId", doc.scholarId).eq("status", "active")
-      )
-      .collect();
+    // A scholar's own wonders are not seeds suggested to them (isWonderSeed).
+    const seeds = withoutWonders(
+      await ctx.db
+        .query("seeds")
+        .withIndex("by_scholar_status", (q) =>
+          q.eq("scholarId", doc.scholarId).eq("status", "active")
+        )
+        .collect(),
+    );
 
     const dossier = await ctx.db
       .query("scholarDossiers")

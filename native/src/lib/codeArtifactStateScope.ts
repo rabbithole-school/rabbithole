@@ -18,7 +18,6 @@ export type CodeArtifactStateBinding =
       identity: string;
       artifactId: Id<"artifacts">;
       customAppArgs: null;
-      supportsRooms: true;
       supportsActionResults: true;
     }
   | {
@@ -30,7 +29,6 @@ export type CodeArtifactStateBinding =
         userId: string;
         key: "default";
       };
-      supportsRooms: false;
       supportsActionResults: false;
     };
 
@@ -43,7 +41,6 @@ export function selectCodeArtifactStateScope(
       identity: String(scope.artifactId),
       artifactId: scope.artifactId,
       customAppArgs: null,
-      supportsRooms: true,
       supportsActionResults: true,
     };
   }
@@ -56,7 +53,6 @@ export function selectCodeArtifactStateScope(
       userId: scope.stateUserId,
       key: scope.stateKey,
     },
-    supportsRooms: false,
     supportsActionResults: false,
   };
 }

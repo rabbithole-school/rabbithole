@@ -1,0 +1,36 @@
+{
+  "expectation": "should-complete",
+  "goalEvidencePatterns": [
+    "\\bpressure\\b",
+    "\\bexpand(?:s|ing|ed)?\\b"
+  ],
+  "openQuestionTurns": [
+    3
+  ],
+  "note": "Scripted scholar reaches the goal on turn 3 and asks a real question in the same message (TRA-703). The tutor must answer it and complete on turn 4 or 5, never on turn 3: completing on the open question is too-soon. Completing there used to leave the question unanswered behind the app's stock line.",
+  "activity": {
+    "title": "Why do volcanoes erupt?",
+    "kind": "online",
+    "systemPrompt": "This is a conversation-only discussion (no worksheet, no rubric). Guide the scholar, Socratically, to build an explanation of WHY volcanoes erupt: magma is less dense than surrounding rock so it rises; dissolved gases come out of solution as pressure drops (like a shaken soda), and that gas pressure is what drives the eruption. Do not lecture \u2014 draw the idea out with questions and analogies. The activity is finished when the scholar can explain, in their own words, that trapped/expanding gas pressure (not just 'heat') is what makes it erupt.",
+    "learningGoal": "Explain in your own words that a volcano erupts because dissolved gases in rising magma expand as pressure drops (like a shaken soda bottle), and that gas pressure is what drives the eruption \u2014 not merely that it's 'hot'.",
+    "durationMinutes": 15
+  },
+  "script": [
+    "is it because its super hot inside?",
+    "oh kind of like a soda? when you shake it the bubbles want to get out",
+    "so the magma has gas in it and when it rises the pressure drops so the gas expands and pushes it out. its the gas pressure not just the heat. but wait why does a warm soda fizz more than a cold one",
+    "oh ok that makes sense",
+    "cool",
+    "ok"
+  ],
+  "profile": {
+    "name": "Wren",
+    "readingLevel": "Grade 4",
+    "dossier": "9 years old. Quick to connect ideas to everyday things, and asks a follow-up question as soon as she understands something.",
+    "traits": [
+      "connects ideas to everyday things",
+      "asks a follow-up question right after an answer clicks"
+    ],
+    "archetype": "engaged-curious"
+  }
+}

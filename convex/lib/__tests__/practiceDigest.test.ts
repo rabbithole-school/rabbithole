@@ -3,11 +3,14 @@ import {
   classifyScholarState,
   computeMathSkillsUpdate,
   computePracticeDigest,
+  MATH_SKILLS_LEGEND,
+  mathSkillsUpdateParts,
   renderScholarNote,
   selectMathSkillsUpdateCohorts,
   type PracticeCohortDigestRow,
   type PracticeScholarDigestRow,
 } from "../practiceDigest";
+import { greyLineMessage } from "../slackGreyLine";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.UTC(2026, 6, 4, 12, 0, 0); // 2026-07-04 (ISO week 27)
@@ -217,7 +220,7 @@ describe("computePracticeDigest", () => {
       ]);
     });
 
-    it("renders the intervention ladder with strong cohort hierarchy and generated nuance", () => {
+    it("leads with persistent misconceptions and moves the rest into the thread", () => {
       const update = computeMathSkillsUpdate({
         now: NOW,
         cohorts: [
@@ -239,7 +242,8 @@ describe("computePracticeDigest", () => {
                     domain: "whole-number-arithmetic",
                     nodeKey: "grouping",
                     label: "Order of operations & grouping",
-                    tier: "sustained",
+                    tier: "persistent",
+                    recurred: true,
                     pattern: "REVERSED_OPERANDS",
                     patternDescription:
                       "Order of the operation isn't yet anchored.",
@@ -263,7 +267,7 @@ describe("computePracticeDigest", () => {
                     domain: "fraction-arithmetic",
                     nodeKey: "equivalent-fractions",
                     label: "Equivalent fractions",
-                    tier: "acute",
+                    tier: "settled",
                     attemptCount: 4,
                     missCount: 3,
                     correctCount: 1,
@@ -275,13 +279,13 @@ describe("computePracticeDigest", () => {
                     breakerCount: 1,
                     missExamples: [],
                     reason:
-                      "3 misses in 4 attempts; the practice brake stepped in; finished with 1 correct attempt",
+                      "3 misses in 4 attempts in one sitting; Rabbithole stepped in after three misses in a row; finished with 1 correct attempt",
                   },
                   {
                     domain: "whole-number-arithmetic",
                     nodeKey: "rounding",
                     label: "Rounding",
-                    tier: "practice",
+                    tier: "watching",
                     attemptCount: 3,
                     missCount: 2,
                     correctCount: 1,
@@ -324,31 +328,127 @@ describe("computePracticeDigest", () => {
       expect(update.text).toContain(
         "This week: practiced 4 of 7 days, confirmed **Adding fractions &amp; mixed numbers** fluent, moved the frontier forward and now at the edge on **Long division** (and 1 more at the edge).",
       );
+      expect(update.text).toContain("What held all week");
       expect(update.text).toContain(
-        "Each scholar's own week first, then the topics worth a 1:1",
+        "  [Order of operations &amp; grouping](https://example.test/teacher/math-skills?node=grouping) — The same operation-order move resurfaced in later practice.",
       );
       expect(update.text).toContain(
-        "🔴 [Order of operations &amp; grouping](https://example.test/teacher/math-skills?node=grouping) — missed 5 of 7, 3 sittings",
+        "    _missed 5 of 7, 3 sittings · also came up last week_",
       );
-      expect(update.text).toContain(
-        "🟠 **Equivalent fractions** — missed 3 of 4, 1 sitting",
-      );
-      expect(update.text).toContain("**Rounding** — missed 2 of 3, 1 sitting");
+      // Settled and new-this-week topics stay out of the post.
+      expect(update.text).not.toContain("Equivalent fractions");
+      expect(update.text).not.toContain("Rounding");
+      expect(update.text).not.toMatch(/🔴|🟠|brake/);
       expect(update.text).toContain("Due reviews are automatic");
       expect(update.text).not.toMatch(/`(?:ERROR|WARN|INFO)`|🧗/);
-      expect(update.text).not.toContain(
-        "The same operation-order move resurfaced in later practice.",
-      );
       expect(update.threadText).toContain(
         "**Geckos · Avery &lt;Admin&gt;**",
       );
       expect(update.threadText).toContain(
-        "• [Order of operations &amp; grouping](https://example.test/teacher/math-skills?node=grouping) — The same operation-order move resurfaced in later practice.",
+        "_Still missing, new this week_\n  • **Rounding** — 2 misses in 3 attempts in one sitting; latest attempt was missed (missed 2 of 3, 1 sitting)",
       );
+      expect(update.threadText).toContain(
+        "_Settled this week_\n  • **Equivalent fractions** — 3 misses in 4 attempts in one sitting; Rabbithole stepped in after three misses in a row; finished with 1 correct attempt (missed 3 of 4, 1 sitting)",
+      );
+      expect(update.threadText).not.toContain("Order of operations");
+      expect(update.threadText).not.toMatch(/brake/);
       expect(update.text).toContain(
-        "Also practiced this week, with nothing repeating enough to queue: Active, no repeated topic.",
+        "Also practiced this week, with nothing that held all week: Active, no repeated topic.",
       );
       expect(update.text).not.toMatch(BANNED_FRAMING);
+    });
+
+    it("says so when nothing held all week, and keeps the week's misses in the thread", () => {
+      const update = computeMathSkillsUpdate({
+        now: NOW,
+        cohorts: [
+          {
+            title: "Geckos",
+            subjectKey: "math",
+            scholars: [
+              scholar({
+                name: "Settled",
+                practiceCount: 6,
+                mathPracticeCount: 6,
+                priorityTopics: [
+                  {
+                    domain: "whole-number-arithmetic",
+                    nodeKey: "rounding",
+                    label: "Rounding",
+                    tier: "settled",
+                    attemptCount: 6,
+                    missCount: 2,
+                    correctCount: 4,
+                    missSittingCount: 2,
+                    dayCount: 2,
+                    dayLabels: ["Monday", "Tuesday"],
+                    latestAttemptCorrect: true,
+                    trailingCorrectCount: 3,
+                    breakerCount: 0,
+                    missExamples: [],
+                    reason: "2 misses in 6 attempts across 2 sittings; finished with 3 correct attempts",
+                  },
+                ],
+              }),
+            ],
+          },
+        ],
+      });
+      expect(update.text).toContain(
+        "No misconception held all week. The week's misses are in the thread.",
+      );
+      expect(update.text).toContain(
+        "Also practiced this week, with nothing that held all week: Settled.",
+      );
+      expect(update.text).not.toContain("Rounding");
+      expect(update.threadText).toContain("_Settled this week_");
+      expect(update.threadText).toContain("**Rounding**");
+    });
+
+    it("names an unanswered topic that came back as not learned yet, not as a wrong idea", () => {
+      const update = computeMathSkillsUpdate({
+        now: NOW,
+        cohorts: [
+          {
+            title: "Geckos",
+            subjectKey: "math",
+            scholars: [
+              scholar({
+                name: "Blank",
+                practiceCount: 4,
+                mathPracticeCount: 4,
+                priorityTopics: [
+                  {
+                    domain: "early-algebra",
+                    nodeKey: "sequences",
+                    label: "Arithmetic sequences",
+                    tier: "persistent",
+                    recurred: true,
+                    notAttempted: true,
+                    attemptCount: 4,
+                    missCount: 4,
+                    correctCount: 0,
+                    missSittingCount: 2,
+                    dayCount: 2,
+                    dayLabels: ["Monday", "Tuesday"],
+                    latestAttemptCorrect: false,
+                    trailingCorrectCount: 0,
+                    breakerCount: 0,
+                    missExamples: [],
+                    reason: "4 misses in 4 attempts across 2 sittings; also came up last week; latest attempt was missed",
+                    narrative: "Every attempt closed as a don't-know response.",
+                  },
+                ],
+              }),
+            ],
+          },
+        ],
+      });
+      expect(update.text).toContain(
+        "**Arithmetic sequences** — Not learned yet: no answer attempted this week.",
+      );
+      expect(update.text).toContain("_missed 4 of 4, 2 sittings · also came up last week_");
+      expect(update.text).not.toContain("don't-know response");
     });
 
     it("omits the week context for a flagged scholar with nothing to show", () => {
@@ -369,7 +469,7 @@ describe("computePracticeDigest", () => {
                     domain: "whole-number-arithmetic",
                     nodeKey: "rounding",
                     label: "Rounding",
-                    tier: "practice",
+                    tier: "persistent",
                     attemptCount: 3,
                     missCount: 2,
                     correctCount: 1,
@@ -391,7 +491,9 @@ describe("computePracticeDigest", () => {
 
       expect(update.text).not.toContain("This week:");
       expect(update.text).not.toContain("Wins this week");
-      expect(update.text).toContain("**Rounding** — missed 2 of 3, 1 sitting");
+      expect(update.text).toContain(
+        "  **Rounding** — 2 misses in 3 attempts in one sitting",
+      );
       expect(update.text).not.toMatch(BANNED_FRAMING);
     });
 
@@ -414,7 +516,7 @@ describe("computePracticeDigest", () => {
                     domain: "whole-number-arithmetic",
                     nodeKey: "rounding",
                     label: "Rounding",
-                    tier: "practice",
+                    tier: "persistent",
                     attemptCount: 3,
                     missCount: 2,
                     correctCount: 1,
@@ -502,6 +604,44 @@ describe("computePracticeDigest", () => {
       expect(noMisses.text).toContain(
         "1 scholar practiced math this week, with no missed attempts.",
       );
+    });
+
+    it("puts the legend in Slack's grey line at post time, leaving the stored text as it was", () => {
+      const update = computeMathSkillsUpdate({
+        now: NOW,
+        cohorts: [
+          {
+            title: "Math",
+            scholars: [scholar({ name: "Quiet" })],
+          },
+        ],
+      });
+      expect(update.text.split("\n")).toEqual([
+        "🎯 **Math skills — week of 2026-W27**",
+        MATH_SKILLS_LEGEND,
+        "No math practice was recorded this week.",
+      ]);
+
+      const message = greyLineMessage(mathSkillsUpdateParts(update.text), {
+        markdown: true,
+        text: update.text,
+      });
+      expect(message.blocks).toEqual([
+        { type: "markdown", text: "🎯 **Math skills — week of 2026-W27**" },
+        {
+          type: "context",
+          block_id: "rh_grey_0",
+          elements: [{ type: "mrkdwn", text: MATH_SKILLS_LEGEND }],
+        },
+        { type: "markdown", text: "No math practice was recorded this week." },
+      ]);
+      // The fallback is still the whole note, in mrkdwn.
+      expect(message.text).toBe(
+        `🎯 *Math skills — week of 2026-W27*\n${MATH_SKILLS_LEGEND}\nNo math practice was recorded this week.`,
+      );
+
+      // A prepared text without the legend (queued before it existed) posts whole.
+      expect(mathSkillsUpdateParts("Root summary")).toEqual(["Root summary"]);
     });
   });
 

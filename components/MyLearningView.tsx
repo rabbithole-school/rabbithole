@@ -568,7 +568,7 @@ type SeedDoc = NonNullable<
 >[number];
 
 function SeedMap({ seeds }: { seeds: SeedDoc[] }) {
-  const { exploreSeed, exploringSeedId, exploreSeedDialog } = useExploreSeed();
+  const { exploreSeed, exploringSeedId } = useExploreSeed();
 
   // Group by domain so the list reads as a map of territories, not a queue.
   const groups = new Map<string, SeedDoc[]>();
@@ -641,14 +641,7 @@ function SeedMap({ seeds }: { seeds: SeedDoc[] }) {
                     _hover={{ bg: "violet.50" }}
                     flexShrink={0}
                     disabled={disabled || isExploring}
-                    onClick={() =>
-                      exploreSeed(
-                        seed._id,
-                        seed.unitId || seed.origin === "story"
-                          ? { skipMenu: true }
-                          : undefined,
-                      )
-                    }
+                    onClick={() => exploreSeed(seed._id)}
                   >
                     {isExploring ? "Starting…" : "Start exploring"}
                     {!isExploring && <ArrowRight style={{ marginLeft: 4 }} />}
@@ -659,7 +652,6 @@ function SeedMap({ seeds }: { seeds: SeedDoc[] }) {
           </VStack>
         </Box>
       ))}
-      {exploreSeedDialog}
     </VStack>
   );
 }

@@ -16,11 +16,12 @@
  */
 
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 import { Box, Button, Flex, HStack, Text } from "@chakra-ui/react";
 import { Pause, Play, Plus } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { toaster } from "@/lib/toaster";
 import {
   SimulatorRunBudgetFields,
@@ -52,7 +53,16 @@ export function SimulatorAssignControls({ assignmentId }: { assignmentId: Id<"as
     return () => clearInterval(id);
   }, []);
 
-  const readout = useQuery(api.simulatorTeacher.assignmentReadout, { assignmentId, clientNowMs });
+  // Smoothed so the minute re-arm doesn't drop the readout to undefined: the
+  // panel would return null for a round-trip, and the reseed effect below
+  // would fire again when data came back, overwriting unsaved run-budget edits
+  // (TRA-424). Keyed on the assignment so another cohort never shows this one's
+  // readout while it loads.
+  const readout = useSmoothedQuery(
+    api.simulatorTeacher.assignmentReadout,
+    { assignmentId, clientNowMs },
+    { resetKey: assignmentId },
+  );
   const pause = useMutation(api.simulatorRuns.pauseAssignment);
   const resume = useMutation(api.simulatorRuns.resumeAssignment);
   const grant = useMutation(api.simulatorBenches.grantRuns);

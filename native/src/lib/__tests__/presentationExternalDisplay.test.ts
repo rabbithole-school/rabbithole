@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONNECT_TV_GUIDANCE,
+  CONNECT_TV_LABEL,
+  DISCONNECT_TV_GUIDANCE,
+  DISCONNECT_TV_LABEL,
   EXTERNAL_DISPLAY_SCENE,
   getAppPresentDisplayState,
   getPresentationDisplayState,
+  getTvButton,
 } from "../presentationExternalDisplay";
 
 function screens(mirrored?: boolean) {
@@ -61,6 +66,17 @@ describe("app present mode on the classroom TV", () => {
     expect(getAppPresentDisplayState(screens(true))).toEqual({
       offerConnect: false,
       tvNotMirroring: false,
+    });
+  });
+
+  it("offers a way off the TV once one is attached", () => {
+    expect(getTvButton(false)).toEqual({
+      label: CONNECT_TV_LABEL,
+      guidance: CONNECT_TV_GUIDANCE,
+    });
+    expect(getTvButton(true)).toEqual({
+      label: DISCONNECT_TV_LABEL,
+      guidance: DISCONNECT_TV_GUIDANCE,
     });
   });
 

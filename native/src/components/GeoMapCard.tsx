@@ -6,8 +6,10 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useMutation, useQuery } from "convex/react";
 
+import { confirmFinishAndSend } from "@/lib/confirmFinishAndSend";
 import { api, type Doc, type Id } from "@/lib/convex";
 import { openInteractiveWebContent } from "@/lib/externalAppHost";
+import { FINISH_AND_SEND_LABEL } from "../../vendor/shared/finishAndSend";
 import { allowedHostsForUrl, geomapEmbedUrl } from "@/lib/webEmbedConfig";
 import { fonts, useColors } from "@/theme";
 import { GeoMapNative } from "./GeoMapNative";
@@ -198,7 +200,7 @@ export function GeoMapCard({
       : criteriaPending
         ? "Preparing check…"
         : mapDeliverable.mode === "none"
-          ? "Send it"
+          ? FINISH_AND_SEND_LABEL
           : "Check my work"
     : hasTask
       ? "Check my answer"
@@ -215,6 +217,14 @@ export function GeoMapCard({
   const showCommit = mapDeliverable ? !!onAskCheck : !!onCommit;
   const handleCommit = async () => {
     if (commitDisabled || !mapArtifact) return;
+    // No rubric: this press finishes the activity, so ask first.
+    if (
+      mapDeliverable?.mode === "none" &&
+      !criteriaFailed &&
+      !(await confirmFinishAndSend())
+    ) {
+      return;
+    }
     void Haptics.selectionAsync();
     // The tutor answers in the chat, which the full-screen map covers.
     setExpanded(false);
@@ -242,6 +252,7 @@ export function GeoMapCard({
       {mapDeliverable ? (
         <FlairChips
           flairEarned={deliverable?.flairEarned}
+          sessionId={sessionId}
           criteria={criteria}
           deliverableId={deliverable?._id}
           resolved={deliverable !== undefined}

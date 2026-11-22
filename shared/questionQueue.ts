@@ -18,9 +18,10 @@ export const QUESTION_QUEUE_COPY = {
   /** Teacher-suggested row actions. */
   start: "Start",
   notNow: "Not now",
-  /** Scholar's Prep — the three plain questions. */
-  prepDue: "Due",
-  prepDueEmpty: "Nothing due tonight.",
+  /** Scholar's Prep: the corner × on a Keep going or wonder row (its
+   *  accessible name, before the row's title). */
+  dismiss: "Dismiss",
+  /** Scholar's Prep — the two plain questions (homework is in the Now tab's Homework section). */
   prepDoneToday: "Done today?",
   prepDoneTodayHint: "Only you know if these are finished.",
   prepDone: "✓ Done",

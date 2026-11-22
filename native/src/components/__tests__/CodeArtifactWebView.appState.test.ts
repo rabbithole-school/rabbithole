@@ -101,7 +101,6 @@ vi.mock("convex/react", () => ({
       : ref === "appAiActions.judge"
         ? appAiJudge
         : vi.fn(async () => []),
-  useConvex: () => ({}),
   useQuery: (ref: string, args: unknown) =>
     args === "skip" ? undefined : queryResults.get(ref),
   useMutation: (ref: string) =>
@@ -115,15 +114,9 @@ vi.mock("@/lib/convex", () => ({
     appStates: {
       getSessionState: "appStates.getSessionState",
       getCustomAppState: "appStates.getCustomAppState",
-      getRoomState: "appStates.getRoomState",
-      getRoomPresence: "appStates.getRoomPresence",
       updateSessionState: "appStates.updateSessionState",
       updateCustomAppState: "appStates.updateCustomAppState",
-      updateRoomState: "appStates.updateRoomState",
-      joinRoomPresence: "appStates.joinRoomPresence",
-      leaveRoomPresence: "appStates.leaveRoomPresence",
     },
-    rooms: { defaultForArtifact: "rooms.defaultForArtifact" },
     appAiActions: {
       say: "appAiActions.say",
       judge: "appAiActions.judge",
@@ -134,8 +127,18 @@ vi.mock("@/lib/convex", () => ({
   },
 }));
 
+// Play-history tracking has its own tests (shared/__tests__/appPlaySession.test.ts).
+vi.mock("@/hooks/useAppPlaySession", () => ({ AppPlaySessionTracker: () => null }));
+vi.mock("@/components/AppLoadingSkeleton", () => ({ AppLoadingSkeleton: () => null }));
+
 vi.mock("@/lib/appKitAssets", () => ({
   resolveNativeAppKitSource: async () => undefined,
+}));
+
+// webEmbedConfig reads the React Native `__DEV__` global at module load, which
+// vitest doesn't define; the host only needs the web origin for the kit base.
+vi.mock("@/lib/webEmbedConfig", () => ({
+  rabbitholeWebBaseUrl: "https://rabbithole.school",
 }));
 
 import { CodeArtifactWebView } from "../CodeArtifactWebView";

@@ -73,7 +73,7 @@ export default defineConfig({
           name: "convex",
           include: ["convex/**/*.test.ts"],
           exclude: convexIsolated,
-          setupFiles: [...shared.setupFiles, "./vitest.convexShared.setup.ts"],
+          setupFiles: [...shared.setupFiles, "./vitest.convexConsole.setup.ts", "./vitest.convexShared.setup.ts"],
           pool: "threads",
           isolate: false,
         },
@@ -83,6 +83,7 @@ export default defineConfig({
         test: {
           name: "convex-isolated",
           include: convexIsolated,
+          setupFiles: [...shared.setupFiles, "./vitest.convexConsole.setup.ts"],
         },
       },
       {
@@ -100,6 +101,9 @@ export default defineConfig({
             "app/**/*.test.ts",
             "evals/**/*.test.ts",
             "scripts/**/*.test.ts",
+            // The MIT keypad package owns the answer-entry model; its suite is
+            // the model's only test suite, so it gates here like shared/ did.
+            "packages/**/*.test.ts",
           ],
         },
       },

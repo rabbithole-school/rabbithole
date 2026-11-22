@@ -1,0 +1,55 @@
+{
+  "name": "react-native-math-keypad",
+  "version": "0.1.0",
+  "description": "On-screen math keypad for React Native and Expo. Kids enter fractions, mixed numbers, exponents and roots in tappable answer boxes, without the system keyboard. Built for iPad.",
+  "license": "MIT",
+  "author": "The Rabbithole authors",
+  "homepage": "https://github.com/rabbithole-school/react-native-math-keypad#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rabbithole-school/react-native-math-keypad.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rabbithole-school/react-native-math-keypad/issues"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "math",
+    "math-input",
+    "math-keyboard",
+    "keypad",
+    "numpad",
+    "fraction",
+    "mixed-number",
+    "exponent",
+    "ipad",
+    "education",
+    "kids",
+    "k-12"
+  ],
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "react-native": "src/index.ts",
+  "files": [
+    "src",
+    "!src/__tests__",
+    "ios",
+    "expo-module.config.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "expo-modules-core": "*",
+    "react": "*",
+    "react-native": "*",
+    "react-native-svg": "*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.0"
+  }
+}

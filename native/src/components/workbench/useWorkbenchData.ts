@@ -98,7 +98,7 @@ export function useWorkbenchBench(sessionId: Id<"sessions">) {
     isLoading: bench === undefined,
     // Aggregate missing AND the open attempt has resolved with an error → the
     // spinner would otherwise never end. While a retry is in flight this is
-    // null again, so the screen falls back to its "opening the bench…" state.
+    // null again, so the screen falls back to its "Opening the bench…" state.
     ensureError: missing && ensureTried ? ensureError : null,
     retry: open,
   };

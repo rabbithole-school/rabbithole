@@ -3,10 +3,14 @@ import {
   internalAction,
   internalMutation,
   internalQuery,
+  type QueryCtx,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
+  deliveryId,
+  deliveryMetadata,
+  EOD_MESSAGE_EVENT_TYPE,
   hasAnyActivity,
   checkinDateLabel,
   checkinDayKey,
@@ -16,12 +20,20 @@ import {
   mergeCheckinQuestions,
   parentMessageText,
   renderMechanicalFallback,
+  renderWeekScreenTime,
+  withLastWeek,
   renderThreadMessage,
   sanitizeEodSlackText,
+  threadMessageParts,
+  buildSnapshotBlocks,
+  renderBuildSnapshotPost,
+  type EodBuildSnapshot,
+  type EodBuildSnapshotPost,
   type EodChannelInput,
   type EodOverdueHomework,
   type EodScheduledActivity,
   type EodScholarDay,
+  type EodWeekScreenTime,
   rankEodSignals,
 } from "./lib/eodCheckin";
 import {
@@ -39,14 +51,28 @@ import {
   fetchConversationReplies,
   messageWithDeliveryMetadata,
   postMessage,
-  type SlackMessageMetadata,
+  uploadFileToSlack,
+  type SlackMessage,
 } from "./lib/slackApi";
+import { greyLineMessage } from "./lib/slackGreyLine";
 import { suspendedInstitutionIds } from "./lib/access";
 import { scholarInstitutionId as resolveScholarInstitutionId } from "./lib/scholarEnrollment";
 import { teacherCanMarkCompleteForGroup } from "./lib/activityCompletionCore";
+import { readSchedule } from "./lib/scheduleStore";
 import { ONBOARDING_UNIT_SLUG } from "./onboardingData";
 import { unstartedAssignedRowSurface } from "./scholarPlate";
-import { dueStatus } from "../shared/institutionDay";
+import {
+  dayKeyForTimezone,
+  dueStatus,
+  shiftDayKey,
+  weekdayForDayKey,
+} from "../shared/institutionDay";
+import { readScholarDayUsage, type ScholarUsageScope } from "./deviceActivity";
+import { primaryInstitutionId } from "./lib/primaryInstitution";
+import { sniffImageMime } from "./lib/imageBytes";
+import { sumScholarWeeks } from "../shared/screenTimeWeek";
+import { nextOpenSchoolDayKeys } from "./lib/schoolDays";
+import { isTestAccount } from "./lib/testAccounts";
 
 const LIST_LIMIT = 20;
 const READ_LIMIT = 100;
@@ -56,21 +82,14 @@ const CHECKIN_CLAIM_STALE_MS = 2 * 60 * 60 * 1000;
 const RETRY_SWEEP_LIMIT = 20;
 const MAX_RETRY_ATTEMPTS = 5;
 const RETRY_BASE_MS = 5 * 60 * 1000;
-const EOD_MESSAGE_EVENT_TYPE = "rabbithole_eod_checkin";
-
-function deliveryId(checkinId: Id<"eodCheckins">, part: "parent" | "reply") {
-  return `eod:${checkinId}:${part}`;
-}
-
-function deliveryMetadata(
-  checkinId: Id<"eodCheckins">,
-  part: "parent" | "reply",
-): SlackMessageMetadata {
-  return {
-    event_type: EOD_MESSAGE_EVENT_TYPE,
-    event_payload: { delivery_id: deliveryId(checkinId, part) },
-  };
-}
+// Slack processes an upload for about two seconds before an image block may
+// name it; a post sooner fails `invalid_blocks` (live probe, 2026-11-09). Each
+// try waits that long first, and five tries cover ten seconds.
+const BUILD_POST_ATTEMPTS = 5;
+const BUILD_POST_WAIT_MS = 2_000;
+// The whole pictures step gets this long before the summary goes without it,
+// so a stalled upload can't hold up the check-in.
+const BUILD_DELIVERY_BUDGET_MS = 45_000;
 
 function retryDelayMs(attempt: number, retryAfterMs?: number): number {
   const backoff = Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1), 60 * 60 * 1000);
@@ -98,6 +117,169 @@ function analysisNote(analysis: Doc<"analyses">): string | null {
   }
   return parts.length > 0 ? snippet(parts.join(" | ")) : null;
 }
+
+// The Workshop screenshots an app after every build change, for the builder
+// model's own render check (`messages.renderCheck`). The newest of those taken
+// today is what a scholar's app looked like when they last changed it, so the
+// check-in posts it. A builder turn spans several assistant rows and play
+// replies add more, so each session is read back a long way, under one budget
+// for the channel. A build followed by more than 80 assistant rows in the
+// same session goes unpictured; that costs a picture, never the summary. A
+// turn that began just before midnight still counts when its screenshot was
+// taken after.
+const BUILD_SNAPSHOT_SESSION_SCAN_LIMIT = 80;
+const BUILD_SNAPSHOT_CHANNEL_SCAN_BUDGET = 2_000;
+const BUILD_TURN_LEAD_MS = 15 * 60 * 1000;
+// One image per scholar, and a hard cap for a channel shared by several groups.
+const MAX_BUILD_SNAPSHOTS = 10;
+
+async function latestBuildSnapshot(
+  ctx: QueryCtx,
+  sessionId: Id<"sessions">,
+  dayStartMs: number,
+  nowMs: number,
+  budget: { rows: number },
+): Promise<{ storageId: Id<"_storage">; answeredAt: number } | null> {
+  let scanned = 0;
+  for await (const message of ctx.db
+    .query("messages")
+    .withIndex("by_session_role", (q) =>
+      q
+        .eq("sessionId", sessionId)
+        .eq("role", "assistant")
+        .gte("_creationTime", dayStartMs - BUILD_TURN_LEAD_MS),
+    )
+    .order("desc")) {
+    if (scanned >= BUILD_SNAPSHOT_SESSION_SCAN_LIMIT || budget.rows <= 0) {
+      return null;
+    }
+    scanned += 1;
+    budget.rows -= 1;
+    const check = message.renderCheck;
+    if (
+      check?.snapshotStorageId &&
+      check.answeredAt !== undefined &&
+      check.answeredAt >= dayStartMs &&
+      check.answeredAt <= nowMs
+    ) {
+      return { storageId: check.snapshotStorageId, answeredAt: check.answeredAt };
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether a session's picture may go to this school's channel. A teacher
+ * archived it for a reason; a rehearsal is a teacher's, never a scholar's
+ * build; and a session stamped to another school stays there. The day's
+ * wonders note applies the same rule to a wonder's chat (dayWonders.ts).
+ */
+export function buildSessionPostable(
+  session: Doc<"sessions">,
+  institutionId: Id<"institutions">,
+): boolean {
+  return (
+    session.teacherArchivedAt === undefined &&
+    session.isTestDrive !== true &&
+    (session.institutionId === undefined ||
+      session.institutionId === institutionId)
+  );
+}
+
+/**
+ * Each scholar's newest build screenshot of the day, read apart from
+ * `collectChannelDay` so a day heavy enough to hit a read limit here costs
+ * only the pictures, never the check-in.
+ */
+export const collectBuildSnapshots = internalQuery({
+  args: {
+    groupIds: v.array(v.id("scholarGroups")),
+    dayStartMs: v.number(),
+    nowMs: v.number(),
+  },
+  handler: async (ctx, args): Promise<EodBuildSnapshot[]> => {
+    const { institutionId, scholarIds } = await channelRoster(
+      ctx,
+      args.groupIds,
+    );
+    if (!institutionId) return [];
+    const budget = { rows: BUILD_SNAPSHOT_CHANNEL_SCAN_BUDGET };
+    const snapshots: EodBuildSnapshot[] = [];
+    for (const scholarId of scholarIds) {
+      if (snapshots.length >= MAX_BUILD_SNAPSHOTS || budget.rows <= 0) break;
+      const scholar = await ctx.db.get(scholarId);
+      if (!scholar) continue;
+      const sessions = await ctx.db
+        .query("sessions")
+        .withIndex("by_user_last_message", (q) =>
+          q.eq("userId", scholarId).gte("lastMessageAt", args.dayStartMs),
+        )
+        .order("desc")
+        .take(LIST_LIMIT);
+      let newest: {
+        session: Doc<"sessions">;
+        storageId: Id<"_storage">;
+        answeredAt: number;
+      } | null = null;
+      for (const session of sessions) {
+        if (!buildSessionPostable(session, institutionId)) continue;
+        const snapshot = await latestBuildSnapshot(
+          ctx,
+          session._id,
+          args.dayStartMs,
+          args.nowMs,
+          budget,
+        );
+        if (snapshot && (!newest || snapshot.answeredAt > newest.answeredAt)) {
+          newest = { session, ...snapshot };
+        }
+      }
+      if (!newest) continue;
+      snapshots.push({
+        scholarId,
+        sessionId: newest.session._id,
+        scholarName: scholar.name?.trim() || scholar.username || "Scholar",
+        sessionTitle: newest.session.title,
+        sessionUrl: withBase(siteUrl(), sessionPath(newest.session._id, scholarId)),
+        storageId: newest.storageId,
+      });
+    }
+    return snapshots;
+  },
+});
+
+/**
+ * The saved pictures that may still go out when the thread is delivered,
+ * which can be hours after they were chosen: the scholar must still be on the
+ * channel's roster and the session must still be postable.
+ */
+export const postableBuildSnapshots = internalQuery({
+  args: { checkinId: v.id("eodCheckins") },
+  handler: async (ctx, args): Promise<EodBuildSnapshotPost[]> => {
+    const checkin = await ctx.db.get(args.checkinId);
+    if (!checkin?.buildSnapshots?.length) return [];
+    const { institutionId, scholarIds } = await channelRoster(
+      ctx,
+      checkin.groupIds,
+    );
+    if (!institutionId) return [];
+    const roster = new Set(scholarIds.map(String));
+    const postable: EodBuildSnapshotPost[] = [];
+    for (const snapshot of checkin.buildSnapshots) {
+      if (!roster.has(String(snapshot.scholarId))) continue;
+      const session = await ctx.db.get(snapshot.sessionId);
+      if (
+        !session ||
+        String(session.userId) !== String(snapshot.scholarId) ||
+        !buildSessionPostable(session, institutionId)
+      ) {
+        continue;
+      }
+      postable.push(snapshot);
+    }
+    return postable;
+  },
+});
 
 export const linkedGroups = internalQuery({
   args: {},
@@ -132,6 +314,240 @@ export const institutionTimeZone = internalQuery({
   },
 });
 
+/**
+ * One Saturday-through-Friday week of a class's BunnyPad time (TRA-589), from
+ * the same read model and the same weekly sum as School › Screen time, so the
+ * post and the page agree. `weeksBack` 0 is the week ending on the check-in's
+ * Friday, 1 the week before. Test accounts are left out. Null unless the
+ * check-in day is a Friday.
+ *
+ * Its own query, apart from `collectChannelDay`: a week of heartbeats is tens
+ * of thousands of rows, and the check-in itself must never fail on them.
+ */
+export const collectWeekScreenTime = internalQuery({
+  args: {
+    groupIds: v.array(v.id("scholarGroups")),
+    dayStartMs: v.number(),
+    weeksBack: v.union(v.literal(0), v.literal(1)),
+  },
+  handler: async (
+    ctx,
+    { groupIds, dayStartMs, weeksBack },
+  ): Promise<EodWeekScreenTime | null> => {
+    const { institutionId, scholarIds: roster } = await channelRoster(
+      ctx,
+      groupIds,
+    );
+    if (!institutionId) return null;
+    const institution = await ctx.db.get(institutionId);
+    const timeZone = effectiveInstitutionTimeZone(institution?.timeZone);
+    const fridayKey = dayKeyForTimezone(dayStartMs, timeZone);
+    // weekdayForDayKey is 0=Sun…6=Sat.
+    if (weekdayForDayKey(fridayKey) !== 5) return null;
+    const endDayKey = shiftDayKey(fridayKey, -7 * weeksBack);
+    const startDayKey = shiftDayKey(endDayKey, -6);
+    const scholarIds = roster.filter((scholarId) => !isTestAccount(scholarId));
+    const rows = await readScholarDayUsage(
+      ctx,
+      await cohortUsageScope(ctx, institutionId, scholarIds),
+      startDayKey,
+      endDayKey,
+    );
+    // Monday through Friday after Saturday, minus the school's closures.
+    const schoolDays = (
+      await nextOpenSchoolDayKeys(ctx, institutionId, startDayKey, timeZone, 5, {
+        maxCalendarDays: 6,
+      })
+    ).filter((key) => key <= endDayKey).length;
+    const totalsById = new Map(
+      sumScholarWeeks(rows).map((week) => [week.scholarId, week.totals]),
+    );
+    const scholars = [];
+    for (const scholarId of scholarIds) {
+      const scholar = await ctx.db.get(scholarId);
+      if (!scholar) continue;
+      const totals = totalsById.get(scholarId);
+      const outsideSchoolMinutes = totals?.outsideSchool.measuredMinutes ?? 0;
+      const builderMinutes = totals?.builder.onScreenMinutes ?? 0;
+      const buildingMinutes = Math.min(
+        totals?.builder.activeMinutes ?? 0,
+        builderMinutes,
+      );
+      scholars.push({
+        scholarId,
+        name: scholar.name?.trim() || scholar.username || "Scholar",
+        url: withBase(
+          siteUrl(),
+          `/school/screen-time?scholar=${scholarId}&end=${endDayKey}`,
+        ),
+        inSchoolMinutes: Math.max(
+          0,
+          (totals?.measuredMinutes ?? 0) - outsideSchoolMinutes,
+        ),
+        outsideSchoolMinutes,
+        buildingMinutes,
+        playingMinutes: builderMinutes - buildingMinutes,
+      });
+    }
+    scholars.sort((a, b) => a.name.localeCompare(b.name));
+    return { startDayKey, endDayKey, schoolDays, scholars };
+  },
+});
+
+/**
+ * The screen-time read scope for one class. Callers pass the roster from
+ * `channelRoster`, which keeps only groups whose every scholar resolves to
+ * this institution, so the roster is already in tenant.
+ */
+async function cohortUsageScope(
+  ctx: QueryCtx,
+  institutionId: Id<"institutions">,
+  scholarIds: Id<"users">[],
+): Promise<ScholarUsageScope> {
+  return {
+    institutionIds: [institutionId],
+    scholarIds,
+    roster: async () => scholarIds,
+    scholarAllowed: () => true,
+    playInstitutionAllowed: (id) => id === institutionId,
+    primaryInstitutionId: (await primaryInstitutionId(ctx)) ?? undefined,
+    fallbackInstitutionId: institutionId,
+  };
+}
+
+/** A Friday check-in's class, for its screen-time charts; null otherwise. */
+async function chartCohort(ctx: QueryCtx, checkinId: Id<"eodCheckins">) {
+  const checkin = await ctx.db.get(checkinId);
+  if (!checkin || checkin.dayStartMs === undefined) return null;
+  const { tenantGroups, institutionId, scholarIds } = await channelRoster(
+    ctx,
+    checkin.groupIds,
+  );
+  if (!institutionId) return null;
+  const institution = await ctx.db.get(institutionId);
+  const timeZone = effectiveInstitutionTimeZone(institution?.timeZone);
+  const endDayKey = dayKeyForTimezone(checkin.dayStartMs, timeZone);
+  if (weekdayForDayKey(endDayKey) !== 5) return null;
+  return {
+    institutionId,
+    timeZone,
+    endDayKey,
+    tenantGroups,
+    scholarIds: scholarIds.filter((scholarId) => !isTestAccount(scholarId)),
+  };
+}
+
+/**
+ * The week behind a Friday roundup's charts: the seven days and each
+ * scholar's class (the first of the channel's groups they are in). Test
+ * accounts are left out.
+ */
+export const screenTimeChartWeek = internalQuery({
+  args: { checkinId: v.id("eodCheckins") },
+  handler: async (ctx, { checkinId }) => {
+    const cohort = await chartCohort(ctx, checkinId);
+    if (!cohort) return null;
+    const classes: { scholarId: string; scholarName: string; className: string }[] = [];
+    for (const scholarId of cohort.scholarIds) {
+      const scholar = await ctx.db.get(scholarId);
+      const group = cohort.tenantGroups.find((candidate) =>
+        candidate.scholarIds.some((id) => id === scholarId),
+      );
+      if (!scholar || !group) continue;
+      classes.push({
+        scholarId,
+        scholarName: scholar.name?.trim() || scholar.username || "Scholar",
+        className: group.name,
+      });
+    }
+    return {
+      timeZone: cohort.timeZone,
+      allDays: Array.from({ length: 7 }, (_, index) =>
+        shiftDayKey(cohort.endDayKey, index - 6),
+      ),
+      classes,
+    };
+  },
+});
+
+/**
+ * One day of the class's BunnyPad time with its minute-by-minute stretches.
+ * A day per call: a timeline reads every tutor turn and practice attempt.
+ */
+export const screenTimeChartDay = internalQuery({
+  args: { checkinId: v.id("eodCheckins"), dayKey: v.string() },
+  handler: async (ctx, { checkinId, dayKey }) => {
+    const cohort = await chartCohort(ctx, checkinId);
+    if (!cohort) return [];
+    // Only the roundup's own week.
+    if (dayKey > cohort.endDayKey || dayKey < shiftDayKey(cohort.endDayKey, -6)) {
+      return [];
+    }
+    const rows = await readScholarDayUsage(
+      ctx,
+      await cohortUsageScope(ctx, cohort.institutionId, cohort.scholarIds),
+      dayKey,
+      dayKey,
+      { timeline: true },
+    );
+    return rows.map((row) => ({
+      scholarId: String(row.scholarId),
+      scholarName: row.scholarName,
+      dayKey: row.dayKey,
+      measuredMinutes: row.measuredMinutes,
+      outsideSchool: { measuredMinutes: row.outsideSchool.measuredMinutes },
+      schoolDay: row.schoolDay,
+      timeline: row.timeline ?? null,
+    }));
+  },
+});
+
+/**
+ * The scholars a channel's check-in may talk about: the groups whose every
+ * scholar belongs to the group's school, all from one school, deduplicated.
+ */
+async function channelRoster(
+  ctx: QueryCtx,
+  groupIds: Id<"scholarGroups">[],
+): Promise<{
+  tenantGroups: Doc<"scholarGroups">[];
+  institutionId: Id<"institutions"> | undefined;
+  scholarIds: Id<"users">[];
+}> {
+  const loadedGroups = (
+    await Promise.all(groupIds.map((groupId) => ctx.db.get(groupId)))
+  ).filter((group): group is Doc<"scholarGroups"> => group !== null);
+  const groups = (
+    await Promise.all(
+      loadedGroups.map(async (group) => {
+        if (!group.institutionId) return null;
+        const institutions = await Promise.all(
+          group.scholarIds.map((scholarId) =>
+            resolveScholarInstitutionId(ctx, scholarId),
+          ),
+        );
+        return institutions.every(
+          (institutionId) => institutionId === group.institutionId,
+        )
+          ? group
+          : null;
+      }),
+    )
+  ).filter((group): group is Doc<"scholarGroups"> => group !== null);
+  const institutionId = groups[0]?.institutionId;
+  const tenantGroups = groups.filter(
+    (group) => group.institutionId === institutionId,
+  );
+  const scholarIds = Array.from(
+    new Map(
+      tenantGroups
+        .flatMap((group) => group.scholarIds)
+        .map((scholarId) => [String(scholarId), scholarId]),
+    ).values(),
+  );
+  return { tenantGroups, institutionId, scholarIds };
+}
+
 export const collectChannelDay = internalQuery({
   args: {
     groupIds: v.array(v.id("scholarGroups")),
@@ -142,35 +558,9 @@ export const collectChannelDay = internalQuery({
     ctx,
     args,
   ): Promise<Omit<EodChannelInput, "dateLabel">> => {
-    const loadedGroups = (
-      await Promise.all(args.groupIds.map((groupId) => ctx.db.get(groupId)))
-    ).filter((group): group is Doc<"scholarGroups"> => group !== null);
-    const groups = (
-      await Promise.all(
-        loadedGroups.map(async (group) => {
-          if (!group.institutionId) return null;
-          const institutions = await Promise.all(
-            group.scholarIds.map((scholarId) =>
-              resolveScholarInstitutionId(ctx, scholarId),
-            ),
-          );
-          return institutions.every(
-            (institutionId) => institutionId === group.institutionId,
-          )
-            ? group
-            : null;
-        }),
-      )
-    ).filter((group): group is Doc<"scholarGroups"> => group !== null);
-    const institutionId = groups[0]?.institutionId;
-    const tenantGroups = groups.filter(
-      (group) => group.institutionId === institutionId,
-    );
-    const eligibleScholarIds = tenantGroups.flatMap((group) => group.scholarIds);
-    const scholarIds = Array.from(
-      new Map(
-        eligibleScholarIds.map((scholarId) => [String(scholarId), scholarId]),
-      ).values(),
+    const { tenantGroups, institutionId, scholarIds } = await channelRoster(
+      ctx,
+      args.groupIds,
     );
 
     const unitTitleCache = new Map<string, string | null>();
@@ -467,7 +857,7 @@ export const collectChannelDay = internalQuery({
       );
       if (assignmentScholars.length === 0) continue;
 
-      for (const entry of assignment.activitySchedule ?? []) {
+      for (const entry of await readSchedule(ctx, assignment)) {
         // `setAt` is when the entry actually went LIVE to scholars; a
         // planned-only entry (`startsAt` set, `setAt` absent) was never on
         // anyone's plate, so asking about its "missing completion" would be
@@ -556,7 +946,8 @@ export const collectChannelDay = internalQuery({
         scholarNameById.has(String(scholarId)),
       );
       if (assignmentScholars.length === 0) continue;
-      for (const entry of assignment.activitySchedule ?? []) {
+      const schedule = await readSchedule(ctx, assignment);
+      for (const entry of schedule) {
         const due =
           entry.mode === "homework"
             ? dueStatus(entry.dueAt, args.nowMs, timeZone)
@@ -574,7 +965,7 @@ export const collectChannelDay = internalQuery({
         const activity = await ctx.db.get(entry.activityId);
         if (
           !activity ||
-          !teacherCanMarkCompleteForGroup(assignment, activity) ||
+          !teacherCanMarkCompleteForGroup(assignment, activity, schedule) ||
           // The iPad Home (web + game rows on) is the scholar's Home.
           !(await unstartedAssignedRowSurface(ctx, activity, entry.mode, true))
         ) {
@@ -745,11 +1136,21 @@ export const stageParentCheckin = internalMutation({
   },
 });
 
+const buildSnapshotPostValidator = v.object({
+  scholarId: v.id("users"),
+  sessionId: v.id("sessions"),
+  storageId: v.id("_storage"),
+  title: v.string(),
+  caption: v.string(),
+});
+
 export const prepareReply = internalMutation({
   args: {
     checkinId: v.id("eodCheckins"),
     parentText: v.string(),
     replyText: v.string(),
+    buildSnapshots: v.optional(v.array(buildSnapshotPostValidator)),
+    weekScreenTimeText: v.optional(v.string()),
     queuedDigestIds: v.array(v.id("slackNotificationQueue")),
   },
   handler: async (ctx, args) => {
@@ -759,15 +1160,28 @@ export const prepareReply = internalMutation({
       return {
         parentText: checkin.parentText ?? args.parentText,
         replyText: checkin.replyText,
+        buildSnapshots: checkin.buildSnapshots,
+        weekScreenTimeText: checkin.weekScreenTimeText,
       };
     }
+    const buildSnapshots =
+      args.buildSnapshots && args.buildSnapshots.length > 0
+        ? args.buildSnapshots
+        : undefined;
     await ctx.db.patch(args.checkinId, {
       parentText: args.parentText,
       replyText: args.replyText,
+      buildSnapshots,
+      weekScreenTimeText: args.weekScreenTimeText,
       initialQueueIds: args.queuedDigestIds,
       lifecycle: "reply_pending",
     });
-    return { parentText: args.parentText, replyText: args.replyText };
+    return {
+      parentText: args.parentText,
+      replyText: args.replyText,
+      buildSnapshots,
+      weekScreenTimeText: args.weekScreenTimeText,
+    };
   },
 });
 
@@ -972,6 +1386,151 @@ export const runDaily = internalAction({
     let postedChannels = 0;
     let skippedChannels = 0;
 
+    // The day's build screenshots, chosen once when the reply is prepared.
+    // Best-effort: a failure here costs the pictures, never the check-in.
+    const chooseBuildSnapshots = async (
+      groupIds: Id<"scholarGroups">[],
+      dayStartMs: number | undefined,
+    ): Promise<EodBuildSnapshotPost[]> => {
+      if (dayStartMs === undefined) return [];
+      try {
+        const snapshots = await ctx.runQuery(
+          internal.eodCheckin.collectBuildSnapshots,
+          {
+            groupIds,
+            dayStartMs,
+            nowMs: Math.min(dayStartMs + 24 * 60 * 60 * 1000 - 1, Date.now()),
+          },
+        );
+        return snapshots.map(renderBuildSnapshotPost);
+      } catch (error: unknown) {
+        console.warn(
+          `[EodCheckin] build screenshots unavailable (the check-in posts without them): ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return [];
+      }
+    };
+
+    // Best-effort: the summary is the check-in, so builds that fail to post
+    // are logged and the summary still goes out. The screenshots go up as
+    // private files and post as ONE message of image blocks, which lands in
+    // order above the summary; shared files post whenever Slack gets to them,
+    // which was after the summary in a live probe (2026-11-09).
+    const postBuildSnapshots = async (
+      checkinId: Id<"eodCheckins">,
+      channel: string,
+      threadTs: string,
+      threadMessages: SlackMessage[],
+      deadline: number,
+    ): Promise<void> => {
+      try {
+        if (
+          messageWithDeliveryMetadata(
+            threadMessages,
+            EOD_MESSAGE_EVENT_TYPE,
+            deliveryId(checkinId, "builds"),
+          )
+        ) {
+          return;
+        }
+        // Re-checked now, since delivery can come hours after the choice.
+        const snapshots = await ctx.runQuery(
+          internal.eodCheckin.postableBuildSnapshots,
+          { checkinId },
+        );
+        const uploads = (
+          await Promise.all(
+            snapshots.map(async (post, index) => {
+              try {
+                const blob = await ctx.storage.get(post.storageId);
+                const bytes = blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+                const mimeType = bytes ? sniffImageMime(bytes) : null;
+                if (
+                  !bytes ||
+                  (mimeType !== "image/png" && mimeType !== "image/jpeg")
+                ) {
+                  console.warn(
+                    `[EodCheckin] build image ${index} for ${checkinId} is missing or not a PNG/JPEG; skipping it`,
+                  );
+                  return null;
+                }
+                const uploaded = await uploadFileToSlack(token, {
+                  bytes,
+                  filename: `rabbithole-build-${index}.${mimeType === "image/png" ? "png" : "jpg"}`,
+                  mimeType,
+                  title: post.title,
+                });
+                if (uploaded.ok && uploaded.fileId) {
+                  return { fileId: uploaded.fileId, post };
+                }
+                console.warn(
+                  `[EodCheckin] build image ${index} for ${checkinId} did not upload; skipping it`,
+                );
+              } catch (error: unknown) {
+                console.warn(
+                  `[EodCheckin] build image ${index} for ${checkinId} failed: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              }
+              return null;
+            }),
+          )
+        ).filter((upload) => upload !== null);
+        if (uploads.length === 0) return;
+        let error: string | undefined;
+        for (let attempt = 1; attempt <= BUILD_POST_ATTEMPTS; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, BUILD_POST_WAIT_MS));
+          // Past the deadline the summary has gone (or is going) without the
+          // pictures, and they must not land under it.
+          if (Date.now() >= deadline) return;
+          const posted = await postMessage(token, {
+            channel,
+            threadTs,
+            text: "Today's builds",
+            blocks: buildSnapshotBlocks(uploads),
+            metadata: deliveryMetadata(checkinId, "builds"),
+          });
+          if (posted.ok) return;
+          error = posted.error;
+          if (error !== "invalid_blocks") break;
+        }
+        console.warn(
+          `[EodCheckin] builds for ${checkinId} did not post (${error ?? "unknown error"}); the summary posts without them`,
+        );
+      } catch (error: unknown) {
+        console.warn(
+          `[EodCheckin] builds for ${checkinId} failed; the summary posts without them: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+
+    const postBuildSnapshotsInTime = async (
+      checkinId: Id<"eodCheckins">,
+      channel: string,
+      threadTs: string,
+      threadMessages: SlackMessage[],
+    ): Promise<void> => {
+      const deadline = Date.now() + BUILD_DELIVERY_BUDGET_MS;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        postBuildSnapshots(checkinId, channel, threadTs, threadMessages, deadline),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            console.warn(
+              `[EodCheckin] builds for ${checkinId} ran out of time; the summary posts without them`,
+            );
+            resolve();
+          }, BUILD_DELIVERY_BUDGET_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    };
+
     const processCheckin = async (
       checkinId: Id<"eodCheckins">,
       channelGroups: typeof groups,
@@ -1044,6 +1603,42 @@ export const runDaily = internalAction({
               queuedDigestLines: [],
             };
           }
+          // Fridays: the class's screen-time week, read apart from the day
+          // so a read that fails or runs long costs only the roundup (or,
+          // for last week, only the comparison), never the check-in.
+          if (input && dayStartMs !== undefined && !input.weekScreenTime) {
+            try {
+              const thisWeek = await ctx.runQuery(
+                internal.eodCheckin.collectWeekScreenTime,
+                { groupIds: checkin.groupIds, dayStartMs, weeksBack: 0 },
+              );
+              if (thisWeek) {
+                let lastWeek: EodWeekScreenTime | null = null;
+                try {
+                  lastWeek = await ctx.runQuery(
+                    internal.eodCheckin.collectWeekScreenTime,
+                    { groupIds: checkin.groupIds, dayStartMs, weeksBack: 1 },
+                  );
+                } catch (error: unknown) {
+                  console.warn(
+                    `[EodCheckin] last week's screen time for ${checkinId} unavailable (no comparison): ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
+                input = {
+                  ...input,
+                  weekScreenTime: withLastWeek(thisWeek, lastWeek),
+                };
+              }
+            } catch (error: unknown) {
+              console.warn(
+                `[EodCheckin] screen time for ${checkinId} unavailable (no roundup): ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          }
           if (!input || (!hasAnyActivity(input) && !checkin.threadTs)) {
             await ctx.runMutation(internal.eodCheckin.cancelCheckin, {
               checkinId,
@@ -1054,9 +1649,13 @@ export const runDaily = internalAction({
 
           let narrative = renderMechanicalFallback(input);
           try {
+            // The Friday screen-time roundup is its own message, rendered
+            // verbatim; the model never sees it, so it can't restate the
+            // numbers.
+            const { weekScreenTime: _week, ...narrativeInput } = input;
             const generated = await ctx.runAction(
               internal.eodCheckinNarrative.generate,
-              { input, institutionId: options.institutionId },
+              { input: narrativeInput, institutionId: options.institutionId },
             );
             if (
               generated.ok &&
@@ -1077,6 +1676,11 @@ export const runDaily = internalAction({
               `[EodCheckin] narrative orchestration failed (mechanical fallback): ${message}`,
             );
           }
+          const weekScreenTimeBlock = renderWeekScreenTime(input.weekScreenTime);
+          const buildSnapshots = await chooseBuildSnapshots(
+            checkin.groupIds,
+            dayStartMs,
+          );
           const allowedBase = siteUrl();
           const prepared = await ctx.runMutation(
             internal.eodCheckin.prepareReply,
@@ -1092,6 +1696,15 @@ export const runDaily = internalAction({
                   sanitizeEodSlackText(question, allowedBase),
                 ),
               ),
+              buildSnapshots,
+              ...(weekScreenTimeBlock
+                ? {
+                    weekScreenTimeText: sanitizeEodSlackText(
+                      weekScreenTimeBlock,
+                      allowedBase,
+                    ),
+                  }
+                : {}),
               queuedDigestIds: input.queuedDigestIds,
             },
           );
@@ -1179,12 +1792,21 @@ export const runDaily = internalAction({
           )
         ) {
           if (!(await ensureDeliveryAllowed())) return false;
+          // Pictures first, so the thread reads image → summary → questions,
+          // with the questions beside the reply box.
+          await postBuildSnapshotsInTime(
+            checkinId,
+            checkin.channelId,
+            threadTs,
+            replies.messages,
+          );
+          // The stored text is posted as written; only its closing hint moves
+          // into the grey line.
           const reply = await postMessage(token, {
             channel: checkin.channelId,
             threadTs,
-            text: replyText,
-            markdown: true,
             metadata: deliveryMetadata(checkinId, "reply"),
+            ...greyLineMessage(threadMessageParts(replyText), { markdown: true }),
           });
           if (!reply.ok) {
             await ctx.runMutation(internal.eodCheckin.scheduleRetry, {
@@ -1193,6 +1815,60 @@ export const runDaily = internalAction({
               retryAfterMs: reply.retryAfterMs,
             });
             return false;
+          }
+        }
+
+        // Fridays: the screen-time roundup goes to the channel as its own
+        // message, after the check-in, so teachers can talk it over in its
+        // own thread.
+        const weekScreenTimeText = checkin.weekScreenTimeText;
+        if (weekScreenTimeText) {
+          // Scan from the parent, which is always older than the roundup.
+          // Not `postedAt`: a stale reclaim moves it forward, past a roundup
+          // that already landed.
+          const history = await fetchConversationHistory(token, checkin.channelId, {
+            oldest: threadTs,
+          });
+          if (!history.ok) {
+            await ctx.runMutation(internal.eodCheckin.scheduleRetry, {
+              checkinId,
+              error: `Slack screen-time reconciliation failed: ${history.error ?? "unknown error"}`,
+              retryAfterMs: history.retryAfterMs,
+            });
+            return false;
+          }
+          let roundupTs = messageWithDeliveryMetadata(
+            history.messages,
+            EOD_MESSAGE_EVENT_TYPE,
+            deliveryId(checkinId, "screenTime"),
+          )?.ts;
+          if (!roundupTs) {
+            if (!(await ensureDeliveryAllowed())) return false;
+            const roundup = await postMessage(token, {
+              channel: checkin.channelId,
+              text: weekScreenTimeText,
+              markdown: true,
+              metadata: deliveryMetadata(checkinId, "screenTime"),
+            });
+            if (!roundup.ok) {
+              await ctx.runMutation(internal.eodCheckin.scheduleRetry, {
+                checkinId,
+                error: `Slack screen-time post failed: ${roundup.error ?? "unknown error"}`,
+                retryAfterMs: roundup.retryAfterMs,
+              });
+              return false;
+            }
+            roundupTs = roundup.ts;
+          }
+          // The charts follow in the roundup's thread, in their own action:
+          // drawing them needs Node, and a failure there costs only the
+          // pictures. It checks the thread first, so a rerun never doubles them.
+          if (roundupTs) {
+            await ctx.scheduler.runAfter(
+              0,
+              internal.eodScreenTimeCharts.postCharts,
+              { checkinId, channelId: checkin.channelId, roundupTs },
+            );
           }
         }
 
@@ -1324,6 +2000,10 @@ export const runDaily = internalAction({
         );
       }
     }
+
+    // The day's wonders ride on this run, after the check-ins so they land
+    // below them, in their own action so neither can hold up the other.
+    await ctx.scheduler.runAfter(0, internal.dayWonders.postForDay, {});
 
     return { postedChannels, skippedChannels };
   },

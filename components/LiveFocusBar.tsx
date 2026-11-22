@@ -3,7 +3,7 @@
 /**
  * LiveFocusBar — the teacher's "what's live right now" list for pushes (see
  * convex/pushes.ts `livePushesForScope`), with a "Wrap up" button per row so
- * a push is always reversible — the counterpart to MakeFocusDialog. Renders
+ * a push is always reversible — the counterpart to GiveNowDialog. Renders
  * nothing when nothing is live, same no-layout-shift convention as
  * FocusStrip / AppLauncher.
  */

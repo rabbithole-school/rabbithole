@@ -1,4 +1,6 @@
 import { convexTest } from "convex-test";
+import { readSchedule } from "../lib/scheduleStore";
+import { insertAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -64,7 +66,7 @@ describe("users.assignmentsForScholar — focus schedule liveness", () => {
         kind: "online",
         order: 0,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId],
@@ -96,16 +98,14 @@ describe("users.assignmentsForScholar — focus schedule liveness", () => {
     expect(planned.focus).toBeNull();
 
     await t.run(async (ctx) => {
-      const assignment = await ctx.db.get(assignmentId);
-      expect(assignment).not.toBeNull();
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: [
+      const [first] = await readSchedule(ctx, { _id: assignmentId });
+      expect(first).toBeDefined();
+      await setSchedule(ctx, assignmentId, [
           {
-            ...assignment!.activitySchedule![0],
+            ...first,
             setAt: now,
           },
-        ],
-      });
+        ]);
     });
 
     const live = await asTeacher.query(api.users.assignmentsForScholar, {
@@ -131,7 +131,7 @@ describe("users.assignmentsForScholar — focus schedule liveness", () => {
     // teacher Now pane via a bare ctx.db.get(a.unitId!).
     const { assignmentId } = await asTeacher.mutation(
       api.assignments.dispatchActivity,
-      { scholarId, title: "Sketch a tide pool" },
+      { scholarId, title: "Sketch a tide pool", finish: { kind: "inClass" } },
     );
 
     const result = await asTeacher.query(api.users.assignmentsForScholar, {
@@ -179,7 +179,7 @@ describe("users.assignmentsForScholar — focus schedule liveness", () => {
         kind: "online",
         order: 0,
       });
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId, targetedScholarId],

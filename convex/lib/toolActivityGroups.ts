@@ -75,10 +75,12 @@ export interface ToolGroup {
 
 export const SCHOLAR_TOOL_FAILURE_MARKER = "__SCHOLAR_TOOL_FAILURE_HIDDEN__";
 
-/** True when a tool result encodes a failure (the "Failed:"/"Error:" convention
- * emitted by the streaming tool handlers on a caught error). */
+/** True when a tool result encodes a failure (the "Failed:"/"Error:"/"Refused:"
+ * convention emitted by the streaming tool handlers on a caught error). A
+ * refusal means the action did not happen, so it counts as a failure: two
+ * refused create_scholar_activity calls must not read "✓ Added 2 activities". */
 export function isFailureResult(result?: string): boolean {
-  return !!result && /^\s*(failed|error)\s*:/i.test(result);
+  return !!result && /^\s*(failed|error|refused)\s*:/i.test(result);
 }
 
 /** Result stamped on a tool that ended without ever reporting a `toolComplete`.

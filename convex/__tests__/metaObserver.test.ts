@@ -236,7 +236,7 @@ describe("applyMetaAnalysis — consented idea capture", () => {
     expect(rows).toHaveLength(0);
   });
 
-  test("at the open-ideas cap (5) → no new row", async () => {
+  test("five open ideas is no cap — a consented sixth still lands", async () => {
     const t = convexTest(schema, modules);
     const kai = await seedUser(t, "scholar", { username: "kai5" });
     const chatId = await seedChat(t, kai);
@@ -253,13 +253,13 @@ describe("applyMetaAnalysis — consented idea capture", () => {
     });
     const res = await applyAnalysis(t, {
       chatId,
-      suggestions: [consented("One too many")],
+      suggestions: [consented("Another idea")],
     });
-    expect(res.captured).toBe(0);
+    expect(res.captured).toBe(1);
     const rows = await t.run(async (ctx) =>
       ctx.db.query("scholarSuggestions").collect(),
     );
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(6);
   });
 
   test("duplicate title (case-insensitive) of an open idea → no row", async () => {

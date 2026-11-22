@@ -2,7 +2,7 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import { normalizeLabel } from "../concepts";
 import { ONBOARDING_UNIT_SLUG } from "../onboardingData";
 
@@ -14,17 +14,16 @@ import { ONBOARDING_UNIT_SLUG } from "../onboardingData";
 // content, the gate is open; if it would render empty, the gate is closed.
 //
 // This suite asserts that biconditional by calling the REAL map queries
-// (api.practiceSkills.treeForScholar, api.concepts.skyFieldForScholar) and
-// comparing what they RENDER against api.mapGates.mine — so a future change to a
-// gate predicate, a map query, OR the seed that breaks honesty FAILS CI, not
-// just today's snapshot.
+// (api.practiceSkills.treeForScholar, and api.skyStars.forSelf — the kid's own
+// Sky both clients draw) and comparing what they RENDER against
+// api.mapGates.mine — so a future change to a gate predicate, a map query, OR
+// the seed that breaks honesty FAILS CI, not just today's snapshot.
 //
-// Two deliberate on-ramp/robustness triggers are NOT strict biconditionals and
-// are handled explicitly: a `practicePlacements` row (the check-in on-ramp the
-// Tree reveal fires on) always opens the Tree, and welcome-unit completion
-// always opens the Sky. In every real/seeded path a completed placement
-// co-writes mastery and welcome-completion co-plants seeds, so neither opens
-// ahead of a rendered map — which this suite also checks.
+// The Sky is a strict biconditional: unlocked exactly when forSelf draws a
+// star (TRA-708). One deliberate on-ramp is not, and is handled explicitly: a
+// `practicePlacements` row (the check-in on-ramp the Tree reveal fires on)
+// always opens the Tree. In every real/seeded path a completed placement
+// co-writes mastery, so it never opens ahead of a rendered map.
 // ─────────────────────────────────────────────────────────────────────────
 
 const modules = (
@@ -34,6 +33,8 @@ const modules = (
 ).glob("../**/*.ts");
 
 const TEST_DOMAIN = "honesty-test-domain";
+
+type T = ReturnType<typeof convexTest>;
 
 // ── render predicates, derived from the REAL query OUTPUT ──────────────────
 
@@ -55,37 +56,18 @@ function treeRendersContent(tree: {
   );
 }
 
-/** The Sky renders EXPLORATION content when it lights a GOLD observation star
- *  or shows a SEED star. The night-museum layers deliberately do NOT count
- *  (Andy's ruling, 2026-07-15): the Sky gate keys off exploration evidence
- *  only — the mastery "you built this" floats (seedMeta kind "mastery",
- *  which also merge into `lit`) and the starter warmth layer (kind
- *  "starter") are decoration on an already-earned sky, never what reveals
- *  it. So gold-lit = litCount minus the mastery floats. */
-function skyRendersContent(sky: {
-  litCount?: number;
-  seeds?: unknown[];
-  seedMeta?: Record<string, { kind?: string }>;
-}): boolean {
-  const meta = Object.values(sky.seedMeta ?? {});
-  const masteryFloats = meta.filter((m) => m.kind === "mastery").length;
-  const goldLit = (sky.litCount ?? 0) - masteryFloats;
-  return (
-    goldLit > 0 ||
-    (sky.seeds?.length ?? 0) > 0 ||
-    meta.some((m) => m.kind === "seed")
-  );
+/** The kid's own Sky renders content when it draws at least one star. */
+function skyRendersContent(stars: unknown[]): boolean {
+  return stars.length > 0;
 }
 
 // ── fixtures ───────────────────────────────────────────────────────────────
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username: string) {
-  return await t.run(async (ctx) =>
-    ctx.db.insert("users", { name: username, username, role: "scholar" }),
-  );
+async function seedUser(t: T, username: string, role: Doc<"users">["role"] = "scholar") {
+  return await t.run(async (ctx) => ctx.db.insert("users", { name: username, username, role }));
 }
 
-async function asScholar(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: T, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) =>
     ctx.db.insert("authSessions", {
       userId,
@@ -99,7 +81,7 @@ async function asScholar(t: ReturnType<typeof convexTest>, userId: Id<"users">) 
 }
 
 /** A minimal practice tree graph (n1 → n2) so treeForScholar renders nodes. */
-async function seedPracticeGraph(t: ReturnType<typeof convexTest>) {
+async function seedPracticeGraph(t: T) {
   await t.run(async (ctx) => {
     await ctx.db.insert("knowledgeNodes", {
       nodeKey: "n1",
@@ -124,30 +106,7 @@ async function seedPracticeGraph(t: ReturnType<typeof convexTest>) {
   });
 }
 
-/** A PLACED atlas node (skyX/skyY set) whose normalized label an observation
- *  can light. Returns the concept label to observe. */
-async function seedPlacedAtlasNode(
-  t: ReturnType<typeof convexTest>,
-  label: string,
-) {
-  await t.run(async (ctx) => {
-    await ctx.db.insert("knowledgeNodes", {
-      nodeKey: `atlas:${label}`,
-      label,
-      normalizedLabel: normalizeLabel(label),
-      domain: "exploration",
-      source: "concept",
-      skyX: 50,
-      skyY: 50,
-    });
-  });
-  return label;
-}
-
-async function addMasteryProgress(
-  t: ReturnType<typeof convexTest>,
-  scholarId: Id<"users">,
-) {
+async function addMasteryProgress(t: T, scholarId: Id<"users">) {
   await t.run(async (ctx) =>
     ctx.db.insert("practiceMastery", {
       scholarId,
@@ -163,10 +122,7 @@ async function addMasteryProgress(
   );
 }
 
-async function addPlacement(
-  t: ReturnType<typeof convexTest>,
-  scholarId: Id<"users">,
-) {
+async function addPlacement(t: T, scholarId: Id<"users">) {
   await t.run(async (ctx) =>
     ctx.db.insert("practicePlacements", {
       scholarId,
@@ -178,32 +134,99 @@ async function addPlacement(
   );
 }
 
-async function addSeed(
-  t: ReturnType<typeof convexTest>,
+type StarRow = { hidden?: boolean; placed?: boolean };
+
+function starRowFields({ hidden = false, placed = true }: StarRow) {
+  return { ...(hidden ? { hidden: true } : {}), ...(placed ? { x: 3, y: 5 } : {}) };
+}
+
+/** A wonder the kid asked (seed + chat) and its row on their Sky. */
+async function addWonderStar(
+  t: T,
   scholarId: Id<"users">,
-  status: "pending" | "active" | "dismissed" | "completed" = "pending",
+  row: StarRow = {},
+  chat: Partial<Doc<"sessions">> = {},
 ) {
-  await t.run(async (ctx) =>
-    ctx.db.insert("seeds", {
+  await t.run(async (ctx) => {
+    const seedId = await ctx.db.insert("seeds", {
+      scholarId,
+      origin: "wonder",
+      status: "active",
+      topic: "How do bees find their way home?",
+      suggestionType: "frontier",
+      rationale: "",
+    });
+    await ctx.db.insert("sessions", {
+      userId: scholarId,
+      seedId,
+      title: "Bees",
+      isArchived: false,
+      ...chat,
+    });
+    await ctx.db.insert("skyStars", {
+      scholarId,
+      seedId,
+      label: "Bees finding home",
+      ...starRowFields(row),
+    });
+  });
+}
+
+/** One of the kid's own older Quests that they wrote in, and its row. */
+async function addQuestStar(t: T, scholarId: Id<"users">, row: StarRow = {}) {
+  await t.run(async (ctx) => {
+    const unitId = await ctx.db.insert("units", {
+      teacherId: scholarId,
+      title: "My bee maze game",
+      isActive: true,
+      authorScholarId: scholarId,
+      authorRole: "author",
+    });
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: scholarId,
+      unitId,
+      title: "My bee maze game",
+      isArchived: false,
+    });
+    await ctx.db.insert("messages", {
+      sessionId,
+      role: "user",
+      content: "I want the bees to dodge the spiders",
+      flagged: false,
+    });
+    await ctx.db.insert("skyStars", {
+      scholarId,
+      unitId,
+      label: "Bee maze game",
+      ...starRowFields(row),
+    });
+  });
+}
+
+/** Everything the OLD Sky unlocked on: a live suggestion seed, an observation
+ *  lighting a placed atlas node, and the Welcome unit's badge. */
+async function addOldSkyEvidence(t: T, scholarId: Id<"users">) {
+  await t.run(async (ctx) => {
+    await ctx.db.insert("seeds", {
       scholarId,
       origin: "ai",
-      status,
+      status: "pending",
       topic: "Why do kettles boil faster up a mountain?",
       suggestionType: "leap",
       rationale: "curiosity",
-    }),
-  );
-}
-
-async function addObservation(
-  t: ReturnType<typeof convexTest>,
-  scholarId: Id<"users">,
-  conceptLabel: string,
-) {
-  await t.run(async (ctx) =>
-    ctx.db.insert("masteryObservations", {
+    });
+    await ctx.db.insert("knowledgeNodes", {
+      nodeKey: "atlas:Photosynthesis",
+      label: "Photosynthesis",
+      normalizedLabel: normalizeLabel("Photosynthesis"),
+      domain: "exploration",
+      source: "concept",
+      skyX: 50,
+      skyY: 50,
+    });
+    await ctx.db.insert("masteryObservations", {
       scholarId,
-      conceptLabel,
+      conceptLabel: "Photosynthesis",
       domain: "exploration",
       observedAt: Date.now(),
       transcriptExcerpt: "…",
@@ -214,15 +237,7 @@ async function addObservation(
       attemptContext: "session",
       studentInitiated: false,
       isSuperseded: false,
-    }),
-  );
-}
-
-async function addWelcomeBadge(
-  t: ReturnType<typeof convexTest>,
-  scholarId: Id<"users">,
-) {
-  await t.run(async (ctx) => {
+    });
     const unitId = await ctx.db.insert("units", {
       title: "Welcome to Rabbithole",
       slug: ONBOARDING_UNIT_SLUG,
@@ -240,13 +255,13 @@ async function addWelcomeBadge(
 }
 
 // Call the real queries + the gate for one scholar.
-async function inspect(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
-  const me = await asScholar(t, scholarId);
+async function inspect(t: T, scholarId: Id<"users">) {
+  const me = await asUser(t, scholarId);
   const tree = await me.query(api.practiceSkills.treeForScholar, {
     scholarId,
     domain: TEST_DOMAIN,
   });
-  const sky = await me.query(api.concepts.skyFieldForScholar, { scholarId });
+  const stars = await me.query(api.skyStars.forSelf, {});
   const gate = await me.query(api.mapGates.mine, {});
   // Read placement without a typed index — the helper's `t` is schema-unbound,
   // so `.withIndex` wouldn't typecheck here; the test table is tiny.
@@ -256,15 +271,14 @@ async function inspect(t: ReturnType<typeof convexTest>, scholarId: Id<"users">)
   const hasPlacement = placements.some((p) => p.scholarId === scholarId);
   return {
     treeRenders: treeRendersContent(tree),
-    skyRenders: skyRendersContent(sky),
+    skyRenders: skyRendersContent(stars),
     gate,
     hasPlacement,
   };
 }
 
-/** Assert the honesty biconditional for one scholar (with the two documented
- *  on-ramp exceptions: placement always opens the Tree; a welcome badge always
- *  opens the Sky). */
+/** Assert the honesty biconditional for one scholar: the Sky strictly, the
+ *  Tree with its one documented on-ramp (placement always opens it). */
 function assertHonest(
   label: string,
   s: {
@@ -272,28 +286,20 @@ function assertHonest(
     skyRenders: boolean;
     gate: { sky: boolean; tree: boolean };
     hasPlacement: boolean;
-    hasWelcomeBadge?: boolean;
   },
 ) {
-  // Never lock a map that renders content (the critical direction Andy flagged).
+  expect(s.gate.sky, `${label}: Sky gate disagrees with what the Sky draws`).toBe(
+    s.skyRenders,
+  );
+  // Never lock a Tree that renders content (the critical direction Andy flagged).
   if (s.treeRenders) {
     expect(s.gate.tree, `${label}: tree renders but is LOCKED`).toBe(true);
   }
-  if (s.skyRenders) {
-    expect(s.gate.sky, `${label}: sky renders but is LOCKED`).toBe(true);
-  }
-  // Never unlock an empty map — except the placement on-ramp (Tree) / welcome
-  // trigger (Sky).
+  // Never unlock an empty Tree, except through the placement on-ramp.
   if (s.gate.tree && !s.treeRenders) {
     expect(s.hasPlacement, `${label}: tree UNLOCKED but empty & no placement`).toBe(
       true,
     );
-  }
-  if (s.gate.sky && !s.skyRenders) {
-    expect(
-      s.hasWelcomeBadge ?? false,
-      `${label}: sky UNLOCKED but empty & no welcome badge`,
-    ).toBe(true);
   }
 }
 
@@ -303,7 +309,7 @@ describe("map gates — renderable-evidence honesty (archetypes)", () => {
   test("blank scholar: both maps render empty and are locked", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const id = await seedScholar(t, "blank");
+    const id = await seedUser(t, "blank");
     const s = await inspect(t, id);
     expect(s.treeRenders).toBe(false);
     expect(s.skyRenders).toBe(false);
@@ -312,19 +318,14 @@ describe("map gates — renderable-evidence honesty (archetypes)", () => {
     assertHonest("blank", s);
   });
 
-  test("mastery-with-progress: tree renders → tree unlocked (sky stays locked — fluency isn't exploration)", async () => {
+  test("mastery-with-progress: tree renders → tree unlocked (sky stays locked)", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const id = await seedScholar(t, "driller");
+    const id = await seedUser(t, "driller");
     await addMasteryProgress(t, id);
     const s = await inspect(t, id);
     expect(s.treeRenders).toBe(true);
     expect(s.gate.tree).toBe(true);
-    // The fixture row is demonstrated-fluent, so the sky QUERY would render a
-    // night-museum mastery float — but museum layers are decoration, not
-    // exploration evidence (see skyRendersContent), so a pure driller's sky
-    // stays locked. No seeds/lit observations → renders no exploration
-    // content → locked (honest).
     expect(s.skyRenders).toBe(false);
     expect(s.gate.sky).toBe(false);
     assertHonest("driller", s);
@@ -333,7 +334,7 @@ describe("map gates — renderable-evidence honesty (archetypes)", () => {
   test("placement-only (mid check-in, no mastery): tree gate opens via the on-ramp", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const id = await seedScholar(t, "placing");
+    const id = await seedUser(t, "placing");
     await addPlacement(t, id);
     const s = await inspect(t, id);
     expect(s.gate.tree).toBe(true);
@@ -341,95 +342,89 @@ describe("map gates — renderable-evidence honesty (archetypes)", () => {
     assertHonest("placing", s);
   });
 
-  test("seed-only: sky shows a seed star → sky unlocked (tree stays locked)", async () => {
+  test("a wonder star: the Sky draws it → Sky unlocked (tree stays locked)", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const id = await seedScholar(t, "curious");
-    await addSeed(t, id);
+    const id = await seedUser(t, "curious");
+    await addWonderStar(t, id);
     const s = await inspect(t, id);
     expect(s.skyRenders).toBe(true);
     expect(s.gate.sky).toBe(true);
-    expect(s.treeRenders).toBe(false);
     expect(s.gate.tree).toBe(false);
     assertHonest("curious", s);
   });
 
-  test("dismissed/completed seed ONLY: sky renders empty → LOCKED (#929)", async () => {
-    // buildScholarAtlas renders only pending/active seeds, so a scholar whose
-    // only seed is dismissed or completed has an empty sky — the gate must stay
-    // locked (a status-blind "any seed" read would falsely unlock it).
+  test("a Quest star: the Sky draws it → Sky unlocked", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const id = await seedScholar(t, "spent");
-    await addSeed(t, id, "dismissed");
-    await addSeed(t, id, "completed");
+    const id = await seedUser(t, "builder");
+    await addQuestStar(t, id);
+    const s = await inspect(t, id);
+    expect(s.skyRenders).toBe(true);
+    expect(s.gate.sky).toBe(true);
+    assertHonest("builder", s);
+  });
+
+  test("hidden and not-yet-placed rows only: Sky draws nothing → LOCKED", async () => {
+    const t = convexTest(schema, modules);
+    await seedPracticeGraph(t);
+    const id = await seedUser(t, "waiting");
+    await addWonderStar(t, id, { hidden: true });
+    await addWonderStar(t, id, { placed: false });
+    await addQuestStar(t, id, { placed: false });
     const s = await inspect(t, id);
     expect(s.skyRenders).toBe(false);
     expect(s.gate.sky).toBe(false);
-    assertHonest("spent", s);
+    assertHonest("waiting", s);
   });
 
-  test("observation on a PLACED atlas node: sky lights → sky unlocked", async () => {
+  test("a placed row whose chat no longer counts (a test drive): Sky draws nothing → LOCKED", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const label = await seedPlacedAtlasNode(t, "Photosynthesis");
-    const id = await seedScholar(t, "litstar");
-    await addObservation(t, id, label);
-    const s = await inspect(t, id);
-    expect(s.skyRenders).toBe(true);
-    expect(s.gate.sky).toBe(true);
-    assertHonest("litstar", s);
-  });
-
-  test("observation with NO placed atlas node (unprojected sky): renders empty → LOCKED", async () => {
-    // The deployment-faithful case: on a worktree the atlas isn't projected, so
-    // an observation lights nothing and the sky must stay locked.
-    const t = convexTest(schema, modules);
-    await seedPracticeGraph(t);
-    const id = await seedScholar(t, "darkobs");
-    await addObservation(t, id, "Some Concept With No Placed Node");
+    const id = await seedUser(t, "rehearsal");
+    await addWonderStar(t, id, {}, { isTestDrive: true });
     const s = await inspect(t, id);
     expect(s.skyRenders).toBe(false);
-    expect(s.gate.sky).toBe(false); // honest: empty sky ⇒ locked
-    assertHonest("darkobs", s);
+    expect(s.gate.sky).toBe(false);
+    assertHonest("rehearsal", s);
   });
 
-  test("welcome badge + planted seed (real onboarding path): sky unlocked & renders", async () => {
+  test("the old Sky's evidence only (seed, atlas light, Welcome badge): Sky draws nothing → LOCKED", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const id = await seedScholar(t, "graduate");
-    await addWelcomeBadge(t, id);
-    await addSeed(t, id); // the observer plants seeds during the welcome quest
+    const id = await seedUser(t, "oldsky");
+    await addOldSkyEvidence(t, id);
     const s = await inspect(t, id);
-    expect(s.skyRenders).toBe(true);
-    expect(s.gate.sky).toBe(true);
-    assertHonest("graduate", { ...s, hasWelcomeBadge: true });
+    expect(s.skyRenders).toBe(false);
+    expect(s.gate.sky).toBe(false);
+    assertHonest("oldsky", s);
   });
 
-  test("bare welcome badge (no seeds): sky opens via the documented trigger", async () => {
+  test("rich scholar (mastery + a star + old evidence): both maps render & unlock", async () => {
     const t = convexTest(schema, modules);
     await seedPracticeGraph(t);
-    const id = await seedScholar(t, "bare-grad");
-    await addWelcomeBadge(t, id);
-    const s = await inspect(t, id);
-    expect(s.gate.sky).toBe(true);
-    assertHonest("bare-grad", { ...s, hasWelcomeBadge: true });
-  });
-
-  test("rich scholar (mastery + seed + lit observation): both maps render & unlock", async () => {
-    const t = convexTest(schema, modules);
-    await seedPracticeGraph(t);
-    const label = await seedPlacedAtlasNode(t, "Fractions");
-    const id = await seedScholar(t, "rich");
+    const id = await seedUser(t, "rich");
     await addMasteryProgress(t, id);
-    await addSeed(t, id);
-    await addObservation(t, id, label);
+    await addOldSkyEvidence(t, id);
+    await addWonderStar(t, id, { hidden: true });
+    await addQuestStar(t, id);
     const s = await inspect(t, id);
     expect(s.treeRenders).toBe(true);
     expect(s.skyRenders).toBe(true);
     expect(s.gate.sky).toBe(true);
     expect(s.gate.tree).toBe(true);
     assertHonest("rich", s);
+  });
+
+  test("not a scholar: the Sky draws nothing for them → Sky locked, even with a placed row", async () => {
+    const t = convexTest(schema, modules);
+    const id = await seedUser(t, "grownup", "teacher");
+    await addWonderStar(t, id);
+    const me = await asUser(t, id);
+    const stars = await me.query(api.skyStars.forSelf, {});
+    const gate = await me.query(api.mapGates.mine, {});
+    expect(skyRendersContent(stars)).toBe(false);
+    expect(gate.sky).toBe(false);
   });
 });
 
@@ -451,16 +446,14 @@ describe("map gates — honesty over the rich-cohort seed", () => {
     expect(scholars.length).toBeGreaterThan(0);
 
     for (const scholar of scholars) {
-      const me = await asScholar(t, scholar._id);
+      const me = await asUser(t, scholar._id);
       // The seed builds no practice graph, so the Tree renders empty for all —
       // and none have mastery/placement, so all Tree gates are closed (honest).
       const tree = await me.query(api.practiceSkills.treeForScholar, {
         scholarId: scholar._id,
         allDomains: true,
       });
-      const sky = await me.query(api.concepts.skyFieldForScholar, {
-        scholarId: scholar._id,
-      });
+      const stars = await me.query(api.skyStars.forSelf, {});
       const gate = await me.query(api.mapGates.mine, {});
       const placement = await t.run(async (ctx) =>
         ctx.db
@@ -468,26 +461,12 @@ describe("map gates — honesty over the rich-cohort seed", () => {
           .withIndex("by_scholar_domain", (q) => q.eq("scholarId", scholar._id))
           .first(),
       );
-      const badge = await t.run(async (ctx) => {
-        const unit = await ctx.db
-          .query("units")
-          .withIndex("by_slug", (q) => q.eq("slug", ONBOARDING_UNIT_SLUG))
-          .first();
-        if (!unit) return null;
-        return ctx.db
-          .query("scholarUnitBadges")
-          .withIndex("by_scholar_unit", (q) =>
-            q.eq("scholarId", scholar._id).eq("unitId", unit._id),
-          )
-          .first();
-      });
 
       assertHonest(`seed:${scholar.username ?? scholar._id}`, {
         treeRenders: treeRendersContent(tree),
-        skyRenders: skyRendersContent(sky),
+        skyRenders: skyRendersContent(stars),
         gate,
         hasPlacement: placement !== null,
-        hasWelcomeBadge: badge !== null,
       });
     }
   });

@@ -7,10 +7,11 @@
 // Shared by both presenting surfaces: slides (SlidesPresentationNative) and a
 // live app (AppPresentControls).
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 
 import { usePresentationAsam } from "@/contexts/AsamControllerContext";
+import { getTvButton } from "@/lib/presentationExternalDisplay";
 
 const SYSTEM_UI_RELEASE_TIMEOUT_MS = 30_000;
 
@@ -19,8 +20,12 @@ export function usePresentationSystemUI() {
   const awaitingSystemUIReturn = useRef(false);
   const systemUIBecameInactive = useRef(false);
   const systemUIReleaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Whether this surface's release is open right now, so a hint about Control
+  // Center can go away the moment Control Center is out of reach again.
+  const [released, setReleased] = useState(false);
 
   const restoreSystemUI = useCallback(() => {
+    setReleased(false);
     awaitingSystemUIReturn.current = false;
     systemUIBecameInactive.current = false;
     if (systemUIReleaseTimer.current) {
@@ -48,6 +53,7 @@ export function usePresentationSystemUI() {
   const requestSystemUI = useCallback(() => {
     awaitingSystemUIReturn.current = true;
     systemUIBecameInactive.current = false;
+    setReleased(true);
     releaseForSystemUI();
     if (systemUIReleaseTimer.current) clearTimeout(systemUIReleaseTimer.current);
     systemUIReleaseTimer.current = setTimeout(
@@ -56,5 +62,39 @@ export function usePresentationSystemUI() {
     );
   }, [releaseForSystemUI, restoreSystemUI]);
 
-  return { requestSystemUI, restoreSystemUI };
+  return { requestSystemUI, restoreSystemUI, released };
+}
+
+/**
+ * The TV button both presenting surfaces show: "Connect TV" with no TV and
+ * "Disconnect TV" with one attached. Either press opens the lock for Control
+ * Center, and the lock comes back once the TV arrives or leaves (or the
+ * scholar comes back from Control Center, or the timeout runs out).
+ */
+export function useTvButton(hasExternalScreen: boolean) {
+  const { requestSystemUI, restoreSystemUI, released } =
+    usePresentationSystemUI();
+  // The TV state the scholar pressed the button in. Its guidance shows only
+  // while that state holds and the lock is still open for Control Center.
+  const [pressedWith, setPressedWith] = useState<boolean | null>(null);
+  const previous = useRef(hasExternalScreen);
+
+  useEffect(() => {
+    if (previous.current === hasExternalScreen) return;
+    previous.current = hasExternalScreen;
+    restoreSystemUI();
+  }, [hasExternalScreen, restoreSystemUI]);
+
+  const press = useCallback(() => {
+    requestSystemUI();
+    setPressedWith(hasExternalScreen);
+  }, [hasExternalScreen, requestSystemUI]);
+
+  const { label, guidance } = getTvButton(hasExternalScreen);
+  return {
+    label,
+    guidance: released && pressedWith === hasExternalScreen ? guidance : null,
+    press,
+    restoreSystemUI,
+  };
 }

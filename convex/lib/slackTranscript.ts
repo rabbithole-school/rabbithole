@@ -10,7 +10,10 @@
 // likewise legal ONLY on user turns, so the bot's own attachments are hoisted
 // onto the next one — see the hoist pass in buildSlackTranscript.
 
-import type { SlackAttachment, SlackMessage } from "./slackApi";
+import type { SlackAttachment, SlackFile, SlackMessage } from "./slackApi";
+import { escapeSlackText } from "./slackText";
+import { GREY_BLOCK_ID_PREFIX } from "./slackGreyLine";
+import { markStoppedAssistantContent } from "../../shared/stoppedTurn";
 import type { SlackSurface } from "./slackTools";
 import type { ImageMime } from "./imageBytes";
 import { imageMediaType } from "./ingestMimes";
@@ -152,8 +155,9 @@ export function cleanSlackText(
   return out.trim();
 }
 
-// A tool-activity CONTEXT line, exactly as buildToolContext (slackBot.ts) emits
-// it: "⋯  <running>" or "✓  <done>", where the leader is U+22EF / U+2713 — NOT
+// A tool-activity CONTEXT line, exactly as the bot posted them before tool
+// activity moved into task cards (2026-11): "⋯  <running>" or "✓  <done>",
+// where the leader is U+22EF / U+2713 — NOT
 // the ✅ (:white_check_mark:) the bot uses in prose, so this can't match a real
 // checklist bullet.
 const TOOL_ACTIVITY_LINE = /^\s*(?:\u22EF|\u2713) {2}/u;
@@ -161,9 +165,9 @@ const TOOL_ACTIVITY_LINE = /^\s*(?:\u22EF|\u2713) {2}/u;
 /**
  * Strip the bot's own tool-activity chrome from a reconstructed assistant turn.
  *
- * The bot posts a small live "progress" block ("⋯  Checking website preview…",
- * "✓  Website PR task dispatched.") as its OWN Slack message via
- * buildToolContext. That's UI chrome, never conversation — but the thread the
+ * The bot used to post a small live "progress" block ("⋯  Checking website
+ * preview…", "✓  Website PR task dispatched.") as its OWN Slack message, and
+ * older threads still hold them. That's UI chrome, never conversation — but the thread the
  * transcript is rebuilt from contains those messages, and replaying them as
  * assistant turns poison the model two ways:
  *   1. it learned to OPEN its own replies with "⋯  Checking website preview…"
@@ -180,6 +184,158 @@ export function stripToolActivityChrome(text: string): string {
     .split("\n")
     .filter((line) => !TOOL_ACTIVITY_LINE.test(line))
     .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+type RichTextNode = Record<string, unknown>;
+
+function richInline(el: RichTextNode): string {
+  switch (el.type) {
+    case "text": {
+      let t = escapeSlackText(String(el.text ?? ""));
+      const style = (el.style ?? {}) as Record<string, boolean>;
+      if (style.code) t = `\`${t}\``;
+      if (style.bold) t = `*${t}*`;
+      if (style.italic) t = `_${t}_`;
+      if (style.strike) t = `~${t}~`;
+      return t;
+    }
+    case "link":
+      return el.text
+        ? `<${String(el.url)}|${escapeSlackText(String(el.text))}>`
+        : `<${String(el.url)}>`;
+    case "user":
+      return `<@${String(el.user_id)}>`;
+    case "channel":
+      return `<#${String(el.channel_id)}>`;
+    case "usergroup":
+      return `<!subteam^${String(el.usergroup_id)}>`;
+    case "broadcast":
+      return `<!${String(el.range)}>`;
+    case "emoji":
+      return `:${String(el.name)}:`;
+    default:
+      return typeof el.text === "string" ? escapeSlackText(el.text) : String(el.fallback ?? "");
+  }
+}
+
+function richInlineRun(node: RichTextNode): string {
+  const els = Array.isArray(node.elements) ? (node.elements as RichTextNode[]) : [];
+  return els.map(richInline).join("");
+}
+
+function richElement(node: RichTextNode): string {
+  switch (node.type) {
+    case "rich_text_list": {
+      const items = Array.isArray(node.elements) ? (node.elements as RichTextNode[]) : [];
+      const pad = "    ".repeat(Number(node.indent ?? 0));
+      const first = Number(node.offset ?? 0) + 1;
+      return items
+        .map((item, i) =>
+          `${pad}${node.style === "ordered" ? `${first + i}.` : "•"} ${richInlineRun(item)}`,
+        )
+        .join("\n");
+    }
+    case "rich_text_preformatted":
+      return `\`\`\`\n${richInlineRun(node)}\n\`\`\``;
+    case "rich_text_quote":
+      return richInlineRun(node)
+        .split("\n")
+        .map((line) => `> ${line}`)
+        .join("\n");
+    default:
+      return richInlineRun(node);
+  }
+}
+
+/** Is this a reply the person stopped with Slack's Stop button? Slack
+ * records that on the message itself (`SlackStreamer.halt`). */
+export function isStoppedReply(m: SlackMessage): boolean {
+  return m.ai_context?.result_status === "stopped_by_user";
+}
+
+/**
+ * The prose of one of the bot's own replies that carries task cards, rebuilt
+ * from its text blocks with the cards left out. Null for a message without
+ * cards (its `text` is used as before).
+ *
+ * The bot shows tool progress as task cards inside its streamed reply, and
+ * Slack's `text` for such a message is its blocks joined by single spaces,
+ * card titles included (`…the unit now. Created unit "Tide pools" Added 3
+ * activities The unit is…`, observed live 2026-11-08). Like the old
+ * tool-activity lines, those titles are UI chrome, never conversation, and
+ * replaying them would teach the model to write them. Cutting titles out of
+ * `text` by matching strings can't tell a title from the same words in the
+ * prose, so the prose is rebuilt from the `rich_text` (or `markdown`) blocks
+ * instead, in Slack's mrkdwn, the same shape `text` has.
+ */
+export function cardedReplyText(blocks: unknown): string | null {
+  if (!Array.isArray(blocks)) return null;
+  const list = blocks as RichTextNode[];
+  if (!list.some((b) => b?.type === "task_card")) return null;
+  return tidyRebuilt(
+    list
+      .map(blockProse)
+      .filter((part): part is string => part !== null)
+      .join("\n\n"),
+  );
+}
+
+/**
+ * One of the bot's own messages with a grey line (`lib/slackGreyLine.ts`),
+ * rebuilt from its blocks in mrkdwn. Null for any other message.
+ *
+ * Beside blocks, Slack keeps the `text` the bot sent but folds its line breaks
+ * into spaces (live-probed 2026-11-15), so a wrap-up's numbered questions or a
+ * quoted parent message would come back as one run-on line. The blocks keep
+ * the lines. Only messages whose grey line carries the
+ * `GREY_BLOCK_ID_PREFIX` block id are read this way: other cards with grey
+ * lines, such as the QuickBooks cards, keep their `text`, which carries marks
+ * the blocks drop.
+ */
+export function greyLineReplyText(blocks: unknown): string | null {
+  if (!Array.isArray(blocks)) return null;
+  const list = blocks as RichTextNode[];
+  const marked = list.some(
+    (b) => b?.type === "context" && String(b.block_id ?? "").startsWith(GREY_BLOCK_ID_PREFIX),
+  );
+  if (!marked) return null;
+  const parts: string[] = [];
+  for (const block of list) {
+    if (block?.type === "context") {
+      const els = Array.isArray(block.elements) ? (block.elements as RichTextNode[]) : [];
+      const line = els
+        .map((el) => (typeof el?.text === "string" ? el.text : ""))
+        .filter(Boolean)
+        .join(" ");
+      if (line) parts.push(line);
+      continue;
+    }
+    const prose = blockProse(block);
+    if (prose !== null) parts.push(prose);
+  }
+  return tidyRebuilt(parts.join("\n"));
+}
+
+/** A text block's prose in mrkdwn: rich_text (what Slack stores a markdown
+ *  block or markdown_text as), markdown, or section. Null for anything else. */
+function blockProse(block: RichTextNode | undefined): string | null {
+  if (block?.type === "rich_text") {
+    const els = Array.isArray(block.elements) ? (block.elements as RichTextNode[]) : [];
+    return els.map(richElement).join("\n");
+  }
+  if (block?.type === "markdown" && typeof block.text === "string") return block.text;
+  if (block?.type === "section") {
+    const text = (block.text as { text?: unknown } | undefined)?.text;
+    if (typeof text === "string") return text;
+  }
+  return null;
+}
+
+function tidyRebuilt(text: string): string {
+  return text
+    .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -236,9 +392,14 @@ export function renderSlackAttachments(
 ): string[] {
   const out: string[] = [];
   for (const a of (attachments ?? []).slice(0, MAX_ATTACHMENTS_PER_MESSAGE)) {
-    const body = truncate(
-      cleanSlackText(a.text ?? a.fallback ?? "", botUserId, names),
-    );
+    // An app's link card (ours: convex/slackUnfurl.ts) can carry only blocks,
+    // and then Slack's stored fallback is "[no preview available]". Read as
+    // text, that told the bot a card it could see on screen had failed.
+    const fallback =
+      a.fallback === undefined || a.fallback === NO_PREVIEW_FALLBACK
+        ? blocksText(a.blocks)
+        : a.fallback;
+    const body = truncate(cleanSlackText(a.text ?? fallback, botUserId, names));
     const fileNote = describeAttachmentFiles(a);
     if (!body && !fileNote && !a.title) continue;
 
@@ -254,6 +415,22 @@ export function renderSlackAttachments(
   return out;
 }
 
+/** What Slack stores as the fallback of an attachment that was given none. */
+const NO_PREVIEW_FALLBACK = "[no preview available]";
+
+/** The words in an attachment's section and context blocks, one per line. */
+function blocksText(blocks: unknown[] | undefined): string {
+  const lines: string[] = [];
+  for (const block of blocks ?? []) {
+    const b = block as { text?: { text?: unknown }; elements?: Array<{ text?: unknown }> };
+    if (typeof b.text?.text === "string") lines.push(b.text.text);
+    for (const el of b.elements ?? []) {
+      if (typeof el?.text === "string") lines.push(el.text);
+    }
+  }
+  return lines.join("\n");
+}
+
 function forwardHeader(a: SlackAttachment): string {
   const who = a.author_name?.trim();
   const where = a.channel_name?.trim();
@@ -264,9 +441,9 @@ function forwardHeader(a: SlackAttachment): string {
 }
 
 /**
- * Name any files on the ORIGINAL message. They aren't downloaded (they belong
- * to a conversation we may have no access to), but naming them beats silently
- * pretending a screenshot-only forward was empty.
+ * Name any files on the ORIGINAL message that `liftForwardedFiles` left
+ * behind (withheld by Slack, or on a link unfurl rather than a forward), so a
+ * screenshot-only forward never reads as empty.
  */
 function describeAttachmentFiles(a: SlackAttachment): string {
   const names = (a.files ?? [])
@@ -274,6 +451,53 @@ function describeAttachmentFiles(a: SlackAttachment): string {
     .filter((n): n is string => !!n);
   if (names.length === 0) return "";
   return `[forwarded message also had ${names.length} file(s), not readable here: ${names.join(", ")}]`;
+}
+
+/**
+ * Move a FORWARDED message's files onto the forwarding message's own `files`,
+ * so every downstream path (vision, PDF/doc reading, marketing photo
+ * mirroring, `storageRef` handles) treats them exactly like an upload.
+ *
+ * Why: forwarding a teacher's photo post into the marketing channel is the
+ * natural motion, and Slack puts the photos in `attachments[].files`, which
+ * every collector skipped. The bot told staff "none of the 4 photos came
+ * through" and asked them to download and re-upload (2026-10-23).
+ *
+ * Same invariant as `renderSlackAttachments`: a forward embeds the files in
+ * the destination message, so everyone in the channel can already open them.
+ * Only `is_share` forwards are lifted (a permalink unfurl is a preview, not a
+ * share), only files Slack marks `file_access: "visible"` with a download URL,
+ * and never on the bot's own messages. A download that still fails degrades
+ * to the ordinary "could not load it" descriptor.
+ */
+export function liftForwardedFiles(
+  messages: SlackMessage[],
+  botUserId: string | null,
+): SlackMessage[] {
+  return messages.map((m) => {
+    const isBot = !!m.bot_id || (botUserId !== null && m.user === botUserId);
+    if (isBot || !m.attachments?.some((a) => a.is_share && a.files?.length)) {
+      return m;
+    }
+    const seen = new Set((m.files ?? []).map((f) => f.id));
+    const lifted: SlackFile[] = [];
+    const attachments = m.attachments.map((a) => {
+      if (!a.is_share || !a.files?.length) return a;
+      const kept: SlackFile[] = [];
+      for (const f of a.files) {
+        const liftable =
+          !!f.url_private_download && (f.file_access ?? "visible") === "visible";
+        if (!liftable) kept.push(f);
+        else if (!seen.has(f.id)) {
+          seen.add(f.id);
+          lifted.push(f);
+        }
+      }
+      return { ...a, files: kept };
+    });
+    if (lifted.length === 0) return m;
+    return { ...m, files: [...(m.files ?? []), ...lifted], attachments };
+  });
 }
 
 function truncate(s: string): string {
@@ -298,6 +522,39 @@ export function describeFile(
   const size = f.size ? ` ${Math.round(f.size / 1024)}KB` : "";
   const ref = storageRef ? ` storageRef=${storageRef}` : "";
   return `[attached file: ${f.name ?? "untitled"} (${f.mimetype ?? "unknown"},${size} slackFileId=${f.id}${ref})]`;
+}
+
+/** A video in a thread. The model can't watch one, so `frames` (when there are
+ *  any) is one image of samples, and `note` says what else it should know. */
+export type VideoAttachment = {
+  durationSec?: number;
+  frames?: {
+    mediaType: ImageMime;
+    dataBase64: string;
+    /** What the image is, in words the model reads beside it. */
+    label: string;
+  };
+  note?: string;
+};
+export type VideoAttachmentMap = ReadonlyMap<string, VideoAttachment>;
+
+function describeVideo(
+  name: string | undefined,
+  video: VideoAttachment,
+  refToken: string,
+): string {
+  const title = name ?? "video";
+  const length =
+    video.durationSec !== undefined
+      ? ` (${Math.round(video.durationSec)} seconds)`
+      : "";
+  return [
+    `[attached video: ${title}${length}${refToken}]`,
+    video.frames
+      ? `[${video.frames.label} from ${title}, shown as one image. These are samples, not the whole clip.]`
+      : `[You have no frames from ${title} and can't see what's in it.]`,
+    ...(video.note ? [`[${video.note}]`] : []),
+  ].join("\n");
 }
 
 /**
@@ -327,6 +584,13 @@ export function buildSlackTranscript(args: {
    *  NOT because anything failed. Rendered with different wording so the model
    *  reports a per-turn limit as a limit instead of diagnosing an outage. */
   imagesSkippedForCapacity?: ReadonlySet<string>;
+  /** Replaces the reason on an image that was mirrored (it has a storageRef)
+   *  but not shown, for a caller whose mirror makes that image usable anyway. */
+  unseenImageNote?: string;
+  /** Images a caller will copy on a later turn, and what to say about them. */
+  pendingImages?: { ids: ReadonlySet<string>; note: string };
+  /** slackFileId → what we know about a video the model can't watch. */
+  videos?: VideoAttachmentMap;
 }): TranscriptTurn[] {
   const {
     messages,
@@ -337,6 +601,9 @@ export function buildSlackTranscript(args: {
     documents,
     texts,
     imagesSkippedForCapacity,
+    unseenImageNote,
+    pendingImages,
+    videos,
   } = args;
 
   // Internal accumulator: text + any inline media (images/PDFs/parsed docs),
@@ -361,11 +628,19 @@ export function buildSlackTranscript(args: {
     const isBot = !!m.bot_id || (botUserId !== null && m.user === botUserId);
     const pieces: string[] = [];
     const mediaBlocks: MediaBlock[] = [];
-    // Bot messages: drop the tool-activity progress chrome ("⋯ …" / "✓ …") the
-    // bot posts as its own messages, so the model never re-ingests it (see
-    // stripToolActivityChrome). Human text is cleaned but never chrome-stripped.
-    const cleaned = cleanSlackText(m.text ?? "", botUserId, names);
-    const text = isBot ? stripToolActivityChrome(cleaned) : cleaned;
+    // Bot messages: drop the tool-activity chrome, so the model never
+    // re-ingests it: a carded reply is read from its text blocks, cards left
+    // out (cardedReplyText), and the "⋯ …" / "✓ …" lines older threads hold
+    // as their own messages are stripped (stripToolActivityChrome). Human
+    // text is cleaned but never chrome-stripped.
+    const source = (isBot ? cardedReplyText(m.blocks) ?? greyLineReplyText(m.blocks) : null) ?? m.text ?? "";
+    const cleaned = cleanSlackText(source, botUserId, names);
+    const reply = isBot ? stripToolActivityChrome(cleaned) : cleaned;
+    // A reply the person stopped carries the same marker the in-app chats
+    // give one, so the model knows it was cut off and why.
+    const text = isBot && isStoppedReply(m)
+      ? markStoppedAssistantContent(reply)
+      : reply;
     if (text) pieces.push(text);
     // Forwarded messages / link previews. Must come after `text` (which holds
     // only the forwarder's own comment) so the quote reads as its elaboration.
@@ -389,7 +664,21 @@ export function buildSlackTranscript(args: {
       const img = images?.get(f.id);
       const doc = documents?.get(f.id);
       const txt = texts?.get(f.id);
-      if (img && !emittedMediaIds.has(f.id)) {
+      const video = videos?.get(f.id);
+      if (video && !emittedMediaIds.has(f.id)) {
+        emittedMediaIds.add(f.id);
+        pieces.push(describeVideo(f.name, video, refToken));
+        if (video.frames) {
+          mediaBlocks.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: video.frames.mediaType,
+              data: video.frames.dataBase64,
+            },
+          });
+        }
+      } else if (img && !emittedMediaIds.has(f.id)) {
         emittedMediaIds.add(f.id);
         pieces.push(`[attached image: ${f.name ?? "image"}${refToken}]`);
         mediaBlocks.push({
@@ -417,6 +706,16 @@ export function buildSlackTranscript(args: {
           title: f.name ?? "document",
         });
       } else if (
+        unseenImageNote &&
+        storageRef &&
+        !emittedMediaIds.has(f.id) &&
+        (f.mimetype ?? "").startsWith("image/")
+      ) {
+        const size = f.size ? ` ${Math.round(f.size / 1024)}KB` : "";
+        pieces.push(
+          `[attached image (NOT shown to you — ${unseenImageNote}): ${f.name ?? "image"} (${f.mimetype},${size} slackFileId=${f.id}${refToken})]`,
+        );
+      } else if (
         !emittedMediaIds.has(f.id) &&
         imageMediaType(f.mimetype ?? "") !== null
       ) {
@@ -435,7 +734,9 @@ export function buildSlackTranscript(args: {
         const size = f.size ? ` ${Math.round(f.size / 1024)}KB` : "";
         const tail = `${f.name ?? "image"} (${f.mimetype ?? "image"},${size} slackFileId=${f.id}${refToken})`;
         pieces.push(
-          imagesSkippedForCapacity?.has(f.id)
+          pendingImages?.ids.has(f.id)
+            ? `[attached image (NOT shown to you — ${pendingImages.note}): ${tail}]`
+            : imagesSkippedForCapacity?.has(f.id)
             ? `[older attached image (NOT shown to you — this thread holds more images than one reply can carry, so the most recent ones were shown instead; nothing is broken, and asking for it to be re-posted in a new message will show it): ${tail}]`
             : `[attached image (NOT shown to you — could not load it): ${tail}]`,
         );
@@ -468,7 +769,7 @@ export function buildSlackTranscript(args: {
   // Anthropic rejects an image/document block inside an assistant turn outright
   // — `messages.N.content: 'image' blocks are not permitted within assistant
   // turns` — a hard 400 that kills the whole reply. The bot posts files of its
-  // own (generate_brand_image uploads the generated image into the thread), so
+  // own (older threads hold images the bot generated and uploaded), so
   // the moment anyone replied after one, every later turn 400'd.
   //
   // Don't just drop them: that image IS the artifact under discussion ("make it
@@ -667,7 +968,9 @@ export function openQuestionAddressees(args: {
       if (m.user) spokenSince.add(m.user);
       continue;
     }
-    if (!endsOnAQuestion(m.text ?? "")) continue;
+    // A grey-line message is read from its blocks, as the transcript reads it:
+    // its `text` has had its line breaks folded into spaces.
+    if (!endsOnAQuestion(greyLineReplyText(m.blocks) ?? m.text ?? "")) continue;
     const addressee = addresseeOf(msgs, i, args.botUserId);
     const answered =
       addressee === null ? anyHumanSince : spokenSince.has(addressee);

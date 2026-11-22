@@ -86,41 +86,40 @@ export function assembleTutorPrompt(
   // conversationCompletionContext (param 35) is what injects the completion
   // guidance section under test; everything between is null for this harness.
   return buildSystemPrompt(
-    null, // 1 teacherWhisper
-    profile.readingLevel, // 2 readingLevel
-    profile.name, // 3 scholarName
-    null, // 4 unitContext
-    null, // 5 personaContext
-    null, // 6 perspectiveContext
-    null, // 7 processContext
-    null, // 8 processStateData
-    null, // 9 artifactData
-    profile.dossier, // 10 dossierContent
-    null, // 11 seedsData
-    null, // 12 masteryContext
-    null, // 13 signalContext
-    null, // 14 timingContext
-    null, // 15 lessonContext
-    null, // 16 teacherDirectives
-    lessonActivityContext, // 17 lessonActivityContext ← activity under test
-    null, // 18 priorActivityContext
-    null, // 19 activityContext
-    null, // 20 standaloneDeliverableContext
-    null, // 21 currentVerdictsContext
-    isFirstTurn, // 22 isFirstTurn
-    false, // 23 isFirstSession
-    null, // 24 lastSessionAt
-    null, // 25 webPracticeContext
-    null, // 26 granuleStatusContext
-    null, // 27 activityRecipe
-    null, // 28 baselineEvidenceContext
-    null, // 29 seedOriginContext
-    null, // 30 documentNotes
-    null, // 31 advanceRubricContext
-    null, // 32 practiceSkillsContext
-    null, // 33 physicalEnvironmentContext
-    null, // 34 goalsContext
-    { activityTitle: activity.title }, // 35 conversationCompletionContext ← under test
+    profile.readingLevel, // 1 readingLevel
+    profile.name, // 2 scholarName
+    null, // 3 unitContext
+    null, // 4 personaContext
+    null, // 5 perspectiveContext
+    null, // 6 processContext
+    null, // 7 processStateData
+    null, // 8 artifactData
+    profile.dossier, // 9 dossierContent
+    null, // 10 seedsData
+    null, // 11 masteryContext
+    null, // 12 signalContext
+    null, // 13 timingContext
+    null, // 14 lessonContext
+    null, // 15 teacherDirectives
+    lessonActivityContext, // 16 lessonActivityContext ← activity under test
+    null, // 17 priorActivityContext
+    null, // 18 activityContext
+    null, // 19 standaloneDeliverableContext
+    null, // 20 currentVerdictsContext
+    isFirstTurn, // 21 isFirstTurn
+    false, // 22 isFirstSession
+    null, // 23 lastSessionAt
+    null, // 24 webPracticeContext
+    null, // 25 granuleStatusContext
+    null, // 26 activityRecipe
+    null, // 27 baselineEvidenceContext
+    null, // 28 seedOriginContext
+    null, // 29 documentNotes
+    null, // 30 advanceRubricContext
+    null, // 31 practiceSkillsContext
+    null, // 32 physicalEnvironmentContext
+    null, // 33 goalsContext
+    { activityTitle: activity.title }, // 34 conversationCompletionContext ← under test
   );
 }
 
@@ -264,15 +263,18 @@ export async function generateTutorTurn(
       typeof toolUse.input.summary === "string"
         ? toolUse.input.summary
         : `${profile.name}:${activity.title}`;
+    // Production (TRA-703): after a tool-first completion the tutor may answer
+    // what the scholar's last message left open, and the app's note follows.
+    const reply = completionToolWasFirst ? textOf(second) : "";
     const followUp = completionToolWasFirst
       ? selectCompletionClosing(profile.readingLevel, summary)
       : "";
     return {
-      text: [text, followUp].filter(Boolean).join("\n\n"),
+      text: [text, reply, followUp].filter(Boolean).join("\n\n"),
       called: true,
       completed: true,
       completionToolWasFirst,
-      completionHadPostToolText: false,
+      completionHadPostToolText: !!reply.trim(),
     };
   }
 

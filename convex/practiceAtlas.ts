@@ -33,31 +33,12 @@ import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import { embedTexts, requireEmbeddingKey } from "./lib/embeddings";
 import { pca2d } from "./lib/pca";
 import { computeDepths } from "./lib/practiceAtlasLayout";
 import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "./seed/wholeNumberArithmeticGraph";
 
-const EMBED_MODEL = "text-embedding-3-small";
-const EMBED_DIMS = 512;
-const BATCH_SIZE = 128; // OpenAI embeddings batch limit
 const PATCH_CHUNK = 100; // Convex mutation chunk size
-
-async function embedBatch(texts: string[], apiKey: string): Promise<number[][]> {
-  const res = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ model: EMBED_MODEL, input: texts, dimensions: EMBED_DIMS }),
-  });
-  if (!res.ok)
-    throw new Error(
-      `OpenAI embeddings ${res.status}: ${(await res.text()).slice(0, 200)}`,
-    );
-  const json = (await res.json()) as { data: { embedding: number[] }[] };
-  return json.data.map((d) => d.embedding);
-}
 
 /**
  * Rebuild treeX / treeY / treeY2 for all nodes in a domain.
@@ -77,8 +58,7 @@ export const rebuildPracticeAtlas = internalAction({
     domain: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error("OPENAI_API_KEY not set on this deployment");
+    const apiKey = requireEmbeddingKey();
 
     const domain = args.domain ?? WHOLE_NUMBER_ARITHMETIC_DOMAIN;
 
@@ -101,14 +81,8 @@ export const rebuildPracticeAtlas = internalAction({
     const maxDepth = Math.max(...depthMap.values(), 0);
 
     // ── 3. Embed labels → treeY (PC1) + treeY2 (PC2) ────────────────────
-    const texts = nodes.map((n) =>
-      (n.embeddingText ?? n.label).slice(0, 1000),
-    );
-    const allVecs: number[][] = [];
-    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-      const batch = await embedBatch(texts.slice(i, i + BATCH_SIZE), apiKey);
-      allVecs.push(...batch);
-    }
+    const texts = nodes.map((n) => n.embeddingText ?? n.label);
+    const allVecs = await embedTexts(texts, apiKey);
 
     // PCA: PC1 → treeY (primary vertical spread), PC2 → treeY2 (parallax)
     const coords = pca2d(allVecs);

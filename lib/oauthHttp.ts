@@ -1,5 +1,35 @@
 // Shared helpers for the OAuth endpoints that front the MCP connector
-// (app/api/oauth/* and app/api/mcp). Server-side only.
+// (app/api/oauth/* and app/api/mcp). Server-side. The consent page
+// (app/oauth/authorize) deliberately does NOT read MCP_READ_ONLY_PATH: a
+// token approved for the read-only connector also works on the full one, so
+// the page describes full access whatever `resource` names (TRA-635).
+
+/**
+ * The connector's two URLs. Both sign in the same way and act as the same
+ * person; the second one offers only the tools that read
+ * (app/api/mcp/read/route.ts), so a coding session can debug against live
+ * data without being able to change it. Each is its own OAuth protected
+ * resource, so the 401 and the RFC 9728 metadata name whichever one the
+ * client connected to.
+ */
+export const MCP_PATH = "/api/mcp";
+export const MCP_READ_ONLY_PATH = "/api/mcp/read";
+
+/**
+ * Whether a request is about the read-only connector: a call to
+ * `/api/mcp/read` itself, or an RFC 9728 metadata lookup for it at
+ * `/.well-known/oauth-protected-resource/api/mcp/read`. A route handler sees
+ * the original path even behind the next.config.js rewrite, so the suffix is
+ * all either case needs.
+ */
+export function isReadOnlyMcpRequest(request: Request): boolean {
+  return new URL(request.url).pathname.replace(/\/+$/, "").endsWith(MCP_READ_ONLY_PATH);
+}
+
+/** The connector URL path a request is about (see isReadOnlyMcpRequest). */
+export function mcpResourcePath(request: Request): string {
+  return isReadOnlyMcpRequest(request) ? MCP_READ_ONLY_PATH : MCP_PATH;
+}
 
 /**
  * The externally visible origin of THIS deployment, honoring proxy

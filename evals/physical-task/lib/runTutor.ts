@@ -135,7 +135,6 @@ const SUGGEST_TOOL = {
  */
 export function assemblePrompt(c: TutorCase): string {
   return buildSystemPrompt(
-    null, // teacherWhisper
     c.readingLevel, // readingLevel
     c.scholarName, // scholarName
     null, null, null, // unit / persona / perspective

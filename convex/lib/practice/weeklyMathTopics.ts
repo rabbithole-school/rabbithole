@@ -7,11 +7,27 @@ import {
 } from "./spiralBreaker";
 
 export const WEEKLY_TOPIC_MIN_MISSES = 2;
-export const WEEKLY_SUSTAINED_MIN_MISSES = 3;
-export const WEEKLY_SUSTAINED_MIN_SITTINGS = 2;
+/**
+ * The two cutoffs below were checked against four weeks of #math posts
+ * (W44–W47 2026): 1 of 17 topics that ended the week settled was back the next
+ * week, against 3 of 10 persistent ones. First guesses checked only against
+ * recurrence, not against learning; revisit with a teacher's read.
+ */
+export const WEEKLY_PERSISTENT_MIN_SITTINGS = 3;
+/** Under this share of misses, the misses are slips inside mostly correct work. */
+export const WEEKLY_SETTLED_MAX_MISS_SHARE = 0.2;
 export const ERROR_EVENT_JOIN_TOLERANCE_MS = 60_000;
 
-export type WeeklyMathTopicTier = "practice" | "acute" | "sustained";
+/**
+ * - `persistent`: still missing at the end of the week, and it also came up the
+ *   week before, ran across 3+ sittings, or tripped the three-misses-in-a-row
+ *   step-in without that step-in closing it.
+ * - `watching`: still missing, but new and in only 1–2 sittings.
+ * - `notYet`: every miss was "I haven't learned this yet" or a blank answer, so
+ *   there is no wrong idea to name. Persistent only when it recurs a week later.
+ * - `settled`: ended the week correct, or misses were a small share of the work.
+ */
+export type WeeklyMathTopicTier = "persistent" | "watching" | "notYet" | "settled";
 export type WeeklyMathSupportOutcome =
   | "triggered"
   | "repair_started"
@@ -27,6 +43,8 @@ export interface WeeklyMathTopicAttempt {
   itemId?: string;
   correct: boolean;
   retry?: boolean;
+  /** The server showed answer-producing help (worked steps) on this attempt. */
+  scaffolded?: boolean;
   breakerEligible?: boolean;
   lane?: string;
   createdAt?: number;
@@ -87,6 +105,10 @@ export interface WeeklyMathTopicEvidence {
   latestAttemptCorrect: boolean;
   trailingCorrectCount: number;
   breakerCount: number;
+  /** The same skill had a topic in the previous week's window. */
+  recurred: boolean;
+  /** Every miss was "I haven't learned this yet" or a blank answer. */
+  notAttempted: boolean;
   supportOutcome?: WeeklyMathSupportOutcome;
   pattern?: ErrorPattern;
   patternDescription?: string;
@@ -109,6 +131,18 @@ const HONOLULU_WEEKDAY = new Intl.DateTimeFormat("en-US", {
   timeZone: "Pacific/Honolulu",
   weekday: "long",
 });
+
+export function topicKey(domain: string, nodeKey: string): string {
+  return `${domain}\u0000${nodeKey}`;
+}
+
+/** "I haven't learned this yet", or an answer left empty. */
+function isNotAttempted(attempt: WeeklyMathTopicAttempt): boolean {
+  return (
+    attempt.explanationReason === "dont_know" ||
+    (attempt.answerText !== undefined && attempt.answerText.trim() === "")
+  );
+}
 
 function dayKey(timestamp: number): string {
   return HONOLULU_DAY.format(timestamp);
@@ -298,6 +332,8 @@ export function weeklyMathTopics(
   attempts: readonly WeeklyMathTopicAttempt[],
   since: number,
   now: number,
+  /** `topicKey(domain, nodeKey)` of last week's topics. */
+  lastWeekTopicKeys: ReadonlySet<string> = new Set(),
 ): WeeklyMathTopicEvidence[] {
   const indexed = indexedAttempts(attempts, since, now);
   const breakerEvidence = sameTopicBreakerEvidence(indexed);
@@ -328,9 +364,6 @@ export function weeklyMathTopics(
         `${first.attempt.domain}\u0000${first.attempt.nodeKey}`,
       );
     const breakerCount = breaker?.count ?? 0;
-    const sustained =
-      misses.length >= WEEKLY_SUSTAINED_MIN_MISSES &&
-      missSittings.size >= WEEKLY_SUSTAINED_MIN_SITTINGS;
     const pattern = dominantPattern(
       events.filter(
         (event) =>
@@ -352,11 +385,39 @@ export function weeklyMathTopics(
       !misses.some(
         ({ attempt }) => attempt.createdAt > breaker.supportCompletedAt!,
       );
-    const tier: WeeklyMathTopicTier = sustained
-      ? "sustained"
-      : breakerCount > 0 && !supportClosed
-        ? "acute"
-        : "practice";
+    const recurred = lastWeekTopicKeys.has(
+      topicKey(first.attempt.domain, first.attempt.nodeKey),
+    );
+    // Only unassisted correct answers show recovery: a correct answer given
+    // with the worked steps showing settles nothing.
+    let trailingUnassistedCorrect = 0;
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const { attempt } = rows[index];
+      if (!attempt.correct) break;
+      // A helped answer neither shows recovery nor cancels an earlier one.
+      if (attempt.scaffolded === true) continue;
+      trailingUnassistedCorrect += 1;
+    }
+    const unassistedCorrect = rows.filter(
+      ({ attempt }) => attempt.correct && attempt.scaffolded !== true,
+    ).length;
+    const settled =
+      trailingUnassistedCorrect > 0 ||
+      supportClosed ||
+      misses.length / (misses.length + unassistedCorrect) <
+        WEEKLY_SETTLED_MAX_MISS_SHARE;
+    const notAttempted = misses.every(({ attempt }) => isNotAttempted(attempt));
+    const tier: WeeklyMathTopicTier = settled
+      ? "settled"
+      : notAttempted
+        ? recurred
+          ? "persistent"
+          : "notYet"
+        : recurred ||
+            missSittings.size >= WEEKLY_PERSISTENT_MIN_SITTINGS ||
+            breakerCount > 0
+          ? "persistent"
+          : "watching";
 
     topics.push({
       domain: first.attempt.domain,
@@ -373,6 +434,8 @@ export function weeklyMathTopics(
       latestAttemptCorrect: latest.attempt.correct,
       trailingCorrectCount,
       breakerCount,
+      recurred,
+      notAttempted,
       ...(breaker?.supportOutcome
         ? { supportOutcome: breaker.supportOutcome }
         : {}),
@@ -387,9 +450,10 @@ export function weeklyMathTopics(
   }
 
   const tierRank: Record<WeeklyMathTopicTier, number> = {
-    sustained: 3,
-    acute: 2,
-    practice: 1,
+    persistent: 4,
+    watching: 3,
+    notYet: 2,
+    settled: 1,
   };
   return topics.sort(
     (a, b) =>

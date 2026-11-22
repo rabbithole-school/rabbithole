@@ -157,7 +157,9 @@ function usernameFor(name: string): string {
   return `${slug}-${nextSuffix()}`;
 }
 
-async function identityFor(t: TestCtx, userId: Id<"users">): Promise<Identity> {
+/** An authenticated client for any seeded user (a staff member the world
+ *  did not name, for instance). */
+export async function identityFor(t: TestCtx, userId: Id<"users">): Promise<Identity> {
   const authSessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,

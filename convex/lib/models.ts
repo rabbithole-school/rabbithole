@@ -78,6 +78,22 @@ export const APP_AI_MODEL = MODELS.SONNET_5_5;
 export const OBSERVER_MODEL = MODELS.SONNET_5_5;
 
 /**
+ * The weekly admissions sweep (lib/admissionsSweep): one call a week reads
+ * every live family's record and decides who might want a nudge. Opus 5.5
+ * because the judgment is subtle (an acknowledgement vs. a question, a bulk
+ * send vs. a personal answer, a note that says wait) and one call a week makes
+ * cost irrelevant next to a digest staff learn to ignore.
+ */
+export const ADMISSIONS_SWEEP_MODEL = MODELS.OPUS_5_5;
+
+/**
+ * Mr. Rabbit's monthly roundup (convex/mrRabbitMonthly.ts): one call a month
+ * turns de-identified aggregates into a few public-facing quick takes, so the
+ * writing quality matters far more than the cost.
+ */
+export const MR_RABBIT_MONTHLY_MODEL = MODELS.OPUS_5_5;
+
+/**
  * Thinking depth for OBSERVER_MODEL (`output_config.effort`). `high` is also
  * the API default, sent explicitly so a future default change can't move it.
  * It judged best of low/medium/high on the observer fixtures (4.50 vs
@@ -205,6 +221,16 @@ export type GeminiImageModel = (typeof GEMINI_IMAGE_MODELS)[number];
 export const OPENAI_IMAGE_MODEL = "gpt-image-2.5-flare" as const;
 
 export const OPENAI_IMAGE_MODELS = [OPENAI_IMAGE_MODEL] as const;
+
+/**
+ * GPT-6 Astra — writes the three.js code behind `charm_model`, the 3D twin of
+ * the charm sprites (lib/charmModelCode.ts). Chosen in an October 2026
+ * side-by-side against Opus 5.5 on the same house-style contract: both built
+ * 6/6 subjects first try, and Andy preferred Astra's models. Measured then:
+ * 30-48 s and 1.6k-2.8k output tokens per model. Called via the Responses API
+ * with OPENAI_API_KEY; see lib/openaiResponses.ts.
+ */
+export const CHARM_MODEL_WRITER = "gpt-6-astra" as const;
 export type OpenAIImageModel = (typeof OPENAI_IMAGE_MODELS)[number];
 
 /**
@@ -220,3 +246,13 @@ export function openaiImageUsageKey(
 ): string {
   return `${model}@${quality}`;
 }
+
+/**
+ * Teacher-edited parent report drafts (convex/parentReportActions.ts). Opus 5.5
+ * at high effort: reports are drafted once a term and parents read them, so
+ * quality outweighs cost (about 130 drafts a term). Moved from Sonnet 5 after
+ * a read of real drafts that broke stated rules (pronouns, decimal grade
+ * levels, jargon; TRA-728). Bump deliberately, with a read of real drafts.
+ */
+export const PARENT_REPORT_MODEL = MODELS.OPUS_5_5;
+export const PARENT_REPORT_EFFORT = "high" as const;

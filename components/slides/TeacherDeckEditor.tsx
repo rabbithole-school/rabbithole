@@ -75,7 +75,7 @@ export function parseActivityDeck(json: string | undefined | null): Deck | null 
 
 /**
  * Resolve every media assetId a deck references to a URL, in ONE query. Hooks
- * can't run in a loop, so a per-image `files.getUrl` isn't expressible in the
+ * can't run in a loop, so a per-image URL query isn't expressible in the
  * renderer — the same reason SlidesArtifactView resolves in bulk.
  */
 export function useDeckAssetResolver(

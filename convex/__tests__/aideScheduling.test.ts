@@ -4,6 +4,8 @@ import schema from "../schema";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
+import { readSchedule } from "../lib/scheduleStore";
+import { insertAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 
 /**
  * The teacher Aide's assignment-scheduling tools (convex/lib/aideTools.ts)
@@ -65,6 +67,13 @@ async function seedUnitWithActivity(
   });
 }
 
+async function schedOf(
+  t: ReturnType<typeof convexTest>,
+  id: Id<"assignments">,
+) {
+  return t.run(async (ctx) => readSchedule(ctx, { _id: id }));
+}
+
 async function seedAssignment(
   t: ReturnType<typeof convexTest>,
   teacherId: Id<"users">,
@@ -72,7 +81,7 @@ async function seedAssignment(
   scholarIds: Id<"users">[],
 ) {
   return await t.run(async (ctx) =>
-    ctx.db.insert("assignments", {
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds,
@@ -98,6 +107,7 @@ describe("aide assignment scheduling", () => {
         scholarIds: [scholar],
         startsAt: Date.now() + 24 * HOUR,
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       }),
     );
     expect(first.created).toBe(true);
@@ -109,14 +119,15 @@ describe("aide assignment scheduling", () => {
         scholarIds: [scholar],
         startsAt: Date.now() + 48 * HOUR,
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       }),
     );
     expect(second.assignmentId).toBe(first.assignmentId);
     expect(second.created).toBe(false);
 
     const a = await t.run(async (ctx) => ctx.db.get(first.assignmentId));
-    expect(a?.activitySchedule).toHaveLength(1);
-    expect(a?.activitySchedule?.[0].activityId).toBe(activityId);
+    expect((await schedOf(t, a!._id))).toHaveLength(1);
+    expect((await schedOf(t, a!._id))[0].activityId).toBe(activityId);
   });
 
   test("assign_work is teacher/admin-only when creating a new assignment", async () => {
@@ -133,6 +144,7 @@ describe("aide assignment scheduling", () => {
           scholarIds: [scholar],
           startsAt: Date.now() + HOUR,
           target: { kind: "unit" },
+          finish: { kind: "inClass" },
         }),
       ),
     ).rejects.toThrow(/teacher\/admin only/i);
@@ -158,8 +170,8 @@ describe("aide assignment scheduling", () => {
     expect(res.ok).toBe(true);
 
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    expect(a?.activitySchedule).toHaveLength(1);
-    const entry = a!.activitySchedule![0];
+    expect((await schedOf(t, a!._id))).toHaveLength(1);
+    const entry = (await schedOf(t, a!._id))[0];
     expect(entry.activityId).toBe(activityId);
     expect(entry.startsAt).toBe(startsAt);
     // Planned, not live.
@@ -238,7 +250,7 @@ describe("aide assignment scheduling", () => {
     );
     expect(moved.found).toBe(true);
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    expect(a!.activitySchedule![0].startsAt).toBe(start + 7 * 24 * HOUR);
+    expect((await schedOf(t, a!._id))[0].startsAt).toBe(start + 7 * 24 * HOUR);
 
     // Rescheduling a never-scheduled activity returns found=false.
     const second = await seedUnitWithActivity(t, teacher, "Other");
@@ -266,6 +278,7 @@ describe("aide assignment scheduling", () => {
         assignmentId,
         activityId,
         mode: "homework",
+        dueAt: Date.now() + 2 * HOUR,
         startsAt: Date.now() + HOUR,
       }),
     );
@@ -278,7 +291,7 @@ describe("aide assignment scheduling", () => {
     );
     expect(cleared.removed).toBe(true);
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    expect(a!.activitySchedule).toHaveLength(0);
+    expect((await schedOf(t, a!._id))).toHaveLength(0);
 
     const again = await t.run(async (ctx) =>
       ctx.runMutation(internal.assignments.aideClearActivity, {
@@ -355,7 +368,7 @@ describe("aide assignment scheduling", () => {
 });
 
 describe("aide push-now / roster / archive", () => {
-  test("push_activity_now lands LIVE immediately (setAt stamped)", async () => {
+  test("aidePushActivityNow (give, now) lands LIVE immediately (setAt stamped)", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar");
@@ -372,13 +385,13 @@ describe("aide push-now / roster / archive", () => {
     );
     expect(res.ok).toBe(true);
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    const entry = a!.activitySchedule![0];
+    const entry = (await schedOf(t, a!._id))[0];
     // Live, not merely planned — this is the difference from scheduleActivity.
     expect(entry.setAt).toBeGreaterThan(0);
     expect(entry.startsAt).toBeGreaterThan(0);
   });
 
-  test("push_activity_now rejects an activity from a different unit", async () => {
+  test("aidePushActivityNow (give, now) rejects an activity from a different unit", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar");
@@ -436,6 +449,212 @@ describe("aide push-now / roster / archive", () => {
     );
   });
 
+  test("remove takes named scholars off by roster name and keeps the rest", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const kai = await seedUser(t, "scholar", { name: "Kai Kahale" });
+    const lani = await seedUser(t, "scholar", { name: "Lani Kahale" });
+    const pua = await seedUser(t, "scholar", { name: "Pua Visitor" });
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacher);
+    const assignmentId = await seedAssignment(t, teacher, unitId, [kai, lani, pua]);
+    // An activity targeted only at the visitor.
+    await t.run(async (ctx) =>
+      setSchedule(ctx, assignmentId, [
+          { activityId, mode: "homework", scholarIds: [pua] },
+        ]),
+    );
+
+    const res = await t.run(async (ctx) =>
+      ctx.runMutation(internal.assignments.aideRemoveScholars, {
+        callerUserId: teacher,
+        assignmentId,
+        scholarNames: ["pua visitor"],
+      }),
+    );
+    expect(res).toEqual({ ok: true, removed: ["Pua Visitor"], rosterSize: 2 });
+    const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(new Set(a!.scholarIds.map(String))).toEqual(
+      new Set([String(kai), String(lani)]),
+    );
+    // The entry targeted only at the removed scholar is dropped, never
+    // widened to the whole cohort.
+    expect((await schedOf(t, a!._id))).toEqual([]);
+  });
+
+  test("remove matches the assignment's own roster, even a scholar now at another school", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const kai = await seedUser(t, "scholar", { name: "Kai Kahale" });
+    // seedUser files every user in a school of their own, so this scholar is
+    // outside the teacher's school, like a visitor after a move.
+    const moved = await seedUser(t, "scholar", { name: "Pua Visitor" });
+    const { unitId } = await seedUnitWithActivity(t, teacher);
+    const assignmentId = await seedAssignment(t, teacher, unitId, [kai, moved]);
+
+    const res = await t.run(async (ctx) =>
+      ctx.runMutation(internal.assignments.aideRemoveScholars, {
+        callerUserId: teacher,
+        assignmentId,
+        scholarNames: ["Pua"],
+      }),
+    );
+    expect(res.ok).toBe(true);
+    const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(a!.scholarIds).toEqual([kai]);
+  });
+
+  test("remove refuses an ambiguous or unknown name, and emptying the roster, changing nothing", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const kai = await seedUser(t, "scholar", { name: "Kai Kahale" });
+    const lani = await seedUser(t, "scholar", { name: "Lani Kahale" });
+    const { unitId } = await seedUnitWithActivity(t, teacher);
+    const assignmentId = await seedAssignment(t, teacher, unitId, [kai, lani]);
+    const remove = (scholarNames: string[]) =>
+      t.run(async (ctx) =>
+        ctx.runMutation(internal.assignments.aideRemoveScholars, {
+          callerUserId: teacher,
+          assignmentId,
+          scholarNames,
+        }),
+      );
+
+    const ambiguous = await remove(["Kahale"]);
+    expect(ambiguous.ok).toBe(false);
+    const unknown = await remove(["Kai Kahale", "Nobody Here"]);
+    expect(unknown.ok).toBe(false);
+    const empties = await remove(["Kai Kahale", "Lani Kahale"]);
+    expect(empties.ok).toBe(false);
+    if (!empties.ok) expect(empties.message).toContain("archive");
+
+    const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(a!.scholarIds).toEqual([kai, lani]);
+  });
+
+  test("remove keeps a narrowed targeted activity for the scholars still on it", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const kai = await seedUser(t, "scholar", { name: "Kai Kahale" });
+    const pua = await seedUser(t, "scholar", { name: "Pua Visitor" });
+    const lani = await seedUser(t, "scholar", { name: "Lani Kahale" });
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacher);
+    const assignmentId = await seedAssignment(t, teacher, unitId, [kai, pua, lani]);
+    await t.run(async (ctx) =>
+      setSchedule(ctx, assignmentId, [
+          { activityId, mode: "homework", scholarIds: [kai, pua] },
+        ]),
+    );
+    await t.run(async (ctx) =>
+      ctx.runMutation(internal.assignments.aideRemoveScholars, {
+        callerUserId: teacher,
+        assignmentId,
+        scholarNames: ["Pua Visitor"],
+      }),
+    );
+    const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect((await schedOf(t, a!._id))[0].scholarIds).toEqual([kai]);
+  });
+
+  test("remove tells same-named scholars apart by username, and reaches a name-less scholar by username", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const kaiA = await seedUser(t, "scholar", { name: "Kai Kahale", username: "kai-a" });
+    const kaiB = await seedUser(t, "scholar", { name: "Kai Kahale", username: "kai-b" });
+    const lani = await seedUser(t, "scholar", { name: "Lani Kahale", username: "lani" });
+    const { unitId } = await seedUnitWithActivity(t, teacher);
+    const assignmentId = await seedAssignment(t, teacher, unitId, [kaiA, kaiB, lani]);
+    const remove = (scholarNames: string[]) =>
+      t.run(async (ctx) =>
+        ctx.runMutation(internal.assignments.aideRemoveScholars, {
+          callerUserId: teacher,
+          assignmentId,
+          scholarNames,
+        }),
+      );
+
+    const byName = await remove(["Kai Kahale"]);
+    expect(byName.ok).toBe(false);
+    if (!byName.ok) expect(byName.message).toContain("kai-b");
+
+    expect((await remove(["kai-b"])).ok).toBe(true);
+    let a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(a!.scholarIds).toEqual([kaiA, lani]);
+
+    await t.run(async (ctx) => ctx.db.patch(lani, { name: undefined as unknown as string }));
+    expect((await remove(["lani"])).ok).toBe(true);
+    a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(a!.scholarIds).toEqual([kaiA]);
+  });
+
+  test("remove refuses when a username and another scholar's exact name collide", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const named = await seedUser(t, "scholar", { name: "kai", username: "kai-k" });
+    const other = await seedUser(t, "scholar", { name: "Kai Kahale", username: "kai" });
+    const lani = await seedUser(t, "scholar", { name: "Lani Kahale", username: "lani" });
+    const { unitId } = await seedUnitWithActivity(t, teacher);
+    const assignmentId = await seedAssignment(t, teacher, unitId, [named, other, lani]);
+
+    const res = await t.run(async (ctx) =>
+      ctx.runMutation(internal.assignments.aideRemoveScholars, {
+        callerUserId: teacher,
+        assignmentId,
+        scholarNames: ["kai"],
+      }),
+    );
+    expect(res.ok).toBe(false);
+    const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(a!.scholarIds).toEqual([named, other, lani]);
+  });
+
+  test("remove refuses an archived assignment and a non-teacher owner", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const runner = await seedUser(t, "staff");
+    const kai = await seedUser(t, "scholar", { name: "Kai Kahale" });
+    const lani = await seedUser(t, "scholar", { name: "Lani Kahale" });
+    const { unitId } = await seedUnitWithActivity(t, teacher);
+    const archived = await seedAssignment(t, teacher, unitId, [kai, lani]);
+    await t.run(async (ctx) => ctx.db.patch(archived, { archivedAt: Date.now() }));
+    const runnerOwned = await seedAssignment(t, runner, unitId, [kai, lani]);
+
+    for (const [callerUserId, assignmentId] of [
+      [teacher, archived],
+      [runner, runnerOwned],
+    ] as const) {
+      await expect(
+        t.run(async (ctx) =>
+          ctx.runMutation(internal.assignments.aideRemoveScholars, {
+            callerUserId,
+            assignmentId,
+            scholarNames: ["Kai Kahale"],
+          }),
+        ),
+      ).rejects.toThrow();
+      const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
+      expect(a!.scholarIds).toEqual([kai, lani]);
+    }
+  });
+
+  test("remove is owner-only", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await seedUser(t, "teacher");
+    const other = await seedUser(t, "teacher");
+    const kai = await seedUser(t, "scholar", { name: "Kai Kahale" });
+    const lani = await seedUser(t, "scholar", { name: "Lani Kahale" });
+    const { unitId } = await seedUnitWithActivity(t, owner);
+    const assignmentId = await seedAssignment(t, owner, unitId, [kai, lani]);
+    await expect(
+      t.run(async (ctx) =>
+        ctx.runMutation(internal.assignments.aideRemoveScholars, {
+          callerUserId: other,
+          assignmentId,
+          scholarNames: ["Kai Kahale"],
+        }),
+      ),
+    ).rejects.toThrow(/not your assignment/i);
+  });
+
   test("roster ops + push are owner-gated", async () => {
     const t = convexTest(schema, modules);
     const owner = await seedUser(t, "teacher");
@@ -489,7 +708,7 @@ describe("aide push-now / roster / archive", () => {
     expect(first.alreadyArchived).toBe(false);
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
     expect(a!.archivedAt).toBeGreaterThan(0);
-    expect(a!.activitySchedule).toHaveLength(0);
+    expect((await schedOf(t, a!._id))).toHaveLength(0);
 
     const second = await t.run(async (ctx) =>
       ctx.runMutation(internal.assignments.aideArchiveAssignment, {

@@ -6,8 +6,9 @@
 // SAME shared set as the teacher aide (lib/scholarReadTools), scoped to the
 // parent's children via `allowedScholarIds`; only the SESSION STORAGE is
 // isolated here (parentChatMessages) rather than overloading the teacher-
-// keyed chats/curriculumMessages tables. The streaming + tool wiring
-// lives in http.ts `/parent-chat-stream`.
+// keyed chats/curriculumMessages tables. Turn setup (scope, tools, prompt)
+// lives in lib/parentAideTurn.ts; the web SSE route is http.ts
+// `/parent-chat-stream`.
 
 import { v } from "convex/values";
 import { authedQuery, authedMutation } from "./lib/customFunctions";
@@ -127,12 +128,37 @@ export const clearMessages = authedMutation({
 // ── Internal (called by the /parent-chat-stream HTTP action) ────────────
 
 /**
+ * A parent's thread never ends, so the aide replays only the current
+ * conversation: everything after the last stretch this long with no messages.
+ * Replaying the whole thread let months-old answers stand in for fresh tool
+ * reads (TRA-623: asked about math with an Aug–Nov thread, the aide called no
+ * tool in 6 of 6 replays and repeated its August answer; with no history it
+ * read the practice tool and answered correctly).
+ *
+ * Calibration (prod, Nov 9, 7 parents): of 66 gaps between consecutive
+ * parent-aide messages, 53 are under an hour, 13 are over 6 hours, and none
+ * fall between 1 and 6 hours. Any cutoff in that range splits conversations
+ * the same way; 3 hours sits in the middle of it.
+ */
+const CONVERSATION_GAP_MS = 3 * 60 * 60 * 1000;
+
+/**
  * Conversation history + the parent's children (id + name) for the aide.
  * The children list is what `/parent-chat-stream` turns into the tool
  * scoping set (`allowedScholarIds`) and the system-prompt name list.
+ *
+ * The history is the current conversation only (CONVERSATION_GAP_MS); the
+ * portal panel (`listMessages`) still shows the whole thread.
  */
 export const getContext = internalQuery({
-  args: { parentUserId: v.id("users") },
+  args: {
+    parentUserId: v.id("users"),
+    // Bind the history to one turn: drop every row written after this one.
+    // A background turn passes its own user message, so a message that lands
+    // while it runs (a second text, a web send) can't become the question
+    // this turn answers (TRA-558). Must be this parent's own row.
+    throughMessageId: v.optional(v.id("parentChatMessages")),
+  },
   handler: async (ctx, args) => {
     const parent = await ctx.db.get(args.parentUserId);
     if (
@@ -141,10 +167,29 @@ export const getContext = internalQuery({
     )
       return null;
 
-    const messages = await ctx.db
+    let messages = await ctx.db
       .query("parentChatMessages")
       .withIndex("by_parent", (q) => q.eq("parentUserId", args.parentUserId))
       .collect();
+    if (args.throughMessageId) {
+      const end = messages.findIndex((m) => m._id === args.throughMessageId);
+      if (end === -1) return null; // not this parent's row
+      messages = messages.slice(0, end + 1);
+    }
+    // Walk back from the newest kept row (the turn's own, so always kept) to
+    // the first quiet gap. The window can open on an aide row (a text we
+    // sent, such as a charge reminder). The API history must open with the
+    // parent, so prepareParentAideTurn moves those rows into the turn's
+    // system text, with their times (TRA-624).
+    let start = messages.length - 1;
+    while (
+      start > 0 &&
+      messages[start]._creationTime - messages[start - 1]._creationTime <=
+        CONVERSATION_GAP_MS
+    ) {
+      start--;
+    }
+    messages = messages.slice(Math.max(start, 0));
 
     const links = await ctx.db
       .query("guardianships")
@@ -165,6 +210,7 @@ export const getContext = internalQuery({
       parentName: parent.name ?? "there",
       messages: messages.map((m) => ({
         role: m.role,
+        at: m._creationTime,
         content:
           m.role === "assistant"
             ? renderStoppedAssistantContent(m.content, m.stopRequestedAt)
@@ -172,6 +218,45 @@ export const getContext = internalQuery({
       })),
       children,
     };
+  },
+});
+
+/**
+ * The background parent-aide turn's writes (lib/parentAideTurn.runParentAideTurn).
+ * No auth identity reaches these: the caller has already resolved which
+ * parent sent the message, so the guardian and read-only checks that
+ * `authedMutation` + `sendMessage` apply on the web path are repeated here.
+ */
+export const appendUserMessageInternal = internalMutation({
+  args: { parentUserId: v.id("users"), content: v.string() },
+  handler: async (ctx, args) => {
+    const parent = await ctx.db.get(args.parentUserId);
+    if (
+      !parent ||
+      (parent.role !== ROLES.PARENT && !(await hasGuardianships(ctx, args.parentUserId)))
+    ) {
+      throw new Error("Forbidden: not a guardian");
+    }
+    if (parent.readOnly) throw new Error("Forbidden: read-only account");
+    const content = args.content.trim();
+    if (!content) throw new Error("Message is empty");
+    return await ctx.db.insert("parentChatMessages", {
+      parentUserId: args.parentUserId,
+      role: "user",
+      content,
+    });
+  },
+});
+
+/** The complete reply of a background turn, written once (never streamed). */
+export const appendAssistantMessageInternal = internalMutation({
+  args: { parentUserId: v.id("users"), content: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("parentChatMessages", {
+      parentUserId: args.parentUserId,
+      role: "assistant",
+      content: args.content,
+    });
   },
 });
 

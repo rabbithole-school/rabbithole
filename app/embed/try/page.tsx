@@ -28,7 +28,7 @@ import { GuestTutorEmbed, type GuestConfig } from "./GuestTutorEmbed";
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Try Rabbithole",
+  title: { absolute: "Try Rabbithole" },
   // A demo surface has nothing to gain from search traffic, and a parent
   // landing here cold — without the page around it that explains what they are
   // looking at — is a worse first impression than not finding it.

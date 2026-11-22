@@ -16,7 +16,7 @@
 
 import { v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { action } from "./_generated/server";
+import { authedAction } from "./lib/customFunctions";
 import { internal } from "./_generated/api";
 import { MODELS } from "./lib/models";
 import { recordAnthropicUsage } from "./usage";
@@ -56,16 +56,17 @@ const TOOL = {
 
 export type Leap = { topic: string; bridge: string; domain: string; reach: number };
 
-export const leapsForConcept = action({
+// Signed-in callers only (TRA-496): the concept drawer on the scholar map,
+// a scholar's profile and the teacher galaxy, all behind a session.
+export const leapsForConcept = authedAction({
   args: { concept: v.string(), grounding: v.optional(v.string()) },
   handler: async (ctx, args): Promise<{ concept: string; leaps: Leap[] }> => {
     const userId = await getAuthUserId(ctx);
-    const institutionId = userId
-      ? await ctx.runQuery(internal.usage.resolveInstitution, {
-          userId,
-          principal: "scholar",
-        })
-      : null;
+    if (!userId) throw new Error("Not authenticated");
+    const institutionId = await ctx.runQuery(internal.usage.resolveInstitution, {
+      userId,
+      principal: "scholar",
+    });
     const userMessage = [
       `Concept the learner understands: "${args.concept}"`,
       args.grounding ? `(from: ${args.grounding})` : "",

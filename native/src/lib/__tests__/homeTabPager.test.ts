@@ -16,12 +16,12 @@ import type { ScholarHomeTab } from "../../../vendor/shared/scholarHomeNow";
 
 const tab = (key: string, label = key): ScholarHomeTab => ({ key, label });
 
-// The canonical Home tab list (deriveHomeTabs always leads with now · all and
-// ends with quests).
+// The canonical Home tab list (deriveHomeTabs always leads with now and ends
+// with quests).
 const FULL: ScholarHomeTab[] = [
   tab("now", "Now"),
-  tab("all", "All"),
   tab("subject:math", "Math"),
+  tab("subject:science", "Science"),
   tab("prep", "Scholar's Prep"),
   tab("quests", "Quests"),
 ];
@@ -30,8 +30,8 @@ describe("homeTabPageKeys", () => {
   it("returns the tab keys in tab order", () => {
     expect(homeTabPageKeys(FULL)).toEqual([
       "now",
-      "all",
       "subject:math",
+      "subject:science",
       "prep",
       "quests",
     ]);
@@ -49,17 +49,17 @@ describe("homeTabPageKeys", () => {
   });
 
   it("prepends 'now' when a tab list somehow omits it", () => {
-    expect(homeTabPageKeys([tab("all"), tab("quests")])).toEqual([
+    expect(homeTabPageKeys([tab("prep"), tab("quests")])).toEqual([
       "now",
-      "all",
+      "prep",
       "quests",
     ]);
   });
 
   it("removes duplicate tab keys, keeping first-seen order", () => {
     expect(
-      homeTabPageKeys([tab("all"), tab("subject:math"), tab("all")]),
-    ).toEqual(["now", "all", "subject:math"]);
+      homeTabPageKeys([tab("prep"), tab("subject:math"), tab("prep")]),
+    ).toEqual(["now", "prep", "subject:math"]);
   });
 });
 
@@ -68,14 +68,14 @@ describe("homeTabIndexForKey", () => {
 
   it("finds a present key's index", () => {
     expect(homeTabIndexForKey(keys, "now")).toBe(0);
-    expect(homeTabIndexForKey(keys, "subject:math")).toBe(2);
+    expect(homeTabIndexForKey(keys, "subject:math")).toBe(1);
     expect(homeTabIndexForKey(keys, "quests")).toBe(4);
   });
 
   it("falls back to the 'now' page (0) for an absent key", () => {
     // A subject tab that disappeared mid-day: the active key is gone, so the
     // pager parks on now rather than a negative index.
-    expect(homeTabIndexForKey(keys, "subject:science")).toBe(0);
+    expect(homeTabIndexForKey(keys, "subject:art")).toBe(0);
   });
 });
 

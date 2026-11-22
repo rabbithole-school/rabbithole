@@ -1,8 +1,5 @@
-import { v } from "convex/values";
 import { DatabaseReader } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
-import { teacherQuery } from "./lib/customFunctions";
-import { requireActiveScholarAccess } from "./lib/access";
 import {
   READ_LEVEL_LABELS,
   WRITE_MODE_LABELS,
@@ -14,8 +11,7 @@ import {
 } from "./lib/readingLevels";
 import { PRACTICE_DOMAIN_LABELS } from "../shared/practiceDomainLabels";
 import {
-  frontierGradeValue,
-  fluentCount,
+  mathLevel,
   gradeLabelFromValueOrNull,
   type MasteryRowForGrade,
 } from "./lib/practice/frontierGrade";
@@ -103,7 +99,7 @@ function median(xs: number[]): number {
 /**
  * Assemble the Working Level for a scholar from the record. `window` optionally
  * bounds the inquiry-complexity sample to a reporting period. Pure over a
- * DatabaseReader so both the teacherQuery and the finalize snapshot share it.
+ * DatabaseReader so the report "done" snapshot can call it.
  */
 export async function gatherWorkingLevel(
   db: DatabaseReader,
@@ -123,10 +119,11 @@ export async function gatherWorkingLevel(
   // ── Math working level — a per-DOMAIN grade band off the procedural-practice
   //    frontier (the deferral in PR #400's note is now unblocked: practiceMastery
   //    + knowledgeNodes are on master). One canonical definition, shared with the
-  //    Math Skills portrait: the DEMONSTRATED-fluent frontier grade per domain
-  //    (lib/practice/frontierGrade.ts), never the generous access gate. `window`
-  //    scopes it to the reporting period's end so a snapshot says what was true
-  //    then. Only touched domains with a demonstrated-fluent skill contribute. ──
+  //    Math Skills portrait: the per-domain level (`mathLevel`,
+  //    lib/practice/frontierGrade.ts), how much of each grade's skills in the
+  //    domain are covered, placement check-in credit included. `window` scopes
+  //    it to the reporting period's end so a snapshot says what was true then.
+  //    Only touched domains with a credited skill contribute. ──
   const asOf = window?.endsAt;
   const mathRows = await db
     .query("practiceMastery")
@@ -139,6 +136,7 @@ export async function gatherWorkingLevel(
       repetition: row.repetition,
       source: row.source,
       becameFluentAt: row.becameFluentAt,
+      frontierAdvancedAt: row.frontierAdvancedAt,
     };
     const bucket = mathRowsByDomain.get(row.domain);
     if (bucket) bucket.push(lite);
@@ -154,14 +152,14 @@ export async function gatherWorkingLevel(
     const gradeByKey = new Map<string, string | null | undefined>(
       nodes.map((n) => [n.nodeKey, n.grade]),
     );
-    const value = frontierGradeValue(domainRows, gradeByKey, asOf);
-    const level = gradeLabelFromValueOrNull(value);
-    if (level === null) continue;
-    const n = fluentCount(domainRows, asOf);
+    const domainLevel = mathLevel(domainRows, gradeByKey, { asOf });
+    const level = gradeLabelFromValueOrNull(domainLevel?.value ?? null);
+    if (domainLevel === null || level === null) continue;
+    const daily = domainLevel.dailySkills;
     byDomain.push({
       domain: PRACTICE_DOMAIN_LABELS[slug],
       level,
-      source: `practice frontier (${n} fluent ${n === 1 ? "skill" : "skills"})`,
+      source: `math level (${daily} ${daily === 1 ? "skill" : "skills"} from daily work, ${domainLevel.placementSkills} from the placement check-in)`,
     });
   }
 
@@ -202,20 +200,3 @@ export async function gatherWorkingLevel(
       : undefined;
   return { headline, byDomain };
 }
-
-/** Composer-time Working Level for a scholar, optionally scoped to a period. */
-export const forScholar = teacherQuery({
-  args: {
-    scholarId: v.id("users"),
-    periodId: v.optional(v.id("reportingPeriods")),
-  },
-  handler: async (ctx, args) => {
-    await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
-    let window: { startsAt: number; endsAt: number } | undefined;
-    if (args.periodId) {
-      const period = await ctx.db.get(args.periodId);
-      if (period) window = { startsAt: period.startsAt, endsAt: period.endsAt };
-    }
-    return await gatherWorkingLevel(ctx.db, args.scholarId, window);
-  },
-});

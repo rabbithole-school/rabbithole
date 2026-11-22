@@ -1,7 +1,7 @@
 "use node";
 
 import { v } from "convex/values";
-import { action, internalAction } from "./_generated/server";
+import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { Id } from "./_generated/dataModel";
 import { MODELS } from "./lib/models";
@@ -346,7 +346,7 @@ export const mapToStandards = internalAction({
  * Callable from CLI:
  *   npx convex run standardsMapper:backfillAll
  */
-export const backfillAll = action({
+export const backfillAll = internalAction({
   args: {},
   handler: async (ctx): Promise<{ scholars: number; observations: number }> => {
     const unmapped: Array<{
@@ -402,7 +402,7 @@ export const backfillAll = action({
  * Use when the mapper prompt has been improved.
  *   npx convex run standardsMapper:rebackfillAll
  */
-export const rebackfillAll = action({
+export const rebackfillAll = internalAction({
   args: {},
   handler: async (ctx): Promise<{ scholars: number; observations: number }> => {
     const allCurrent: Array<{

@@ -1,15 +1,14 @@
 import { v } from "convex/values";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import type { ScheduleCache } from "./lib/scheduleStore";
 import { authedMutation, authedQuery, teacherQuery } from "./lib/customFunctions";
 import { unarchivePatch } from "./lib/teacherArchive";
 import {
-  accessibleGroupScholars,
-  canReadScholarAsTeacher,
   filterToAccessibleScholars,
   requireActiveScholarAccess,
 } from "./lib/access";
-import { ROLES, isPlatformAdminRole, isTeacherRole } from "./lib/roles";
+import { ROLES } from "./lib/roles";
 import { timeZoneForInstitution } from "./lib/institutionTime";
 import {
   nextOpenSchoolDayKey,
@@ -23,10 +22,12 @@ import {
   homeworkForScholarFromAssignments,
   homeworkAssignmentsByScholar,
 } from "./assignments";
-import { questStateForPair, questsForScholar } from "./lib/questLifecycle";
+import {
+  isRetractedQuestSession,
+  questStateForPair,
+  questsForScholar,
+} from "./lib/questLifecycle";
 import { reconcileActivityCompletion } from "./lib/activityCompletionCore";
-import { suggestedQuestsForScholar } from "./lib/scholarReads";
-import { createSessionFromSeedCore } from "./sessions";
 import {
   dayKeysShareCalendarWeek,
   dayKeyForTimezone,
@@ -55,55 +56,6 @@ type ScholarContext = {
   isPrimary: boolean;
 };
 
-type SelectedActivity = {
-  kind: "activity";
-  id: Id<"takeHomePlanItems">;
-  activityId: Id<"activities">;
-  sessionId: Id<"sessions"> | null;
-  label: string;
-  meta: string | null;
-  checked: boolean;
-  actions:
-    | readonly ["remove", "markDone"]
-    | readonly ["remove", "undoMarkDone"]
-    | readonly ["remove"];
-};
-
-type SelectedQuest = {
-  kind: "quest";
-  id: Id<"takeHomePlanItems">;
-  unitId: Id<"units">;
-  sessionId: Id<"sessions"> | null;
-  label: string;
-  meta: string | null;
-  checked: boolean;
-  actions: readonly ["remove", "closeQuest"] | readonly ["remove", "undoCloseQuest"];
-};
-
-type SelectedSession = {
-  kind: "session";
-  id: Id<"takeHomePlanItems">;
-  sessionId: Id<"sessions">;
-  label: string;
-  meta: null;
-  checked: false;
-  actions: readonly ["remove"];
-};
-
-type SelectedNote = {
-  kind: "note";
-  id: Id<"takeHomePlanItems">;
-  text: string;
-  checked: boolean;
-  actions: readonly ["edit", "remove", "setChecked"];
-};
-
-type SelectedItem =
-  | SelectedActivity
-  | SelectedQuest
-  | SelectedSession
-  | SelectedNote;
-
 type Suggestion =
   | {
       kind: "activity";
@@ -112,7 +64,7 @@ type Suggestion =
       activityId: Id<"activities">;
       label: string;
       meta: string | null;
-      actions: readonly ["addToPlan", "markDone"];
+      actions: readonly ["markDone"];
     }
   | {
       kind: "quest";
@@ -121,7 +73,7 @@ type Suggestion =
       sessionId: Id<"sessions"> | null;
       label: string;
       meta: string | null;
-      actions: readonly ["addToPlan", "markDone"];
+      actions: readonly ["markDone"];
     };
 
 type ResolvedToday =
@@ -187,110 +139,12 @@ async function currentItem(
   return item;
 }
 
-async function selectedItems(
-  ctx: QueryCtx,
-  context: ScholarContext,
-): Promise<SelectedItem[]> {
-  const rows = await ctx.db
-    .query("takeHomePlanItems")
-    .withIndex("by_scholar_day", (q) =>
-      q.eq("scholarId", context.scholar._id).eq("dayKey", context.dayKey),
-    )
-    .collect();
-  const visible = rows
-    .filter(
-      (row) =>
-        row.institutionId === context.institutionId &&
-        !row.removedAt &&
-        !row.resolution,
-    )
-    .sort((a, b) => a._creationTime - b._creationTime);
-  const items: SelectedItem[] = [];
-
-  for (const row of visible) {
-    if (row.kind === "note") {
-      if (!row.text) continue;
-      items.push({
-        kind: "note",
-        id: row._id,
-        text: row.text,
-        checked: row.checkedAt !== undefined,
-        actions: ["edit", "remove", "setChecked"],
-      });
-      continue;
-    }
-    if (row.kind === "activity") {
-      if (!row.activityId) continue;
-      const [activity, session] = await Promise.all([
-        ctx.db.get(row.activityId),
-        row.sessionId ? ctx.db.get(row.sessionId) : null,
-      ]);
-      items.push({
-        kind: "activity",
-        id: row._id,
-        activityId: row.activityId,
-        sessionId: row.sessionId ?? null,
-        label: activity?.title ?? "(removed activity)",
-        meta: session?.title ?? null,
-        checked: row.checkedAt !== undefined,
-        actions: row.markedCompletionId
-          ? ["remove", "undoMarkDone"]
-          : row.checkedAt
-            ? ["remove"]
-            : ["remove", "markDone"],
-      });
-      continue;
-    }
-    if (row.kind === "session") {
-      if (!row.sessionId) continue;
-      const session = await ctx.db.get(row.sessionId);
-      if (!session || session.userId !== context.scholar._id) continue;
-      items.push({
-        kind: "session",
-        id: row._id,
-        sessionId: row.sessionId,
-        label: session.title,
-        meta: null,
-        checked: false,
-        actions: ["remove"],
-      });
-      continue;
-    }
-    if (!row.unitId) continue;
-    const [unit, session] = await Promise.all([
-      ctx.db.get(row.unitId),
-      row.sessionId ? ctx.db.get(row.sessionId) : null,
-    ]);
-    items.push({
-      kind: "quest",
-      id: row._id,
-      unitId: row.unitId,
-      sessionId: row.sessionId ?? null,
-      label: unit?.title ?? "(removed quest)",
-      meta: session?.title ?? null,
-      checked: row.checkedAt !== undefined,
-      actions: row.questOutcome === "scholar_closed"
-          ? ["remove", "undoCloseQuest"]
-          : ["remove", "closeQuest"],
-    });
-  }
-  return items;
-}
-
 /** The enriched-homework list for one scholar (the shared, once-computed input
- *  threaded through the composition so a group read never re-scans per call). */
+ *  threaded through the composition so a roster read never re-scans per call). */
 type ScholarHomework = Awaited<ReturnType<typeof homeworkForScholar>>;
 
-function assignedItems(
-  context: ScholarContext,
-  homework: ScholarHomework,
-  nextOpenDayKey: string | null,
-) {
-  const forNow = filterHomeworkForNow(homework, {
-    nowMs: context.nowMs,
-    timeZone: context.timeZone,
-    nextOpenSchoolDayKey: nextOpenDayKey,
-  });
+function assignedItems(homework: ScholarHomework) {
+  const forNow = filterHomeworkForNow(homework);
   return forNow.map((item) => {
     return {
       kind: "assigned" as const,
@@ -322,17 +176,10 @@ function assignedItems(
 async function suggestions(
   ctx: QueryCtx,
   context: ScholarContext,
-  selected: readonly SelectedItem[],
   homework: ScholarHomework,
 ): Promise<Suggestion[]> {
   const assignedActivityIds = new Set(
     homework.map((item) => String(item.activityId)),
-  );
-  const selectedActivityIds = new Set(
-    selected.flatMap((item) => (item.kind === "activity" ? [String(item.activityId)] : [])),
-  );
-  const selectedUnitIds = new Set(
-    selected.flatMap((item) => (item.kind === "quest" ? [String(item.unitId)] : [])),
   );
   const priorRows = await ctx.db
     .query("takeHomePlanItems")
@@ -386,9 +233,7 @@ async function suggestions(
     if (
       seenActivityIds.has(activityKey) ||
       assignedActivityIds.has(activityKey) ||
-      selectedActivityIds.has(activityKey) ||
-      resolvedActivityIds.has(activityKey) ||
-      (session.unitId && selectedUnitIds.has(String(session.unitId)))
+      resolvedActivityIds.has(activityKey)
     ) {
       continue;
     }
@@ -402,7 +247,7 @@ async function suggestions(
       activityId: session.activityId,
       label: activity.title,
       meta: session.title,
-      actions: ["addToPlan", "markDone"],
+      actions: ["markDone"],
     });
   }
 
@@ -410,7 +255,6 @@ async function suggestions(
     if (
       quest.state !== "active" ||
       quest.completedCount >= quest.onlineActivityCount ||
-      selectedUnitIds.has(String(quest.unitId)) ||
       resolvedUnitIds.has(String(quest.unitId))
     ) {
       continue;
@@ -433,7 +277,7 @@ async function suggestions(
       sessionId: session?._id ?? null,
       label: quest.title,
       meta: quest.emoji,
-      actions: ["addToPlan", "markDone"],
+      actions: ["markDone"],
     });
   }
 
@@ -489,19 +333,18 @@ function emptyPlan() {
     printsTonight: false,
     takeHomePeriod: "tonight" as const,
     assigned: [],
-    selected: [],
     suggestions: [],
     resolvedToday: [],
-    counts: { assigned: 0, selected: 0, suggestions: 0, checked: 0 },
+    counts: { assigned: 0, suggestions: 0 },
   };
 }
 
 /**
- * THE canonical tonight-list composition, shared verbatim by the scholar's own
- * card (`forSelf`) and the teacher reads (`forScholarAsTeacher` /
- * `forGroupAsTeacher`). The scholar and the teacher must never disagree about a
- * scholar's list, so there is exactly one computation — never a re-derivation.
- * The caller owns the auth gate; this takes an already-resolved context.
+ * THE canonical Prep composition, shared verbatim by the scholar's own Prep
+ * (`forSelf`) and the teacher Prep table (`forVisibleScholarsAsTeacher`). The
+ * scholar and the teacher must never disagree about a scholar's Due list, so
+ * there is exactly one computation — never a re-derivation. The caller owns
+ * the auth gate; this takes an already-resolved context.
  */
 async function composePlan(
   ctx: QueryCtx,
@@ -515,22 +358,19 @@ async function composePlan(
   // returns them.
   opts: { lean?: boolean } = {},
 ) {
-  const [selected, nextOpenDayKey] = await Promise.all([
-    selectedItems(ctx, context),
-    nextOpenSchoolDayKey(
-      ctx,
-      context.institutionId,
-      context.dayKey,
-      context.timeZone,
-    ),
-  ]);
+  const nextOpenDayKey = await nextOpenSchoolDayKey(
+    ctx,
+    context.institutionId,
+    context.dayKey,
+    context.timeZone,
+  );
   const [suggested, resolved] = opts.lean
     ? [[] as Awaited<ReturnType<typeof suggestions>>, [] as Awaited<ReturnType<typeof resolvedToday>>]
     : await Promise.all([
-        suggestions(ctx, context, selected, homework),
+        suggestions(ctx, context, homework),
         resolvedToday(ctx, context),
       ]);
-  const assigned = assignedItems(context, homework, nextOpenDayKey);
+  const assigned = assignedItems(homework);
   return {
     timeZone: context.timeZone,
     dayKey: context.dayKey,
@@ -543,14 +383,11 @@ async function composePlan(
         ? ("weekend" as const)
         : ("tonight" as const),
     assigned,
-    selected,
     suggestions: suggested,
     resolvedToday: resolved,
     counts: {
       assigned: assigned.length,
-      selected: selected.length,
       suggestions: suggested.length,
-      checked: selected.filter((item) => item.checked).length,
     },
   };
 }
@@ -561,7 +398,7 @@ async function composePlan(
  * `activityCompletions` record (via `homeworkForScholar`'s `completedByMe`).
  * The claim is narrow on purpose (T7): this is "homework that was due
  * yesterday," not a reconstruction of last night's exact tonight card. Takes
- * the already-computed `homework` so a group read never re-scans per scholar.
+ * the already-computed `homework` so a roster read never re-scans per scholar.
  */
 async function lastNightOutcome(
   ctx: QueryCtx,
@@ -605,57 +442,6 @@ export const forSelf = authedQuery({
     return await composePlan(ctx, context, homework);
   },
 });
-
-/**
- * The teacher-gated read of ONE scholar's tonight list — the SAME composition
- * `forSelf` returns, behind `canReadScholarAsTeacher` instead of self-auth, so
- * the scholar card and the teacher board can never disagree.
- */
-export const forScholarAsTeacher = teacherQuery({
-  args: { scholarId: v.id("users"), now: v.number() },
-  handler: async (ctx, args) => {
-    if (!(await canReadScholarAsTeacher(ctx, ctx.user, args.scholarId))) {
-      throw new Error("Forbidden: scholar is not in your current context");
-    }
-    const scholar = await ctx.db.get(args.scholarId);
-    if (!scholar) return emptyPlan();
-    const context = await scholarContext(ctx, scholar, args.now);
-    if (!context) return emptyPlan();
-    const homework = await homeworkForScholar(
-      ctx,
-      context.scholar._id,
-      context.nowMs,
-    );
-    return await composePlan(ctx, context, homework);
-  },
-});
-
-/**
- * Whether the caller may read `group` as a group RESOURCE — its institution
- * must be in the caller's teacher-accessible scope. `accessibleGroupScholars`
- * only intersects the ROSTER (deliberately lenient for reads: an empty group is
- * harmless, partial overlap is fine), which never authorizes the group's own
- * institution — so a stamped foreign group (empty, or containing one scholar
- * the caller happens to reach) would otherwise leak. Mirrors the teacher-
- * membership loop in `canReadScholarAsTeacher`. A legacy UNSTAMPED group
- * (institutionId unset) falls back to the roster rule the caller already
- * applied.
- */
-async function groupInstitutionAccessible(
-  ctx: QueryCtx,
-  user: Doc<"users">,
-  group: Doc<"scholarGroups">,
-): Promise<boolean> {
-  if (isPlatformAdminRole(user.role)) return true;
-  if (!group.institutionId) return true;
-  const memberships = await ctx.db
-    .query("memberships")
-    .withIndex("by_user", (q) => q.eq("userId", user._id))
-    .collect();
-  return memberships.some(
-    (m) => isTeacherRole(m.role) && m.institutionId === group.institutionId,
-  );
-}
 
 /**
  * Question homework a teacher set for a day BEYOND the Due window (TRA-476).
@@ -725,8 +511,7 @@ function bestNextQuestion(
 
 /**
  * Build the per-scholar Prep rows for a set of already-authorized scholars —
- * the shared core of the group read and the whole-view Homework table, so the
- * two can never derive a scholar's row two ways (T1). Collects assignments ONCE
+ * the core of the whole-view Homework table. Collects assignments ONCE
  * for the whole set and partitions per scholar (never a full assignment-table
  * scan per scholar), then composes each row with the SAME `composePlan` the
  * scholar's own Prep uses. The caller owns the access gate; this takes an
@@ -779,6 +564,8 @@ async function buildTonightPlanRows(
     }
     return days;
   };
+  // One schedule read per assignment across the whole roster.
+  const scheduleCache: ScheduleCache = new Map();
 
   return Promise.all(
     sorted.map(async (scholar) => {
@@ -808,6 +595,7 @@ async function buildTonightPlanRows(
         scholar._id,
         byScholar.get(String(scholar._id)) ?? [],
         context.nowMs,
+        scheduleCache,
       );
       const [plan, closedToday, lastNight, best, assignDays] = await Promise.all([
         // Lean: skip the suggestions scan (the scholar's own "Done today?"
@@ -847,42 +635,6 @@ async function buildTonightPlanRows(
 }
 
 /**
- * The prep board's read model: the tonight list for every scholar in a group,
- * access-gated per handler via `accessibleGroupScholars` (a role check alone is
- * a cross-tenant leak). Each row carries the SAME composed plan `forSelf`
- * returns, plus a neutral empty-list flag and the named last-night outcome.
- */
-export const forGroupAsTeacher = teacherQuery({
-  args: { groupId: v.id("scholarGroups"), now: v.number() },
-  handler: async (ctx, args) => {
-    const { group, scholarIds, forbidden } = await accessibleGroupScholars(
-      ctx,
-      ctx.user,
-      args.groupId,
-    );
-    if (forbidden) {
-      throw new Error("Forbidden: group is not in your current context");
-    }
-    // Authorize the group RESOURCE itself, independently of roster filtering —
-    // a stamped foreign group (even empty, or with one reachable scholar) must
-    // not leak. accessibleGroupScholars only gated the roster.
-    if (group && !(await groupInstitutionAccessible(ctx, ctx.user, group))) {
-      throw new Error("Forbidden: group is not in your current context");
-    }
-    const scholars = (
-      await Promise.all(scholarIds.map((id) => ctx.db.get(id)))
-    ).filter((s): s is Doc<"users"> => s != null && s.role === ROLES.SCHOLAR);
-
-    const rows = await buildTonightPlanRows(ctx, scholars, args.now);
-
-    return {
-      group: group ? { id: group._id, name: group.name, emoji: group.emoji ?? null } : null,
-      scholars: rows,
-    };
-  },
-});
-
-/**
  * The whole-VIEW prep board: the tonight list for every scholar the caller can
  * see, from a client-supplied roster (the scholars already rendered in the
  * grid), access-gated per handler via `filterToAccessibleScholars` — a role
@@ -891,9 +643,9 @@ export const forGroupAsTeacher = teacherQuery({
  * what bounds it, not a single institution id.
  *
  * ONE subscription for the whole grid (the tonight strips render on ALL scopes,
- * including All scholars), bounded by the roster the teacher already has. Reuses
- * `buildTonightPlanRows` — the SAME composition `forGroupAsTeacher` and the
- * scholar's own card use (T1), never a fork.
+ * including All scholars), bounded by the roster the teacher already has. Each
+ * row is composed by `composePlan`, the SAME composition the scholar's own
+ * Prep uses (T1), never a fork.
  */
 export const forVisibleScholarsAsTeacher = teacherQuery({
   args: { scholarIds: v.array(v.id("users")), now: v.number() },
@@ -912,162 +664,19 @@ export const forVisibleScholarsAsTeacher = teacherQuery({
   },
 });
 
-/** The small self-only projection used by canonical Quest cards for pin state. */
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const pinningForSelf = authedQuery({
-  args: { now: v.number() },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user, args.now);
-    if (!context) {
-      return { dayKey: null, takeHomePeriod: "tonight" as const, pins: [] };
-    }
-    const [nextOpenDayKey, rows] = await Promise.all([
-      nextOpenSchoolDayKey(
-        ctx,
-        context.institutionId,
-        context.dayKey,
-        context.timeZone,
-      ),
-      ctx.db
-        .query("takeHomePlanItems")
-        .withIndex("by_scholar_day", (q) =>
-          q.eq("scholarId", context.scholar._id).eq("dayKey", context.dayKey),
-        )
-        .collect(),
-    ]);
-    return {
-      dayKey: context.dayKey,
-      takeHomePeriod:
-        nextOpenDayKey &&
-        !dayKeysShareCalendarWeek(context.dayKey, nextOpenDayKey)
-          ? ("weekend" as const)
-          : ("tonight" as const),
-      pins: rows
-        .filter(
-          (row) =>
-            row.institutionId === context.institutionId &&
-            !row.removedAt &&
-            !row.resolution &&
-            (row.kind === "quest" || row.kind === "session"),
-        )
-        .map((row) => ({
-          itemId: row._id,
-          unitId: row.unitId ?? null,
-          sessionId: row.sessionId ?? null,
-        })),
-    };
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const addSuggestion = authedMutation({
-  args: { suggestion: suggestionValidator },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const selected = await selectedItems(ctx, context);
-    let candidate: Suggestion | undefined;
-    if ("sessionId" in args.suggestion) {
-      const sessionId = args.suggestion.sessionId;
-      const candidates = await suggestions(
-        ctx,
-        context,
-        selected,
-        await homeworkForScholar(ctx, context.scholar._id, context.nowMs),
-      );
-      candidate = candidates.find(
-        (item) =>
-          item.kind === "activity" &&
-          item.sessionId === sessionId,
-      );
-    } else {
-      const unitId = args.suggestion.unitId;
-      const quest = (await questsForScholar(ctx, context.scholar._id)).find(
-        (item) => item.unitId === unitId && item.state === "active",
-      );
-      if (quest) {
-        const session = (
-          await ctx.db
-            .query("sessions")
-            .withIndex("by_user_unit", (q) =>
-              q.eq("userId", context.scholar._id).eq("unitId", unitId),
-            )
-            .collect()
-        )
-          .filter(
-            (item) =>
-              !item.isArchived &&
-              !item.isTestDrive &&
-              !item.isOffline &&
-              !item.assignmentId,
-          )
-          .sort((a, b) => sessionTouchTime(b) - sessionTouchTime(a))[0];
-        candidate = {
-          kind: "quest",
-          id: `quest:${quest.unitId}`,
-          unitId: quest.unitId,
-          sessionId: session?._id ?? null,
-          label: quest.title,
-          meta: quest.emoji,
-          actions: ["addToPlan", "markDone"],
-        };
-      }
-    }
-    if (!candidate) throw new Error("Suggestion is no longer available");
-
-    const existing = selected.find((item) =>
-      candidate.kind === "activity"
-        ? item.kind === "activity" && item.activityId === candidate.activityId
-        : item.kind === "quest" && item.unitId === candidate.unitId,
-    );
-    if (existing) return existing.id;
-    const prior = (
-      await ctx.db
-        .query("takeHomePlanItems")
-        .withIndex("by_scholar_day", (q) =>
-          q.eq("scholarId", context.scholar._id).eq("dayKey", context.dayKey),
-        )
-        .collect()
-    ).find(
-      (item) =>
-        item.institutionId === context.institutionId &&
-        item.removedAt !== undefined &&
-        (candidate.kind === "activity"
-          ? item.kind === "activity" && item.activityId === candidate.activityId
-          : item.kind === "quest" && item.unitId === candidate.unitId),
-    );
-    if (prior) {
-      await ctx.db.patch(prior._id, { removedAt: undefined });
-      return prior._id;
-    }
-
-    return await ctx.db.insert("takeHomePlanItems", {
-      scholarId: context.scholar._id,
-      institutionId: context.institutionId,
-      dayKey: context.dayKey,
-      kind: candidate.kind,
-      ...(candidate.kind === "activity"
-        ? { activityId: candidate.activityId, sessionId: candidate.sessionId }
-        : { unitId: candidate.unitId, sessionId: candidate.sessionId ?? undefined }),
-    });
-  },
-});
-
 /**
- * Resolve a current suggestion in one transaction. Unlike `addSuggestion`,
- * this records the outcome in `resolvedToday`, keeping the editable tonight
- * list free of already-finished work.
+ * Resolve a current suggestion ("Done today?" → done) in one transaction: it
+ * records the completion or closes the quest, and the outcome shows in
+ * `resolvedToday` with an undo.
  */
 export const resolveSuggestion = authedMutation({
   args: { suggestion: suggestionValidator },
   handler: async (ctx, args) => {
     const context = await scholarContext(ctx, ctx.user);
     if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const selected = await selectedItems(ctx, context);
     const candidates = await suggestions(
       ctx,
       context,
-      selected,
       await homeworkForScholar(ctx, context.scholar._id, context.nowMs),
     );
     const suggestion:
@@ -1187,11 +796,9 @@ export const keepSuggestionOpen = authedMutation({
   handler: async (ctx, args) => {
     const context = await scholarContext(ctx, ctx.user);
     if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const selected = await selectedItems(ctx, context);
     const candidates = await suggestions(
       ctx,
       context,
-      selected,
       await homeworkForScholar(ctx, context.scholar._id, context.nowMs),
     );
     const suggestion = args.suggestion;
@@ -1248,323 +855,15 @@ export const undoResolveSuggestion = authedMutation({
     } else {
       for (const sessionId of item.questClosedSessionIds ?? []) {
         const session = await ctx.db.get(sessionId);
-        if (session?.userId === context.scholar._id) {
-          await ctx.db.patch(session._id, unarchivePatch(session));
-        }
-      }
-    }
-    await ctx.db.delete(item._id);
-    return { restored: true };
-  },
-});
-
-/**
- * Start one canonical teacher-suggested Quest and attach its new session to
- * today's plan in the same mutation.
- */
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const startSeedInPlan = authedMutation({
-  args: { seedId: v.id("seeds") },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const candidates = await suggestedQuestsForScholar(ctx, context.scholar._id);
-    if (!candidates.some((candidate) => candidate.seedId === args.seedId)) {
-      throw new Error("Quest invitation is no longer available");
-    }
-
-    const { id: sessionId } = await createSessionFromSeedCore(
-      ctx,
-      context.scholar._id,
-      args.seedId,
-    );
-    const session = await ctx.db.get(sessionId);
-    if (!session || session.userId !== context.scholar._id) {
-      throw new Error("Failed to start Quest session");
-    }
-    const itemId = await ctx.db.insert("takeHomePlanItems", {
-      scholarId: context.scholar._id,
-      institutionId: context.institutionId,
-      dayKey: context.dayKey,
-      kind: session.unitId ? "quest" : "session",
-      sessionId,
-      ...(session.unitId ? { unitId: session.unitId } : {}),
-    });
-    return { itemId, sessionId, kind: session.unitId ? "quest" as const : "session" as const };
-  },
-});
-
-/**
- * Attach a session already created by the existing freeform Quest flow to
- * the take-home plan. Creation remains owned by `units.createQuest` /
- * `sessions.startUnit`; this is intentionally only the idempotent plan seam.
- */
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const addSessionToPlan = authedMutation({
-  args: { sessionId: v.id("sessions") },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const session = await ctx.db.get(args.sessionId);
-    if (
-      !session ||
-      session.userId !== context.scholar._id ||
-      session.isArchived ||
-      session.isTestDrive ||
-      session.isOffline ||
-      session.assignmentId
-    ) {
-      throw new Error("Quest session is not available");
-    }
-
-    let unitId: Id<"units"> | undefined;
-    if (session.unitId) {
-      const unit = await ctx.db.get(session.unitId);
-      if (
-        !unit ||
-        !unit.isActive ||
-        unit.authorScholarId !== context.scholar._id ||
-        unit.institutionId !== context.institutionId
-      ) {
-        throw new Error("Quest session is not available");
-      }
-      unitId = unit._id;
-    }
-
-    const rows = await ctx.db
-      .query("takeHomePlanItems")
-      .withIndex("by_scholar_day", (q) =>
-        q.eq("scholarId", context.scholar._id).eq("dayKey", context.dayKey),
-      )
-      .collect();
-    const existing = rows.find(
-      (item) =>
-        item.institutionId === context.institutionId &&
-        !item.resolution &&
-        (item.sessionId === session._id ||
-          (unitId !== undefined && item.kind === "quest" && item.unitId === unitId)),
-    );
-    if (existing) {
-      if (existing.removedAt) await ctx.db.patch(existing._id, { removedAt: undefined });
-      return existing._id;
-    }
-    return await ctx.db.insert("takeHomePlanItems", {
-      scholarId: context.scholar._id,
-      institutionId: context.institutionId,
-      dayKey: context.dayKey,
-      kind: unitId ? "quest" : "session",
-      sessionId: session._id,
-      ...(unitId ? { unitId } : {}),
-    });
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const addNote = authedMutation({
-  args: { text: v.string() },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const text = args.text.trim();
-    if (!text || text.length > 1_000) throw new Error("Note must be 1–1000 characters");
-    return await ctx.db.insert("takeHomePlanItems", {
-      scholarId: context.scholar._id,
-      institutionId: context.institutionId,
-      dayKey: context.dayKey,
-      kind: "note",
-      text,
-    });
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const editNote = authedMutation({
-  args: { itemId: v.id("takeHomePlanItems"), text: v.string() },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const item = await currentItem(ctx, context, args.itemId);
-    if (item.kind !== "note" || item.removedAt) throw new Error("Note not found");
-    const text = args.text.trim();
-    if (!text || text.length > 1_000) throw new Error("Note must be 1–1000 characters");
-    await ctx.db.patch(item._id, { text });
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const setNoteChecked = authedMutation({
-  args: { itemId: v.id("takeHomePlanItems"), checked: v.boolean() },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const item = await currentItem(ctx, context, args.itemId);
-    if (item.kind !== "note" || item.removedAt) throw new Error("Note not found");
-    await ctx.db.patch(item._id, { checkedAt: args.checked ? Date.now() : undefined });
-  },
-});
-
-/** Remove the choice itself so eligible work can return to the suggestion pool. */
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const removeItem = authedMutation({
-  args: { itemId: v.id("takeHomePlanItems") },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const item = await currentItem(ctx, context, args.itemId);
-    await ctx.db.delete(item._id);
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const markActivityDone = authedMutation({
-  args: { itemId: v.id("takeHomePlanItems") },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const item = await currentItem(ctx, context, args.itemId);
-    if (item.kind !== "activity" || !item.activityId || item.removedAt) {
-      throw new Error("Activity plan item not found");
-    }
-    const activity = await ctx.db.get(item.activityId);
-    if (!activity?.lessonId) {
-      throw new Error("Only lesson activities can be marked done");
-    }
-    if (item.sessionId) {
-      const session = await ctx.db.get(item.sessionId);
-      if (
-        !session ||
-        session.userId !== context.scholar._id ||
-        session.activityId !== item.activityId
-      ) {
-        throw new Error("Activity session no longer belongs to this plan");
-      }
-    }
-    const completion = await reconcileActivityCompletion(ctx, {
-      scholarId: context.scholar._id,
-      activityId: item.activityId,
-      sessionId: item.sessionId,
-      note: "Marked from take-home plan",
-      source: "scholar_home",
-      action: "scholar_marked_take_home_done",
-    });
-    if (!completion.completionId) throw new Error("Failed to record completion");
-    await ctx.db.patch(item._id, {
-      checkedAt: Date.now(),
-      markedDoneAt: completion.created ? Date.now() : item.markedDoneAt,
-      markedCompletionId: completion.created
-        ? completion.completionId
-        : item.markedCompletionId,
-    });
-    return {
-      completionId: completion.completionId,
-      undoAvailable: completion.created,
-      undoItemId: completion.created ? item._id : null,
-    };
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const undoMarkActivityDone = authedMutation({
-  args: { itemId: v.id("takeHomePlanItems") },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const item = await currentItem(ctx, context, args.itemId);
-    if (
-      item.kind !== "activity" ||
-      !item.markedCompletionId ||
-      item.removedAt
-    ) {
-      throw new Error("This activity completion cannot be undone here");
-    }
-    const completion = await ctx.db.get(item.markedCompletionId);
-    if (completion?.scholarId === context.scholar._id) {
-      await ctx.db.delete(completion._id);
-    }
-    if (item.sessionId) {
-      const session = await ctx.db.get(item.sessionId);
-      if (session?.userId === context.scholar._id) {
-        await ctx.db.patch(session._id, {
-          activityCompletedAt: undefined,
-          activityCompletionMessageId: undefined,
-        });
-      }
-    }
-    await ctx.db.patch(item._id, {
-      checkedAt: undefined,
-      markedDoneAt: undefined,
-      markedCompletionId: undefined,
-    });
-    return { restored: true };
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const closeQuest = authedMutation({
-  args: { itemId: v.id("takeHomePlanItems") },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const item = await currentItem(ctx, context, args.itemId);
-    if (item.kind !== "quest" || !item.unitId || item.removedAt) {
-      throw new Error("Quest plan item not found");
-    }
-    if (
-      (await questStateForPair(ctx, context.scholar._id, item.unitId)) !==
-      "active"
-    ) {
-      throw new Error("Quest is no longer active");
-    }
-    const activeSessions = (
-      await ctx.db
-        .query("sessions")
-        .withIndex("by_user_unit", (q) =>
-          q.eq("userId", context.scholar._id).eq("unitId", item.unitId!),
-        )
-        .collect()
-    ).filter(
-      (session) =>
-        !session.isArchived &&
-        !session.isTestDrive &&
-        !session.isOffline &&
-        !session.assignmentId,
-    );
-    if (activeSessions.length === 0) throw new Error("Quest has no open sessions");
-    for (const session of activeSessions) {
-      await ctx.db.patch(session._id, { isArchived: true });
-    }
-    await ctx.db.patch(item._id, {
-      checkedAt: Date.now(),
-      questOutcome: "scholar_closed",
-      questClosedAt: Date.now(),
-      questClosedSessionIds: activeSessions.map((session) => session._id),
-    });
-    return { undoAvailable: true, undoItemId: item._id };
-  },
-});
-
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const undoCloseQuest = authedMutation({
-  args: { itemId: v.id("takeHomePlanItems") },
-  handler: async (ctx, args) => {
-    const context = await scholarContext(ctx, ctx.user);
-    if (!context) throw new Error("Only scholars can edit a take-home plan");
-    const item = await currentItem(ctx, context, args.itemId);
-    if (item.kind !== "quest" || !item.questClosedSessionIds || item.removedAt) {
-      throw new Error("This quest closure cannot be undone here");
-    }
-    for (const sessionId of item.questClosedSessionIds) {
-      const session = await ctx.db.get(sessionId);
-      if (session?.userId === context.scholar._id) {
+        if (session?.userId !== context.scholar._id) continue;
+        // A teacher may have retracted the quest since it was closed; that
+        // work stays put away (lib/questLifecycle.ts isRetractedQuestSession).
+        const unit = session.unitId ? await ctx.db.get(session.unitId) : null;
+        if (isRetractedQuestSession(session, unit)) continue;
         await ctx.db.patch(session._id, unarchivePatch(session));
       }
     }
-    await ctx.db.patch(item._id, {
-      checkedAt: undefined,
-      questOutcome: undefined,
-      questClosedAt: undefined,
-      questClosedSessionIds: undefined,
-    });
+    await ctx.db.delete(item._id);
     return { restored: true };
   },
 });

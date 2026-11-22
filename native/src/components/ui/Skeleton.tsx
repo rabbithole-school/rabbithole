@@ -12,7 +12,8 @@ import { useColors } from "@/theme";
 
 export type SkeletonProps = {
   width?: number | string;
-  height: number;
+  /** Omit to size from `style` (e.g. `flex: 1` to fill a frame). */
+  height?: number;
   radius?: number;
   style?: StyleProp<ViewStyle>;
 };
@@ -52,7 +53,7 @@ export function Skeleton({
   }, [pulse, reduceMotion]);
 
   const dimensions: ViewStyle = {
-    height,
+    ...(height === undefined ? {} : { height }),
     ...(width === undefined
       ? {}
       : { width: width as ViewStyle["width"] }),

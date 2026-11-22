@@ -26,6 +26,7 @@
  * than papering over the unreadable state with a fresh one-entry queue.
  */
 
+import { formNudgeOf } from "./practiceAnswerForm";
 import {
   createKeyedMutex,
   readJsonOrThrow,
@@ -87,6 +88,9 @@ export type OutboxAnswer = {
    *  before this field existed default to `false`, which is compatible with an
    *  already-landed live attempt and cannot permanently wedge the FIFO. */
   submissionReplay?: boolean;
+  /** Form nudges this item already received (shared/practiceAnswerForm);
+   *  the server grades normally once its cap is reached. */
+  formNudgesUsed?: number;
 };
 
 function outboxStorageKey(scholarId: string): string {
@@ -110,7 +114,8 @@ function isOutboxAnswer(value: unknown): value is OutboxAnswer {
       v.servedLane === "challenge" ||
       v.servedLane === "required") &&
     (v.latencyMs === undefined || typeof v.latencyMs === "number") &&
-    (v.thinkTimeMs === undefined || typeof v.thinkTimeMs === "number")
+    (v.thinkTimeMs === undefined || typeof v.thinkTimeMs === "number") &&
+    (v.formNudgesUsed === undefined || typeof v.formNudgesUsed === "number")
   );
 }
 
@@ -195,6 +200,16 @@ export type OutboxSubmitArgs = {
   servedLane?: OutboxAnswer["servedLane"];
   latencyMs?: OutboxAnswer["latencyMs"];
   thinkTimeMs?: OutboxAnswer["thinkTimeMs"];
+  formNudgesUsed?: OutboxAnswer["formNudgesUsed"];
+  /**
+   * Set only when a queued entry is being drained: nobody is at that item any
+   * more, so a "right value, not yet in the form asked" nudge would reach no
+   * one, record nothing, and the drain would drop the answer. The submitters
+   * send `formNudgesUsed` at the grader's cap for these, so the server grades
+   * the answer exactly as it would after the nudges were spent. A live submit
+   * (the scholar on the item) never sets it.
+   */
+  fromOutbox?: true;
 };
 
 /** Historical name for the payload used while draining. The `replay` value is
@@ -230,6 +245,7 @@ function buildSubmitArgs(
     ...(entry.servedLane !== undefined ? { servedLane: entry.servedLane } : {}),
     ...(entry.latencyMs !== undefined ? { latencyMs: entry.latencyMs } : {}),
     ...(entry.thinkTimeMs !== undefined ? { thinkTimeMs: entry.thinkTimeMs } : {}),
+    ...(entry.formNudgesUsed !== undefined ? { formNudgesUsed: entry.formNudgesUsed } : {}),
   };
 }
 
@@ -251,7 +267,7 @@ export type DrainOutcome =
   | {
       status: "blocked";
       remaining: number;
-      reason: "submit-failed" | "save-failed";
+      reason: "submit-failed" | "save-failed" | "form-nudged";
       error: unknown;
     }
   | { status: "unreadable"; error: unknown };
@@ -291,14 +307,27 @@ export async function drainOutbox<T>(opts: {
     for (const q of remaining) {
       if (isCancelled()) return { status: "cancelled", remaining: remaining.length };
       let result: T;
+      const args: OutboxReplayArgs = {
+        ...buildSubmitArgs(scholarId, q, q.submissionReplay ?? true),
+        fromOutbox: true,
+      };
       try {
-        result = await submit(
-          buildSubmitArgs(
-            scholarId,
-            q,
-            q.submissionReplay ?? true,
-          ) as OutboxReplayArgs,
-        );
+        result = await submit(args);
+        // Defensive: a drained answer must come back graded. A form nudge
+        // here recorded nothing and has no one to show it to, so ask once
+        // more (still at the cap); if it is still a nudge, keep the entry
+        // queued rather than drop an unrecorded answer.
+        if (formNudgeOf(result) !== null) {
+          result = await submit(args);
+          if (formNudgeOf(result) !== null) {
+            return {
+              status: "blocked",
+              remaining: remaining.length,
+              reason: "form-nudged",
+              error: new Error("A replayed answer came back as a form nudge twice"),
+            };
+          }
+        }
       } catch (error) {
         return { status: "blocked", remaining: remaining.length, reason: "submit-failed", error };
       }

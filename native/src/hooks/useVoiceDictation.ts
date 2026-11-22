@@ -1,9 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Linking } from "react-native";
 import {
-  useAudioRecorder,
-  useAudioRecorderState,
-  RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
 } from "expo-audio";
@@ -13,6 +10,7 @@ import { useAction } from "convex/react";
 import { api, type Id } from "@/lib/convex";
 import { appStatusBus } from "@/lib/appStatusBus";
 import { voiceMark } from "@/lib/voicePerf";
+import { useMeteredRecorder } from "@/hooks/useMeteredRecorder";
 
 /**
  * Hard cap on a single recording. Exported so RecordingBar can render a
@@ -34,11 +32,8 @@ export const MAX_RECORDING_MS = 120_000; // 2 minutes
  * timer doesn't snap back to 0:00 if expo-audio resets its counter on stop().
  */
 export function useVoiceDictation(sessionId?: Id<"sessions">) {
-  const recorder = useAudioRecorder({
-    ...RecordingPresets.HIGH_QUALITY,
-    isMeteringEnabled: true,
-  });
-  const state = useAudioRecorderState(recorder, 80);
+  // Metering ON for the live waveform; `level` is 0..1 for the waveform bars.
+  const { recorder, state, level } = useMeteredRecorder();
   const transcribe = useAction(api.audioActions.transcribe);
 
   const [isRecording, setIsRecording] = useState(false);
@@ -65,9 +60,6 @@ export function useVoiceDictation(sessionId?: Id<"sessions">) {
   // eslint-disable-next-line react-hooks/refs -- The auto-stop timer must read the latest recorder state without being recreated.
   stateRef.current = state;
 
-  // metering dBFS (~ -60 quiet … 0 loud) → 0..1 for the waveform bars
-  const db = state.metering ?? -60;
-  const level = Math.max(0, Math.min(1, (db + 60) / 60));
   // Use frozen value so the timer display doesn't jump back to 0 after auto-stop
   const durationMs = frozenDurationMs ?? (state.durationMillis ?? 0);
 

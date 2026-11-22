@@ -63,6 +63,39 @@ export function canUseExternalAppsTools(opts: {
   );
 }
 
+/** The one-line tool-complete chip for enable/disable_app_for_group. A
+ *  one-day grant names its last day so the chat never reads it as standing. */
+export function groupAccessSummary(res: {
+  app: string;
+  group: string;
+  enabled: boolean;
+  memberCount?: number;
+  standingGroupGrant?: boolean;
+  throughDay?: string | null;
+  scholarCount?: number;
+  keptLonger?: number;
+  dayAddsRemoved?: number;
+}): string {
+  const scholars = (n: number) => `${n} scholar${n === 1 ? "" : "s"}`;
+  if (!res.enabled) {
+    return res.dayAddsRemoved
+      ? `Disabled ${res.app} for ${res.group}, including today's one-day grant (${scholars(res.dayAddsRemoved)})`
+      : `Disabled ${res.app} for ${res.group}`;
+  }
+  if (res.standingGroupGrant) {
+    return `${res.group} already has ${res.app} around the clock; nothing added`;
+  }
+  if (res.scholarCount !== undefined) {
+    const kept = res.keptLonger
+      ? `; ${scholars(res.keptLonger)} already had it longer`
+      : "";
+    return res.throughDay
+      ? `Opened ${res.app} for ${res.group} (${scholars(res.scholarCount)}) through ${res.throughDay}${kept}`
+      : `${res.group} already has ${res.app} at least that long${kept}`;
+  }
+  return `Enabled ${res.app} for ${res.group} (${scholars(res.memberCount ?? 0)})`;
+}
+
 export async function makeExternalAppsTools(
   ctx: ActionCtx,
   emit: AideEmit,
@@ -136,14 +169,14 @@ export async function makeExternalAppsTools(
     name: "get_external_app_access",
     description:
       "For ONE External App (named), show who can use it. An app reaches a scholar by THREE independent routes and this returns all three, so read all three before drawing any conclusion:\n" +
-      "1. STANDING grants, which have NO clock and apply around the clock: `groups` (scholar groups), `institutions` (whole schools, each with a live member count + whether the grant is enabled), and `scholars` (individuals granted it directly).\n" +
+      "1. STANDING grants, which apply around the clock: `groups` (scholar groups), `institutions` (whole schools, each with a live member count + whether the grant is enabled), and `scholars` (individuals granted it directly). Group and school grants have no end. A one-day grant to a group (enable_app_for_group with throughDay) is not a group row: it is a direct add on each member, listed under `scholars` with its `throughDay`. A direct scholar add can end: staff may open an app for a scholar \"all day today\" or \"until\" a date, and that row's `throughDay` is the last day it covers (\"YYYY-MM-DD\", the scholar's school calendar; it ends at the midnight after). `throughDay` null means the add lasts until someone removes it. An add past its end is not listed.\n" +
       "2. `blockScoped` — schedule placements that grant the app only during a class block, with the day, the block, and the exact window including the lead-in before the bell and the grace after it. This is the PREFERRED way to grant a class app (see place_class).\n" +
       "3. `pushes` — the pushes themselves: a block placement's window (`source: \"schedule\"`) or a teacher pushing the app to a class (`source: \"teacher\"`), each with who it covers (`group`), its window in school-local time, and `live` saying whether it is putting the app on scholars' tiles at this instant (the tiles' own rule, so an archived app is never live). A live push has `liveUntilLocal`, normally the end of its window, when a scheduled clear retires it. `overrun: true` means that window has already ended but nothing has cleared the push yet, so it is still on scholars' tiles: a clear normally lands within minutes, and `liveUntilLocal` is then midnight, the latest it can last. Every live push is listed; one that is not live is listed only when its window is within ±2 hours of now (e.g. about to open). For a push to a list of scholars or to an assignment's roster, `group` is only a COUNT (e.g. \"3 scholars\"): it does not say who, so it cannot tell you whether a particular scholar is covered.\n" +
       "CRITICAL: empty `groups`/`institutions`/`scholars` does NOT mean nobody can use the app. A block-scoped app has zero standing grants BY DESIGN. Never report an app as ungranted, broken, or accidentally revoked on the strength of those three being empty — check `blockScoped` and `pushes` first, and check `recentGrantChanges` (recent grant edits for this app, with who and via which surface) before suggesting a grant was lost.\n" +
       "ONE SCHOLAR: to answer \"can this scholar open it?\", pass `scholar` instead of working it out from the lists above. The result then also has `forScholar`, with `summary`, a sentence to relay:\n" +
       "- `canOpen`: right now, by the same rule as that scholar's own tile and launch checks.\n" +
       "- `via`: every route that lets them, each with a `name` to say and its `route` kind: `direct` (their own app row: added for them, or one of the default apps every new scholar gets), `group grant`, `school grant`, `schedule push` or `teacher push`.\n" +
-      "- `untilLocal`: null when nothing ends the access on a clock (a direct row or a grant lasts until someone removes it). For a push it is the EXPECTED end, the close of its window, when a scheduled clear retires it. That is not guaranteed: if the clear is late, the push stays on the scholar's tile past its window, and a later call shows `overrun: true` with midnight, the latest it can last.\n" +
+      "- `untilLocal`: null when nothing ends the access on a clock (a group or school grant, or a direct row with no end, lasts until someone removes it). For a direct row opened for a day or until a date, it is the midnight that ends it. For a push it is the EXPECTED end, the close of its window, when a scheduled clear retires it. That is not guaranteed: if the clear is late, the push stays on the scholar's tile past its window, and a later call shows `overrun: true` with midnight, the latest it can last.\n" +
       "- When `canOpen` is false: `whyNot` (`no-route`: nothing opens it for them at this moment; or `archived`), and `when`, which states rows that already exist and never forecasts:\n" +
       "  - `when.opens`: pushes already planned for them, soonest first, each with `atLocal`. These are the scheduler's (or a teacher's) own rows, so they are the ONLY authority on when the app opens. The scheduler plans only about a week ahead, so the soonest is the soonest ALREADY PLANNED; do not call it the next opening.\n" +
       "  - `when.wrappedToday`: today's sessions covering them that a teacher wrapped up (`opened: true`) or called off before they opened (`opened: false`). A deleted class, or a class whose app was removed, is not listed here, and a session a newer push covers again is not either.\n" +
@@ -161,7 +194,7 @@ export async function makeExternalAppsTools(
         scholar: {
           type: "string" as const,
           description:
-            "Optional: ONE scholar's name or (preferably) exact username, to ask whether THEY can open the app right now, through what, and until when (adds `forScholar`).",
+            "Optional: ONE scholar, to ask whether THEY can open the app right now, through what, and until when (adds `forScholar`). Pass their name exactly as the staff member said it (a first name is fine) or their username. The server resolves it; do not look it up with list_scholars first. A name that matches more than one scholar is refused with their usernames, so retry with one of those.",
         },
         ...INCLUDE_EXTENDED_EDUCATION_PROP,
       },
@@ -223,7 +256,13 @@ export async function makeExternalAppsTools(
             )
             .join(", ")}`
         : "";
-      const appWideLine = `${access.app.name}: standing — ${access.groups.length} group(s), ${access.institutions.length} school(s), ${scholars.length} scholar(s)${
+      // A direct add opened for a day is not standing access; the human
+      // reading this line must not take it for one (TRA-448).
+      const ending = scholars.filter((s) => s.throughDay !== null).length;
+      const endingText = ending
+        ? ` (${ending} of them only through a set day)`
+        : "";
+      const appWideLine = `${access.app.name}: standing — ${access.groups.length} group(s), ${access.institutions.length} school(s), ${scholars.length} scholar(s)${endingText}${
         blockText ? `; ${blockText}` : ""
       }${liveText ? `; ${liveText}` : ""}`;
       // Asked about one scholar, the line leads with their answer and keeps
@@ -471,17 +510,26 @@ export async function makeExternalAppsTools(
     betaTool({
       name: enabled ? "enable_app_for_group" : "disable_app_for_group",
       description: enabled
-        ? "Grant an External App to a whole scholar GROUP (named) — every scholar in the group gets the tile, and it stays true as membership changes (join the group → get the app). App + group names are resolved server-side."
-        : "Revoke an External App from a scholar GROUP (named) — removes the group grant so the tile disappears for everyone it covered (per-scholar credentials are retained for a later re-grant). App + group names are resolved server-side.",
+        ? "Grant an External App to a whole scholar GROUP (named). Without `throughDay` the grant is STANDING: every scholar in the group gets the tile around the clock, and it follows membership changes (join the group → get the app) until someone removes it. With `throughDay` it is a ONE-DAY grant: each scholar in the group gets the app until the end of that school day (it ends at the midnight after, in the school's time zone, with nothing to undo). When staff ask for an app \"all day\", \"for today\", or \"until the end of the day\" for a group, call this with throughDay:'today'; never place the app on each of the day's blocks with place_class, which only covers each block's own window, drops the app between blocks, and stacks a copy in every row of the Master Schedule. Use place_class with an app only for one specific block. The result's `throughDay` is the last day covered (\"YYYY-MM-DD\"); `standingGroupGrant: true` means the group already has the app around the clock, so nothing was added. App + group names are resolved server-side."
+        : "Revoke an External App from a scholar GROUP (named) — removes the group grant so the tile disappears for everyone it covered, and ends any one-day grant given to the group today (`dayAddsRemoved`). Per-scholar credentials are retained for a later re-grant. App + group names are resolved server-side.",
       inputSchema: {
         type: "object" as const,
         properties: {
           appName: { type: "string" as const, description: "The External App, by name." },
           groupName: { type: "string" as const, description: "The scholar group, by name (e.g. 'Geckos')." },
+          ...(enabled
+            ? {
+                throughDay: {
+                  type: "string" as const,
+                  description:
+                    "Optional: make this a one-day grant. 'today' (the school's today, from the server clock) for \"all day\" or \"for today\", or a later school day as YYYY-MM-DD for \"until Friday\". Omit for a standing grant.",
+                },
+              }
+            : {}),
         },
         required: ["appName", "groupName"] as const,
       },
-      run: async (input: { appName: string; groupName: string }) => {
+      run: async (input: { appName: string; groupName: string; throughDay?: unknown }) => {
         let res;
         try {
           res = await ctx.runMutation(internal.appAudiences.aideSetGroupAccess, {
@@ -490,17 +538,17 @@ export async function makeExternalAppsTools(
             groupName: input.groupName,
             enabled,
             via,
+            ...(enabled && typeof input.throughDay === "string"
+              ? { throughDay: input.throughDay }
+              : {}),
           });
         } catch (e) {
           return `Could not ${enabled ? "enable" : "disable"} the app for that group: ${errMsg(e)}`;
         }
-        const result = enabled
-          ? `Enabled ${res.app} for ${res.group} (${res.memberCount} scholar${res.memberCount === 1 ? "" : "s"})`
-          : `Disabled ${res.app} for ${res.group}`;
         emit({
           toolComplete: {
             name: enabled ? "enable_app_for_group" : "disable_app_for_group",
-            result,
+            result: groupAccessSummary(res),
           },
         });
         return JSON.stringify(res);
@@ -559,15 +607,16 @@ export async function makeExternalAppsTools(
     betaTool({
       name: enabled ? "enable_app_for_scholar" : "disable_app_for_scholar",
       description: enabled
-        ? "Give an External App to ONE scholar (by name or username) — adds the tile directly to just that scholar's launcher. App + scholar are resolved server-side; prefer the exact username when a name is ambiguous."
-        : "Remove an External App from ONE scholar's launcher (by name or username) — removes their direct link (does not touch group/school grants). App + scholar are resolved server-side; prefer the exact username when a name is ambiguous.",
+        ? "Give an External App to ONE scholar (by name or username) — adds the tile directly to just that scholar's launcher. If staff had already opened the app for them for a day or until a date, that end is kept: the result's `throughDay` is the last day THAT DIRECT ADD covers (\"YYYY-MM-DD\", the school's calendar; it ends at the midnight after), so do not tell the staff member the add is permanent. It does not say how long the scholar has the app overall, since a group, school, or class-block grant can keep it open longer: use get_external_app_access with the scholar for that. `throughDay` null means the direct add has no end and lasts until someone removes it. App + scholar are resolved server-side from the names as given; an ambiguous scholar name is refused with candidate usernames."
+        : "Remove an External App from ONE scholar's launcher (by name or username) — removes their direct link (does not touch group/school grants). App + scholar are resolved server-side from the names as given; an ambiguous scholar name is refused with candidate usernames.",
       inputSchema: {
         type: "object" as const,
         properties: {
           appName: { type: "string" as const, description: "The External App, by name." },
           scholar: {
             type: "string" as const,
-            description: "The scholar's name or (preferably) exact username.",
+            description:
+              "The scholar's name exactly as the staff member said it (a first name is fine) or their username. The server resolves it; do not look it up with list_scholars first. A name that matches more than one scholar is refused with their usernames, so retry with one of those.",
           },
         },
         required: ["appName", "scholar"] as const,
@@ -585,9 +634,11 @@ export async function makeExternalAppsTools(
         } catch (e) {
           return `Could not ${enabled ? "enable" : "disable"} the app for that scholar: ${errMsg(e)}`;
         }
-        const result = enabled
-          ? `Enabled ${res.app} for ${res.scholar}`
-          : `Disabled ${res.app} for ${res.scholar}`;
+        const result = !enabled
+          ? `Disabled ${res.app} for ${res.scholar}`
+          : "throughDay" in res && res.throughDay
+            ? `Enabled ${res.app} for ${res.scholar}: the direct add runs through ${res.throughDay} (an end set earlier, kept)`
+            : `Enabled ${res.app} for ${res.scholar}`;
         emit({
           toolComplete: {
             name: enabled ? "enable_app_for_scholar" : "disable_app_for_scholar",
@@ -601,14 +652,15 @@ export async function makeExternalAppsTools(
   const setCredentialsTool = betaTool({
     name: "set_external_app_login",
     description:
-      "Set or update ONE scholar's saved login for an External App. This is credential-bearing and is available only in a private chat. ALWAYS confirm the resolved scholar and app with the staff member before calling it; never repeat a username or password in your confirmation or response. Pass at least one of username or password. An empty string clears that field; omitting it leaves the saved value unchanged. App + scholar are resolved server-side; prefer the scholar's exact username when their name is ambiguous.",
+      "Set or update ONE scholar's saved login for an External App. This is credential-bearing and is available only in a private chat. ALWAYS confirm the resolved scholar and app with the staff member before calling it; never repeat a username or password in your confirmation or response. Pass at least one of username or password. An empty string clears that field; omitting it leaves the saved value unchanged. App + scholar are resolved server-side from the names as given; an ambiguous scholar name is refused with candidate usernames.",
     inputSchema: {
       type: "object" as const,
       properties: {
         appName: { type: "string" as const, description: "The External App, by name." },
         scholar: {
           type: "string" as const,
-          description: "The scholar's name or (preferably) exact username.",
+          description:
+            "The scholar's name exactly as the staff member said it (a first name is fine) or their username. The server resolves it; do not look it up with list_scholars first. A name that matches more than one scholar is refused with their usernames, so retry with one of those.",
         },
         username: {
           type: "string" as const,

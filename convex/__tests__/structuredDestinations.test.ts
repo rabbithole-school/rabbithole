@@ -119,6 +119,32 @@ describe("structured destinations (offer stars)", () => {
     expect(cards.some((u) => String(u.unitId) === String(unitId))).toBe(false);
   });
 
+  test("a teacher offer the scholar dismissed from Prep does not come back as a card", async () => {
+    const t = convexTest(schema, modules);
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    const asTeacher = await world.as.staffOf(school);
+    const { unitId } = await asTeacher.mutation(
+      api.units.createAndOfferQuestForScholar,
+      { scholarId: school.scholars[0].id, title: "Comics" },
+    );
+    const asScholar = await world.as.scholar(school.scholars[0]);
+    const star = (await asScholar.query(api.seeds.skyForSelf, {})).seeds.find(
+      (s) => s.topic === "Comics",
+    );
+    expect(star).toBeDefined();
+
+    await asScholar.mutation(api.seeds.dismissForSelf, { seedId: star!._id });
+
+    const cards = await asScholar.query(api.units.myIndependentStudyUnits, {});
+    expect(cards.some((u) => String(u.unitId) === String(unitId))).toBe(false);
+  });
+
   test("a scholar's own (un-offered) IS unit still shows as a card", async () => {
     const t = convexTest(schema, modules);
     const world = await makeWorld(t, {

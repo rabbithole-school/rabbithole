@@ -19,7 +19,6 @@ import {
   teacherMutation,
 } from "./lib/customFunctions";
 import {
-  action,
   internalAction,
   internalMutation,
   internalQuery,
@@ -55,7 +54,15 @@ import {
 import { ensureFlairArtForSession } from "./flairArt";
 import type { Doc, Id } from "./_generated/dataModel";
 import { isTextArtifact } from "../shared/textArtifacts";
+import { readLatestSessionState } from "./appStates";
+import { isPythonQuestActivity } from "./lib/questApproval";
 import {
+  PYTHON_BENCH_FIXED_APP,
+  programFromBenchDoc,
+} from "./lib/pythonBench";
+import { PYTHON_BENCH_STARTER_CODE } from "./lib/pythonBenchApp.generated";
+import {
+  MAX_TEXT_LENGTH,
   summarizeDeckForModel,
   validateDeck,
 } from "../shared/slidesScene";
@@ -71,7 +78,8 @@ import {
   levelsPromptLine,
 } from "./lib/readingLevels";
 import { isAppActivity } from "../shared/appSurface";
-import { APP_MAKER_EXPLANATION_CRITERION } from "./lib/appActivity";
+import { missionCriterionId } from "../shared/missionFlair";
+import { APP_MAKER_EXPLANATION_CRITERION, isMissionAppActivity } from "./lib/appActivity";
 
 // ── Queries ───────────────────────────────────────────────────────────
 
@@ -172,6 +180,13 @@ export const submit = authedMutation({
     }
     // Omitted preserves the legacy Send behavior for older clients.
     const intent = args.intent ?? "send";
+    // What finishes the activity. With no rubric, any hand-in does. A mission
+    // app keeps "Finish and send" beside its auto rubric (TRA-612, Andy
+    // 2026-11-08): its flair comes from the builder's ordinary turns, so a
+    // send finishes it and a check never does.
+    const finishes =
+      activity.deliverable.mode === "none" ||
+      (intent === "send" && isMissionAppActivity(activity));
     let submittedTextContent = args.textContent;
     let submittedMapContent: string | undefined;
     // Snapshot the transcription provenance with the content it describes: the
@@ -193,7 +208,9 @@ export const submit = authedMutation({
       } else if (activity.deliverable.kind === "map") {
         throw new Error("Choose the map for this deliverable");
       } else if (isTextArtifact(artifact)) {
-        submittedTextContent = artifact.content;
+        // A Python Quest hands in the scholar's program, not the bench.
+        submittedTextContent =
+          (await pythonQuestProgram(ctx, session, artifact)) ?? artifact.content;
       }
       hasTutorTranscription = artifact.hasTutorTranscription === true;
     }
@@ -201,7 +218,7 @@ export const submit = authedMutation({
       throw new Error("Open the map before checking this work");
     }
     if (
-      activity.deliverable.mode === "none" &&
+      finishes &&
       args.fileStorageId === undefined &&
       submittedMapContent === undefined &&
       !submittedTextContent?.trim()
@@ -278,7 +295,7 @@ export const submit = authedMutation({
         await notifySubmission(existing._id);
         await maybeScheduleArtifactAssessment(ctx, existing._id);
       }
-      if (activity.deliverable.mode === "none") {
+      if (finishes) {
         await markActivityCompleted(
           ctx,
           scholarId,
@@ -303,7 +320,7 @@ export const submit = authedMutation({
     });
     await notifySubmission(deliverableId);
     await maybeScheduleArtifactAssessment(ctx, deliverableId);
-    if (activity.deliverable.mode === "none") {
+    if (finishes) {
       await markActivityCompleted(
         ctx,
         scholarId,
@@ -405,6 +422,36 @@ export const setFamilyVisibility = teacherMutation({
 // mutation records the verdicts and runs pass-side effects.
 
 /**
+ * A Python Quest's work (TRA-692): the program the scholar wrote in the
+ * Python bench, read from the bench's saved app state, never the bench's own
+ * fixed HTML. Undefined when `artifact` is not the bench of a Python Quest's
+ * session, so every other session keeps the bench as a tool and never the
+ * work. "" when the scholar has written nothing yet (the bench's starter
+ * example is not their program), or when the program grew too long for the
+ * bench to save.
+ */
+async function pythonQuestProgram(
+  ctx: QueryCtx,
+  session: Pick<Doc<"sessions">, "_id" | "userId" | "unitId" | "activityId">,
+  artifact: Doc<"artifacts">,
+): Promise<string | undefined> {
+  if (artifact.fixedApp !== PYTHON_BENCH_FIXED_APP) return undefined;
+  if (!session.unitId || !session.activityId) return undefined;
+  const unit = await ctx.db.get(session.unitId);
+  if (!isPythonQuestActivity(unit, session.activityId)) return undefined;
+  const saved = await readLatestSessionState(
+    ctx,
+    session._id,
+    session.userId,
+    [artifact],
+    artifact._id,
+  );
+  const program = programFromBenchDoc(saved?.snapshot.doc) ?? "";
+  const norm = (text: string) => text.replace(/\r\n/g, "\n").trim();
+  return norm(program) === norm(PYTHON_BENCH_STARTER_CODE) ? "" : program;
+}
+
+/**
  * Resolve the artifact that matches the activity's deliverable kind. Slides
  * activities use the session's one deck; a text deliverable takes the newest
  * non-code text artifact, an app ("artifact") deliverable the newest code
@@ -436,18 +483,30 @@ export async function resolveScorableArtifactId(
   if (activity?.deliverable?.kind === "map") {
     return artifacts.find((artifact) => artifact.type === "map")?._id ?? null;
   }
+  // A Python Quest's work is its bench (the program in its saved state).
+  if (activity && session?.unitId) {
+    const unit = await ctx.db.get(session.unitId);
+    if (isPythonQuestActivity(unit, activity._id)) {
+      return (
+        artifacts.find((artifact) => artifact.fixedApp === PYTHON_BENCH_FIXED_APP)
+          ?._id ?? null
+      );
+    }
+  }
 
   // TRA-519 one app surface: any session can hold an app beside the
   // scholar's writing, so the deliverable kind decides which one is scored —
   // a writing activity checks the writing, never the side app the tutor
   // built, and an app deliverable checks the app.
   const deliverableKind = activity?.deliverable?.kind;
+  // The Python bench (artifacts.fixedApp) is a tool, never the scholar's work.
   const textArtifacts = artifacts.filter((artifact) =>
-    deliverableKind === "text"
+    !artifact.fixedApp &&
+    (deliverableKind === "text"
       ? isTextArtifact(artifact) && artifact.type !== "code"
       : deliverableKind === "artifact"
         ? artifact.type === "code"
-        : isTextArtifact(artifact),
+        : isTextArtifact(artifact)),
   );
   if (textArtifacts.length === 0) return null;
   let newest = textArtifacts[0];
@@ -575,9 +634,9 @@ export const applyRubricScoreFromTool = internalMutation({
           `Slides artifact content is invalid: ${validated.errors.join("; ")}`,
         );
       }
-      // Match the generous cap used by buildSlidesSection so the provenance
-      // snapshot reflects the deck evidence the rubric judge actually saw.
-      snapshotContent = summarizeDeckForModel(validated.deck, 600);
+      // Match buildSlidesSection (full text) so the provenance snapshot
+      // reflects the deck evidence the rubric judge actually saw.
+      snapshotContent = summarizeDeckForModel(validated.deck, MAX_TEXT_LENGTH);
     } else if (
       activity.deliverable.kind === "map" &&
       artifact.type === "map"
@@ -593,7 +652,8 @@ export const applyRubricScoreFromTool = internalMutation({
       activity.deliverable.kind !== "map" &&
       isTextArtifact(artifact)
     ) {
-      snapshotContent = artifact.content;
+      snapshotContent =
+        (await pythonQuestProgram(ctx, session, artifact)) ?? artifact.content;
     } else {
       throw new Error("This artifact does not match the deliverable kind");
     }
@@ -1016,7 +1076,9 @@ interface RubricResult {
   confidence: number;
 }
 
-export const checkRubric = action({
+// No app caller (web, native, scripts and evals all checked for TRA-496), and
+// its context query does no caller check, so it is internal-only.
+export const checkRubric = internalAction({
   args: { deliverableId: v.id("deliverables") },
   handler: async (ctx, args): Promise<RubricResult> => {
     const ctxBundle = await ctx.runQuery(
@@ -1413,9 +1475,23 @@ async function markActivityCompleted(
 
 const buildCriteriaGenSystemPrompt = (
   profile: InstitutionPromptProfile = DEFAULT_INSTITUTION_PROMPT_PROFILE,
-): string => `You write rubric criteria for an AI tutor at ${profile.schoolName}, a gifted elementary school.
+  missionInvariants?: readonly string[],
+): string => missionInvariants?.length
+  ? `You write mission labels for an AI tutor at ${profile.schoolName}, a gifted elementary school.
 
-A scholar is about to work on an activity. Your job: produce 3-5 dimensional rubric criteria that capture the quality bar for THIS scholar, given their talk level and the teacher's intent. The criteria are a private map for the AI tutor, not a scholar checklist and not a completion gate. The tutor later judges each criterion not/half/full. Only a full criterion is revealed to the scholar: its label and description appear together as permanent flair.
+Produce exactly one criterion per invariant, in the same source order. Write ONLY each label; the server supplies the criterion id and grading description.
+
+Each label must be short (at most 7 words), sentence case, and plain words a grade 2-6 scholar can read. Name what the line is ABOUT: the thing in the app the scholar will watch, as a "where/what/how" phrase. Never state the rule, its answer, its direction, or a number, and never use a word that gives the answer away (downhill, faster, less, more, always). Use no grading words. These labels are scholar-facing; the invariants are not label text.
+
+Examples:
+- "Rain that falls on the mountain flows downhill to the lowest point" -> "Where the rain goes after it lands" (not "How rain flows downhill")
+- "Seeds that land near the parent tree get less light and grow less" -> "Where seeds land and which ones grow" (not "Why close seeds grow less")
+- "The score goes up by 10 each time the player catches a coin" -> "How you score points"
+
+Call report_criteria with the supplied mission keys in source order. Do not add a maker's explanation or any generic quality criteria.`
+  : `You write rubric criteria for an AI tutor at ${profile.schoolName}, a gifted elementary school.
+
+A scholar is about to work on an activity. Your job: produce 3-5 dimensional rubric criteria that capture the quality bar for THIS scholar, given their talk level and the teacher's intent. The criteria are a private map for the AI tutor, not a scholar checklist and not a completion gate. The tutor later judges each criterion not/half/full. Only a full criterion is revealed to the scholar as permanent flair: its label appears with the tutor's awarding note, never its grading description.
 
 CALIBRATION RULES:
 - Level-dependent dimensions (length, vocabulary): SCALE to the scholar's talk level. A 6-year-old emerging reader's "Length: full" might be 2 sentences; a 5th grader's might be 6 with varied structure. Don't hold a 1st grader to a 5th grader's bar.
@@ -1468,7 +1544,39 @@ const CRITERIA_GEN_TOOL = {
   },
 };
 
+/** The private half of a mission criterion: when its flair is earned. The
+ * scholar sees only the label. Correct code alone is not enough (the builder
+ * writes the code), and a line that is a spec rather than a rule ("how you
+ * score") still needs the scholar to say how it works. */
+export const MISSION_CRITERION_CONDITION =
+  "Full only when the app does this AND, after running it, the scholar has said in their own words how it works.";
+
+function missionCriteriaGenTool(invariants: readonly string[]) {
+  const keys = invariants.map((_, index) => missionCriterionId(index));
+  return {
+    name: "report_criteria",
+    description: "Report one topic-only label per mission key, in source order.",
+    strict: true,
+    input_schema: {
+      type: "object" as const,
+      additionalProperties: false,
+      properties: {
+        criteria: {
+          type: "object" as const,
+          additionalProperties: false,
+          properties: Object.fromEntries(
+            keys.map((key) => [key, { type: "string" as const }]),
+          ),
+          required: keys,
+        },
+      },
+      required: ["criteria"],
+    },
+  };
+}
+
 interface GeneratedCriterionInput {
+  id?: string;
   label: string;
   description: string;
 }
@@ -1490,9 +1598,44 @@ function hasOnlyKeys(
  */
 export function parseCriteriaGenToolInput(
   input: unknown,
+  missionInvariants?: readonly string[],
 ): GeneratedCriterionInput[] {
   if (!isRecord(input) || !hasOnlyKeys(input, ["criteria"])) {
     throw new Error("report_criteria input must contain only criteria");
+  }
+  if (missionInvariants?.length) {
+    const labels = input.criteria;
+    if (!isRecord(labels)) {
+      throw new Error("report_criteria criteria must be a mission-label object");
+    }
+    // Exactly the expected keys, in any order: a JSON object's key order is
+    // not part of the tool schema, and the result is built in source order.
+    const keys = Object.keys(labels);
+    const expected = missionInvariants.map((_, index) => missionCriterionId(index));
+    if (
+      keys.length !== expected.length ||
+      expected.some((key) => !Object.prototype.hasOwnProperty.call(labels, key))
+    ) {
+      throw new Error(
+        "report_criteria must contain exactly one label per invariant",
+      );
+    }
+    return missionInvariants.map((invariant, index) => {
+      const id = missionCriterionId(index);
+      const label = labels[id];
+      if (
+        typeof label !== "string" ||
+        !label.trim() ||
+        label.trim().split(/\s+/).length > 7
+      ) {
+        throw new Error(`report_criteria ${id} label must contain 1-7 words`);
+      }
+      return {
+        id,
+        label: label.trim(),
+        description: `${/[.!?]$/.test(invariant.trim()) ? invariant.trim() : `${invariant.trim()}.`} ${MISSION_CRITERION_CONDITION}`,
+      };
+    });
   }
   if (!Array.isArray(input.criteria)) {
     throw new Error("report_criteria criteria must be an array");
@@ -1545,8 +1688,9 @@ interface CriteriaGenContext {
   // The activity's `assessesWritingMechanics` flag (TRA-502).
   assessesWritingMechanics: boolean;
   // The deliverable is an app the scholar builds (an app activity's
-  // "artifact"): one criterion is the maker's own explanation of it.
+  // "artifact"): without invariants, one criterion is the maker's explanation.
   isAppDeliverable: boolean;
+  missionInvariants?: string[];
 }
 
 export const internalGetCriteriaGenContext = internalQuery({
@@ -1612,6 +1756,13 @@ export const internalGetCriteriaGenContext = internalQuery({
       assessesWritingMechanics: activity.assessesWritingMechanics === true,
       isAppDeliverable:
         isAppActivity(activity) && activity.deliverable.kind === "artifact",
+      ...(isMissionAppActivity(activity) && activity.buildContract
+        ? {
+            missionInvariants: activity.buildContract.invariants.filter(
+              (invariant) => invariant.trim(),
+            ),
+          }
+        : {}),
     };
   },
 });
@@ -1654,6 +1805,7 @@ export const recordCriteriaError = internalMutation({
 export function buildCriteriaGenUserMessage(
   bundle: Omit<CriteriaGenContext, "scholarId" | "institutionProfile">,
 ): string {
+  const missionInvariants = bundle.missionInvariants;
   const angleBlock = bundle.angleTitle
     ? [
         `Scholar's chosen angle for this activity: ${bundle.angleTitle}${bundle.angleDescription ? ` — ${bundle.angleDescription}` : ""}`,
@@ -1668,12 +1820,24 @@ export function buildCriteriaGenUserMessage(
     `Deliverable prompt (what the scholar produces): ${bundle.deliverablePrompt}`,
     `Teacher's notes about quality bar / intent: ${bundle.teacherNotes ?? "(none — infer from the deliverable prompt and unit context)"}`,
     levelsPromptLine(bundle.readingLevel) ?? "Talk level: (not set — pick a sensible default for elementary)",
-    bundle.assessesWritingMechanics
-      ? WRITING_MECHANICS_CRITERIA_ALLOWED
-      : WRITING_MECHANICS_CRITERIA_FORBIDDEN,
-    bundle.isAppDeliverable ? APP_MAKER_EXPLANATION_CRITERION : null,
+    missionInvariants?.length
+      ? null
+      : bundle.assessesWritingMechanics
+        ? WRITING_MECHANICS_CRITERIA_ALLOWED
+        : WRITING_MECHANICS_CRITERIA_FORBIDDEN,
+    bundle.isAppDeliverable && !missionInvariants?.length
+      ? APP_MAKER_EXPLANATION_CRITERION
+      : null,
     "",
-    "Produce 3-5 dimensional criteria calibrated for this scholar. Call report_criteria.",
+    missionInvariants?.length
+      ? [
+          "Mission invariants (source order; write only the topic label for each key):",
+          ...missionInvariants.map(
+            (invariant, index) => `${missionCriterionId(index)}: ${invariant}`,
+          ),
+          "Produce exactly one label per invariant, in the same order. Call report_criteria.",
+        ].join("\n")
+      : "Produce 3-5 dimensional criteria calibrated for this scholar. Call report_criteria.",
   ]
     .filter((s) => s !== null)
     .join("\n");
@@ -1702,8 +1866,14 @@ export const generateCriteriaForSession = internalAction({
       const response = await anthropic.messages.create({
         model: MODELS.SONNET,
         max_tokens: 1024,
-        system: buildCriteriaGenSystemPrompt(bundle.institutionProfile),
-        tools: [CRITERIA_GEN_TOOL],
+        system: buildCriteriaGenSystemPrompt(
+          bundle.institutionProfile, bundle.missionInvariants,
+        ),
+        tools: [
+          bundle.missionInvariants?.length
+            ? missionCriteriaGenTool(bundle.missionInvariants)
+            : CRITERIA_GEN_TOOL,
+        ],
         tool_choice: { type: "tool", name: "report_criteria" },
         messages: [{ role: "user", content: userMessage }],
       });
@@ -1718,13 +1888,15 @@ export const generateCriteriaForSession = internalAction({
         usage: response.usage,
         institutionId,
       });
-      const criteria = parseCriteriaGenToolInput(toolBlock.input);
+      const criteria = parseCriteriaGenToolInput(
+        toolBlock.input, bundle.missionInvariants,
+      );
       const normalized = normalizeDeliverable({
         kind: "text",
         prompt: "x",
         mode: "manual",
         criteria: criteria.map((c) => ({
-          id: "",
+          id: c.id ?? "",
           label: c.label,
           description: c.description,
         })),

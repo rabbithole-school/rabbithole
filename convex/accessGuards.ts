@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { internalQuery } from "./_generated/server";
-import { requireActiveScholarAccess } from "./lib/access";
+import { evaluateInstitutionSuspension, requireActiveScholarAccess } from "./lib/access";
 import { requireActiveSessionOwnerInstitution } from "./lib/scholarEnrollment";
 
 /**
@@ -36,5 +36,22 @@ export const requireActiveLearnerSessionByUserId = internalQuery({
     if (!user) throw new Error("User not found");
     await requireActiveSessionOwnerInstitution(ctx, user, session);
     return true;
+  },
+});
+
+/**
+ * Action/HTTP bridge for "is this signed-in caller still allowed to spend?"
+ * A valid token can outlive its user (deleted) or their school (suspended);
+ * this is the same check `requireUser` makes, without throwing, so an HTTP
+ * route can answer 401 vs 403 before it pays for anything.
+ */
+export const activeCallerByUserId = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) return { status: "missing" as const };
+    const { blocked } = await evaluateInstitutionSuspension(ctx, user);
+    if (blocked) return { status: "suspended" as const };
+    return { status: "active" as const, role: user.role ?? null };
   },
 });

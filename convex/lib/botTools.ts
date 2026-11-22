@@ -84,6 +84,15 @@ export function tutorModelSchemaFragment() {
   };
 }
 
+/** The input description of a unit's title, shared by every bot that edits
+ *  one. The next teacher finds a unit by its title, so it names the topic. */
+export const UNIT_TITLE_DESCRIPTION =
+  'New title for the unit. Name the topic so the next teacher can find and reuse it: "Tide Pool Ecosystems", not "Tide Pools (Otters)" or "Tide Pools for Avery". Leave out the class or scholar it was first run with; who it is given to lives on the assignment.';
+
+/** The input description of a unit's description (teacher-facing). */
+export const UNIT_DESCRIPTION_DESCRIPTION =
+  "One or two sentences on what the unit covers and what scholars do in it, written so another teacher can tell whether to reuse it. Replaces the current description; an empty string clears it.";
+
 export const VIBECODE_BUILD_BRIEF_DESCRIPTION =
   "The BUILD BRIEF must state (a) what the app must let the scholar demonstrate, (b) the learning arc — what the scholar should DISCOVER by building and observing, in what order, (c) what NOT to reveal up front (formula names, etc.), and (d) that the scholar chooses their own scenario/setting where applicable.";
 
@@ -99,15 +108,12 @@ export const VIBECODE_BUILD_BRIEF_DESCRIPTION =
  */
 export const MISSION_DESCRIPTION =
   "The activity's MISSION — write one for EVERY online activity with a deliverable. " +
-  "`gate`: ONE thing that must exist before side ideas get built — for writing, usually \"a first draft of X exists\"; for an app activity, \"the core model, run once without the intervention\". " +
+  "`gate`: on an APP activity this is the MISSION LINE scholars see at the top of the builder — one open understanding goal in plain words, 60 characters or fewer, like \"Understand escape velocity\" or \"Find out why seeds travel\". Name the idea to understand, never a build step, a checklist, or a topic label (\"Volcanoes\"); it never holds a build back, so the scholar may experiment, add a side idea, or let the world run wild from the first turn. On any other activity it is ONE thing that must exist before side ideas get built, usually \"a first draft of X exists\". " +
   "`freedoms` (\"scholar owns\"): what the scholar decides outright — topic choice, characters, setting, genre, look; anything that doesn't break the work. " +
   "`invariants` (\"must be true\"): ONLY for an app activity, where they are REQUIRED — 2–3 things the app must be TRUE about, stated as testable MECHANICS (a cause and its effect you could check by running the app), never as topics. On any other activity leave invariants out: its must-be-true items belong in the deliverable's criteria, and a non-app mission with invariants is refused. " +
   "Do NOT ask the teacher whether off-topic scholar ideas should be translated, parked, or allowed: the tutor translates them into the subject by default and saves the rest for later. " +
   "Example (a narrative essay): gate \"a first draft of the whole story exists, however rough\"; freedoms [\"which moment you pick\", \"the characters' names\", \"funny or serious\"]. " +
-  "Example (a seed-dispersal app build): invariants [\"How far a seed travels depends on its shape and weight — winged seeds drift with the wind, heavy seeds fall near the parent\", \"Seeds that land in the parent's shade sprout less often than seeds that land in open ground\"]; freedoms [\"setting — any island, planet, or backyard\", \"the plants' names, looks, and story\", \"genre — game, toy, or simulation\", \"visuals and sound\"]; gate \"one generation of seeds dropped and sprouted with the default seed, before the scholar redesigns it\".";
-
-export const VIBECODE_ALLOW_SILENCE_DESCRIPTION =
-  "kind=vibecode only. Set true whenever you write a buildContract: the App designer may then stay silent until the scholar actually answers the learning question it asked, instead of building past it. Omit (false) when there is no contract.";
+  "Example (a seed-dispersal app build): invariants [\"How far a seed travels depends on its shape and weight — winged seeds drift with the wind, heavy seeds fall near the parent\", \"Seeds that land in the parent's shade sprout less often than seeds that land in open ground\"]; freedoms [\"setting — any island, planet, or backyard\", \"the plants' names, looks, and story\", \"genre — game, toy, or simulation\", \"visuals and sound\"]; gate \"Find out why some seeds travel farther\".";
 
 /** JSON-schema fragment for a tool's `buildContract` property. */
 export function buildContractSchemaFragment() {
@@ -130,7 +136,7 @@ export function buildContractSchemaFragment() {
       gate: {
         type: "string" as const,
         description:
-          "The one thing that must exist before side ideas get built (≤ 240 characters).",
+          "App activity: the mission line scholars see — one open understanding goal, ≤ 60 characters (\"Understand escape velocity\"). Other activities: the one thing that must exist before side ideas get built (≤ 240 characters).",
       },
     },
     required: ["freedoms"] as const,
@@ -195,14 +201,6 @@ export function assessesWritingMechanicsSchemaFragment() {
     type: "boolean" as const,
     description:
       "Set true ONLY for an activity that is explicitly about spelling or typing (a spelling lesson, a typing-practice task). Default/omitted = false: dictation is a first-class way for scholars to write, so spelling, punctuation and typing never affect how their work is judged. Do not set this just because a story or write-up should be well written.",
-  };
-}
-
-/** JSON-schema fragment for a tool's `allowSilence` property. */
-export function allowSilenceSchemaFragment() {
-  return {
-    type: "boolean" as const,
-    description: VIBECODE_ALLOW_SILENCE_DESCRIPTION,
   };
 }
 

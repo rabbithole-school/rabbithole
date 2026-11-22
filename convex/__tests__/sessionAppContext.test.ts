@@ -234,7 +234,9 @@ describe("getSessionContext appContext", () => {
       }),
     );
     const withoutApp = await seedSession(t, w, w.writingActivityId);
-    expect((await contextFor(t, withoutApp)).priorUnitWork).toBeNull();
+    expect((await contextFor(t, withoutApp)).priorUnitWork).toContain(
+      "Gas builds up under the rock",
+    );
 
     const withApp = await seedSession(t, w, w.writingActivityId, {
       withApp: true,

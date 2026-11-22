@@ -12,6 +12,9 @@ import {
   bareRecurringShadowKey,
   exactSchedulePlacementKey,
 } from "../lib/schedulePlacementIdentity";
+import { readSchedule, writeSchedule } from "../lib/scheduleStore";
+import { syncClassesForGroupPeriod, syncClassesForPlacements } from "../lib/classLink";
+import { isRecurringClassMeeting } from "../../shared/meetingSlots";
 
 const weekdays = [1, 2, 3, 4, 5];
 const DEFAULT_BARE_SHADOW_BATCH_SIZE = 25;
@@ -366,11 +369,11 @@ function desired(): Desired[] {
     rows.push({ group: "geckos", day, block: "morning-circle", subject: "Morning Circle", teacher: "humanities" });
     rows.push({ group: "seals", day, block: "morning-circle", subject: "Morning Circle", teacher: "science" });
     const mw = day === 1 || day === 3, tt = day === 2 || day === 4;
-    rows.push({ group: "geckos", day, block: "block-a", subject: day === 5 ? "Humanities" : "Math Workshop", teacher: "humanities" });
-    rows.push({ group: "seals", day, block: "block-a", subject: day === 5 ? "Science" : "Math Workshop", teacher: "science" });
+    rows.push({ group: "geckos", day, block: "block-a", subject: day === 5 ? "Humanities" : "Math", teacher: "humanities" });
+    rows.push({ group: "seals", day, block: "block-a", subject: day === 5 ? "Science" : "Math", teacher: "science" });
     rows.push({ group: "geckos", day, block: "block-b", subject: mw ? "Humanities" : "Science", teacher: mw ? "humanities" : "science" });
-    rows.push({ group: "seals", day, block: "block-b", subject: mw ? "Japanese Cooking Enrichment Cluster" : tt ? "LA Workshop" : "Humanities", teacher: tt || day === 5 ? "humanities" : undefined });
-    rows.push({ group: "geckos", day, block: "block-c", subject: mw ? "Japanese Cooking Enrichment Cluster" : tt ? "LA Workshop" : "Holoholo", teacher: tt ? "humanities" : undefined, spanBlocks: day === 5 ? 5 : undefined });
+    rows.push({ group: "seals", day, block: "block-b", subject: mw ? "Cooking" : tt ? "Language Arts" : "Humanities", teacher: tt || day === 5 ? "humanities" : undefined });
+    rows.push({ group: "geckos", day, block: "block-c", subject: mw ? "Cooking" : tt ? "Language Arts" : "Holoholo", teacher: tt ? "humanities" : undefined, spanBlocks: day === 5 ? 5 : undefined });
     rows.push({ group: "seals", day, block: "block-c", subject: mw ? "Humanities" : tt ? "Art" : "Holoholo", teacher: mw ? "humanities" : undefined, spanBlocks: day === 5 ? 5 : undefined });
     if (day !== 5) {
       rows.push({ group: "geckos", day, block: "block-d", subject: mw ? "Physical Education" : "Art", teacher: mw ? "pe" : undefined });
@@ -492,6 +495,15 @@ export const reconcileBlockSchedule = internalMutation({
         subject: row.subject, teacherId: row.teacher ? staff.get(row.teacher)! : undefined, spanBlocks: row.spanBlocks,
       });
     }
+    if (!dryRun) {
+      const groupIds = new Set([
+        ...placements.filter(isRecurringClassMeeting).map((p) => p.groupId),
+        ...[...targetGroups.values()].map((group) => group._id),
+      ]);
+      for (const groupId of groupIds) {
+        await syncClassesForGroupPeriod(ctx, period._id, groupId);
+      }
+    }
     return {
       dryRun,
       periodId: period._id,
@@ -606,6 +618,7 @@ export const cleanupExactScheduleDuplicates = internalMutation({
 
     if (!dryRun) {
       for (const id of deleteIds) await ctx.db.delete(id);
+      await syncClassesForPlacements(ctx, rows.filter((row) => deleteIds.includes(row._id)));
     }
     return {
       dryRun,
@@ -701,7 +714,7 @@ export const archiveRedundantAssignmentSchedule = internalMutation({
         dryRun,
         alreadyApplied: true,
         plannedPlacementDeletes: 0,
-        plannedActivityEntries: redundant.activitySchedule?.length ?? 0,
+        plannedActivityEntries: (await readSchedule(ctx, redundant)).length,
         archived: false,
       };
     }
@@ -713,10 +726,10 @@ export const archiveRedundantAssignmentSchedule = internalMutation({
     if (placements.length !== args.expectedPlacementCount) {
       throw new Error("Redundant assignment placement count does not match the expected count.");
     }
-    if ((redundant.activitySchedule ?? []).length !== args.expectedPlannedEntryCount) {
+    if ((await readSchedule(ctx, redundant)).length !== args.expectedPlannedEntryCount) {
       throw new Error("Redundant assignment planned-entry count does not match the expected count.");
     }
-    for (const entry of redundant.activitySchedule ?? []) {
+    for (const entry of (await readSchedule(ctx, redundant))) {
       if (
         entry.setAt != null ||
         entry.scheduledFnId != null ||
@@ -741,16 +754,15 @@ export const archiveRedundantAssignmentSchedule = internalMutation({
 
     if (!dryRun) {
       for (const placement of placements) await ctx.db.delete(placement._id);
-      await ctx.db.patch(redundant._id, {
-        archivedAt: Date.now(),
-        activitySchedule: [],
-      });
+      await ctx.db.patch(redundant._id, { archivedAt: Date.now() });
+      await writeSchedule(ctx, redundant, []);
+
     }
     return {
       dryRun,
       alreadyApplied: false,
       plannedPlacementDeletes: placements.length,
-      plannedActivityEntries: (redundant.activitySchedule ?? []).length,
+      plannedActivityEntries: (await readSchedule(ctx, redundant)).length,
       archived: !dryRun,
     };
   },

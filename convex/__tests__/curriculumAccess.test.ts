@@ -175,9 +175,9 @@ describe("scoped curriculum capability", () => {
         essentialQuestions: [{ text: "Denied edit" }],
       }),
     ).rejects.toThrow(/not allowed to edit/i);
-    await expect(asRegistrar.query(api.rooms.listOwned, {})).rejects.toThrow(
-      /teacher or admin role required/i,
-    );
+    await expect(
+      asRegistrar.query(api.assignments.activePushesForTeacher, {}),
+    ).rejects.toThrow(/teacher or admin role required/i);
   });
 
   test("a staff membership in another institution does not grant curriculum access", async () => {
@@ -194,9 +194,9 @@ describe("scoped curriculum capability", () => {
         essentialQuestions: [{ text: "Foreign edit" }],
       }),
     ).rejects.toThrow(/not allowed to edit/i);
-    await expect(asForeignDesigner.query(api.rooms.listOwned, {})).rejects.toThrow(
-      /teacher or admin role required/i,
-    );
+    await expect(
+      asForeignDesigner.query(api.assignments.activePushesForTeacher, {}),
+    ).rejects.toThrow(/teacher or admin role required/i);
   });
 
   test("a grant at one school cannot edit the primary school's unstamped unit (TRA-531)", async () => {

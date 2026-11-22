@@ -14,8 +14,10 @@
 // it. See review/external-apps-launcher.html and the #2456 write-up.
 
 import type { QueryCtx } from "../_generated/server";
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import { ROLES } from "./roles";
+import { openAppPushesForInstitution } from "./deviceAppProjection";
+import { isPushShowing } from "./pushes";
 
 type ExternalAppReadCtx = { db: QueryCtx["db"] };
 
@@ -83,6 +85,85 @@ export async function liveReachOfExternalApp(
     }
   }
   return reach;
+}
+
+/**
+ * Every scholar whose iPad may currently hold the app: `liveReachOfExternalApp`
+ * (grants) plus the audience of every SHOWING app push for it. Used ONLY to
+ * choose whose devices to re-mark when the app is archived or its managed
+ * identity changes (TRA-435) — a scholar whose only route is a teacher's focus
+ * or a schedule block's push has the app in the allowlist with no grant at all.
+ *
+ * Never use this for tenancy (`externalAppWithinLens`, the catalog write
+ * gate): a push writer does not check which school's app it pushes, and push
+ * reach follows the bell schedule, so another school's live push would hand it
+ * edit rights to an app this school depends on. Re-marking an extra device is
+ * harmless; widening who may edit is not.
+ *
+ * Pushes are read through the one push reader (`openAppPushesForInstitution`)
+ * and judged by `isPushShowing`, the test the scholar's tile uses, so a stale
+ * open row from a past day reaches nobody. `nowMs` comes from the calling
+ * mutation (T11). A push never crosses a school, so each audience is bounded
+ * to the push's own.
+ */
+export async function deviceReachOfExternalApp(
+  ctx: ExternalAppReadCtx,
+  appId: Id<"externalApps">,
+  nowMs: number,
+): Promise<Set<Id<"users">>> {
+  const reach = await liveReachOfExternalApp(ctx, appId);
+  for (const institution of await ctx.db.query("institutions").collect()) {
+    const { pushes, clock } = await openAppPushesForInstitution(ctx, institution._id, nowMs);
+    for (const push of pushes) {
+      if (push.target.kind !== "app" || push.target.externalAppId !== appId) continue;
+      if (!isPushShowing(push, clock)) continue;
+      await addPushAudience(ctx, push, reach);
+    }
+  }
+  return reach;
+}
+
+/** Add every live scholar a push's audience covers, inside the push's school
+ *  (the boundary `pushCoversScholar` enforces). */
+async function addPushAudience(
+  ctx: ExternalAppReadCtx,
+  push: Doc<"pushes">,
+  reach: Set<Id<"users">>,
+): Promise<void> {
+  const addIfOwnSchool = async (id: Id<"users">) => {
+    const member = await ctx.db.get(id);
+    if (
+      member &&
+      member.role === ROLES.SCHOLAR &&
+      member.institutionId === push.institutionId
+    ) {
+      reach.add(id);
+    }
+  };
+  const audience = push.audience;
+  switch (audience.kind) {
+    case "institution": {
+      const members = await ctx.db
+        .query("users")
+        .withIndex("by_institution", (q) => q.eq("institutionId", push.institutionId))
+        .collect();
+      for (const m of members) if (m.role === ROLES.SCHOLAR) reach.add(m._id);
+      return;
+    }
+    case "group": {
+      const group = await ctx.db.get(audience.groupId);
+      for (const id of group?.scholarIds ?? []) await addIfOwnSchool(id);
+      return;
+    }
+    case "scholars":
+      for (const id of audience.scholarIds) await addIfOwnSchool(id);
+      return;
+    case "assignment": {
+      const assignment = await ctx.db.get(audience.assignmentId);
+      for (const id of assignment?.scholarIds ?? []) await addIfOwnSchool(id);
+      return;
+    }
+  }
 }
 
 /** Whether a catalog app falls within the caller's institution scholar lens —

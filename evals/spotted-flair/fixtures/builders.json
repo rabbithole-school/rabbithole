@@ -1,0 +1,89 @@
+[
+  {
+    "id": "fictional-garden-shadows",
+    "scholarId": "fictional-robot-sprout",
+    "date": "2026-10-30T10:00:00Z",
+    "title": "Garden builder",
+    "buildContract": { "gate": "Build a garden game with planting and harvesting.", "invariants": ["A seed grows into a harvestable plant.", "Harvesting adds a point."] },
+    "chatHistory": [
+      { "role": "user", "content": "Make a garden where I plant seeds and collect carrots." },
+      { "role": "assistant", "content": "The planting and harvest buttons work. What would you like to change?" },
+      { "role": "user", "content": "Put a barn beside the field. Make the carrots in its shadow grow slower because plants use sunlight to make their food. When the sun moves, the slow patch should move too, not stay painted on the same squares." },
+      { "role": "assistant", "content": "I can make the growth rate depend on whether the barn blocks the sun." },
+      { "role": "user", "content": "Yes, then moving the barn changes which plants get enough light." }
+    ]
+  },
+  {
+    "id": "fictional-polish",
+    "scholarId": "fictional-robot-sprout",
+    "date": "2026-10-31T10:00:00Z",
+    "title": "Garden builder",
+    "buildContract": { "gate": "Build a garden game with planting and harvesting." },
+    "chatHistory": [
+      { "role": "user", "content": "Make a garden game." },
+      { "role": "assistant", "content": "You can plant seeds and harvest vegetables." },
+      { "role": "user", "content": "More detail please. Make the carrots shiny and put a huge rainbow on the win screen." },
+      { "role": "assistant", "content": "The carrots now shine, and the win screen has a rainbow." },
+      { "role": "user", "content": "Make a thousand levels and lots more colors!" }
+    ]
+  },
+  {
+    "id": "fictional-listed-inflation",
+    "scholarId": "fictional-robot-cog",
+    "date": "2026-11-01T10:00:00Z",
+    "title": "Market builder",
+    "deliverableCriteria": [
+      { "id": "mission-1", "label": "Model inflation", "description": "When more coins circulate but goods stay fixed, raise prices; explain why." }
+    ],
+    "buildContract": { "gate": "Create a market that models inflation.", "invariants": ["Doubling available money without more goods raises prices."] },
+    "chatHistory": [
+      { "role": "user", "content": "Let's make the market." },
+      { "role": "assistant", "content": "The mission is to model inflation. What should happen if we double the coins but keep the same number of apples?" },
+      { "role": "user", "content": "Prices should go up because people have more coins to bid for the same apples. Make each apple cost more after the coin button so the coins buy less than before." },
+      { "role": "assistant", "content": "The coin button now increases the money supply and prices." },
+      { "role": "user", "content": "I can buy fewer apples with ten coins now." }
+    ]
+  },
+  {
+    "id": "fictional-outside-knowledge",
+    "scholarId": "fictional-robot-sprout",
+    "date": "2026-11-02T10:00:00Z",
+    "title": "Space courier builder",
+    "buildContract": { "gate": "Build a game that delivers parcels between planets.", "invariants": ["Delivering a parcel increases the score."] },
+    "chatHistory": [
+      { "role": "user", "content": "Build a space delivery game with a parcel ship." },
+      { "role": "assistant", "content": "The ship can collect a parcel and land at the destination." },
+      { "role": "user", "content": "Add a signal delay to the remote controls. Light takes time to travel, so a faraway ship should get my command later than a nearby one. Show the command as a little pulse moving toward the ship, and only turn when that pulse arrives." },
+      { "role": "assistant", "content": "Commands will travel as pulses, and each ship will wait for its pulse." },
+      { "role": "user", "content": "Then I will need to plan turns earlier for the far ship instead of just clicking faster." }
+    ]
+  },
+  {
+    "id": "fictional-tutor-supplied",
+    "scholarId": "fictional-robot-cog",
+    "date": "2026-11-03T10:00:00Z",
+    "title": "Garden builder",
+    "buildContract": { "gate": "Build a garden game with planting and harvesting." },
+    "chatHistory": [
+      { "role": "user", "content": "What could we add to the garden?" },
+      { "role": "assistant", "content": "Plants use sunlight to make food. You could make a barn cast a shadow that slows the carrots, with the shadow moving when the sun moves. Shall I build that?" },
+      { "role": "user", "content": "Yes, put the slow carrots in the moving shadow like you said." },
+      { "role": "assistant", "content": "The shadow now moves with the sun." },
+      { "role": "user", "content": "Nice. Make the barn purple." }
+    ]
+  },
+  {
+    "id": "fictional-rule-invention",
+    "scholarId": "fictional-robot-sprout",
+    "date": "2026-11-04T10:00:00Z",
+    "title": "Bridge builder",
+    "buildContract": { "gate": "Make a bridge-building puzzle where a cart reaches the far side.", "invariants": ["The cart must cross the gap."] },
+    "chatHistory": [
+      { "role": "user", "content": "Make a bridge puzzle with a cart and some planks." },
+      { "role": "assistant", "content": "You can place planks and send the cart across." },
+      { "role": "user", "content": "I found a cheat: I can carry a plank away from behind the cart and keep putting it in front, so one plank crosses everything. Make a plank lock in place as soon as the cart touches it. It only unlocks when I reset the whole attempt, so I have to design the bridge before crossing." },
+      { "role": "assistant", "content": "Planks the cart touches will stay locked until reset." },
+      { "role": "user", "content": "Now removing a touched plank should fail, but I can still rearrange ones the cart hasn't reached." }
+    ]
+  }
+]

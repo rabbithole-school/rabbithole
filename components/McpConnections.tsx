@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Copy, Check, Trash, Plugs } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import { formatRelative } from "@/lib/relativeTime";
+import { MCP_PATH, MCP_READ_ONLY_PATH } from "@/lib/oauthHttp";
 
 /**
  * Remote MCP connector UI. The full connect experience — instructions for
@@ -20,22 +21,24 @@ import { formatRelative } from "@/lib/relativeTime";
  */
 
 /**
- * The connector URL in a copyable row. `${origin}/api/mcp`, derived from the
- * live origin so it's correct on dev/worktree ports and prod alike.
+ * The connector URL in a copyable row. `${origin}/api/mcp`, or with `readOnly`
+ * the read-only connector `${origin}/api/mcp/read`, derived from the live
+ * origin so it's correct on dev/worktree ports and prod alike.
  *
  * minW=0 on the flex items is load-bearing: without it their automatic minimum
  * size is their min-content width, which the long connector URL blows past —
  * overflowing the container, which clips, so the copy reads as cut off.
  */
-export function McpConnectorUrl() {
+export function McpConnectorUrl({ readOnly = false }: { readOnly?: boolean }) {
   const [connectorUrl, setConnectorUrl] = useState("");
+  const path = readOnly ? MCP_READ_ONLY_PATH : MCP_PATH;
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     // window is absent during SSR; derive the URL after mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only origin, deferred past SSR
-    setConnectorUrl(`${window.location.origin}/api/mcp`);
-  }, []);
+    setConnectorUrl(`${window.location.origin}${path}`);
+  }, [path]);
 
   const handleCopy = async () => {
     try {
@@ -67,7 +70,7 @@ export function McpConnectorUrl() {
         {connectorUrl || "…"}
       </Text>
       <IconButton
-        aria-label="Copy connector URL"
+        aria-label={readOnly ? "Copy read-only connector URL" : "Copy connector URL"}
         size="xs"
         variant="ghost"
         color={copied ? "green.500" : "charcoal.300"}

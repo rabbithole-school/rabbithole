@@ -51,6 +51,7 @@ export const MANIPULATIVE_KIND_LABELS: Record<ManipulativeKind, string> = {
   liquid: "Measuring jars",
   money: "Money",
   molecule: "Molecule",
+  functionGraph: "Function graph",
 };
 
 // Molecule is intentionally tutor-tool-only in v1: it has no grading goal, so
@@ -112,7 +113,8 @@ export type ManipulativeGroup =
   | "Geometry"
   | "Chemistry"
   | "Measurement and money"
-  | "Chance and data";
+  | "Chance and data"
+  | "Functions and graphs";
 
 /** Rail order for the groups (curriculum-ish: quantity → fractions → operations
  *  → space → measure → data). */
@@ -124,6 +126,7 @@ export const MANIPULATIVE_GROUP_ORDER: readonly ManipulativeGroup[] = [
   "Chemistry",
   "Measurement and money",
   "Chance and data",
+  "Functions and graphs",
 ];
 
 export interface ManipulativeCatalogEntry {
@@ -338,6 +341,16 @@ export const MANIPULATIVE_CATALOG: Record<
     whatYouCanChange:
       "The tutor supplies a compound name or PubChem CID and may highlight oxygen atoms or a bridging oxygen; the server resolves every atom, bond, and stereochemical mark.",
     group: "Chemistry",
+    production: true,
+  },
+  functionGraph: {
+    blurb:
+      "Build a graph by hand on a numbered grid: drag a parent curve into a transformation, place a polynomial's zeros and end behaviour, or drag dashed lines onto a rational function's asymptotes.",
+    // Its own group: the other Geometry mechanics measure shapes and points;
+    // this one is about functions as graphs (Algebra 2).
+    whatYouCanChange:
+      "You set the grid's window and the goal: a parent function and the a, h, k to reach, a factored polynomial to sketch (zeros, bounce or cross, ends), or a rational function whose asymptotes to find.",
+    group: "Functions and graphs",
     production: true,
   },
 };

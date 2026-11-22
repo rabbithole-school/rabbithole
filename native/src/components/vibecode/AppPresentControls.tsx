@@ -6,61 +6,70 @@
 //
 // The TV shows the iPad through Screen Mirroring rather than a second rendering
 // on an external screen (the slides path): a second WebView would be a second,
-// diverging copy of the game that nobody is touching. "Connect TV" reuses the
-// slides path's lock release so Control Center can be reached.
+// diverging copy of the game that nobody is touching. The TV button ("Connect
+// TV", then "Disconnect TV") reuses the slides path's lock release so Control
+// Center can be reached both to start mirroring and to stop it.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useExternalDisplay } from "react-native-external-display";
-import { useKeepAwake } from "expo-keep-awake";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { usePresentationSystemUI } from "@/hooks/usePresentationSystemUI";
+import { useTvButton } from "@/hooks/usePresentationSystemUI";
 import {
-  CONNECT_TV_GUIDANCE,
-  CONNECT_TV_LABEL,
   getAppPresentDisplayState,
   type ExternalScreen,
 } from "@/lib/presentationExternalDisplay";
 import { fonts, useColors } from "@/theme";
 import { APP_SURFACE_COPY } from "../../../vendor/shared/appSurface";
+import { useKeepAwakeUnlessBedtime } from "@/hooks/useKeepAwakeUnlessBedtime";
+import {
+  RecordingClock,
+  type PresentingTalk,
+} from "@/components/slides/SlidesPresentationNative";
+import { TALK_COPY } from "@/components/talk/talkCopy";
 
 const TV_NOT_MIRRORING =
   "The TV is connected but isn't showing this iPad.";
 
-export function AppPresentControls({ onDone }: { onDone: () => void }) {
-  useKeepAwake();
+export function AppPresentControls({
+  onDone,
+  talk,
+}: {
+  onDone: () => void;
+  /**
+   * Recording a take (AppTalkSession): Start/Record and Finish/Stop beside
+   * the TV button, and who is watching from the back of the room.
+   */
+  talk?: PresentingTalk;
+}) {
+  useKeepAwakeUnlessBedtime();
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const screens: Readonly<Record<string, ExternalScreen>> = useExternalDisplay();
   const { offerConnect, tvNotMirroring } = getAppPresentDisplayState(screens);
-  const { requestSystemUI, restoreSystemUI } = usePresentationSystemUI();
-  const [showGuidance, setShowGuidance] = useState(false);
+  const tvButton = useTvButton(!offerConnect);
+  const { restoreSystemUI } = tvButton;
 
-  // A TV arrived: the lock goes back on and the hint has done its job.
-  useEffect(() => {
-    if (offerConnect) return;
-    restoreSystemUI();
-  }, [offerConnect, restoreSystemUI]);
-
-  const connectTV = useCallback(() => {
-    requestSystemUI();
-    setShowGuidance(true);
-  }, [requestSystemUI]);
-
+  const rehearsing = talk?.mode === "rehearse";
+  const takeStatus = talk?.take.status ?? "idle";
+  const recordingTake = takeStatus !== "idle";
   const done = useCallback(() => {
     restoreSystemUI();
-    onDone();
-  }, [onDone, restoreSystemUI]);
+    // A take still recording ends here too, and its review opens.
+    if (recordingTake && talk) talk.onStop();
+    else onDone();
+  }, [onDone, recordingTake, restoreSystemUI, talk]);
+  const stopTake = useCallback(() => {
+    restoreSystemUI();
+    talk?.onStop();
+  }, [restoreSystemUI, talk]);
 
-  const note = offerConnect
-    ? showGuidance
-      ? CONNECT_TV_GUIDANCE
-      : null
-    : tvNotMirroring
-      ? TV_NOT_MIRRORING
-      : null;
+  const note =
+    talk?.take.notice ??
+    tvButton.guidance ??
+    (tvNotMirroring ? TV_NOT_MIRRORING : null);
 
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
@@ -73,19 +82,58 @@ export function AppPresentControls({ onDone }: { onDone: () => void }) {
         ]}
       >
         <View style={styles.row}>
-          {offerConnect ? (
+          {talk && recordingTake ? (
+            <Text style={[styles.clock, { color: colors.white }]}>
+              {takeStatus === "recording" ? (
+                <RecordingClock subscribe={talk.take.subscribe} />
+              ) : takeStatus === "starting" ? (
+                TALK_COPY.starting
+              ) : (
+                TALK_COPY.saving
+              )}
+            </Text>
+          ) : null}
+          {talk ? (
             <CornerButton
-              label={CONNECT_TV_LABEL}
-              onPress={connectTV}
+              label={
+                recordingTake
+                  ? rehearsing
+                    ? TALK_COPY.finish
+                    : TALK_COPY.stop
+                  : rehearsing
+                    ? TALK_COPY.start
+                    : TALK_COPY.record
+              }
+              onPress={recordingTake ? stopTake : talk.take.start}
+              disabled={takeStatus === "starting" || takeStatus === "stopping"}
               color={colors.white}
             />
           ) : null}
           <CornerButton
-            label={APP_SURFACE_COPY.stopPresenting}
-            onPress={done}
+            label={tvButton.label}
+            onPress={tvButton.press}
             color={colors.white}
           />
+          {rehearsing && recordingTake ? null : (
+            <CornerButton
+              label={APP_SURFACE_COPY.stopPresenting}
+              onPress={done}
+              color={colors.white}
+            />
+          )}
         </View>
+        {talk?.listener ? (
+          <View style={styles.row}>
+            <Text style={[styles.note, { color: colors.white }]}>
+              {TALK_COPY.watching(talk.listener.name)}
+            </Text>
+            <CornerButton
+              label={TALK_COPY.disconnect}
+              onPress={talk.onDropListener}
+              color={colors.white}
+            />
+          </View>
+        ) : null}
         {note ? (
           <Text style={[styles.note, { color: colors.white }]}>{note}</Text>
         ) : null}
@@ -98,18 +146,21 @@ function CornerButton({
   label,
   onPress,
   color,
+  disabled = false,
 }: {
   label: string;
   onPress: () => void;
   color: string;
+  disabled?: boolean;
 }) {
   return (
     <Pressable
       onPress={onPress}
+      disabled={disabled}
       hitSlop={8}
       accessibilityRole="button"
       accessibilityLabel={label}
-      style={({ pressed }) => [styles.button, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.button, (pressed || disabled) && styles.pressed]}
     >
       <Text style={[styles.buttonText, { color }]}>{label}</Text>
     </Pressable>
@@ -118,7 +169,17 @@ function CornerButton({
 
 const styles = StyleSheet.create({
   corner: { position: "absolute", alignItems: "flex-end", gap: 8, maxWidth: 360 },
-  row: { flexDirection: "row", gap: 8 },
+  row: { flexDirection: "row", alignItems: "center", gap: 8 },
+  clock: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    fontVariant: ["tabular-nums"],
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    overflow: "hidden",
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+  },
   button: {
     paddingHorizontal: 12,
     paddingVertical: 6,

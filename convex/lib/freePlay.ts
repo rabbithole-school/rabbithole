@@ -1,10 +1,10 @@
 /**
- * FREE PLAY (TRA-489; "Build it now" on the done screen, TRA-519 B2): the
- * scholar's own contract-free version of an APP activity after the assignment
- * version is done. The App designer parks off-contract ideas in
- * `sessions.parkingLot` "for later"; `sessions.startFreePlay` makes that real
- * by opening a contract-free copy of the app (a new session with
- * `freePlay: true`, `freePlayOf` = the source session).
+ * "Build it now" on the done screen (TRA-519 B2): carry on building an APP
+ * activity's app once the activity is done. The App designer parks
+ * off-contract ideas in `sessions.parkingLot` "for later"; after the activity
+ * is finished `sessions.startFreePlay` reopens the same session for them, where
+ * the scholar makes the rules. Free-play COPIES (`freePlay: true`,
+ * `freePlayOf`, TRA-489) are no longer made; old ones keep working.
  *
  * Only an app activity can be the source: free play continues an app that
  * exists. Ideas parked in a writing, slides or map activity stay on its done
@@ -82,9 +82,29 @@ export async function resolveFreePlayEligibility(
   return { eligible: true, activity };
 }
 
-/** The free-play session's title: "<activity title>: Free play". */
-export function freePlayTitle(activityTitle: string): string {
-  return `${activityTitle.trim() || "My app"}: Free play`;
+/**
+ * Whether the scholar has finished this session's activity: ONE answer for the
+ * builder's prompt (the gate counts as met), its tool offer, and the
+ * Workshop's done state. The session stamp (`activityCompletedAt`) is set by
+ * Finish and send; a teacher's class-wide mark writes only the completions
+ * ledger, so the ledger is the fallback.
+ */
+export async function sessionActivityDone(
+  ctx: Pick<QueryCtx | MutationCtx, "db">,
+  session: Pick<
+    Doc<"sessions">,
+    "userId" | "activityId" | "assignmentId" | "activityCompletedAt" | "isTestDrive" | "freePlay"
+  >,
+): Promise<boolean> {
+  if (session.activityCompletedAt != null) return true;
+  if (!session.activityId || session.isTestDrive || session.freePlay) {
+    return false;
+  }
+  return await scholarHasCompletedActivity(ctx, {
+    scholarId: session.userId,
+    activityId: session.activityId,
+    assignmentId: session.assignmentId ?? null,
+  });
 }
 
 /**

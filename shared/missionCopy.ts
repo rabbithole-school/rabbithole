@@ -13,6 +13,17 @@ export const MISSION_COPY = {
   unlockBuild: "Unlock: build a simulation of this",
 } as const;
 
+/**
+ * OFF since 2026-10-27 (Andy): a scholar gets a NEW app only inside a
+ * teacher-assigned activity with a clear mission. While false, Quests start no
+ * new app (no "Build a simulation" card, no build-first hand-off, no unlock
+ * offer, no app step from a bake or co-design) and a session outside a
+ * teacher's activity (a Quest step, an open chat) gets no create_code. A
+ * Quest's app step that already exists keeps working. The code behind every
+ * entry point stays for a later revisit: flipping this restores it.
+ */
+export const SCHOLAR_LED_APP_BUILDING = false;
+
 /** The always-offered Quest path card (B4; title ruled by Andy). The bake keys
  * on `shape`, never on the title. */
 export const BUILD_SIMULATION_PATH = {

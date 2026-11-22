@@ -124,6 +124,34 @@ export function nthBirthdayLabel(
   return n == null ? null : `${ordinal(n)} Birthday`;
 }
 
+export type ScholarBirthdayAcknowledgement = {
+  firstName: string;
+  /** The greeting only. Never carries the date of birth or an age. */
+  bannerText: string;
+};
+
+function firstNameForGreeting(name: string | null | undefined): string {
+  const trimmed = name?.trim();
+  return trimmed ? (trimmed.split(/\s+/)[0] ?? "Scholar") : "Scholar";
+}
+
+/**
+ * Greeting banner for the scholar's own home. Reuses the canonical day-key
+ * birthday check (the day-key comes from the institution's time zone); returns
+ * null for non-birthdays, malformed/missing DOBs, or a missing day-key. The
+ * result carries a greeting and a first name, never the DOB or an age, and no
+ * school name: the banner is institution-neutral.
+ */
+export function scholarBirthdayAcknowledgement(
+  name: string | null | undefined,
+  dobIso: string | null | undefined,
+  dayKey: string | null | undefined,
+): ScholarBirthdayAcknowledgement | null {
+  if (!isBirthdayOnDayKey(dobIso, dayKey)) return null;
+  const firstName = firstNameForGreeting(name);
+  return { firstName, bannerText: `Happy birthday, ${firstName}!` };
+}
+
 /**
  * Add `n` whole days to an ISO "YYYY-MM-DD" day-key, returning a new
  * "YYYY-MM-DD". Pure calendar arithmetic at UTC midnight (no timezone drift) —

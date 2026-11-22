@@ -36,3 +36,52 @@ export const asamTransitionReasonValidator = v.union(
   v.literal("system_ui_restore"),
   v.literal("reassert"),
 );
+
+// ── The screen-time summary row (`screenTimeDays`) ──────────────────────
+
+/** Minutes per stretch kind (shared/screenTimeStretches.ts `STRETCH_KINDS`). */
+export const kindMinutesValidator = v.object({
+  launched_app: v.number(),
+  web: v.number(),
+  building: v.number(),
+  playing: v.number(),
+  practice: v.number(),
+  chat: v.number(),
+  rabbithole: v.number(),
+});
+
+/**
+ * One scholar-day as `deviceActivity.readScholarDayUsage` rolls it up, less
+ * the fields the row carries itself (scholar, day) and the read-time ones
+ * (name, timeline). Mirrors `ScholarDayUsage`; a type test keeps them equal.
+ */
+export const screenTimeDayUsageValidator = v.object({
+  foregroundMinutes: v.number(),
+  apps: v.array(
+    v.object({
+      externalAppId: v.string(),
+      appName: v.string(),
+      measuredMinutes: v.number(),
+      estimatedMinutes: v.number(),
+      estimatedIntervals: v.number(),
+    }),
+  ),
+  unattributedBackgroundMinutes: v.number(),
+  measuredMinutes: v.number(),
+  estimatedMinutes: v.number(),
+  estimatedIntervals: v.number(),
+  byContext: v.record(
+    v.string(),
+    v.object({ measuredMinutes: v.number(), estimatedMinutes: v.number() }),
+  ),
+  eventCount: v.number(),
+  outsideSchool: v.object({
+    measuredMinutes: v.number(),
+    estimatedMinutes: v.number(),
+    foregroundMinutes: v.number(),
+  }),
+  builder: v.object({ onScreenMinutes: v.number(), activeMinutes: v.number() }),
+  webActivityMinutes: v.number(),
+  otherRabbitholeMinutes: v.number(),
+  schoolDay: v.boolean(),
+});

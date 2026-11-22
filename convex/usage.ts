@@ -232,6 +232,7 @@ export async function recordUnitUsage(
   args: {
     source: string;
     role?: string | null;
+    institutionId?: Id<"institutions"> | null;
     model: string;
     audioSeconds?: number | null;
     characters?: number | null;
@@ -252,6 +253,7 @@ export async function recordUnitUsage(
     await ctx.runMutation(internal.usage.record, {
       source: args.source,
       role: args.role ?? undefined,
+      institutionId: args.institutionId ?? undefined,
       model: args.model,
       inputTokens: 0,
       cacheWriteTokens: 0,

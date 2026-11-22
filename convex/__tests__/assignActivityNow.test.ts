@@ -5,15 +5,16 @@ import { grantInstitutionMembership, seedTestInstitution } from "./institutionTe
 import { internal } from "../_generated/api";
 import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
-import {
-  classFocusLifetimeConfirmation,
-  makeAssignmentTools,
-} from "../lib/assignmentTools";
+import { readSchedule } from "../lib/scheduleStore";
+import { makeAssignmentTools } from "../lib/assignmentTools";
+import { schoolDayEndAt } from "../lib/schoolDays";
+import { dayKeyForTimezone } from "../../shared/institutionDay";
 import type { Role } from "../lib/roles";
 
 /**
- * The teacher Aide's `assign_activity_now` tool (convex/lib/aideTools.ts) has
- * no backend mutation of its own — it COMPOSES two existing internal mutations:
+ * The teacher Aide's `give` tool (convex/lib/assignmentTools.ts), giving one
+ * activity of a unit to named scholars now, has no backend mutation of its
+ * own — it routes to existing internal mutations:
  * `aideAssignWork` (target kind "activity", startsAt now) creates/reuses the
  * cohort assignment and PLANS the one activity, then `aidePushActivityNow`
  * stamps it live. These tests cover that composition and the roster-subset
@@ -103,41 +104,55 @@ async function toolsFor(
   >;
 }
 
-describe("assign_activity_now composition", () => {
-  test("tool result states the class-focus lifetime", async () => {
+async function sched(
+  t: { run: <R>(fn: (ctx: any) => Promise<R>) => Promise<R> },
+  doc: { _id: Id<"assignments"> } | null | undefined,
+) {
+  return t.run((ctx) => readSchedule(ctx, { _id: doc!._id }));
+}
+
+describe("give: one activity of a unit, now", () => {
+  test("asks for the finish when missing, then stores the window it was given", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     await seedUser(t, "scholar", {
       name: "Avery Example",
       username: "avery-example",
     });
-    await seedUnitWithActivity(t, teacher);
+    const { activityId } = await seedUnitWithActivity(t, teacher);
     const tools = await toolsFor(t, teacher);
+    const input = {
+      unitTitle: "Test Unit",
+      activityTitle: "Test Activity",
+      scholarNames: ["Avery Example"],
+      startsNow: true,
+    };
 
-    const withoutEnd = JSON.parse(
-      await tools.assign_activity_now.run({
-        unitTitle: "Test Unit",
-        activityTitle: "Test Activity",
-        scholarNames: ["Avery Example"],
-        mode: "classFocus",
-      }),
+    // No finish → a question back, and nothing is created.
+    const asked = await tools.give.run(input);
+    expect(asked.startsWith("NOT GIVEN")).toBe(true);
+    expect(
+      await t.run((ctx) => ctx.db.query("assignments").collect()),
+    ).toHaveLength(0);
+
+    // "In that class" with no bell schedule → live until the end of today.
+    const given = JSON.parse(
+      await tools.give.run({ ...input, finish: "inClass" }),
     ) as Record<string, unknown>;
-    expect(withoutEnd.confirmation).toBe(
-      classFocusLifetimeConfirmation(undefined, "Pacific/Honolulu"),
+    expect(given).toMatchObject({ ok: true, live: true });
+    const assignment = await t.run((ctx) =>
+      ctx.db.get(given.assignmentId as Id<"assignments">),
     );
-
-    const endsAtMs = Date.now() + HOUR;
-    const withEnd = JSON.parse(
-      await tools.assign_activity_now.run({
-        unitTitle: "Test Unit",
-        activityTitle: "Test Activity",
-        scholarNames: ["Avery Example"],
-        mode: "classFocus",
-        endsAtMs,
-      }),
-    ) as Record<string, unknown>;
-    expect(withEnd.confirmation).toBe(
-      classFocusLifetimeConfirmation(endsAtMs, "Pacific/Honolulu"),
+    const entry = (await sched(t, assignment)).find(
+      (e) => e.activityId === activityId,
+    )!;
+    expect(entry.mode).toBe("classFocus");
+    expect(entry.setAt).toBeDefined();
+    expect(entry.endsAt).toBe(
+      schoolDayEndAt(
+        dayKeyForTimezone(entry.setAt!, "Pacific/Honolulu"),
+        "Pacific/Honolulu",
+      ),
     );
   });
 
@@ -166,9 +181,9 @@ describe("assign_activity_now composition", () => {
 
     // assignWork alone only PLANS the activity — not yet visible to scholars.
     const planned = await t.run(async (ctx) => ctx.db.get(res.assignmentId));
-    expect(planned?.activitySchedule).toHaveLength(1);
-    expect(planned!.activitySchedule![0].activityId).toBe(activityId);
-    expect(planned!.activitySchedule![0].setAt).toBeUndefined();
+    expect((await sched(t, planned))).toHaveLength(1);
+    expect((await sched(t, planned))[0].activityId).toBe(activityId);
+    expect((await sched(t, planned))[0].setAt).toBeUndefined();
 
     // The second half of the tool: push it live now.
     await t.run(async (ctx) =>
@@ -182,8 +197,8 @@ describe("assign_activity_now composition", () => {
     );
 
     const live = await t.run(async (ctx) => ctx.db.get(res.assignmentId));
-    expect(live!.activitySchedule).toHaveLength(1);
-    const entry = live!.activitySchedule![0];
+    expect((await sched(t, live))).toHaveLength(1);
+    const entry = (await sched(t, live))[0];
     expect(entry.activityId).toBe(activityId);
     expect(entry.mode).toBe("classFocus");
     // Live now — setAt stamped so the scholar sees it.
@@ -206,6 +221,7 @@ describe("assign_activity_now composition", () => {
         scholarIds: [a, b, c],
         startsAt: Date.now(),
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       }),
     );
 

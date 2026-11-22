@@ -15,7 +15,7 @@
  *     "soon".
  *   - Nothing is yanked at `endsAt` — a class focus has NO mechanical effect on
  *     a scholar's screen at all (the hard gate was removed; see
- *     shared/focusLock.ts); their session and work are untouched throughout.
+ *     shared/classFocus.ts); their session and work are untouched throughout.
  *   - The "running long" + lingering-scholar awareness are TEACHER-only
  *     concepts — the "no ticking" rule is scoped to a kid's screen, not a
  *     teacher's dashboard.
@@ -54,7 +54,7 @@ export function isLifetimeFocus(
 
 /** The room-clock reading of a live focus: `endsAt` only when it is a block
  *  end, plus the lifetime end (or null) for the lifetime copy. Every surface
- *  that builds a focus lock goes through this, so none can forget the split. */
+ *  that builds a live focus goes through this, so none can forget the split. */
 export function roomClockForFocus(focus: {
   setAt?: number | null;
   endsAt?: number | null;
@@ -189,7 +189,7 @@ export function liveFocusLine(
 /**
  * The "your class is elsewhere" banner (item 1) — shown when the scholar is
  * viewing a DIFFERENT session than the live class focus. Purely informational
- * since the hard focus gate was removed (shared/focusLock.ts): the session
+ * since the hard focus gate was removed (shared/classFocus.ts): the session
  * stays fully usable, so the copy names where the room is and stops there —
  * it must never imply the scholar has to wait to send.
  */

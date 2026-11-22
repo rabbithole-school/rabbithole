@@ -2,9 +2,35 @@ import { describe, expect, it } from "vitest";
 import {
   pushActionLabel,
   pushGlyph,
-  pushSummaryLine,
+  pushMetaLine,
   pushTimeLeftLabel,
+  pushUntilLabel,
 } from "../pushCopy";
+
+describe("pushMetaLine", () => {
+  const tz = "Pacific/Honolulu";
+  const tenTwenty = Date.parse("2026-11-09T10:20:00-10:00");
+
+  it("puts the end time after the note, in the school's time zone", () => {
+    expect(
+      pushMetaLine({ note: "Graph the tide data", endsAt: tenTwenty }, tz),
+    ).toBe("Graph the tide data · until 10:20 AM");
+  });
+
+  it("is just the time with no note, and just the note when open-ended", () => {
+    expect(pushMetaLine({ note: null, endsAt: tenTwenty }, tz)).toBe("until 10:20 AM");
+    expect(pushMetaLine({ note: "Read p. 4", endsAt: null }, tz)).toBe("Read p. 4");
+    expect(pushMetaLine({ note: " ", endsAt: null }, tz)).toBeNull();
+    expect(pushUntilLabel(null, tz)).toBeNull();
+  });
+
+  it("an open-until give shows its open-until wording, never the closing clock time", () => {
+    const wednesdayLast = Date.parse("2026-11-11T23:59:59.999-10:00");
+    expect(
+      pushMetaLine({ note: "Watch it twice", endsAt: wednesdayLast }, tz, "Open until Wed"),
+    ).toBe("Watch it twice · Open until Wed");
+  });
+});
 
 describe("pushTimeLeftLabel", () => {
   const now = 1_000_000;
@@ -58,17 +84,5 @@ describe("pushActionLabel", () => {
     expect(pushActionLabel({ kind: "resource" })).toBe("Open");
     expect(pushActionLabel({ kind: "link", media: "video" })).toBe("Watch");
     expect(pushActionLabel({ kind: "link", media: "page" })).toBe("Open");
-  });
-});
-
-describe("pushSummaryLine", () => {
-  it("reads as a sentence, not a row of fields", () => {
-    expect(
-      pushSummaryLine({
-        title: "Blue Planet: Coral Seas",
-        audienceLabel: "Geckos",
-        minutes: 20,
-      }),
-    ).toBe("Blue Planet: Coral Seas → Geckos, for 20 min");
   });
 });

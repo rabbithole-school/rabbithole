@@ -107,6 +107,7 @@ const STRUCTURE: Record<string, Record<string, FieldChecker>> = {
   clock: { startHour: finiteNumber, startMinute: finiteNumber },
   liquid: { unit: enumOf("cup", "L", "mL"), vessels: nonEmptyArray },
   money: { available: nonEmptyArray },
+  functionGraph: { xMin: int, xMax: int, yMin: int, yMax: int, goal: object },
   molecule: {
     query: nonEmptyString,
     resolvedName: nonEmptyString,

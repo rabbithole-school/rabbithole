@@ -1,7 +1,7 @@
 /**
  * The Fast math row's readouts for the All-domains matrix — pure, so the row's
  * copy and its three states are testable without a render harness (the same
- * shape `masteryGradeLevel.ts` / `mathSkillsMasteryFilters.ts` take).
+ * shape `mathSkillsMasteryFilters.ts` takes).
  *
  * The row is a PERCENT row in a matrix of grade levels, so it deliberately
  * shows no wash: the heatmap's tints encode grade level against age, and a

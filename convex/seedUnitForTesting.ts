@@ -13,6 +13,7 @@ import { internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { DEFAULT_BADGE_STYLE, DEFAULT_BADGE_COLORWAY } from "./lib/badgeArt";
 import type { Id } from "./_generated/dataModel";
+import { readSchedule, writeSchedule } from "./lib/scheduleStore";
 
 export const seedUnitProgressForTesting = internalMutation({
   args: {
@@ -411,16 +412,17 @@ export const teardownUnitProgressForTesting = internalMutation({
       }
       await ctx.db.delete(unit._id);
     }
-    // Clear activitySchedule on any assignments still pointing at the
+    // Clear the schedule of any assignments still pointing at the
     // deleted unit. (Post Assignments split; the units we just
     // deleted may have orphan assignments.)
     const all = await ctx.db.query("assignments").collect();
     for (const a of all) {
-      if (a.activitySchedule && a.activitySchedule.length > 0) {
-        // Safe: standing (unitId-less) assignments never populate
-        // activitySchedule, so reaching here means unit-mode.
-        const unit = await ctx.db.get(a.unitId!);
-        if (!unit) await ctx.db.patch(a._id, { activitySchedule: [] });
+      if (!a.unitId) continue;
+      if ((await readSchedule(ctx, a)).length > 0) {
+        const unit = await ctx.db.get(a.unitId);
+        if (!unit) {
+          await writeSchedule(ctx, a._id, []);
+        }
       }
     }
     return null;
@@ -469,7 +471,7 @@ export const seedAssignedWorkForScholar = internalMutation({
     for (const a of assignments) {
       if (a.archivedAt) continue;
       if (!a.scholarIds.includes(scholar._id)) continue;
-      const schedule = a.activitySchedule ?? [];
+      const schedule = (await readSchedule(ctx, a));
       if (schedule.length === 0) continue;
 
       // Pick one entry per mode, preferring an already-live one.
@@ -505,7 +507,7 @@ export const seedAssignedWorkForScholar = internalMutation({
         }
         return e;
       });
-      await ctx.db.patch(a._id, { activitySchedule: newSchedule });
+      await writeSchedule(ctx, a._id, newSchedule);
 
       const ensureInProgress = async (
         entry: { activityId: Id<"activities"> } | null,
@@ -743,7 +745,6 @@ export const seedChoiceLessonForTesting = internalMutation({
         scholarIds: Array.from(
           new Set([...existing.scholarIds, scholar._id]),
         ),
-        activitySchedule: schedule,
       });
     } else {
       assignmentId = await ctx.db.insert("assignments", {
@@ -751,9 +752,10 @@ export const seedChoiceLessonForTesting = internalMutation({
         unitId,
         scholarIds: [scholar._id],
         startedAt: now,
-        activitySchedule: schedule,
       });
     }
+    await writeSchedule(ctx, assignmentId, schedule);
+
 
     return { unitId, lessonId, activityIds, assignmentId, pickCount };
   },

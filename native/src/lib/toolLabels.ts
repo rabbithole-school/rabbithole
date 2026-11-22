@@ -20,6 +20,8 @@ export const SCHOLAR_TOOL_LABELS: Readonly<Record<string, string>> = {
   // Scholar tutor tools (/session-stream). `generate_image` is intentionally
   // absent — image generation has its own dedicated activity state.
   create_code: "Writing some code",
+  charm_icon: "Making an icon",
+  charm_model: "Building a 3D model",
   edit_document: "Working on the document",
   update_rubric_score: "Checking your work",
   mark_activity_complete: "Marking activity complete",
@@ -29,10 +31,17 @@ export const SCHOLAR_TOOL_LABELS: Readonly<Record<string, string>> = {
   finish_teach_back: "Thanks for teaching me",
   share_resource: "Sharing a resource",
   run_app_action: "Setting up the app",
+  open_python_bench: "Opening the Python bench",
+  offer_quest_proposal: "Writing up your proposal",
   // App designer parking lot. stay_silent has no label on purpose: the stream
   // never announces it.
   park_idea: "Parking an idea",
   unpark_idea: "Taking an idea off the lot",
+  set_provocation: "Saving something to figure out",
+  // A world question saved mid-build, and a follow-up saved in the kid's own
+  // Quest (TRA-682). Both land on the kid's Quests tab.
+  save_question: "Saving a question",
+  save_follow_up: "Saving a follow-up",
 };
 
 /** A tool id → its kid-facing gerund label. Unknown ids get neutral copy rather

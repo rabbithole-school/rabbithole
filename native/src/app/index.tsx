@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useConvex, useMutation, useQuery } from "convex/react";
 import { useConvexAuth } from "@convex-dev/auth/react";
+import { reloadAppAsync } from "expo";
 import { Stack, useRouter, useFocusEffect } from "expo-router";
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Pressable,
@@ -27,9 +34,9 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { AppLauncher } from "@/components/AppLauncher";
-import { FocusStrip } from "@/components/FocusStrip";
+import { PushRows, useLivePushes } from "@/components/FocusStrip";
 import { ArchivedSessions } from "@/components/ArchivedSessions";
-import { CreateQuestDialog } from "@/components/CreateQuestDialog";
+import { ProposeQuestButton, QuestProposalList } from "@/components/QuestProposalRows";
 import { DevManipulativeLauncher } from "@/components/EmbeddedWebLaunchButton";
 import { ContainmentBoundary } from "@/components/ContainmentBoundary";
 import {
@@ -48,7 +55,6 @@ import {
   SessionsTitleSwitcher,
   type SessionsView,
 } from "@/components/SessionsSwitcher";
-import { QuestionQueueList } from "@/components/QuestionQueue";
 import { PeerTrails } from "@/components/PeerTrails";
 import { UnitBand } from "@/components/UnitBand";
 import { ScholarHomeTabs } from "@/components/ScholarHomeTabs";
@@ -56,15 +62,27 @@ import { usePrewarmSessions } from "@/hooks/usePrewarmSessions";
 import { PlannedTodayCard } from "@/components/PlannedTodayCard";
 import { ComingUpCard } from "@/components/ComingUpCard";
 import { ScholarPrepSections } from "@/components/ScholarPrepSections";
+import { TodaysWonders, WonderStarters } from "@/components/WonderLists";
+import type { WonderBoxHandle } from "@/components/WonderBox";
 import { BirthdayConfetti } from "@/components/BirthdayConfetti";
 import { HouseIcon, SunHorizonIcon, TargetIcon } from "@/components/PrepIcons";
 import { api, type Id } from "@/lib/convex";
+import { reloadDeliberately } from "@/lib/appHealthMonitor";
+import {
+  connectionLooksStuck,
+  convexServerReachable,
+} from "@/lib/stuckConnection";
 import { hasLearnerContext } from "@/lib/learnerContext";
 import { tuning, useTuningValue } from "@/lib/homeGestureTuning";
 import { FORCE_ALL_HOME_CARDS } from "@/lib/homeDevForce";
 import { HOME_GAP, HOME_LABEL_GAP, HOME_SECTION_GAP } from "@/lib/homeRhythm";
 import { HomeSection, HomeSectionHead } from "@/components/HomeSection";
-import { DueChip } from "@/components/ui/DueChip";
+import { DismissButton } from "@/components/ui/DismissButton";
+import { DueChip, StatusChip } from "@/components/ui/DueChip";
+import {
+  OPEN_FROM_CLASS_HEADING,
+  openUntilPhrase,
+} from "../../vendor/shared/openUntil";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { openWebActivity } from "@/lib/externalAppHost";
 import { openGameActivity } from "@/lib/gameHost";
@@ -85,11 +103,14 @@ import { RoomCueBanner } from "@/components/RoomCueBanner";
 import { RestOverlay } from "@/components/RestOverlay";
 import {
   isWelcomeGated,
-  pickLockingFocus,
+  pickLiveFocus,
   prioritizeFocusedUnit,
-  type PlateFocusLock,
-} from "../../vendor/shared/focusLock";
-import { isBirthdayOnDayKey } from "../../vendor/shared/birthday";
+  type PlateClassFocus,
+} from "../../vendor/shared/classFocus";
+import {
+  isBirthdayOnDayKey,
+  scholarBirthdayAcknowledgement,
+} from "../../vendor/shared/birthday";
 import {
   OVERSIGHT_LINE,
   RELATIONAL_LINE,
@@ -98,25 +119,38 @@ import {
   liveFocusLine,
   roomClockForFocus,
 } from "../../vendor/shared/roomTurn";
-import {
-  dayKeyForTimezone,
-  dueStatus,
-} from "../../vendor/shared/institutionDay";
+import { dayKeyForTimezone } from "../../vendor/shared/institutionDay";
 import {
   buildNowDigest,
   deriveHomeTabs,
   filterArchivedRowsForTab,
-  filterHomeworkForNow,
   filterRowsForTab,
   focusSectionLabel,
   groupHomeRowsByUnit,
   isWithinScheduleWindow,
   matchRowsToFocusOrder,
   pickCurrentBlock,
-  shouldShowHomeworkInNow,
+  PICK_UP_HEADING,
+  pickUpRows,
+  onYourList,
+  yourListRowsForTab,
   type ScholarHomeTab,
 } from "../../vendor/shared/scholarHomeNow";
+import {
+  HOMEWORK_SECTION_HEADING,
+  buildYourList,
+  homeworkListRowMeta,
+  homeworkRowCta,
+  opensOfflinePage,
+  showsHomeworkDueChip,
+  type HomeworkClosures,
+  type HomeworkCta,
+  type HomeworkWeek,
+} from "../../vendor/shared/homeworkList";
+import { homeworkDueStatus } from "../../vendor/shared/homeworkWeek";
+import { FIELD_TRIP_TODAY, fieldTripDetail } from "../../vendor/shared/fieldTrips";
 import { HOME_ARCHIVE_COPY } from "../../vendor/shared/homeArchive";
+import { proposalCoverage, proposalRowCount } from "../../vendor/shared/questRows";
 import { serverErrorMessage } from "../../vendor/shared/serverErrorMessage";
 
 // iPad-first: a centered reading-width column (works in landscape + portrait).
@@ -209,12 +243,21 @@ type PlateRow = {
   choiceOptionCount?: number | null;
   // Tab-filter fields added by Stage A backend (scholarPlate.ts):
   subject: string | null;
+  /** The row's subject for a person to read (Homework). Optional for an
+   *  older backend during deploy skew; falls back to `subject`. */
+  subjectLabel?: string | null;
   dueAt: number | null;
   endsAt: number | null;
+  /** Open-until work (vendored shared/openUntil.ts): when its window closes.
+   *  Optional for an older backend during deploy skew. */
+  openUntil?: number | null;
   // The session holds an app the scholar built — the row also lists on Apps.
   isApp?: boolean;
 };
 type QuestEmptyRow = { kind: "quest-empty" };
+// The scholar's proposals and the Quests approved from them, at the head of
+// Your Quests on the Quests tab (components/QuestProposalRows, TRA-695).
+type QuestProposalsRow = { kind: "quest-proposals" };
 // A run of choice options (same choiceLessonId) collapsed into one menu card.
 type ChoiceGroupRow = {
   kind: "choice-group";
@@ -229,6 +272,7 @@ type UnitActivityGroupRow = {
 type SectionRow =
   | PlateRow
   | QuestEmptyRow
+  | QuestProposalsRow
   | ChoiceGroupRow
   | UnitActivityGroupRow;
 
@@ -310,7 +354,9 @@ function sectionMeta(c: ReturnType<typeof useColors>): Record<
 > {
   return {
     classFocus: {
-      heading: "Class focus",
+      // Replaced in buildSectionsFor by focusSectionLabel ("In class now" /
+      // "From class today"), the one name the Now tab uses for this work.
+      heading: "In class now",
       tint: c.violet,
       subtle: c.violetSubtle,
       muted: c.violetMuted,
@@ -400,7 +446,11 @@ function ScholarHome() {
   const EARTH_FRAC = EARTH_R / ATMO_R;
   const SKY_EXTRA = 900; // overscan above the screen so descending never reveals bg
   const [view, setView] = useState<SessionsView>("active");
-  const [createQuestOpen, setCreateQuestOpen] = useState(false);
+  // The "I wonder…" box on Scholar's Prep, which the quiet-day "Start a Quest"
+  // button opens (TRA-677). A tap from another tab switches to Prep first, so the
+  // focus waits for the tab (wonderBoxFocusPending).
+  const wonderBoxRef = useRef<WonderBoxHandle>(null);
+  const [wonderBoxFocusPending, setWonderBoxFocusPending] = useState(false);
   // WHICH page is refreshing, not merely whether one is. Every mounted pager
   // page renders its own RefreshControl, so a bare boolean handed a second
   // page a `refreshing` it never initiated: iOS then had no pull gesture to
@@ -457,7 +507,7 @@ function ScholarHome() {
   // Every query fed by minuteNow goes through useSmoothedQuery: a plain
   // useQuery drops to `undefined` for one round-trip whenever the bucket
   // changes, and the `plate === undefined` spinner gate below would then
-  // unmount the whole Home once a minute — snapping CreateQuestDialog shut and
+  // unmount the whole Home once a minute — snapping any open dialog shut and
   // wiping its text (scholar bug reports, 2026-09-22).
   const plate = useSmoothedQuery(
     api.scholarPlate.activeForMe,
@@ -465,17 +515,12 @@ function ScholarHome() {
       ? { includeWebActivities: true, now: minuteNow }
       : "skip",
   );
-  // Milestone reveals (f6): the pull-to-Sky gesture is inert until at least one
-  // of the scholar's two maps first has real data — no surface, no teaser before
-  // then. Mirrored into a shared value the gesture worklets can read.
-  const mapGates = useQuery(
-    api.mapGates.mine,
-    isAuthenticated ? {} : "skip",
-  );
   // Sky reveal — the horizon backdrop + pull-to-Sky gesture — is scoped to the
-  // Quests tab and the SKY map ONLY (`skyRevealActive`, computed once the active
-  // tab is known, below). These are the gesture worklets' bridge to that gate;
-  // the effect that syncs them lives next to `skyRevealActive`'s definition.
+  // Quests tab (`skyRevealActive`, computed once the active tab is known,
+  // below). The Sky is the kid's own record (TRA-699) and opens for every
+  // scholar; an empty one says how a first star arrives. These are the gesture
+  // worklets' bridge to that scope; the effect that syncs them lives next to
+  // `skyRevealActive`'s definition.
   const skyRevealActiveRef = useRef(false);
   const mapUnlockedSV = useSharedValue(false);
   const currentFocus = useSmoothedQuery(
@@ -514,12 +559,25 @@ function ScholarHome() {
     try {
       await Promise.all([
         waitForHomeSync(convex),
-        new Promise<void>((resolve) =>
-          setTimeout(resolve, HOME_REFRESH_FEEDBACK_MS),
-        ),
+        new Promise<void>((resolve) => setTimeout(resolve, HOME_REFRESH_FEEDBACK_MS)),
       ]);
     } catch (error) {
       console.warn("Failed to refresh Home:", error);
+      // A stopped Convex socket never comes back on its own, so waiting would
+      // be a dead end; a reload starts a fresh connection. Really offline, the
+      // reconnect is automatic and the alert below is true.
+      if (await connectionLooksStuck(convex, () => convexServerReachable(convex.url))) {
+        try {
+          await reloadDeliberately(() =>
+            reloadAppAsync("Home refresh found the server connection stuck"),
+          );
+          return;
+        } catch (reloadError) {
+          console.warn("Couldn't reload Rabbithole:", reloadError);
+        }
+      }
+      // It reconnected while the check waited, so Home is updating.
+      if (convex.connectionState().isWebSocketConnected) return;
       Alert.alert(
         "Can't refresh Home",
         "Check your connection. Home will update automatically when you're back online.",
@@ -532,7 +590,7 @@ function ScholarHome() {
     }
   }, [convex]);
 
-  // ── Tab row (Now · All · subjects · Scholar’s Prep · Apps · Quests) ──
+  // ── Tab row (Now · subjects · Scholar’s Prep · Apps · Quests) ──
   // Shared by both values of the Active / Archived filter: the tab picks which
   // work, the filter picks whether it is in progress or archived, so flipping
   // the filter keeps the scholar on their tab (review/home-finished-filter.html).
@@ -550,9 +608,9 @@ function ScholarHome() {
     );
   }, [activeTab]);
 
-  // Institution day — drives dayKey cache-busters for bell-schedule queries.
-  // Derived dayKey: fallback to computing from nowMs + "Pacific/Honolulu" so
-  // the cache-buster is always a valid string even before the query resolves.
+  // Institution day. The Honolulu fallback only keeps the birthday check valid
+  // before the day query resolves: the day-scoped reads below answer for the
+  // key they are sent, so they wait for `institutionDay` (as web does).
   const institutionDayKey =
     institutionDay?.dayKey ??
     dayKeyForTimezone(nowMs, serverDayRaw?.timeZone ?? "Pacific/Honolulu");
@@ -564,16 +622,25 @@ function ScholarHome() {
   // the wordless birthday confetti — derived on-client, no new round-trip.
   const me = useQuery(api.users.currentUser, isAuthenticated ? {} : "skip");
   const isOwnBirthday = isBirthdayOnDayKey(me?.dateOfBirth, institutionDayKey);
+  // The banner waits for the resolved institution day, so it never answers for
+  // the fallback zone above. Greeting only: no DOB or age reaches the render.
+  const birthdayAcknowledgement = institutionDay
+    ? scholarBirthdayAcknowledgement(
+        me?.name ?? me?.username ?? null,
+        me?.dateOfBirth,
+        institutionDay.dayKey,
+      )
+    : null;
 
   // Bell-schedule block query (context strip: "Right now: Math Workshop · until 9:40").
   const blockResult = useQuery(
     api.masterSchedule.currentBlockForSelf,
-    isAuthenticated ? { dayKey: institutionDayKey } : "skip",
+    isAuthenticated && institutionDay ? { dayKey: institutionDay.dayKey } : "skip",
   );
   // TODAY's planned entries (non-startable ghost cards in Now tab, invariant 1).
   const plannedTodayResult = useQuery(
     api.assignments.todayScheduleForSelf,
-    isAuthenticated ? { dayKey: institutionDayKey, includeWebActivities: true } : "skip",
+    isAuthenticated && institutionDay ? { dayKey: institutionDay.dayKey, includeWebActivities: true } : "skip",
   );
 
   // Derive the current bell-schedule block from server data + 30s tick.
@@ -600,8 +667,8 @@ function ScholarHome() {
   const platePin = plate?.onboarding as OnboardingPin | null | undefined;
   const onboarding: OnboardingPin | null =
     platePin ?? (FORCE_ALL_HOME_CARDS ? DEMO_ONBOARDING_PIN : null);
-  const firstFocus = pickLockingFocus(currentFocus);
-  const focusLock: PlateFocusLock = firstFocus
+  const firstFocus = pickLiveFocus(currentFocus);
+  const liveFocus: PlateClassFocus = firstFocus
     ? {
         unitId: firstFocus.unitId ? String(firstFocus.unitId) : null,
         label:
@@ -619,17 +686,40 @@ function ScholarHome() {
       }
     : null;
   // H1 (review/ftue-audit): before the first Welcome beat is done, gate the
-  // "new exploration" actions — Custom Quest, the "Start with your own
+  // "new exploration" actions — Propose a Quest, the "Start with your own
   // question" empty card, and Suggested Quests — so a zero-history scholar
   // finishes one beat of Welcome before authoring/exploring. Mirrors web
-  // ScholarPlate's `welcomeGate` (vendor/shared/focusLock). A live class focus
+  // ScholarPlate's `welcomeGate` (vendor/shared/classFocus). A live class focus
   // used to gate these too; that hard gate is gone.
   const welcomeGate = isWelcomeGated(onboarding);
   const newQuestLocked = welcomeGate;
-  const openCreateQuest = () => {
+  // The scholar's proposals and the Quests approved from them (TRA-695): the
+  // head of Your Quests on the Quests tab, drawn as the one row. Contained, so
+  // an older server or a failed read only leaves them out. Their units leave
+  // the tab's older Quest rows, so no Quest shows twice.
+  const { data: questProposals } = useContainedQuery(
+    api.questProposals.forSelf,
+    newQuestLocked ? "skip" : {},
+  );
+  // Each proposal's unit, and the chat it was proposed from (a kid's own chat,
+  // which the older lists would show as a Quest of its own).
+  const proposalCovered = questProposals
+    ? proposalCoverage(questProposals)
+    : null;
+  const hasQuestProposals =
+    !!questProposals &&
+    proposalRowCount(questProposals) > 0;
+  // The quiet-day empty state's "Start a Quest" button takes the scholar to the
+  // "I wonder…" box, which lives on Scholar's Prep.
+  const openWonderBox = () => {
     if (newQuestLocked) return;
     Haptics.selectionAsync();
-    setCreateQuestOpen(true);
+    if (activeTab === "prep" && wonderBoxRef.current) {
+      wonderBoxRef.current.focus();
+      return;
+    }
+    setActiveTab("prep");
+    setWonderBoxFocusPending(true);
   };
   usePrewarmSessions(
     rows.map((r) => r.sessionId).filter((x): x is Id<"sessions"> => !!x),
@@ -662,6 +752,9 @@ function ScholarHome() {
   // heading). To exercise the no-school branch instead, flip this to
   // `FORCE_ALL_HOME_CARDS ? { label: "Kūhiō Day" } : null`.
   const closure = blockResult?.closure ?? null;
+  // A field trip today for one of the scholar's groups (TRA-601); the blocks
+  // it covers come back without it.
+  const trip = blockResult?.trip ?? null;
   // The live timetable block. It is a section HEADING over the work happening
   // inside that block — never a free-floating line. Its label is the heading
   // ("MATH WORKSHOP"); the rest of the old one-line strip is its detail.
@@ -699,6 +792,16 @@ function ScholarHome() {
     [tabs],
   );
   const effectiveActiveTab = validTabKeys.has(activeTab) ? activeTab : "now";
+  // "Start a Quest" asked for the box from another tab: focus it once
+  // the Prep page has paged in (its box mounts with the page).
+  useEffect(() => {
+    if (!wonderBoxFocusPending || effectiveActiveTab !== "prep") return;
+    const timer = setTimeout(() => {
+      wonderBoxRef.current?.focus();
+      setWonderBoxFocusPending(false);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [wonderBoxFocusPending, effectiveActiveTab]);
   // No "retract on tab change" effect is needed, and deliberately so. A page
   // that did not start the refresh renders `refreshing={false}` (below), so it
   // can never inherit a spinner it does not own — which was the actual bug.
@@ -744,12 +847,10 @@ function ScholarHome() {
   }, [activePageIndex]);
 
   // Sky reveal (horizon backdrop + pull-to-Sky gesture) is scoped to the Quests
-  // tab and the SKY map only. The Tree map has its own affordance on the Math
-  // tab (the "View your frontier" card), so a tree-only unlock never arms the
-  // pull gesture, and no other tab shows the horizon.
+  // tab. The Tree map has its own affordance on the Math tab (the "View your
+  // frontier" card), and no other tab shows the horizon.
   // Archived lists are plain lists — no horizon, no pull-to-Sky.
-  const skyRevealActive =
-    view === "active" && effectiveActiveTab === "quests" && !!mapGates?.sky;
+  const skyRevealActive = view === "active" && effectiveActiveTab === "quests";
   useEffect(() => {
     skyRevealActiveRef.current = skyRevealActive;
     mapUnlockedSV.set(skyRevealActive);
@@ -782,22 +883,18 @@ function ScholarHome() {
     pullShift,
   ]);
 
-  const homeworkForNow = useMemo(
-    () => filterHomeworkForNow(
-      rows.filter((row) => row.origin === "homework"),
-      {
-        nowMs,
-        timeZone: institutionTimeZone,
-        nextOpenSchoolDayKey: plannedTodayResult?.nextOpenSchoolDayKey,
-      },
-    ),
-    [
-      rows,
-      institutionTimeZone,
+  // Homework: every live, unfinished homework item from every teacher, by
+  // school week (vendored shared/homeworkList.ts, TRA-581). Never hidden or
+  // folded. A subject tab lists its own slice (yourListRowsForTab). Closures
+  // only shape the due phrase ("due this week"). Open-until work is its own
+  // section, Open from class, above Homework (TRA-724). Web twin:
+  // app/scholar/page.tsx.
+  const weekClosures = serverDayRaw?.closures;
+  const yourListFor = (tab: string) =>
+    buildYourList(yourListRowsForTab(rows, tab, nowMs), {
       nowMs,
-      plannedTodayResult?.nextOpenSchoolDayKey,
-    ],
-  );
+      timeZone: institutionTimeZone,
+    });
 
   // Fix A: loading guard — only apply digest when both relevant queries have
   // resolved. Before they resolve, treat as not-quiet to avoid flashing the
@@ -807,28 +904,7 @@ function ScholarHome() {
     plannedTodayResult !== undefined &&
     blockResult !== undefined &&
     prepBlock !== undefined;
-  const showHomeworkInNow = shouldShowHomeworkInNow({
-    currentBlockKind: currentBlock?.kind,
-    isWithinSchoolHours,
-    isPrepTime,
-  });
-  // After Prep, the Now tab is the evening Home: the digest renders the
-  // homework itself (the retired "To do tonight" card used to own it here),
-  // and the dated "Coming up" forecast follows it. Web twin:
-  // components/takeHomePlanPlacement.ts → afterPrepEvening.
-  const isAfterPrepEvening = showHomeworkInNow && !isPrepTime;
-  const homeworkVisibleInNow = showHomeworkInNow ? homeworkForNow : [];
-  const homeworkDueTodayInNow = homeworkVisibleInNow.filter(
-    (r) => dueStatus(r.dueAt, nowMs, institutionTimeZone)?.status === "dueToday",
-  );
-  const homeworkOverdueInNow = homeworkVisibleInNow.filter(
-    (r) => dueStatus(r.dueAt, nowMs, institutionTimeZone)?.status === "overdue",
-  );
-  const homeworkUpcomingInNow = homeworkVisibleInNow.filter(
-    (r) =>
-      r.dueAt == null ||
-      dueStatus(r.dueAt, nowMs, institutionTimeZone)?.status === "upcoming",
-  );
+
 
   // Fix A: use buildNowDigest to derive isQuiet and the live focus / upcoming
   // planned item lists. Pass playlist:null — practice lives under Math and
@@ -836,11 +912,6 @@ function ScholarHome() {
   const { sections: nowSections, isQuiet: digestIsQuiet } = buildNowDigest({
     focusEntries: nowDataLoaded ? (currentFocus ?? []) : [],
     plannedToday: nowDataLoaded ? plannedToday : [],
-    // Plate rows never include completed work, so stamp the explicit false the
-    // helper's weak HomeworkEntry type needs.
-    homework: nowDataLoaded
-      ? homeworkVisibleInNow.map((r) => ({ ...r, completedByMe: false }))
-      : [],
     playlist: null,
     nowMs,
   });
@@ -856,9 +927,17 @@ function ScholarHome() {
       nowFocusItems,
       rows.filter((row) => row.origin === "classFocus"),
     ),
-    focusLock,
+    liveFocus,
   );
   const liveFocusItems = groupPlateRows(liveFocusRows);
+  // Pushes are rows at the top of the class section; a live push alone is
+  // enough to show it.
+  const livePushes = useLivePushes(true);
+  // An open-until give (a link, an app, a file given "Open until Fri") is not
+  // class-now work: it sits under Open from class with the unit activities
+  // given the same way (TRA-724). Web twin: app/scholar/page.tsx.
+  const classPushes = livePushes.filter((push) => push.openUntil == null);
+  const openUntilPushes = livePushes.filter((push) => push.openUntil != null);
   // Upcoming planned items (startsAt >= nowMs), filtered by buildNowDigest.
   const nowPlannedItems = (nowSections.find((s) => s.key === "planned") as
     | { key: "planned"; items: typeof plannedToday }
@@ -869,6 +948,13 @@ function ScholarHome() {
   // empty state has to know, or it tells a scholar with three open Quests that
   // "nothing is open" and points them at starting a fourth.
   const hasQuestsWaiting = filterRowsForTab(rows, "quests").length > 0;
+  // "Pick up where you left off": open class work the class section above
+  // isn't showing, below Coming up, at any time of day.
+  // It replaced the All tab and the quiet-day "Open work" block. Web twin:
+  // app/scholar/page.tsx.
+  const pickUpItems = nowDataLoaded
+    ? groupPlateRows(pickUpRows(rows, liveFocusRows, nowMs))
+    : [];
 
   const buildSectionsFor = (tab: string) => {
     const meta = sectionMeta(colors);
@@ -891,47 +977,60 @@ function ScholarHome() {
         },
       ];
     }
-    const effectiveRows =
-      isNowTab && !showHomeworkInNow
-        ? tabRows.filter((row) => row.origin !== "homework")
-        : tabRows;
+    // Homework (and open-until work) lives in Homework only, never in a
+    // plate section on any tab. Web twin: ScholarPlate's assigned-tab filter.
+    const effectiveRows = tabRows.filter((row) => !onYourList(row, nowMs));
     return ORDER.map((origin) => {
       if (isQuestTab && origin !== "is") return null;
       if (!isQuestTab && origin === "is") return null;
-      // Fix D: Now tab (not quiet): return null for ALL origins. Live class
-      // focus is hoisted to the ListHeader digest above the planned rail;
-      // rendering classFocus rows here AND in the header would double them.
-      // (Old code only suppressed non-classFocus, leaving focus rows in the
-      // SectionList body BELOW the header digest — inverting the Q5 ladder.)
-      if (isNowTab && !isQuiet) return null;
-      const sectionRows = effectiveRows.filter((r) => r.origin === origin);
-      const owedRows = sectionRows.filter((row) => !row.isReopenedComplete);
-      const startedCount = owedRows.filter((row) => !row.notStarted).length;
-      const notStartedCount = owedRows.filter((row) => row.notStarted).length;
-      const isTotalCount = plate?.isTotalCount ?? 0;
+      // Now renders every section in its ListHeader (class work, Homework,
+      // Coming up, Pick up where you left off), so its body is empty.
+      if (isNowTab) return null;
+      const sectionRows = effectiveRows.filter(
+        (r) =>
+          r.origin === origin &&
+          // A proposed Quest is drawn by its proposal row, never twice.
+          !(
+            origin === "is" &&
+            proposalCovered &&
+            ((r.unitId && proposalCovered.unitIds.has(String(r.unitId))) ||
+              (r.sessionId && proposalCovered.sessionIds.has(String(r.sessionId))))
+          ),
+      );
+      const hiddenIs =
+        origin === "is" ? effectiveRows.filter((r) => r.origin === "is").length - sectionRows.length : 0;
+      const isTotalCount = Math.max(0, (plate?.isTotalCount ?? 0) - hiddenIs);
+      // Class work carries no count, like Homework (web parity:
+      // ScholarPlate's PlateSection).
       const countText =
-        origin === "homework"
-          ? owedRows.length > 0
-            ? `${owedRows.length} due`
-            : null
-          : origin === "classFocus"
-            ? [
-                startedCount > 0 ? `${startedCount} in progress` : null,
-                notStartedCount > 0 ? `${notStartedCount} to start` : null,
-              ].filter(Boolean).join(" · ")
-            : isTotalCount > 0
-              ? `${isTotalCount} in progress`
-              : null;
+        origin === "classFocus"
+          ? null
+          : isTotalCount > 0
+            ? `${isTotalCount} in progress`
+            : null;
       return {
         origin,
         ...meta[origin],
+        ...(origin === "classFocus"
+          ? { heading: focusSectionLabel(isWithinSchoolHours) }
+          : {}),
         countText: countText || null,
         data: (() => {
           const base =
             origin === "classFocus"
-              ? prioritizeFocusedUnit(sectionRows, focusLock)
+              ? prioritizeFocusedUnit(sectionRows, liveFocus)
               : sectionRows;
-          return origin === "is" && base.length === 0
+          if (origin !== "is") return groupPlateRows(base);
+          // Your Quests: the proposal rows first (approved, then waiting),
+          // then the older Quest rows; the empty line only when both are
+          // empty.
+          if (hasQuestProposals) {
+            return [
+              { kind: "quest-proposals" } as const,
+              ...groupPlateRows(base),
+            ] satisfies SectionRow[];
+          }
+          return base.length === 0
             ? ([{ kind: "quest-empty" }] satisfies SectionRow[])
             : groupPlateRows(base);
         })(),
@@ -1041,8 +1140,8 @@ function ScholarHome() {
         1,
         Math.pow(os / tuning.overscrollDistance.get(), tuning.resistance.get()),
       );
-      // Locked map (f6): no sky layers are rendered, so the pull must not fade
-      // the cards toward a backdrop that isn't there (and no teaser haptic).
+      // Off the Quests tab no sky layers are rendered, so the pull must not
+      // fade the cards toward a backdrop that isn't there (and no haptic).
       skyProgress.set(mapUnlockedSV.get() ? p : 0);
       // Threshold haptic: once per drag, when progress first crosses the commit
       // line upward — a "you can release now" tick (replaces the removed text).
@@ -1113,7 +1212,7 @@ function ScholarHome() {
     ? filterArchivedRowsForTab(archived, effectiveActiveTab).length
     : null;
 
-  // The Home nav bar: the Now·All·subject tabs live in the title (center), and
+  // The Home nav bar: the Now·subject tabs live in the title (center), and
   // the Active⇄Archived filter is a compact button in the top-left. The tab
   // strip stays for both filter values; the plain title is only the fallback
   // before the tabs are derived.
@@ -1157,10 +1256,7 @@ function ScholarHome() {
     </>
   );
 
-  // mapGates gates the whole backdrop (horizon vs plain), so hold the spinner
-  // until it resolves — otherwise an unlocked scholar flashes the locked plain
-  // home for a beat on every launch before the horizon pops in.
-  if (!isAuthenticated || plate === undefined || mapGates === undefined) {
+  if (!isAuthenticated || plate === undefined) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color={colors.violet} />
@@ -1222,10 +1318,32 @@ function ScholarHome() {
       </MathCardBoundary>
     );
     // Sky treatment (horizon backdrop + pull gesture + top peek padding) is
-    // Quests-tab + unlocked-sky ONLY; a locked-sky Quests tab renders as a plain
-    // list on the light surface, exactly like every other tab.
-    const questSkyEnabled = isQuestTab && !!mapGates?.sky;
+    // Quests-tab ONLY; every other tab renders as a plain list on the light
+    // surface.
+    const questSkyEnabled = isQuestTab;
     const tabSections = buildSectionsFor(tab);
+    const tabYourList = yourListFor(tab);
+    const tabHomeworkWeek = tabYourList.homework;
+    const tabOpenFromClass = tabYourList.openFromClass;
+    // Pushes are on the Now tab only, as in the class section.
+    const tabOpenUntilPushes = isNowTab ? openUntilPushes : [];
+    const openFromClassSection =
+      tabOpenFromClass.isEmpty && tabOpenUntilPushes.length === 0 ? null : (
+        <HomeworkSectionNative
+          heading={OPEN_FROM_CLASS_HEADING}
+          week={tabOpenFromClass}
+          closures={weekClosures}
+          nowMs={nowMs}
+          timeZone={institutionTimeZone}
+        >
+          <PushRows
+            pushes={tabOpenUntilPushes}
+            timeZone={institutionTimeZone}
+            nowMs={nowMs}
+          />
+        </HomeworkSectionNative>
+      );
+    const isSubjectTab = !isNowTab && !isPrepTab && !isAppsTab && !isQuestTab;
     const list = (
       <AnimatedSectionList
         style={styles.listFrame}
@@ -1234,6 +1352,10 @@ function ScholarHome() {
         scrollEventThrottle={16}
         bounces={bounces}
         alwaysBounceVertical={true}
+        // The "I wonder…" box lives in this list: with the on-screen keyboard
+        // up, the box's Ask and mic buttons must take the first tap rather
+        // than spend it closing the keyboard (TRA-677).
+        keyboardShouldPersistTaps="handled"
         refreshControl={
           questSkyEnabled || tab !== effectiveActiveTab ? undefined : (
             <RefreshControl
@@ -1266,7 +1388,6 @@ function ScholarHome() {
           // `cond && <Card/>`, so an absent card contributes no gap. Do NOT
           // wrap these in per-card <View>s (see HOME_GAP).
           <View style={[styles.column, styles.stack]}>
-            {isNowTab && !isAfterPrepEvening ? <FocusStrip /> : null}
             {/* The map card, elevated (f6/f14/f21). ONE card per map, whose
                 state picks its heading and tone: the once-ever unlock
                 ("SOMETHING NEW"), or today's movement ("TODAY"). The standing
@@ -1286,6 +1407,13 @@ function ScholarHome() {
                 horizon hint), and /sky still consumes revealPending on first
                 arrival. Only the TREE renders a MapHomeCard now, on Math. */}
             {onboarding ? <OnboardingPinCard pin={onboarding} /> : null}
+            {birthdayAcknowledgement ? (
+              <View style={styles.birthdayBanner}>
+                <Text style={styles.birthdayBannerText}>
+                  {birthdayAcknowledgement.bannerText}
+                </Text>
+              </View>
+            ) : null}
             {/* Fix D: Context strip renders independently of tabs.length.
                 Tab row is still hidden when tabs.length === 0, but the
                 context strip should not be suppressed just because there
@@ -1297,6 +1425,13 @@ function ScholarHome() {
               <View style={styles.noSchoolBanner}>
                 <Text style={styles.noSchoolTitle}>No school today</Text>
                 <Text style={styles.noSchoolLabel}>{closure.label}</Text>
+              </View>
+            ) : null}
+            {/* Field trip banner (TRA-601): parity with the web scholar home. */}
+            {trip ? (
+              <View style={styles.noSchoolBanner}>
+                <Text style={styles.noSchoolTitle}>{FIELD_TRIP_TODAY}</Text>
+                <Text style={styles.noSchoolLabel}>{fieldTripDetail(trip)}</Text>
               </View>
             ) : null}
             {/* The live block is a section HEADING over the work happening in
@@ -1313,27 +1448,38 @@ function ScholarHome() {
             {isNowTab && isPrepTime && (
               <PrepEntryCard onOpen={() => setActiveTab("prep")} />
             )}
-            {isNowTab && liveFocusRows.length > 0 && (
+            {isNowTab && (liveFocusRows.length > 0 || classPushes.length > 0) && (
               <HomeSection
-                label={
-                  isWithinSchoolHours
-                    ? (blockContext?.label ?? focusSectionLabel(true))
-                    : focusSectionLabel(false)
+                label={focusSectionLabel(isWithinSchoolHours)}
+                // The block's own name moves into the detail line, so the
+                // heading is the one shared name ("In class now").
+                detail={
+                  isWithinSchoolHours && blockContext
+                    ? [blockContext.label, blockContext.detail]
+                        .filter(Boolean)
+                        .join(" · ")
+                    : undefined
                 }
-                detail={isWithinSchoolHours ? blockContext?.detail : undefined}
               >
+                {/* Pushes (an app, a resource, a link) come first, above
+                    the activity rows. Web twin: PushRows. */}
+                <PushRows
+                  pushes={classPushes}
+                  timeZone={institutionTimeZone}
+                  nowMs={nowMs}
+                />
                 {liveFocusItems.map((item, index) => (
                   <PlateWorkItem
                     key={sectionRowKey(item, index)}
                     item={item}
-                    focusLock={focusLock}
+                    liveFocus={liveFocus}
                     nowMs={nowMs}
                     timeZone={institutionTimeZone}
+                    closures={weekClosures}
                   />
                 ))}
               </HomeSection>
             )}
-            {isNowTab && isAfterPrepEvening ? <FocusStrip /> : null}
             {/* Now tab: planned ghost cards — upcoming only (startsAt ≥ nowMs,
                 filtered by buildNowDigest). Invariant 1: no CTA. */}
             {isNowTab &&
@@ -1406,76 +1552,59 @@ function ScholarHome() {
             )}
             {isPrepTab && (
               <>
-                {/* The three plain questions — Due · Done today? · Keep going
-                    — then Coming up dates what follows and Prep activities
-                    close it. The old "To do tonight" plan list is retired. */}
+                {/* Today's wonders comes first, headed by the "I wonder…" box
+                    (its one home), with the kid's Earlier wonders under it;
+                    then the two plain questions — Done today? · Keep going —
+                    then Coming up dates the planned class work that follows
+                    and Prep activities close it. Homework is on the Now tab. */}
+                <TodaysWonders ref={wonderBoxRef} />
                 <ScholarPrepSections />
                 <ComingUpCard />
                 <PrepActivityCards />
               </>
             )}
-            {/* Coming up — read-only lookahead on the evening Home. Never
-                null; renders a quiet empty line instead. */}
-            {isNowTab && isAfterPrepEvening && <ComingUpCard />}
             {isAppsTab && <AppLauncher minuteNow={minuteNow} />}
-            {/* Now tab: homework rows in digest (below practice, above quiet
-                note) — web §5.1 parity. Rendered only when not quiet (quiet
-                state shows the full plate via sections). Two groups sharing the
-                same orange pill: "Due today", then "Catch up" for past-due
-                incomplete homework that was previously vanishing. */}
-            {isNowTab && !isQuiet && homeworkDueTodayInNow.length > 0 && (
-              <HomeSection label="Due today" tint={colors.orange}>
-                {homeworkDueTodayInNow.map((row) => (
-                  <HomeworkNowNativeRow
-                    key={`${row.assignmentId ?? ""}::${row.activityId ?? ""}`}
-                    row={row}
+            {/* Now tab: Open from class — open-until work, between the class
+                work and Homework (TRA-724). */}
+            {isNowTab && openFromClassSection}
+            {/* Now tab: Homework — every teacher's homework by school week,
+                under the class work. It never hides or folds. Web twin:
+                components/HomeworkSection.tsx. */}
+            {isNowTab && !tabHomeworkWeek.isEmpty && (
+              <HomeworkSectionNative
+                week={tabHomeworkWeek}
+                closures={weekClosures}
+                nowMs={nowMs}
+                timeZone={institutionTimeZone}
+              />
+            )}
+            {/* Coming up — planned class work that hasn't started, below Your
+                list, at any time of day. */}
+            {isNowTab && <ComingUpCard hideWhenEmpty />}
+            {/* Pick up where you left off — open class work the class section
+                isn't showing, a sibling of Homework and Coming up. */}
+            {isNowTab && pickUpItems.length > 0 && (
+              <HomeSection label={PICK_UP_HEADING}>
+                {pickUpItems.map((item, index) => (
+                  <PlateWorkItem
+                    key={sectionRowKey(item, index)}
+                    item={item}
+                    liveFocus={liveFocus}
                     nowMs={nowMs}
                     timeZone={institutionTimeZone}
+                    closures={weekClosures}
                   />
                 ))}
               </HomeSection>
             )}
-            {isNowTab && !isQuiet && homeworkOverdueInNow.length > 0 && (
-              <HomeSection label="Catch up" tint={colors.orange}>
-                {homeworkOverdueInNow.map((row) => (
-                  <HomeworkNowNativeRow
-                    key={`${row.assignmentId ?? ""}::${row.activityId ?? ""}`}
-                    row={row}
-                    nowMs={nowMs}
-                    timeZone={institutionTimeZone}
-                  />
-                ))}
-              </HomeSection>
-            )}
-            {isNowTab && !isQuiet && homeworkUpcomingInNow.length > 0 && (
-              <HomeSection label="Homework" tint={colors.orange}>
-                {homeworkUpcomingInNow.map((row) => (
-                  <HomeworkNowNativeRow
-                    key={`${row.assignmentId ?? ""}::${row.activityId ?? ""}`}
-                    row={row}
-                    nowMs={nowMs}
-                    timeZone={institutionTimeZone}
-                  />
-                ))}
-              </HomeSection>
-            )}
-            {/* Quiet fallback (Now tab): no live focus + no planned + no visible
-                homework. Two genuinely different states hide behind that one
-                signal, so they get two different renderings (the web twin makes
-                the same split in app/scholar/page.tsx):
-
-                  - open work DOES render below → this is a HEADER over a real
-                    list, so it uses the same HomeSectionHead every other
-                    section on this tab uses. It was a dashed 13px pill, which
-                    is a second rendering of a signal that already has one.
-                  - nothing renders below → the tab is genuinely empty, so it
-                    gets exactly ONE canonical full-surface empty state, with
-                    the same "Start a Quest" way out the Quests tab offers
-                    (native's empty states have been dead ends). */}
-            {isNowTab && isQuiet && (
-              tabSections.length > 0 ? (
-                <HomeSectionHead label="Open work" tint={colors.charcoalSubtle} />
-              ) : (
+            {/* A quiet day with nothing open, no Open from class and no Homework gets
+                exactly ONE full-surface empty state, with the same "Start a
+                Quest" way out the Quests tab offers. */}
+            {isNowTab &&
+              isQuiet &&
+              livePushes.length === 0 &&
+              pickUpItems.length === 0 &&
+              tabYourList.isEmpty && (
                 <EmptyState
                   size="lg"
                   icon={(size, color) => (
@@ -1492,18 +1621,21 @@ function ScholarHome() {
                       ? undefined
                       : {
                           label: "Start a Quest",
-                          onPress: openCreateQuest,
+                          onPress: openWonderBox,
                           primary: true,
                           disabled: newQuestLocked,
                         }
                   }
                 />
-              )
-            )}
+              )}
           </View>
         }
         ListEmptyComponent={
-          isPrepTab || isMathTab || isAppsTab || isNowTab ? null : (
+          isPrepTab ||
+          isMathTab ||
+          isAppsTab ||
+          isNowTab ||
+          (isSubjectTab && !tabYourList.isEmpty) ? null : (
             <View style={[styles.column, { paddingTop: HOME_SECTION_GAP }]}>
               <Text style={styles.empty}>Nothing open right now.</Text>
             </View>
@@ -1527,23 +1659,11 @@ function ScholarHome() {
                     {section.countText ? (
                       <Text style={styles.sectionCount}>{section.countText}</Text>
                     ) : null}
+                    {/* "Propose a Quest", where "+ Start a Quest" was: a chat
+                        whose tutor helps the kid say what they want to make,
+                        then offers the proposal card (TRA-695). */}
                     {section.origin === "is" && isQuestTab ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="Start a Quest"
-                        disabled={newQuestLocked}
-                        onPress={openCreateQuest}
-                        style={({ pressed }) => [
-                          styles.startQuestButton,
-                          { borderColor: section.muted, backgroundColor: section.subtle },
-                          pressed && !newQuestLocked && { backgroundColor: section.muted },
-                          newQuestLocked && styles.lockedControl,
-                        ]}
-                      >
-                        <Text style={[styles.startQuestText, { color: section.tint }]}>
-                          + Start a Quest
-                        </Text>
-                      </Pressable>
+                      <ProposeQuestButton disabled={newQuestLocked} />
                     ) : null}
                   </View>
                 ) : null
@@ -1568,40 +1688,68 @@ function ScholarHome() {
             {"kind" in item ? (
               item.kind === "quest-empty" ? (
                 <QuestEmptyCard locked={newQuestLocked} />
+              ) : item.kind === "quest-proposals" ? (
+                <QuestProposalList
+                  approved={questProposals?.approved}
+                  offered={questProposals?.offered}
+                  waiting={questProposals?.waiting}
+                  unlocked={questProposals?.unlocked}
+                />
               ) : (
                 <PlateWorkItem
                   item={item}
-                  focusLock={focusLock}
+                  liveFocus={liveFocus}
                   nowMs={nowMs}
                   timeZone={institutionTimeZone}
+                  closures={weekClosures}
                 />
               )
             ) : (
               <PlateWorkItem
                 item={item}
-                focusLock={focusLock}
+                liveFocus={liveFocus}
                 nowMs={nowMs}
                 timeZone={institutionTimeZone}
+                closures={weekClosures}
               />
             )}
           </View>
         )}
         renderSectionFooter={({ section }) =>
-          section.origin === "is" && !newQuestLocked && isQuestTab ? (
-            // Both sections can self-gate to nothing — so this wrapper
+          section.origin === "is" && isQuestTab ? (
+            // Every section here can self-gate to nothing — so this wrapper
             // carries neither padding nor gap. Each section owns its LEADING
             // gap instead (HOME_SECTION_GAP on its own root), which collapses
-            // with it. The question queue is the ONE list of open questions
-            // + teacher-suggested quests (it replaced Suggested quests + the
-            // story invitations).
-            <View style={styles.column}>
-              <QuestionQueueList />
-              <PeerTrails />
-            </View>
+            // with it. Peer trails, then "Things to wonder about": the ONE
+            // question queue, its question cards answered in place as before
+            // and its other starters as rows with Ask, closing the tab
+            // (review/quests-rebuilt-proposal.html, "Starters"). The kid's own
+            // wonders live on Scholar's Prep with the box. Prep's "Keep going"
+            // draws the same queue's top rows. Both wait for the first Welcome
+            // beat (H1). Web twin: components/ScholarPlate.tsx.
+            !newQuestLocked ? (
+              <View style={styles.column}>
+                <PeerTrails />
+                <WonderStarters />
+              </View>
+            ) : null
           ) : null
         }
         ListFooterComponent={
           <View style={[styles.column, styles.stack, styles.footerStack]}>
+            {/* A subject tab's slice of Open from class and Homework, under
+                its class work — the same sections as Now's, so a
+                homework-only subject isn't empty. Web twin:
+                app/scholar/page.tsx. */}
+            {isSubjectTab && openFromClassSection}
+            {isSubjectTab && !tabHomeworkWeek.isEmpty && (
+              <HomeworkSectionNative
+                week={tabHomeworkWeek}
+                closures={weekClosures}
+                nowMs={nowMs}
+                timeZone={institutionTimeZone}
+              />
+            )}
             {/* Math tab: the Tree card's QUIET state — the standing doorway to
                 the scholar's frontier. It renders only when the elevated slot
                 above is empty (nothing new, nothing moved today), so the two
@@ -1722,15 +1870,14 @@ function ScholarHome() {
           }}
         >
           {pageKeys.map((tab, index) => {
-            // A locked-sky Quests tab is a plain light surface; an unlocked-sky
-            // one paints SPACE_BG so its horizon backdrop sits against space.
+            // The active Quests tab paints SPACE_BG so its horizon backdrop
+            // sits against space; every other page is a plain light surface.
             // It used to be left transparent and let the black homeRoot show
             // through, but the pager's overdrag bounce reveals the pager's own
             // background at the ends — so the two jobs that one black surface
             // was doing had to be split: the pager carries the page surface
             // colour (what the bounce reveals) and the sky page carries space.
-            const questSky =
-              view === "active" && tab === "quests" && !!mapGates?.sky;
+            const questSky = view === "active" && tab === "quests";
             // Lazy mount, widened by ONE page either side of the active one.
             // A visited tab renders its real list and STAYS mounted (the pager
             // keeps every page mounted) to keep its subscriptions warm; an
@@ -1768,24 +1915,10 @@ function ScholarHome() {
           })}
         </PagerView>
       </View>
-      <CreateQuestDialog
-        open={createQuestOpen}
-        onClose={() => setCreateQuestOpen(false)}
-      />
       <BirthdayConfetti active={isOwnBirthday} dayKey={institutionDayKey} />
     </>
   );
 }
-
-/**
- * DailyRecapSection — factual map movement stays in Now. Math practice and
- * check-in live in the dedicated Math tab.
- *
- * Retired: the card now owns its own TODAY eyebrow (`eyebrow` prop), so the
- * label and the card gate together instead of the card reporting presence back
- * up so a sibling label could gate on it. One child in the Home stack, one
- * gate, no empty wrapper left behind when there's no movement to report.
- */
 
 /**
  * The Math tab's per-card render-error wall (see ContainmentBoundary). Only
@@ -1821,16 +1954,14 @@ function MathCardBoundary({
 function QuestEmptyCard({ locked }: { locked: boolean }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  // The question queue renders right below this section; "No Quests yet"
-  // above a list of open questions contradicts it. Same subscription the
-  // queue already holds, so this costs no extra read.
+  // "Things to wonder about" draws the question queue at the end of this
+  // section; "No Quests yet" above open questions contradicts it. It reads
+  // the queue itself (the subscription Prep's "Keep going" shares).
   // Contained: an older backend (deploy skew) lacks this query; an error
   // just shows the empty line.
   const { data: queue } = useContainedQuery(api.questionQueue.forSelf, locked ? "skip" : {});
   if (!locked && queue !== undefined && queue.length > 0) return null;
-  // Boring empty state, matching the other tabs' muted line — the section
-  // header's "+ Start a Quest" CTA is the affordance for a custom quest, so
-  // this no longer needs its own pressable card.
+  // Boring empty state, matching the other tabs' muted line.
   return (
     <Text style={styles.empty}>
       {locked ? "After you finish Welcome" : "No Quests yet."}
@@ -1913,28 +2044,28 @@ function OnboardingPinCard({ pin }: { pin: OnboardingPin }) {
   );
 }
 
-// Long-press → Archive, for every Home item that stands for a real session
-// (review/home-finished-filter.html). Spread the result onto the item's
-// Pressable: a long-press (not a swipe, so it can't fight the tab pager) opens
-// an [Cancel, Archive] sheet, and VoiceOver gets the same action by name. An
-// item with no session yet (a not-started start row) gets nothing (a
-// teacher-archived session never sits on the plate). The Welcome pin has
-// none either (web parity): it stays pinned until onboarding is done, so
-// archiving it would change nothing the scholar can see. Relaunching assigned work
-// resumes a session the scholar archived, so archiving live work loses nothing.
-function useLongPressArchive({
+// Archive, for every Home item that stands for a real session
+// (review/home-finished-filter.html). The row draws the wonder rows' quiet ×
+// (DismissButton) after its verb, wired to `archiveNow`, and spreads
+// `a11yProps` onto its Pressable so VoiceOver gets the same action by name on
+// the row itself. A tap archives at once, with no confirm: the Archived filter
+// puts it back, and relaunching assigned work resumes a session the scholar
+// archived, so archiving live work loses nothing. An item with no session yet
+// (a not-started start row) gets nothing (a teacher-archived session never
+// sits on the plate). The Welcome pin has none either (web parity): it stays
+// pinned until onboarding is done, so archiving it would change nothing the
+// scholar can see.
+function useHomeRowArchive({
   sessionId,
-  title,
 }: {
   sessionId: Id<"sessions"> | null | undefined;
-  title: string;
-}): Pick<
-  PressableProps,
-  "onLongPress" | "accessibilityActions" | "onAccessibilityAction"
-> {
+}): {
+  archiveNow: (() => void) | null;
+  a11yProps: Pick<PressableProps, "accessibilityActions" | "onAccessibilityAction">;
+} {
   const archive = useMutation(api.sessions.archive);
   const id = sessionId ?? null;
-  if (!id) return {};
+  if (!id) return { archiveNow: null, a11yProps: {} };
   const archiveNow = () => {
     archive({ id }).catch((err: unknown) => {
       console.error("Failed to archive session:", err);
@@ -1942,24 +2073,14 @@ function useLongPressArchive({
     });
   };
   return {
-    onLongPress: () => {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          title,
-          options: ["Cancel", HOME_ARCHIVE_COPY.archiveAction],
-          cancelButtonIndex: 0,
-        },
-        (i) => {
-          if (i === 1) archiveNow();
-        },
-      );
-    },
-    accessibilityActions: [
-      { name: "archive", label: HOME_ARCHIVE_COPY.archiveAction },
-    ],
-    onAccessibilityAction: (e) => {
-      if (e.nativeEvent.actionName === "archive") archiveNow();
+    archiveNow,
+    a11yProps: {
+      accessibilityActions: [
+        { name: "archive", label: HOME_ARCHIVE_COPY.archiveAction },
+      ],
+      onAccessibilityAction: (e) => {
+        if (e.nativeEvent.actionName === "archive") archiveNow();
+      },
     },
   };
 }
@@ -1973,13 +2094,13 @@ function useRowAction(row: PlateRow) {
   const createSession = useMutation(api.sessions.create);
   const openOfflineHomework = useMutation(api.sessions.openOfflineHomework);
   const [starting, setStarting] = useState(false);
-  const isOfflineHomework =
-    row.activityKind === "offline" && row.origin === "homework";
+  // Offline homework and offline open-until work open their read-only page.
+  const isOfflinePage = opensOfflinePage(row);
 
   const open = async () => {
     if (starting) return;
     Haptics.selectionAsync();
-    if (isOfflineHomework) {
+    if (isOfflinePage) {
       if (!row.activityId || !row.assignmentId) return;
       setStarting(true);
       try {
@@ -1994,7 +2115,7 @@ function useRowAction(row: PlateRow) {
       } catch (e) {
         console.warn("[offline-homework] open failed", e);
         Alert.alert(
-          "Couldn’t open that homework",
+          "Couldn’t open that",
           "Check your connection and try again.",
         );
       } finally {
@@ -2090,90 +2211,221 @@ function useRowAction(row: PlateRow) {
     }
   };
 
-  return { open, starting, isOfflineHomework };
+  return { open, starting, isOfflinePage };
 }
 
-// ── Homework row for the Now tab's homework digest ────────────────────────
-// Serves BOTH the "Due today" and "Catch up" groups — a small orange due pill
-// in the title block carries the distinguishing phrase ("due today" / "was due
-// yesterday") via dueStatus().phrase, while the right-hand CTA is the standard
-// violet "Start ›" / "Continue ›" link (Andy, fix round 2: pill and CTA are
-// separate, not one coalesced chip; identical structure/copy to web).
-// Fix B native: fully start/continue capable via useRowAction — handles web
-// activities, existing sessions (open), and not-yet-started activities (create
-// then open).
-function HomeworkNowNativeRow({
+// ── Homework on the Now tab ────────────────────────────────────────────────
+// One surface split by quiet subheadings — This weekend (Sat/Sun only), This
+// week, Late, Next week, Later, No date — each left out when empty (vendored
+// shared/homeworkList.ts). Rows carry the plain "Start ›" / "Continue ›" /
+// "Open ›"; in Next week and Later a row with nothing to open yet is a
+// forecast (homeworkRowCta). It also draws Open from class (TRA-724): one
+// list from buildYourList, with no subheading. Web twin:
+// components/HomeworkSection.tsx.
+function HomeworkSectionNative({
+  heading = HOMEWORK_SECTION_HEADING,
+  week,
+  closures,
+  nowMs,
+  timeZone,
+  children,
+}: {
+  /** The section's header: Homework, or Open from class. */
+  heading?: string;
+  week: HomeworkWeek<PlateRow>;
+  closures: HomeworkClosures;
+  nowMs: number;
+  timeZone: string;
+  /** Open from class's open-until gives (PushRows), under its rows. */
+  children?: ReactNode;
+}) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  const rowKey = (row: PlateRow) =>
+    `${row.assignmentId ?? ""}::${row.activityId ?? ""}::${row.sessionId ?? ""}`;
+
+  return (
+    <HomeSection label={heading}>
+      {!week.isEmpty && (
+        <View style={styles.hwListCard}>
+          {week.sections.map((section, index) => (
+            <View
+              key={section.key}
+              style={index > 0 ? styles.hwListGroupDivided : undefined}
+            >
+              {section.heading != null ? (
+                <Text style={styles.hwListGroupHeading}>
+                  {section.heading}
+                  {section.range ? (
+                    <Text style={styles.hwSectionRange}>{`  ${section.range}`}</Text>
+                  ) : null}
+                </Text>
+              ) : null}
+              {section.items.map((row) => {
+                const cta = homeworkRowCta(row, {
+                  isOffline: opensOfflinePage(row),
+                  forecast: !section.actionable,
+                  nowMs,
+                });
+                return cta ? (
+                  <HomeworkListNativeRow
+                    key={rowKey(row)}
+                    row={row}
+                    cta={cta}
+                    closures={closures}
+                    nowMs={nowMs}
+                    timeZone={timeZone}
+                  />
+                ) : (
+                  <View key={rowKey(row)} style={styles.hwListRow}>
+                    <HomeworkRowLayoutNative
+                      row={row}
+                      isOffline={row.activityKind === "offline"}
+                      closures={closures}
+                      nowMs={nowMs}
+                      timeZone={timeZone}
+                      cta={null}
+                    />
+                  </View>
+                );
+              })}
+            </View>
+          ))}
+        </View>
+      )}
+      {children}
+    </HomeSection>
+  );
+}
+
+// The row's status: the DueChip ("due this week" on the week's last school
+// day) or the open-until pill. Reopened work past its date shows none
+// (web twin: RowStatus in components/HomeworkSection.tsx).
+function HomeworkRowStatus({
   row,
+  closures,
   nowMs,
   timeZone,
 }: {
   row: PlateRow;
+  closures: HomeworkClosures;
+  nowMs: number;
+  timeZone: string;
+}) {
+  if (row.openUntil != null) {
+    return <StatusChip>{openUntilPhrase(row.openUntil, timeZone, nowMs)}</StatusChip>;
+  }
+  if (!showsHomeworkDueChip(row, nowMs, timeZone)) return null;
+  return (
+    <DueChip dueAt={row.dueAt} nowMs={nowMs} timeZone={timeZone} closures={closures} />
+  );
+}
+
+// One homework row: glyph · title + "Subject · with Teacher" · pill · CTA.
+// The pill sits on the right, centered on the title line, immediately left
+// of a fixed-width CTA slot; a row with no CTA keeps the empty slot so every
+// pill lines up (web twin: RowLayout in components/HomeworkSection.tsx).
+function HomeworkRowLayoutNative({
+  row,
+  isOffline,
+  closures,
+  nowMs,
+  timeZone,
+  cta,
+}: {
+  row: PlateRow;
+  isOffline: boolean;
+  closures: HomeworkClosures;
+  nowMs: number;
+  timeZone: string;
+  cta: React.ReactNode;
+}) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  const meta = homeworkListRowMeta({
+    // `?? row.subject`: an older backend's row (deploy skew) has no label.
+    subject: row.subjectLabel ?? row.subject,
+    teacherName: row.teacherName,
+    isOffline,
+  });
+  const hasStatus =
+    row.openUntil != null || showsHomeworkDueChip(row, nowMs, timeZone);
+  return (
+    <>
+      <View style={styles.hwListRowMain}>
+        <Text style={styles.hwListEmoji} importantForAccessibility="no">
+          {row.unitEmoji ?? ""}
+        </Text>
+        <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+          <Text style={styles.hwDueTodayTitle} numberOfLines={2}>
+            {row.title}
+          </Text>
+          {meta ? (
+            <Text style={styles.hwDueTodayMeta} numberOfLines={1}>
+              {meta}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+      <View style={styles.hwRowTrail}>
+        {hasStatus ? (
+          <HomeworkRowStatus
+            row={row}
+            closures={closures}
+            nowMs={nowMs}
+            timeZone={timeZone}
+          />
+        ) : null}
+        <View style={styles.hwCtaSlot}>{cta}</View>
+      </View>
+    </>
+  );
+}
+
+function HomeworkListNativeRow({
+  row,
+  cta,
+  closures,
+  nowMs,
+  timeZone,
+}: {
+  row: PlateRow;
+  cta: HomeworkCta;
+  closures: HomeworkClosures;
   nowMs: number;
   timeZone: string;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const { open, starting, isOfflineHomework } = useRowAction(row);
-  const archiveProps = useLongPressArchive(row);
+  const { open, starting, isOfflinePage } = useRowAction(row);
+  // No archive × here: archiving a started homework session would
+  // hide live, unfinished work from its only home (web twin: HomeworkRow).
   const actionable = !starting;
 
   return (
     <Pressable
       onPress={actionable ? open : undefined}
-      {...archiveProps}
       accessibilityRole="button"
       accessibilityLabel={row.title}
       accessibilityState={{ disabled: !actionable }}
       style={({ pressed }) => [
-        styles.hwDueTodayCard,
+        styles.hwListRow,
         pressed && actionable && styles.cardPressed,
         starting && { opacity: 0.7 },
       ]}
     >
-      <View style={styles.hwDueTodayLeft}>
-        <View style={{ flex: 1, minWidth: 0, gap: 6 }}>
-          <View style={{ gap: 3 }}>
-            <View style={styles.hwDueTodayTitleRow}>
-              {row.unitEmoji ? (
-                <Text style={styles.hwDueTodayEmoji}>{row.unitEmoji}</Text>
-              ) : null}
-              <Text style={styles.hwDueTodayTitle} numberOfLines={2}>
-                {row.title}
-              </Text>
-            </View>
-            {row.unitTitle ? (
-              <Text style={styles.hwDueTodayMeta} numberOfLines={1}>
-                {row.unitTitle}
-              </Text>
-            ) : null}
-          </View>
-          {isOfflineHomework && row.description ? (
-            <Text style={styles.cardContext} numberOfLines={2}>
-              {row.description}
-            </Text>
-          ) : null}
-          {/* The due phrase stays its OWN token, never coalesced into the CTA
-              (Andy, fix round 2) — but it is the SHARED chip now, not a local
-              orange badge. Catch up rows are already late or due tonight, so
-              DueChip derives the loud tone without being told. */}
-          <View style={styles.dueChipWrap}>
-            <DueChip dueAt={row.dueAt} nowMs={nowMs} timeZone={timeZone} />
-          </View>
-        </View>
-      </View>
-      {/* Standard violet CTA (matches PlateActivityRow's styles.open), never
-          the orange chip. "Opening…" replaces the label while starting. */}
-      <View style={styles.ctaWrap}>
-        <Text style={styles.open}>
-          {starting
-            ? "Opening…"
-            : isOfflineHomework
-              ? "Open ›"
-              : row.sessionId
-              ? "Continue ›"
-              : "Start ›"}
-        </Text>
-      </View>
+      <HomeworkRowLayoutNative
+        row={row}
+        isOffline={isOfflinePage}
+        closures={closures}
+        nowMs={nowMs}
+        timeZone={timeZone}
+        cta={
+          <Text style={styles.open}>
+            {starting ? "Opening…" : `${cta} ›`}
+          </Text>
+        }
+      />
     </Pressable>
   );
 }
@@ -2226,14 +2478,17 @@ function PlateUnitBand({
 
 function PlateWorkItem({
   item,
-  focusLock,
+  liveFocus,
   nowMs,
   timeZone,
+  closures,
 }: {
   item: SectionRow;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   nowMs: number;
   timeZone: string;
+  /** The school's closures, for the "this week" due phrase. */
+  closures: HomeworkClosures;
 }) {
   if ("kind" in item) {
     if (item.kind === "choice-group") {
@@ -2245,9 +2500,10 @@ function PlateWorkItem({
       return (
         <UnitActivityGroup
           group={item}
-          focusLock={focusLock}
+          liveFocus={liveFocus}
           nowMs={nowMs}
           timeZone={timeZone}
+          closures={closures}
         />
       );
     }
@@ -2256,23 +2512,27 @@ function PlateWorkItem({
   return (
     <PlateCard
       row={item}
-      focusLock={focusLock}
+      liveFocus={liveFocus}
       nowMs={nowMs}
       timeZone={timeZone}
+      closures={closures}
     />
   );
 }
 
 function UnitActivityGroup({
   group,
-  focusLock,
+  liveFocus,
   nowMs,
   timeZone,
+  closures,
 }: {
   group: UnitActivityGroupRow;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   nowMs: number;
   timeZone: string;
+  /** The school's closures, for the "this week" due phrase. */
+  closures: HomeworkClosures;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -2289,11 +2549,12 @@ function UnitActivityGroup({
           <PlateActivityRow
             key={String(row.sessionId ?? row.activityId ?? index)}
             row={row}
-            focusLock={focusLock}
+            liveFocus={liveFocus}
             hasUnitStrip
             showDivider={index > 0}
             nowMs={nowMs}
             timeZone={timeZone}
+            closures={closures}
           />
         ))}
       </View>
@@ -2303,14 +2564,17 @@ function UnitActivityGroup({
 
 function PlateCard({
   row,
-  focusLock,
+  liveFocus,
   nowMs,
   timeZone,
+  closures,
 }: {
   row: PlateRow;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   nowMs: number;
   timeZone: string;
+  /** The school's closures, for the "this week" due phrase. */
+  closures: HomeworkClosures;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -2326,10 +2590,11 @@ function PlateCard({
         ) : null}
         <PlateActivityRow
           row={row}
-          focusLock={focusLock}
+          liveFocus={liveFocus}
           hasUnitStrip={hasUnitStrip}
           nowMs={nowMs}
           timeZone={timeZone}
+          closures={closures}
         />
       </View>
     </View>
@@ -2338,26 +2603,29 @@ function PlateCard({
 
 function PlateActivityRow({
   row,
-  focusLock,
+  liveFocus,
   hasUnitStrip,
   showDivider = false,
   nowMs,
   timeZone,
+  closures,
 }: {
   row: PlateRow;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   hasUnitStrip: boolean;
   showDivider?: boolean;
   nowMs: number;
   timeZone: string;
+  /** The school's closures, for the "this week" due phrase. */
+  closures: HomeworkClosures;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const { open, starting, isOfflineHomework } = useRowAction(row);
-  // Long-press → Archive, on any row that has a session (an open exploration,
-  // a continuation, started class or homework work). Web parity with
-  // ScholarPlate's hover archive.
-  const archiveProps = useLongPressArchive(row);
+  const { open, starting, isOfflinePage } = useRowAction(row);
+  // A trailing × archives any row that has a session (an open exploration, a
+  // continuation, started class or homework work). Web twin: ScholarPlate's
+  // archive ×.
+  const { archiveNow, a11yProps } = useHomeRowArchive(row);
   const progress =
     row.unitCompletedCount != null && row.unitActivityCount != null
       ? `${row.unitCompletedCount} of ${row.unitActivityCount}`
@@ -2375,23 +2643,27 @@ function PlateActivityRow({
   // is on right now (never a countdown — a soft phase + a wall-clock label).
   const matchesLiveFocus =
     row.origin === "classFocus" &&
-    !!focusLock?.unitId &&
-    String(row.unitId ?? "") === focusLock.unitId;
-  const roomPhase = useRoomTurnPhase(matchesLiveFocus ? focusLock?.endsAt ?? null : null);
+    !!liveFocus?.unitId &&
+    String(row.unitId ?? "") === liveFocus.unitId;
+  const roomPhase = useRoomTurnPhase(matchesLiveFocus ? liveFocus?.endsAt ?? null : null);
   const roomTurnLine =
-    matchesLiveFocus && focusLock ? liveFocusLine(roomPhase, focusLock) : null;
+    matchesLiveFocus && liveFocus ? liveFocusLine(roomPhase, liveFocus) : null;
 
   // Secondary overdue read on All / subject cards (web parity, ScholarPlate):
   // a small orange "was due X" line on past-due homework. Derived from Home's
   // ticking nowMs (30s) + the institution tz, so it acquires/updates across
   // institution midnight while mounted.
   const dueInfo =
-    row.origin === "homework" ? dueStatus(row.dueAt, nowMs, timeZone) : null;
+    row.origin === "homework"
+      ? homeworkDueStatus(row.dueAt, nowMs, timeZone, closures)
+      : null;
   // The plate is a BROWSE surface: it deliberately shows a deadline only once
   // it is late, because a chip on every homework row would be deadline noise on
   // a screen about choosing work. The SELECTION is the plate's; the rendering
   // is the shared one (review/scholar-activity-row-rationalization.html §4).
-  const isOverdue = dueInfo?.status === "overdue";
+  // Reopened work is never late (shared/homeworkList.ts), so it gets no
+  // late chip here either.
+  const isOverdue = dueInfo?.status === "overdue" && !row.isReopenedComplete;
 
   return (
     <View
@@ -2399,21 +2671,26 @@ function PlateActivityRow({
     >
       <Pressable
         onPress={open}
-        {...archiveProps}
+        {...a11yProps}
         disabled={starting}
         accessibilityRole="button"
         accessibilityLabel={row.title}
         accessibilityState={{ disabled: starting }}
         style={({ pressed }) => [
           styles.cardBodyMain,
+          archiveNow && styles.cardBodyMainWithArchive,
           pressed && styles.cardPressed,
         ]}
       >
+      {/* The activity's emoji in a fixed lead column (the same column Your
+          list rows use), so every row on Now shares one text edge. Status
+          is the button: Start / Continue. Web twin: UnitGroupRow. */}
+      <View style={styles.leadRow}>
+      <Text style={styles.leadEmoji} importantForAccessibility="no">
+        {row.unitEmoji ?? ""}
+      </Text>
       <View style={styles.cardLeft}>
         <View style={styles.titleRow}>
-          {!hasUnitStrip && row.unitEmoji ? (
-            <Text style={styles.emoji}>{row.unitEmoji}</Text>
-          ) : null}
           <Text style={styles.cardTitle} numberOfLines={2}>
             {row.title}
           </Text>
@@ -2439,16 +2716,17 @@ function PlateActivityRow({
         )}
         {isOverdue ? (
           <View style={styles.dueChipWrap}>
-            <DueChip dueAt={row.dueAt} nowMs={nowMs} timeZone={timeZone} />
+            <DueChip dueAt={row.dueAt} nowMs={nowMs} timeZone={timeZone} closures={closures} />
           </View>
         ) : null}
+      </View>
       </View>
       <View style={styles.ctaWrap}>
         {starting ? (
           <ActivityIndicator color={colors.violet} />
         ) : (
           <Text style={styles.open}>
-            {isOfflineHomework
+            {isOfflinePage
               ? "Open ›"
               : row.activityKind === "web" || row.activityKind === "game"
                 ? "Open ›"
@@ -2459,6 +2737,16 @@ function PlateActivityRow({
         )}
       </View>
       </Pressable>
+      {archiveNow ? (
+        <View style={styles.rowArchive}>
+          <DismissButton
+            action={HOME_ARCHIVE_COPY.archiveAction}
+            label={row.title}
+            disabled={starting}
+            onPress={archiveNow}
+          />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -2522,27 +2810,32 @@ function ChoiceOptionRow({
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const { open, starting, isOfflineHomework } = useRowAction(row);
-  const archiveProps = useLongPressArchive(row);
+  const { open, starting, isOfflinePage } = useRowAction(row);
+  const { archiveNow, a11yProps } = useHomeRowArchive(row);
   const eta = row.etaMinutes ? `~${row.etaMinutes} min` : null;
-  const context = isOfflineHomework
+  const context = isOfflinePage
     ? row.description ?? null
     : row.lastMessagePreview ?? null;
 
   return (
+    <View style={[styles.cardBody, showDivider && styles.choiceRowDivider]}>
     <Pressable
       onPress={open}
-      {...archiveProps}
+      {...a11yProps}
       disabled={starting}
       accessibilityRole="button"
       accessibilityLabel={row.title}
       accessibilityState={{ disabled: starting }}
       style={({ pressed }) => [
-        styles.cardBody,
-        showDivider && styles.choiceRowDivider,
+        styles.cardBodyMain,
+        archiveNow && styles.cardBodyMainWithArchive,
         pressed && styles.cardPressed,
       ]}
     >
+      <View style={styles.leadRow}>
+      <Text style={styles.leadEmoji} importantForAccessibility="no">
+        {row.unitEmoji ?? ""}
+      </Text>
       <View style={styles.cardLeft}>
         <Text style={styles.cardTitle} numberOfLines={2}>
           {row.title}
@@ -2558,12 +2851,13 @@ function ChoiceOptionRow({
           </Text>
         ) : null}
       </View>
+      </View>
       <View style={styles.ctaWrap}>
         {starting ? (
           <ActivityIndicator color={colors.violet} />
         ) : (
           <Text style={styles.open}>
-            {isOfflineHomework
+            {isOfflinePage
               ? "Open ›"
               : row.activityKind === "web" || row.activityKind === "game"
                 ? "Open ›"
@@ -2574,6 +2868,17 @@ function ChoiceOptionRow({
         )}
       </View>
     </Pressable>
+      {archiveNow ? (
+        <View style={styles.rowArchive}>
+          <DismissButton
+            action={HOME_ARCHIVE_COPY.archiveAction}
+            label={row.title}
+            disabled={starting}
+            onPress={archiveNow}
+          />
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -2720,19 +3025,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     fontFamily: fonts.semibold,
     textDecorationLine: "underline",
   },
-  startQuestButton: {
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-  },
-  lockedControl: {
-    opacity: 0.45,
-  },
-  startQuestText: {
-    fontSize: 13.5,
-    fontFamily: fonts.bold,
-  },
   onboardingPin: {
     flexDirection: "row",
     alignItems: "center",
@@ -2812,10 +3104,23 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     paddingLeft: 22,
     paddingRight: 22,
   },
+  // With the archive × after it, the row's own right padding shrinks so the
+  // verb and the × sit together, like a wonder row's verb and ×.
+  cardBodyMainWithArchive: { paddingRight: 6 },
+  // The × keeps its 40pt target and sits 12pt off the card's edge.
+  rowArchive: { flexShrink: 0, marginRight: 12 },
   cardPressed: { backgroundColor: c.gray50 },
   cardLeft: { flex: 1, minWidth: 0, gap: 7 },
+  // A plate row's fixed emoji lead column + its text stack.
+  leadRow: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row" as const,
+    alignItems: "flex-start" as const,
+    gap: 10,
+  },
+  leadEmoji: { width: 22, fontSize: 18, lineHeight: 26, textAlign: "center" as const },
   titleRow: { flexDirection: "row", alignItems: "center", gap: 12 },
-  emoji: { fontSize: 26 },
   cardTitle: {
     flex: 1,
     fontSize: 19,
@@ -2839,35 +3144,19 @@ function makeStyles(c: ReturnType<typeof useColors>) {
   sectionCount: { fontSize: 13, fontFamily: fonts.medium, color: c.charcoalMuted },
   ctaWrap: { minWidth: 60, alignItems: "flex-end" },
   open: { fontSize: 16, fontFamily: fonts.semibold, color: c.violet },
-  // ── Due-today homework rows (Now tab digest) ──────────────────────────
-  hwDueTodayCard: {
-    flexDirection: "row" as const,
-    alignItems: "center" as const,
-    justifyContent: "space-between" as const,
-    gap: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: c.gray200,
-    backgroundColor: c.bg,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-  },
-  hwDueTodayLeft: {
+  // ── Homework rows (Now tab) ───────────────────────────────────────────
+  hwListRowMain: {
     flex: 1,
     minWidth: 0,
     flexDirection: "row" as const,
-    alignItems: "center" as const,
-    gap: 10,
-  },
-  hwDueTodayTitleRow: {
-    flexDirection: "row" as const,
-    alignItems: "center" as const,
+    alignItems: "flex-start" as const,
     gap: 8,
   },
-  hwDueTodayEmoji: { fontSize: 18 },
+  // Fixed width so every row's text starts on the same edge, emoji or not.
+  hwListEmoji: { width: 22, fontSize: 18, lineHeight: 22, textAlign: "center" as const },
   hwDueTodayTitle: {
-    flex: 1,
     fontSize: 16,
+    lineHeight: 22,
     fontFamily: fonts.semibold,
     color: c.navy,
   },
@@ -2879,11 +3168,61 @@ function makeStyles(c: ReturnType<typeof useColors>) {
   // The one wrapper the shared DueChip needs on native: RN stretches a child
   // to the cross axis, so without this the pill would span the whole row.
   dueChipWrap: { alignSelf: "flex-start" as const },
+  // ── Homework card shell (Now tab) ───────────────────────────────────────────────
+  hwListCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: c.gray200,
+    backgroundColor: c.bg,
+    overflow: "hidden" as const,
+  },
+  hwListGroupDivided: { borderTopWidth: 1, borderTopColor: c.gray100 },
+  hwListGroupHeading: {
+    paddingHorizontal: 18,
+    paddingTop: 12,
+    paddingBottom: 2,
+    fontSize: 13,
+    fontFamily: fonts.bold,
+    color: c.charcoalMuted,
+  },
+  // ── Homework section (Now tab) ────────────────────────────────────────
+  hwSectionRange: { fontSize: 13, fontFamily: fonts.medium, color: c.charcoalMuted },
+  // The pill + CTA cluster, centered on the title's first line (lineHeight
+  // 22), with a fixed CTA slot so every row's pill lines up.
+  hwRowTrail: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 10,
+    height: 22,
+  },
+  hwCtaSlot: { width: 96, alignItems: "flex-end" as const },
+  hwListRow: {
+    flexDirection: "row" as const,
+    alignItems: "flex-start" as const,
+    justifyContent: "space-between" as const,
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+  },
   // ── Tab row chrome ──────────────────────────────────────────────────
   headerTitleText: {
     fontSize: 17,
     fontFamily: fonts.semibold,
     color: c.navy,
+  },
+  birthdayBanner: {
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.violetSubtle,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  birthdayBannerText: {
+    fontSize: 15,
+    lineHeight: 21,
+    fontFamily: fonts.bold,
+    color: c.violetSolid,
   },
   noSchoolBanner: {
     borderWidth: 1,

@@ -247,3 +247,210 @@ describe("practiceSession — stored conceptual-item consecutive-day dedupe", ()
     expect(second.items.map((it) => it.itemId)).toEqual(firstIds);
   });
 });
+
+/**
+ * Review rotation. A review usually comes back DAYS after the skill's last
+ * serve — past the 3-day window above — and the stored pool's index order is
+ * the same on every serve, so before this fix a review re-served the pool's
+ * first row every time, the row just missed included. Serving now orders a
+ * REVIEW skill's stored pool least-recently-seen first from the scholar's own
+ * attempts on that skill. Frontier work is untouched.
+ */
+describe("practiceSession — stored items rotate across reviews", () => {
+  const STORED_SKILL = "partition_shapes";
+  const DOMAIN = "fraction-arithmetic";
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  // Past RECENT_DEDUPE_WINDOW_MS, so only the per-skill history can rotate.
+  const LONG_AGO = Date.now() - 5 * DAY_MS;
+
+  async function seedPool(t: TestConvex<typeof schema>, n: number): Promise<string[]> {
+    return t.run(async (ctx) => {
+      const ids: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const id = await ctx.db.insert("practiceItems", {
+          skillKey: STORED_SKILL,
+          domain: DOMAIN,
+          stem: `Rotation problem ${i}: cut a pizza into ${2 + i} equal slices. How many slices?`,
+          answerType: "integer",
+          answerCanonical: `${2 + i}`,
+          verifierKind: "arithmetic",
+          source: "generated",
+          verifiedAt: Date.now(),
+        });
+        ids.push(`gen#${id}`);
+      }
+      return ids;
+    });
+  }
+
+  // A demonstrated skill whose retention has long decayed: due, so it is
+  // queued as a REVIEW.
+  async function seedDueReview(t: TestConvex<typeof schema>, userId: Id<"users">) {
+    await t.run((ctx) =>
+      ctx.db.insert("practiceMastery", {
+        scholarId: userId,
+        skillKey: STORED_SKILL,
+        domain: DOMAIN,
+        repetition: 4,
+        halfLifeDays: 1,
+        lastPracticedAt: LONG_AGO,
+        lastAttemptAt: LONG_AGO,
+        frontier: false,
+        source: "practice",
+        updatedAt: LONG_AGO,
+      }),
+    );
+  }
+
+  async function recordAttempt(
+    t: TestConvex<typeof schema>,
+    userId: Id<"users">,
+    itemId: string,
+    correct: boolean,
+    createdAt: number,
+    lane?: "review",
+  ) {
+    await t.run((ctx) =>
+      ctx.db.insert("practiceAttempts", {
+        scholarId: userId,
+        nodeKey: STORED_SKILL,
+        itemId,
+        correct,
+        ...(lane ? { lane } : {}),
+        createdAt,
+      }),
+    );
+  }
+
+  async function serveStored(
+    asScholar: Awaited<ReturnType<typeof seedScholar>>["asScholar"],
+    userId: Id<"users">,
+    seed: number,
+  ) {
+    const session = await asScholar.query(api.practiceSkills.practiceSession, {
+      scholarId: userId,
+      seed,
+      domain: DOMAIN,
+    });
+    return session.items.filter((it) => it.skillKey === STORED_SKILL);
+  }
+
+  test("after a review miss on item A, the next review serve is not A", async () => {
+    const t = await freshSeeded();
+    const { userId, asScholar } = await seedScholar(t);
+    const ids = await seedPool(t, 5);
+    await seedDueReview(t, userId);
+
+    // Control: with no history the review leads with the pool's first row.
+    const before = await serveStored(asScholar, userId, 11);
+    expect(before.length).toBeGreaterThan(0);
+    expect(before.every((it) => it.lane === "review")).toBe(true);
+    expect(before[0].itemId).toBe(ids[0]);
+
+    await recordAttempt(t, userId, ids[0], false, LONG_AGO, "review");
+
+    const after = await serveStored(asScholar, userId, 12);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.map((it) => it.itemId)).not.toContain(ids[0]);
+  });
+
+  test("over several reviews the scholar meets more than one item", async () => {
+    const t = await freshSeeded();
+    const { userId, asScholar } = await seedScholar(t);
+    const ids = await seedPool(t, 3);
+    await seedDueReview(t, userId);
+
+    const leads: string[] = [];
+    for (let review = 0; review < 4; review++) {
+      const served = await serveStored(asScholar, userId, 100 + review);
+      const lead = served[0].itemId;
+      // Never the item answered at the previous review.
+      if (leads.length > 0) expect(lead).not.toBe(leads[leads.length - 1]);
+      leads.push(lead);
+      // Each review answered (correctly) well outside the recent-serve window.
+      await recordAttempt(t, userId, lead, true, LONG_AGO + review * 60_000, "review");
+    }
+    // Least-recently-seen first walks the whole pool before repeating.
+    expect(leads.slice(0, 3).sort()).toEqual([...ids].sort());
+    expect(leads[3]).toBe(leads[0]);
+  });
+
+  test("a two-item pool: the item just answered is absent from the whole next run", async () => {
+    const t = await freshSeeded();
+    const { userId, asScholar } = await seedScholar(t);
+    const ids = await seedPool(t, 2);
+    await seedDueReview(t, userId);
+
+    // Last answered is the pool's FIRST row, then (next review) its second.
+    await recordAttempt(t, userId, ids[0], false, LONG_AGO, "review");
+    const afterFirst = await serveStored(asScholar, userId, 21);
+    expect(afterFirst.map((it) => it.itemId)).toEqual([ids[1]]);
+
+    await recordAttempt(t, userId, ids[1], false, LONG_AGO + 60_000, "review");
+    const afterSecond = await serveStored(asScholar, userId, 22);
+    expect(afterSecond.map((it) => it.itemId)).toEqual([ids[0]]);
+  });
+
+  test("a just-missed skill still leads with worked steps: rotation stays inside the stepped rows", async () => {
+    const t = await freshSeeded();
+    const { userId, asScholar } = await seedScholar(t);
+    const steps = [
+      { text: "Count the equal parts: 4.", blankText: "Count the equal parts: ___" },
+      { text: "Each part is one fourth.", blankText: "Each part is one ___" },
+      { text: "So the shape has 4 fourths.", blankText: "So the shape has ___ fourths" },
+    ];
+    // Pool order: A (steps), C (steps), B (bare, never seen).
+    const [a, c, b] = await t.run(async (ctx) => {
+      const ids: string[] = [];
+      for (const [i, withSteps] of [true, true, false].entries()) {
+        const id = await ctx.db.insert("practiceItems", {
+          skillKey: STORED_SKILL,
+          domain: DOMAIN,
+          stem: `Stepped rotation problem ${i}: how many fourths make a whole?`,
+          answerType: "integer",
+          answerCanonical: "4",
+          verifierKind: "arithmetic",
+          ...(withSteps ? { workedSteps: steps } : {}),
+          source: "generated",
+          verifiedAt: Date.now(),
+        });
+        ids.push(`gen#${id}`);
+      }
+      return ids;
+    });
+    await seedDueReview(t, userId);
+    await recordAttempt(t, userId, c, true, LONG_AGO, "review");
+    // The miss that arms teach-before-re-serve: recent, no teaching since.
+    await recordAttempt(t, userId, a, false, Date.now() - 60_000, "review");
+
+    const served = await serveStored(asScholar, userId, 31);
+    expect(served[0].itemId).toBe(c);
+    expect(served[0].workedSteps?.revealed.length ?? 0).toBeGreaterThan(0);
+    expect(served.map((it) => it.itemId)).not.toContain(a);
+    expect(served[0].itemId).not.toBe(b);
+  });
+
+  test("a one-item skill still serves its item after a miss on it", async () => {
+    const t = await freshSeeded();
+    const { userId, asScholar } = await seedScholar(t);
+    const [only] = await seedPool(t, 1);
+    await seedDueReview(t, userId);
+    await recordAttempt(t, userId, only, false, LONG_AGO, "review");
+
+    const served = await serveStored(asScholar, userId, 7);
+    expect(served.map((it) => it.itemId)).toEqual([only]);
+  });
+
+  test("frontier work is unchanged: an old attempt does not reorder a frontier skill's pool", async () => {
+    const t = await freshSeeded();
+    const { userId, asScholar } = await seedScholar(t);
+    const ids = await seedPool(t, 5);
+    // No mastery row: the skill is new frontier work, not a review.
+    await recordAttempt(t, userId, ids[0], false, LONG_AGO);
+
+    const served = await serveStored(asScholar, userId, 11);
+    expect(served.length).toBeGreaterThan(0);
+    expect(served.every((it) => it.lane !== "review")).toBe(true);
+    expect(served[0].itemId).toBe(ids[0]);
+  });
+});

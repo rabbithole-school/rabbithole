@@ -110,7 +110,7 @@ describe("the sweep report is honest about what it did not evaluate", () => {
 
     it("catches a narrated favorable-count corruption outside the terminal equation", () => {
       const audit = auditScaffold(
-        "3 of the 6 faces are even. Write that probability in simplest form.",
+        "A bag holds 6 marbles, and 3 of them are red. You draw one without looking. Write the probability that it is red in simplest form.",
         "1/2",
         [
           {

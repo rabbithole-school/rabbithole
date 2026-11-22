@@ -21,6 +21,7 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
+import { readScholarWebActivity } from "../lib/scholarReads";
 import {
   seedScholarInInstitution,
   seedTestInstitution,
@@ -432,14 +433,18 @@ describe("a direct add over a parked grant login", () => {
     ]);
     expect(await w.autofill()).toMatchObject(savedLogin);
 
-    // Grant gone: enable gives the app back, and with no grant left to need
-    // the login, disable takes the row with it.
+    // Grant gone: enable gives the app back, and disable takes the access
+    // away but parks the login again, because it was parked before this add
+    // and a parked login outlives its grant (TRA-636). The parked row shows
+    // no tile.
     await w.ungrant();
     await aideSetAccess(true);
     expect(await w.tileShown()).toBe(true);
     expect(await aideSetAccess(false)).toMatchObject({ removed: 1 });
     expect(await w.tileShown()).toBe(false);
-    expect(await w.links()).toEqual([]);
+    expect(await w.links()).toMatchObject([
+      { source: "grant", enabled: true, loginUsername: "kai.k" },
+    ]);
   });
 
   // TRA-437: the aide's install-a-URL used its own copy of the "already
@@ -494,5 +499,61 @@ describe("a direct add over a parked grant login", () => {
     expect(await w.panelRow()).toMatchObject({ direct: true, grantGroups: [] });
     expect(await w.autofill()).toMatchObject(savedLogin);
     expect(installed).toMatchObject({ scholars: 1 });
+  });
+});
+
+describe("custom-app tiles opened on the web", () => {
+  async function seedTile(t: TestClient) {
+    const world = await seedGrantedApp(t);
+    await t.run((ctx) =>
+      ctx.db.insert("customApps", {
+        token: "tile-token-moli",
+        name: "Reading App",
+        kind: "static",
+        status: "live",
+        html: "<p>hi</p>",
+        externalAppId: world.appId,
+      }),
+    );
+    return world;
+  }
+
+  test("the tile's token opens the same app session an iPad launch does", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, appId } = await seedTile(t);
+    const asScholar = await withUser(t, scholarId);
+
+    const started = await asScholar.mutation(
+      api.webActivitySessions.startForTile,
+      { customAppToken: "tile-token-moli" },
+    );
+    const row = await t.run((ctx) => ctx.db.get(started!.sessionId));
+    expect(row).toMatchObject({ appId, scholarId });
+
+    // And the aide names it as an app, not as external practice.
+    const read = await t.run((ctx) => readScholarWebActivity(ctx, scholarId));
+    expect(read.sessions[0]).toMatchObject({ kind: "app", site: "Reading App" });
+  });
+
+  test("a tile that isn't on the caller's launcher records nothing", async () => {
+    const t = convexTest(schema, modules);
+    const { institutionId } = await seedTile(t);
+    const outsider = await seedScholarInInstitution(t, {
+      institutionId,
+      name: "Hoku Makani",
+      username: "hoku-grantlaunch",
+    });
+    const asOutsider = await withUser(t, outsider);
+    for (const customAppToken of ["tile-token-moli", "no-such-tile"]) {
+      await expect(
+        asOutsider.mutation(api.webActivitySessions.startForTile, {
+          customAppToken,
+        }),
+      ).resolves.toBeNull();
+    }
+    const rows = await t.run((ctx) =>
+      ctx.db.query("webActivitySessions").collect(),
+    );
+    expect(rows).toHaveLength(0);
   });
 });

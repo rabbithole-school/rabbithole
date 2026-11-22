@@ -34,7 +34,7 @@ import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
  */
 
 export const metadata: Metadata = {
-  title: "Content sources — Rabbithole",
+  title: "Content sources",
   description:
     "Where the learning material in Rabbithole comes from, and the licenses it's used under.",
 };

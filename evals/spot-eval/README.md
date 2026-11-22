@@ -46,6 +46,47 @@ Output:
 5. Computes structural metrics per response.
 6. Renders a markdown report with collapsed OLD / expanded NEW per turn.
 
+## Overriding a section per arm
+
+By default the two arms differ only in the Guidelines block. To A/B a section
+assembled **outside** that block (`buildPreReaderSection`,
+`buildEarlyReaderSection`, or any other level/context section), add an optional
+`arms` object to the scholar script. The CLI is unchanged; a script without
+`arms` runs exactly as before.
+
+```json
+{
+  "scholarName": "Scholar A",
+  "messages": ["<start>", "..."],
+  "arms": {
+    "old": { "sections": [{ "name": "preReader", "file": "evals/spot-eval/out/pre-reader-old.txt" }] },
+    "new": { "sections": [{ "name": "preReader", "builder": "buildPreReaderSection" }] }
+  }
+}
+```
+
+Each entry in `sections` has a `name` and exactly one source:
+
+| Source | Meaning |
+|---|---|
+| `text` | the section text inline |
+| `file` | a file holding the text, relative to the working directory |
+| `builder` (+ optional `args`) | an exported string-returning function of the working tree's `convex/prompts.ts`, e.g. `{"builder": "buildEarlyReaderSection", "args": ["1"]}` |
+
+- A section named `guidelines` replaces that arm's git-derived Guidelines block.
+- Any other name is appended after the base prompt, in the order listed, one
+  blank line apart. Production places the level sections after the base prompt
+  too.
+- `builder` always runs the **working tree's** code. For the OLD side of a
+  section you just reworded, copy the previous section text out of
+  `git show HEAD~1:convex/prompts.ts` into a file and point `file` at it.
+- If both arms resolve to the same prompt, the runner exits before calling the
+  model.
+- The report header lists what each arm was built from.
+
+The resolution logic lives in `sections.ts` and is unit-tested in
+`sections.test.ts` (no API key needed).
+
 ## Reconstructing a production failure safely
 
 When a production conversation reveals a failure mode, inspect it only in the

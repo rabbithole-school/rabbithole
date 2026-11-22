@@ -3,6 +3,7 @@ import {
   PRACTICE_SCOPE_BLOCKED_DETAIL,
   PRACTICE_SCOPE_BLOCKED_HEADLINE,
   practiceScopeSentence,
+  previewPlanDomain,
   scopeAllowsChoice,
   scopeAllowsDomain,
   scopeAllowsStrand,
@@ -64,5 +65,25 @@ describe("the scope-blocked boundary copy", () => {
       const capitalized = line.match(/(?<!^)(?<![.!?] )\b[A-Z][a-z]+/g) ?? [];
       expect(capitalized.filter((word) => word !== "Math")).toEqual([]);
     }
+  });
+});
+
+describe("previewPlanDomain", () => {
+  const plan = ["algebra-1", "discrete-math", "early-algebra", "fraction-arithmetic"];
+
+  it("skips unstarted domains that sort first", () => {
+    expect(previewPlanDomain(plan, ["fraction-arithmetic", "early-algebra"])).toBe("early-algebra");
+  });
+
+  it("falls back to the first plan domain when none is started", () => {
+    expect(previewPlanDomain(plan, [])).toBe("algebra-1");
+  });
+
+  it("ignores started domains outside the plan", () => {
+    expect(previewPlanDomain(["probability"], ["whole-number-arithmetic"])).toBe("probability");
+  });
+
+  it("returns undefined for an empty plan", () => {
+    expect(previewPlanDomain([], ["probability"])).toBeUndefined();
   });
 });

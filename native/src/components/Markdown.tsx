@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import {
+  Alert,
   Linking,
   ScrollView,
   StyleSheet,
@@ -18,16 +19,33 @@ import {
   type SpanStyle,
 } from "@/lib/markdownParse";
 import { splitMathSegments, hasInlineMath, latexToSpeech } from "../../vendor/shared/mathLatex";
-import { openYouTubeVideo } from "@/lib/externalAppHost";
+import { openLink, openYouTubeVideo } from "@/lib/externalAppHost";
+import { httpsForm, isYouTubeSiteUrl, linkViewerTitle } from "@/lib/linkViewer";
 import { MathView } from "../../modules/expo-math-view";
 
-// A tapped link that resolves to a YouTube video opens the same sandboxed,
-// locked-down player that activity video resources use (the school iPads have no
-// browser, so a bare Linking.openURL does nothing). Every other link keeps its
-// existing outbound behaviour. Also the tap path for links in Messages bubbles
-// (components/messages/ThreadView.tsx).
+// The school iPads have no browser, so a bare Linking.openURL does nothing
+// there. A tapped link that resolves to a YouTube video opens the same
+// sandboxed, locked-down player that activity video resources use; any other
+// http(s) link opens in the embedded link viewer (lib/linkViewer.ts, TRA-643).
+// Other schemes (mailto:, tel:) keep the system hand-off. Also the tap path for
+// links in Messages bubbles (components/messages/ThreadView.tsx).
 export function openMarkdownLink(href: string, title: string) {
   if (openYouTubeVideo({ url: href, title })) return;
+  if (/^https?:\/\//i.test(href.trim())) {
+    // A YouTube link that isn't one video (a channel, search, a playlist)
+    // would be open YouTube in the viewer, past the locked player.
+    if (isYouTubeSiteUrl(href)) {
+      Alert.alert(
+        "This YouTube link can't open here",
+        "Only a link to one video plays on a BunnyPad. Ask for the video's own link.",
+      );
+      return;
+    }
+    // The viewer only embeds HTTPS (webEmbedUrlError), and nearly every site
+    // serves it, so a pasted http:// link is upgraded instead of refused.
+    openLink({ url: httpsForm(href), title: linkViewerTitle(href, title) });
+    return;
+  }
   Linking.openURL(href).catch(() => {});
 }
 

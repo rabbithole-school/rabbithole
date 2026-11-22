@@ -8,6 +8,7 @@ type CustomAppBase = {
   origin: "starter" | null;
   thumbnailUrl: string | null;
   appAssets: Array<{ id: string; url: string }>;
+  credit: string | null;
 };
 
 export type ResolvedCustomApp =

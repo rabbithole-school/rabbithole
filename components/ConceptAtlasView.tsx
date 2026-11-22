@@ -27,7 +27,6 @@ import { createAtlasEngine } from "@/lib/atlasEngine";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { MASTERY_STAR_COLOR } from "@/shared/skyTiers";
 import { tapOpensSomething } from "@/components/conceptAtlasTapHint";
-import type { ExploreSeedOptions } from "@/lib/bakePaths";
 
 type Mode = "atlas" | "scholar" | "galaxy";
 
@@ -41,7 +40,7 @@ type SeedMetaWire = {
   strand: string | null;
 };
 
-export function ConceptAtlasView({ lockedScholarId, canCurate = true, height = "560px", fill = false, lockMode, initialMode, onExploreSeed, exploringSeedId, allowFullscreen = false, groupId, selfChartable = false }: { lockedScholarId?: Id<"users">; canCurate?: boolean; height?: string; fill?: boolean; lockMode?: Mode; initialMode?: Mode; onExploreSeed?: (seedId: Id<"seeds">, opts?: ExploreSeedOptions) => void; exploringSeedId?: string | null; allowFullscreen?: boolean; groupId?: string; selfChartable?: boolean } = {}) {
+export function ConceptAtlasView({ lockedScholarId, canCurate = true, height = "560px", fill = false, lockMode, initialMode, onExploreSeed, exploringSeedId, allowFullscreen = false, groupId, selfChartable = false }: { lockedScholarId?: Id<"users">; canCurate?: boolean; height?: string; fill?: boolean; lockMode?: Mode; initialMode?: Mode; onExploreSeed?: (seedId: Id<"seeds">) => void; exploringSeedId?: string | null; allowFullscreen?: boolean; groupId?: string; selfChartable?: boolean } = {}) {
   const locked = !!lockedScholarId;
   const [mode, setMode] = useState<Mode>(lockMode ?? initialMode ?? (locked ? "scholar" : "atlas"));
   const [pickedScholarId, setScholarId] = useState<Id<"users"> | null>(null);
@@ -234,10 +233,7 @@ export function ConceptAtlasView({ lockedScholarId, canCurate = true, height = "
       onClick: () => {
         setSeedSheetId(null);
         setFullscreen(false);
-        onExploreSeed?.(
-          seedSel.seedId as Id<"seeds">,
-          seedSel.structured ? { skipMenu: true } : undefined,
-        );
+        onExploreSeed?.(seedSel.seedId as Id<"seeds">);
       },
       primary: true,
       loading: exploringSeedId === seedSel.seedId,

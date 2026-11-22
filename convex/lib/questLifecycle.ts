@@ -22,7 +22,12 @@
 //     scholarPlate's completion-skip when deciding whether a session is "live".
 //   - isQuestUnitForScholar(ctx, scholarId, unitId): the cheap classification
 //     used when copy must distinguish a Quest from assigned classwork.
+//   - isRetractedQuestSession / assertNotRetractedQuestSession: the one test
+//     every scholar-side reader of a retracted quest's sessions shares.
 
+import { ConvexError } from "convex/values";
+import { TEACHER_ARCHIVE_COPY } from "../../shared/teacherArchive";
+import { isTileSession } from "./tileSessions";
 import type { QueryCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
@@ -31,6 +36,7 @@ import {
   reopenLiveChecker,
 } from "./scholarReads";
 import { isStructurallyDraft } from "./unitMaturity";
+import { isUnansweredOrDeclinedProposal } from "./questApproval";
 import { granuleTexts } from "./granules";
 
 type UnitSession = Doc<"sessions"> & { unitId: Id<"units"> };
@@ -42,6 +48,9 @@ function isPlateEligibleSession(
     !session.isArchived &&
     !session.isTestDrive &&
     !session.isOffline &&
+    // A tile session is never a Quest, even if a unit got attached to it
+    // later (lib/tileSessions.ts).
+    !isTileSession(session) &&
     session.unitId != null
   );
 }
@@ -160,6 +169,58 @@ export function deriveQuestState(facts: QuestFacts): DerivedQuestState {
 }
 
 /**
+ * Does this session belong to a RETRACTED quest? Independent (unassigned) work
+ * on a scholar-authored unit that is no longer active: what `quests.retract`
+ * leaves behind (it refuses any other unit), and what Home already drops
+ * (scholarPlate's quest lane keeps only quests whose unit is active).
+ *
+ * Every other scholar-side reader of the session must agree with Home: the
+ * Archived list shows it as put away by the teacher
+ * (sessions.finishedForScholar), and Keep working / Unarchive refuse it
+ * (assertNotRetractedQuestSession). A teacher brings it back with
+ * `quests.reopen`, which reactivates the unit and unarchives its sessions.
+ *
+ * Scholar-authored only, on purpose. Archiving a catalog unit retires it from
+ * the curriculum; it doesn't take back the work scholars did on it, and
+ * `quests.reopen` can't bring a catalog unit back for one scholar anyway.
+ * Assigned work never qualifies either: an assignment row doesn't read
+ * `units.isActive`.
+ */
+export function isRetractedQuestSession(
+  session: Pick<Doc<"sessions">, "assignmentId" | "unitId">,
+  unit: Pick<Doc<"units">, "isActive" | "authorScholarId"> | null,
+): boolean {
+  return (
+    session.assignmentId == null &&
+    session.unitId != null &&
+    unit != null &&
+    unit.authorScholarId != null &&
+    !unit.isActive
+  );
+}
+
+/**
+ * Refuse re-entering a retracted quest's session. Retracting puts the whole
+ * quest away, so bringing its work back is the teacher's `quests.reopen`, as an
+ * app a teacher archived is theirs to restore. Before this guard, Keep working
+ * in Archived un-archived the session while its unit stayed retracted, and
+ * because Home drops retracted quests the work then showed up on neither list
+ * (a scholar's Workshop report, 2026-11-11).
+ */
+export async function assertNotRetractedQuestSession(
+  ctx: Pick<QueryCtx, "db">,
+  session: Pick<Doc<"sessions">, "assignmentId" | "unitId">,
+): Promise<void> {
+  if (session.assignmentId != null || session.unitId == null) return;
+  const unit = await ctx.db.get(session.unitId);
+  if (isRetractedQuestSession(session, unit)) {
+    // The data is the sentence itself: serverErrorMessage / serverRefusal on
+    // web and the iPad show a ConvexError's data only when it is a string.
+    throw new ConvexError(TEACHER_ARCHIVE_COPY.scholarExplain);
+  }
+}
+
+/**
  * A back-compat lane for the /teacher/quests board, kept byte-for-byte
  * identical to units.listScholarAuthored's lane derivation:
  *   badged (a badge exists) → inProgress (any raw session) → offered (else).
@@ -237,11 +298,20 @@ export async function questsForScholar(
   now: number = Date.now(),
 ): Promise<ScholarQuest[]> {
   const isReopenLive = reopenLiveChecker(ctx, scholarId, now);
-  const authoredUnits = await ctx.db
+  // A proposal waiting for a teacher's yes, or one a teacher said no to, is
+  // not a Quest yet: it has no activity, and an old BunnyPad build would list
+  // it as a startable Quest that opens onto nothing (TRA-685,
+  // lib/questApproval.ts). It stays out of every list built here.
+  // (The id set keeps them, so a session pointing at one can never re-enter
+  // below as a catalog free-start.)
+  const allAuthoredUnits = await ctx.db
     .query("units")
     .withIndex("by_authorScholar", (q) => q.eq("authorScholarId", scholarId))
     .collect();
-  const authoredUnitIds = new Set(authoredUnits.map((u) => String(u._id)));
+  const authoredUnitIds = new Set(allAuthoredUnits.map((u) => String(u._id)));
+  const authoredUnits = allAuthoredUnits.filter(
+    (u) => !isUnansweredOrDeclinedProposal(u),
+  );
 
   // Preload the scholar's plate-eligible sessions once, grouped by unit — the
   // same filter listScholarAuthored uses (raw presence, no completion-skip).
@@ -273,7 +343,8 @@ export async function questsForScholar(
   const catalogUnits: Doc<"units">[] = [];
   for (const k of catalogUnitIds) {
     const u = await ctx.db.get(k as Id<"units">);
-    if (u) catalogUnits.push(u);
+    // Someone else's waiting or declined proposal is no Quest either.
+    if (u && !isUnansweredOrDeclinedProposal(u)) catalogUnits.push(u);
   }
 
   const units = [...authoredUnits, ...catalogUnits];
@@ -392,8 +463,13 @@ export async function questsForScholar(
         state,
         // A CATALOG free-start is self-chosen, so it's always scholar-sourced.
         // For authored units, matches listScholarAuthored: an offer (past or
-        // present) marks it teacher-sourced; otherwise the scholar authored it.
-        source: isCatalog ? "scholar" : hasNonTerminalSeedOffer ? "teacher" : "scholar",
+        // present) marks it teacher-sourced, and so does a started teacher offer
+        // (questApproval.offeredBy, TRA-696); otherwise the scholar authored it.
+        source: isCatalog
+          ? "scholar"
+          : hasNonTerminalSeedOffer || unit.questApproval?.offeredBy
+            ? "teacher"
+            : "scholar",
         lane: deriveLane(badgeEarned, hasRawSession),
         unitIsActive: unit.isActive,
         unitIsDraft,

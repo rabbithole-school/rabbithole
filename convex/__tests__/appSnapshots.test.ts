@@ -15,6 +15,7 @@ import {
 import type { ImageContentPart } from "../lib/imageBytes";
 import { deleteSessionCascade } from "../lib/cascade";
 import { MODELS } from "../lib/models";
+import { APP_STATE_DEFAULTS_KEY } from "../../shared/appStateDefaults";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -485,6 +486,43 @@ describe("app snapshot model content", () => {
       text: expect.stringContaining("(no console output)"),
     });
   });
+
+  test("strips recorded defaults before truncating render-check state for the tutor", () => {
+    const result = buildRenderCheckToolResult(
+      "Successfully replaced text.",
+      {
+        stateJson: JSON.stringify({
+          [APP_STATE_DEFAULTS_KEY]: { text: "x".repeat(2_100) },
+          score: 12,
+        }),
+      },
+      null,
+    );
+
+    expect(result[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining('State JSON:\n{"score":12}\n'),
+    });
+    expect(result[0]).toMatchObject({
+      text: expect.not.stringContaining(APP_STATE_DEFAULTS_KEY),
+    });
+  });
+
+  test.each(["{invalid", "null", "[1, 2]", '"text"', "5", "false"])(
+    "preserves non-object or unparseable render-check state: %s",
+    (stateJson) => {
+      const result = buildRenderCheckToolResult(
+        "Successfully replaced text.",
+        { stateJson },
+        null,
+      );
+
+      expect(result[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining(`State JSON:\n${stateJson}\n`),
+      });
+    },
+  );
 });
 
 describe("render check answers", () => {
@@ -501,7 +539,7 @@ describe("render check answers", () => {
     });
   }
 
-  test("stores an answer on the matching assistant stream row", async () => {
+  test("stores an answer without recorded defaults on the matching assistant stream row", async () => {
     const t = convexTest(schema, modules);
     const turn = await seedTurn(t);
     await requestCheck(t, turn);
@@ -515,7 +553,10 @@ describe("render check answers", () => {
         checkId: "check-current",
         snapshotStorageId: storageId,
         consoleLines: ["error: boom", "log: ready"],
-        stateJson: '{"screen":"shop"}',
+        stateJson: JSON.stringify({
+          screen: "shop",
+          [APP_STATE_DEFAULTS_KEY]: { screen: "start" },
+        }),
       }),
     ).resolves.toMatchObject({ messageId: turn.assistantMsgId });
 

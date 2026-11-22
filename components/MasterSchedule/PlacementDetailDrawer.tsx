@@ -3,9 +3,9 @@
 /**
  * PlacementDetailDrawer — the click-through detail drawer for a scheduled
  * class (review/schedule-activity-detail-drawer-plan.html). Drag moves,
- * click reveals: the grid/shelf/Now chips open this drawer; movement never
- * enters it (no bump, no shelf controls — cells and the shelf are drop
- * targets). Placement-first content order:
+ * click reveals: the grid and Now chips open this drawer; movement never
+ * enters it (no bump controls — cells are the drop targets). Placement-first
+ * content order:
  *
  *   1. Header — the canonical PlacementChipExpanded + one quiet context line.
  *   2. Links out — Open in Curriculum / Open Run page.
@@ -13,8 +13,7 @@
  *      mutations through masterSchedule.updatePlacement.
  *   4. Activity body — the shared ActivityReadBody (snippet mode; the
  *      Curriculum link is the click-through to full text).
- *   5. Out-of-order flag actions (only when flagged) + Remove (destructive,
- *      live-state-aware) in the footer.
+ *   5. Remove (destructive, live-state-aware) in the footer.
  *
  * Shell mirrors AssignWorkDrawer: Chakra Drawer.Root placement="end"
  * size="sm" in a Portal, Drawer.Root stably mounted (never keyed while
@@ -42,9 +41,7 @@ import {
 import {
   AppWindow,
   ArrowSquareOut,
-  CaretDown,
   ChatCircle,
-  Check,
   Trash,
   X,
 } from "@phosphor-icons/react";
@@ -53,7 +50,6 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
 import { curriculumUnitHref } from "@/lib/curriculumHref";
-import { Avatar } from "@/components/Avatar";
 import { ActivityReadBody } from "@/components/ActivityReadBody";
 import { ResourcesEditor } from "@/components/nodeEditor/ResourcesSection";
 import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
@@ -63,14 +59,11 @@ import {
   type PlacementChipData,
 } from "@/components/MasterSchedule/PlacementChip";
 import { fmtTimeRange } from "@/components/MasterSchedule/timeFormat";
-import { DidThisHappenSection } from "@/components/MasterSchedule/DidThisHappenSection";
 
 type GridData = NonNullable<ReturnType<typeof useQuery<typeof api.masterSchedule.grid>>>;
 type Placement = GridData["placements"][number];
 
-export type DrawerTarget =
-  | { kind: "placement"; placementId: string }
-  | { kind: "cell"; placementIds: string[]; activePlacementId?: string };
+export type DrawerTarget = { kind: "placement"; placementId: string };
 type DrawerVariant = "teacher" | "program";
 
 const WEEKDAY_FULL = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
@@ -83,7 +76,7 @@ function andJoin(items: string[]): string {
 }
 
 function targetKey(t: DrawerTarget): string {
-  return t.kind === "placement" ? `p:${t.placementId}` : `c:${t.placementIds.join(",")}`;
+  return `p:${t.placementId}`;
 }
 
 /** One quiet line locating the placement: group · weekday · block · teacher. */
@@ -92,7 +85,7 @@ function contextLine(p: Placement, grid: GridData): string {
   const group = grid.groups.find((g) => String(g._id) === String(p.groupId));
   if (group) parts.push(`${group.emoji ? `${group.emoji} ` : ""}${group.name}`);
   if (p.onShelf) {
-    parts.push("Shelf");
+    parts.push("No day yet");
   } else {
     if (p.weekday != null && WEEKDAY_FULL[p.weekday]) parts.push(WEEKDAY_FULL[p.weekday]);
     const block = grid.blocks.find((b) => String(b._id) === String(p.blockId));
@@ -108,9 +101,6 @@ export function PlacementDetailDrawer({
   onClose,
   lens = "group",
   variant = "teacher",
-  editBlocks = false,
-  outOfOrderByPlacement,
-  onAcceptReorder,
   onAskBot,
   onRemove,
 }: {
@@ -122,12 +112,6 @@ export function PlacementDetailDrawer({
   /** Program staff may inspect every linked activity and edit only Handouts
    * owned by their exact program assignment. */
   variant?: DrawerVariant;
-  /** Whether "Edit blocks" is on. Slot-structural edits (rename/reassign/move/
-   *  delete the class slot) are gated behind it; in normal mode the drawer only
-   *  manages the ACTIVITY that fills the slot. */
-  editBlocks?: boolean;
-  outOfOrderByPlacement?: Map<string, { sequenceId: string; flagId: string }>;
-  onAcceptReorder?: (sequenceId: string) => void;
   onAskBot?: (text: string) => void;
   onRemove?: (placementId: string) => void;
 }) {
@@ -158,10 +142,7 @@ export function PlacementDetailDrawer({
                 grid={grid}
                 lens={lens}
                 variant={variant}
-                editBlocks={editBlocks}
                 onClose={onClose}
-                outOfOrderByPlacement={outOfOrderByPlacement}
-                onAcceptReorder={onAcceptReorder}
                 onAskBot={onAskBot}
                 onRemove={onRemove}
               />
@@ -178,10 +159,7 @@ function DrawerBody({
   grid,
   lens,
   variant,
-  editBlocks,
   onClose,
-  outOfOrderByPlacement,
-  onAcceptReorder,
   onAskBot,
   onRemove,
 }: {
@@ -189,20 +167,12 @@ function DrawerBody({
   grid: GridData;
   lens: Lens;
   variant: DrawerVariant;
-  editBlocks: boolean;
   onClose: () => void;
-  outOfOrderByPlacement?: Map<string, { sequenceId: string; flagId: string }>;
-  onAcceptReorder?: (sequenceId: string) => void;
   onAskBot?: (text: string) => void;
   onRemove?: (placementId: string) => void;
 }) {
-  // Cell scope: which row is drilled into (undefined = the block list).
-  const [activeId, setActiveId] = useState<string | undefined>(
-    target.kind === "cell" ? target.activePlacementId : undefined,
-  );
   // Set when WE requested the removal — the placement vanishing then closes
-  // the drawer (placement scope) or falls back to the list (cell scope),
-  // instead of showing the "no longer exists" state meant for external edits.
+  // the drawer instead of showing the "no longer exists" state meant for external edits.
   const removeRequestedRef = useRef(false);
 
   const placementsById = useMemo(() => {
@@ -211,96 +181,27 @@ function DrawerBody({
     return m;
   }, [grid.placements]);
 
-  // Resolve from the LIVE grid every render — never a snapshot. A vanished
-  // active row in a cell target simply resolves to undefined, so the render
-  // below falls back to the block list (no state write needed).
-  const cellPlacements =
-    target.kind === "cell"
-      ? target.placementIds
-          .map((id) => placementsById.get(id))
-          .filter((p): p is Placement => Boolean(p))
-      : null;
-  const placement =
-    target.kind === "placement"
-      ? placementsById.get(target.placementId)
-      : activeId
-        ? placementsById.get(activeId)
-        : undefined;
+  // Resolve from the LIVE grid every render — never a snapshot.
+  const placement = placementsById.get(target.placementId);
 
-  // Our own remove landed (placement scope): close the drawer rather than
+  // Our own remove landed: close the drawer rather than
   // showing the "no longer exists" state meant for external edits.
   useEffect(() => {
-    if (removeRequestedRef.current && target.kind === "placement" && !placement) {
+    if (removeRequestedRef.current && !placement) {
       onClose();
     }
-  }, [onClose, placement, target.kind]);
+  }, [onClose, placement]);
 
-  const groupEmoji = (p: Placement) =>
-    grid.groups.find((g) => String(g._id) === String(p.groupId))?.emoji ?? null;
-
-  // ── Cell scope: the block's classes, each a tap-through to its detail ──────
-  if (target.kind === "cell" && !placement) {
-    if (!cellPlacements || cellPlacements.length === 0) {
-      return <VanishedState onClose={onClose} />;
-    }
-    const first = cellPlacements[0];
-    return (
-      <>
-        <DrawerHeader
-          title={`Block · ${cellPlacements.map((p) => p.subject).join(", ")}`}
-          subtitle={contextLine(first, grid)}
-          onClose={onClose}
-        />
-        <VStack align="stretch" gap={2} px={5} py={5} flex={1} overflowY="auto">
-          <Text fontSize="xs" color="charcoal.400">
-            Classes in this block — pick one for details.
-          </Text>
-          {cellPlacements.map((p) => (
-            <chakra.button
-              key={String(p._id)}
-              type="button"
-              cursor="pointer"
-              textAlign="left"
-              w="full"
-              p={0}
-              border={0}
-              bg="transparent"
-              borderRadius="md"
-              aria-label={`Details for ${p.subject}`}
-              _focusVisible={{ outline: "2px solid", outlineColor: "violet.400", outlineOffset: "2px" }}
-              onClick={() => setActiveId(String(p._id))}
-            >
-              <PlacementChipExpanded p={p as PlacementChipData} lens={lens} groupEmoji={groupEmoji(p)} />
-            </chakra.button>
-          ))}
-        </VStack>
-      </>
-    );
-  }
-
-  // ── Placement scope ────────────────────────────────────────────────────────
   if (!placement) {
     return <VanishedState onClose={onClose} />;
   }
-  const flag = outOfOrderByPlacement?.get(String(placement._id));
   return (
     <PlacementDetail
-      // Keyed so cell-scope row switches reseed the subject/note field state
-      // (the drawer's outer body is keyed per TARGET, not per row).
-      key={String(placement._id)}
       placement={placement}
       grid={grid}
       lens={lens}
       variant={variant}
-      editBlocks={editBlocks}
       onClose={onClose}
-      onBack={
-        target.kind === "cell" && (cellPlacements?.length ?? 0) > 1
-          ? () => setActiveId(undefined)
-          : undefined
-      }
-      flag={flag}
-      onAcceptReorder={onAcceptReorder}
       onAskBot={onAskBot}
       onRemove={
         onRemove
@@ -379,11 +280,7 @@ function PlacementDetail({
   grid,
   lens,
   variant,
-  editBlocks,
   onClose,
-  onBack,
-  flag,
-  onAcceptReorder,
   onAskBot,
   onRemove,
 }: {
@@ -391,11 +288,7 @@ function PlacementDetail({
   grid: GridData;
   lens: Lens;
   variant: DrawerVariant;
-  editBlocks: boolean;
   onClose: () => void;
-  onBack?: () => void;
-  flag?: { sequenceId: string; flagId: string };
-  onAcceptReorder?: (sequenceId: string) => void;
   onAskBot?: (text: string) => void;
   onRemove?: (placementId: string) => void;
 }) {
@@ -415,14 +308,11 @@ function PlacementDetail({
     variant === "teacher" && !p.activityId && !p.externalAppId ? {} : "skip",
   );
 
-  const [subject, setSubject] = useState(p.subject);
-  const [note, setNote] = useState(p.note ?? "");
   const [handoutTitle, setHandoutTitle] = useState(
     p.activityTitle ?? p.subject,
   );
   const [savingHandoutTitle, setSavingHandoutTitle] = useState(false);
   const cancelHandoutTitleRef = useRef(false);
-  const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [confirmingClear, setConfirmingClear] = useState(false);
 
   const groupEmoji =
@@ -479,43 +369,10 @@ function PlacementDetail({
     return { others, teacherFirstName, weekdayLabel, askText };
   }, [grid.conflicts, grid.placements, grid.groups, grid.blocks, p._id, p.groupId, p.teacherName, p.weekday, p.blockId, p.subject]);
 
-  async function commitSubject() {
-    const s = subject.trim();
-    if (!s || s === p.subject) {
-      setSubject(p.subject); // empty or unchanged → revert, never clear
-      return;
-    }
-    try {
-      await updatePlacement({ placementId, subject: s });
-    } catch (err) {
-      setSubject(p.subject);
-      toaster.create({ title: "Couldn't rename", description: String(err), type: "error" });
-    }
-  }
-
-  async function commitNote() {
-    const n = note.trim();
-    if (n === (p.note ?? "")) return;
-    try {
-      await updatePlacement({ placementId, note: n || null });
-    } catch (err) {
-      setNote(p.note ?? "");
-      toaster.create({ title: "Couldn't save note", description: String(err), type: "error" });
-    }
-  }
-
-  async function commitTeacher(teacherId: Id<"users"> | null) {
-    try {
-      await updatePlacement({ placementId, teacherId });
-    } catch (err) {
-      toaster.create({ title: "Couldn't reassign", description: String(err), type: "error" });
-    }
-  }
-
-  // Normal-mode destructive action: strip the activity from the slot but KEEP
-  // the class slot (unset activity/assignment link → it reverts to an awaiting
-  // slot; the backend unmaterializes any planned entry). Deleting the slot
-  // itself is Edit-blocks-only (onRemove).
+  // Strip the activity from the slot but KEEP the class slot (unset
+  // activity/assignment link → it reverts to an awaiting slot; the backend
+  // unmaterializes any planned entry). The slot itself is edited on
+  // School › Classes & times.
   async function clearActivity() {
     try {
       await updatePlacement({ placementId, activityId: null, assignmentId: null });
@@ -578,7 +435,6 @@ function PlacementDetail({
   }
 
   // The exact copy the retired context menu used for a flagged chip.
-  const outOfOrderAskText = `"${p.subject}" is now out of its unit's order. Did I mean to reorder it, or should the rest of the unit follow? Help me sort out the sequence.`;
 
   const curriculumHref =
     p.unitId && p.activityId
@@ -606,22 +462,7 @@ function PlacementDetail({
         borderColor="gray.100"
       >
         <Flex align="start" justify="space-between" gap={3}>
-          {onBack ? (
-            <chakra.button
-              type="button"
-              cursor="pointer"
-              onClick={onBack}
-              color="charcoal.400"
-              fontSize="xs"
-              fontWeight="700"
-              _hover={{ color: "charcoal.600" }}
-              aria-label="Back to the block's classes"
-            >
-              ← All classes in this block
-            </chakra.button>
-          ) : (
-            <Box />
-          )}
+          <Box />
           <chakra.button
             type="button"
             cursor="pointer"
@@ -662,88 +503,6 @@ function PlacementDetail({
               </Link>
             )}
           </HStack>
-        )}
-
-        {/* 3 · Placement edits — field-level immediate mutations. These change
-            the class SLOT itself (its subject label, teacher, note), so they're
-            gated behind Edit blocks; in normal mode the drawer only manages the
-            activity that fills the slot. */}
-        {variant === "teacher" && editBlocks && (
-          <>
-            <Field label="Subject">
-              <Input
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                onBlur={() => void commitSubject()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    (e.target as HTMLInputElement).blur();
-                  }
-                }}
-                size="sm"
-              />
-            </Field>
-
-            <Field label="Teacher">
-              <Menu.Root positioning={{ placement: "bottom-start" }}>
-                <Menu.Trigger asChild>
-                  <Button size="sm" variant="outline" fontWeight="600" fontSize="sm" gap={1.5} justifyContent="space-between" w="full">
-                    <HStack gap={2} minW={0}>
-                      {p.teacherName ? (
-                        <Avatar name={p.teacherName} colorKey={String(p.teacherId)} size="2xs" />
-                      ) : (
-                        <Box w={4.5} h={4.5} borderRadius="full" border="1px dashed" borderColor="gray.300" flexShrink={0} />
-                      )}
-                      <Text lineClamp={1}>{p.teacherName ?? "Unassigned"}</Text>
-                    </HStack>
-                    <CaretDown size={12} />
-                  </Button>
-                </Menu.Trigger>
-                <Portal>
-                  <Menu.Positioner>
-                    <Menu.Content minW="220px" maxH="50vh" overflowY="auto">
-                      <Menu.Item value="" cursor="pointer" onClick={() => void commitTeacher(null)}>
-                        <HStack w="full" gap={2}>
-                          <Box w={4.5} h={4.5} borderRadius="full" border="1px dashed" borderColor="gray.300" flexShrink={0} />
-                          <Text flex={1} lineClamp={1}>Unassigned</Text>
-                          {!p.teacherId && <Check size={13} />}
-                        </HStack>
-                      </Menu.Item>
-                      {grid.teachers.map((t) => {
-                        const id = String(t._id);
-                        return (
-                          <Menu.Item key={id} value={id} cursor="pointer" onClick={() => void commitTeacher(t._id)}>
-                            <HStack w="full" gap={2}>
-                              <Avatar name={t.name} colorKey={id} size="2xs" />
-                              <Text flex={1} lineClamp={1}>{t.name}</Text>
-                              {String(p.teacherId ?? "") === id && <Check size={13} />}
-                            </HStack>
-                          </Menu.Item>
-                        );
-                      })}
-                    </Menu.Content>
-                  </Menu.Positioner>
-                </Portal>
-              </Menu.Root>
-            </Field>
-
-            <Field label="Note">
-              <Input
-                value={note}
-                placeholder="e.g. bring rulers"
-                onChange={(e) => setNote(e.target.value)}
-                onBlur={() => void commitNote()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    (e.target as HTMLInputElement).blur();
-                  }
-                }}
-                size="sm"
-              />
-            </Field>
-          </>
         )}
 
         {/* 4 · Activity body — the shared read-only detail, snippet mode. */}
@@ -866,16 +625,9 @@ function PlacementDetail({
           </Box>
         )}
 
-        {/* 4b · "Did this activity happen?" — only for a PAST meeting of a unit
-            sequence (§7). Two honest answers on different layers: Yes writes the
-            learning record; No re-flows the projection. */}
-        {variant === "teacher" && (
-          <DidThisHappenSection placement={p} grid={grid} onDone={onClose} />
-        )}
-
         {/* 4c · Double-booked teacher — the only surfaced explanation for the
-            grid's red conflict badge (its sibling flags already do this: overload
-            → OverloadTag, out-of-order → the section below). A real staffing
+            grid's red conflict badge (its sibling overload flag already does this:
+            → OverloadTag). A real staffing
             problem, so it's a red warn callout with one action and no dismiss. */}
         {variant === "teacher" && conflict && (
           <Box borderWidth="1px" borderColor="red.200" bg="red.50" borderRadius="md" p={3}>
@@ -908,39 +660,12 @@ function PlacementDetail({
           </Box>
         )}
 
-        {/* 5 · Out-of-order flag actions — only when this placement is flagged. */}
-        {variant === "teacher" && flag && (onAcceptReorder || onAskBot) && (
-          <Box>
-            <SectionEyebrow>Out of order</SectionEyebrow>
-            <Text fontSize="xs" color="charcoal.400" mt={1.5} mb={2}>
-              This activity is out of its unit&apos;s planned order.
-            </Text>
-            <VStack align="stretch" gap={2}>
-              {onAcceptReorder && (
-                <Button size="sm" variant="outline" onClick={() => onAcceptReorder(flag.sequenceId)}>
-                  <HStack gap={1.5}>
-                    <Check size={15} /> Accept new order
-                  </HStack>
-                </Button>
-              )}
-              {onAskBot && (
-                <Button size="sm" variant="ghost" color="charcoal.500" onClick={() => onAskBot(outOfOrderAskText)}>
-                  <HStack gap={1.5}>
-                    <ChatCircle size={15} /> Ask the bot to sort it out
-                  </HStack>
-                </Button>
-              )}
-            </VStack>
-          </Box>
-        )}
       </VStack>
 
-      {/* 6 · Footer — the destructive action, framed by mode (inline confirm,
-          never a Dialog stacked over the drawer):
-          • Normal mode + a filled slot → "Remove activity" strips the activity
-            but KEEPS the class slot (revert to an awaiting slot). A slot is only
-            deletable in Edit blocks.
-          • Edit blocks → "Remove class slot" deletes the slot itself. */}
+      {/* 6 · Footer — the destructive action (inline confirm, never a Dialog
+          stacked over the drawer). A filled slot's "Remove activity" strips the
+          activity but KEEPS the class slot. The class slot itself is edited on
+          School › Classes & times. */}
       {variant === "program" && programHandout && onRemove ? (
         <VStack align="stretch" gap={2} px={5} py={4} borderTop="1px solid" borderColor="gray.100">
           {confirmingClear ? (
@@ -975,56 +700,7 @@ function PlacementDetail({
             </Button>
           )}
         </VStack>
-      ) : variant === "teacher" && (editBlocks
-        ? onRemove && (
-            <VStack align="stretch" gap={2} px={5} py={4} borderTop="1px solid" borderColor="gray.100">
-              {confirmingRemove ? (
-                <>
-                  <Text fontSize="xs" color="charcoal.500">
-                    {p.linkState === "live" ? (
-                      <>
-                        Scholars&apos; live work on this activity keeps running after
-                        the slot leaves the schedule.{" "}
-                        {runHref && (
-                          <Link href={runHref}>
-                            <chakra.span color="violet.600" fontWeight="600" _hover={{ textDecoration: "underline" }}>
-                              Open the Run page
-                            </chakra.span>
-                          </Link>
-                        )}{" "}
-                        to wrap it up.
-                      </>
-                    ) : (
-                      "Remove this class slot from the schedule?"
-                    )}
-                  </Text>
-                  <HStack gap={2}>
-                    <Button size="sm" colorPalette="red" onClick={() => onRemove(String(p._id))}>
-                      <HStack gap={1.5}>
-                        <Trash size={13} /> Remove slot
-                      </HStack>
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setConfirmingRemove(false)}>
-                      Cancel
-                    </Button>
-                  </HStack>
-                </>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  color="red.600"
-                  justifyContent="flex-start"
-                  onClick={() => setConfirmingRemove(true)}
-                >
-                  <HStack gap={1.5}>
-                    <Trash size={13} /> Remove class slot…
-                  </HStack>
-                </Button>
-              )}
-            </VStack>
-          )
-        : p.activityId && (
+      ) : variant === "teacher" && (p.activityId && (
             <VStack align="stretch" gap={2} px={5} py={4} borderTop="1px solid" borderColor="gray.100">
               {confirmingClear ? (
                 <>

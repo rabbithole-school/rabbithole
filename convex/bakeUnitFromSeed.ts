@@ -35,6 +35,7 @@ import { buildDesignerPhysicalEnvironmentSection } from "./prompts";
 import { curatedExplorationEntryForTopic } from "./lib/curatedExplorationCatalog";
 import { ensureSessionActivitySetup } from "./lib/sessionActivitySetup";
 import { effectiveActivityKind, isAppActivity } from "../shared/appSurface";
+import { SCHOLAR_LED_APP_BUILDING } from "../shared/missionCopy";
 import { isLearningStep, type MissionActivity } from "./lib/mission";
 
 // The scholar's chosen "way in" to the topic — picked from the live menu, whose
@@ -64,14 +65,17 @@ export type ChosenPath = {
   shape?: "build" | "buildFirst";
 };
 
-/** The "Build a simulation" path: the bake ends in an app activity. */
+/** The "Build a simulation" path: the bake ends in an app activity. While
+ * SCHOLAR_LED_APP_BUILDING is off no path is one (an older iPad can still send
+ * the shape), so the bake designs ordinary learning steps. */
 export function isBuildPath(path: ChosenPath | null | undefined): boolean {
-  return path?.shape === "build";
+  return SCHOLAR_LED_APP_BUILDING && path?.shape === "build";
 }
 
-/** The scholar described the thing to make: the quest is that one build. */
+/** The scholar described the thing to make: the quest is that one build.
+ * Off with SCHOLAR_LED_APP_BUILDING, like isBuildPath. */
 export function isBuildFirstPath(path: ChosenPath | null | undefined): boolean {
-  return path?.shape === "buildFirst";
+  return SCHOLAR_LED_APP_BUILDING && path?.shape === "buildFirst";
 }
 
 /**
@@ -172,12 +176,15 @@ export function buildBakeInstruction(spec: BakeSpec): string {
         '3. create_activity — EXACTLY 4 activities on that lesson, created in the exact learner-facing sequence they should appear. The first three are ONLINE (kind:"online") design steps where the scholar FIGURES OUT how it works: commit (a bet or prediction they own), capture (gather evidence), reckon (name the rule in their own words). Each MUST include a deliverable with mode:"auto", a concrete scholar-facing `prompt`, `notes` capturing the quality bar, and an EMPTY `criteria` array (the per-scholar rubric is generated later). ' +
           stageMarkerRule +
           " Use each marker exactly once, in that order. The marker is stripped after the bake.",
-        '   The 4th, `[bake-stage:extend]`, is THE BUILD: kind:"app". Its `systemPrompt` is the BUILD BRIEF: build a simulation that shows the rule the scholar named in the reckon step, in their own words — the builder can read their earlier work in this quest, so it never re-asks. Its deliverable is { kind:"artifact", mode:"auto", prompt: what their running simulation shows, notes: starting with `[bake-stage:extend]` then the quality bar, criteria: [] }. It ALWAYS carries a buildContract: `invariants` = 1-3 statements of the mechanism as testable cause→effect ("when X goes up, Y …"), `freedoms` = what the scholar owns (setting, characters, look, genre), `gate` = "The mechanism runs once with default settings."',
+        '   The 4th, `[bake-stage:extend]`, is THE BUILD: kind:"app". Its `systemPrompt` is the BUILD BRIEF: build a simulation that shows the rule the scholar named in the reckon step, in their own words — the builder can read their earlier work in this quest, so it never re-asks. Its deliverable is { kind:"artifact", mode:"auto", prompt: what their running simulation shows, notes: starting with `[bake-stage:extend]` then the quality bar, criteria: [] }. It ALWAYS carries a buildContract: `invariants` = 1-3 statements of the mechanism as testable cause→effect ("when X goes up, Y …"), `freedoms` = what the scholar owns (setting, characters, look, genre), `gate` = the mission line the scholar sees: ONE open understanding goal of at most 60 characters, naming the idea this simulation is for (e.g. "Understand why prey numbers rise and fall"), never a build step',
       ]
     : [
         '3. create_activity — 3-4 ONLINE activities on that lesson, created in the exact learner-facing sequence they should appear, each a focused step toward the topic. EVERY online activity MUST include a deliverable with mode:"auto", a concrete scholar-facing `prompt`, `notes` capturing the quality bar, and an EMPTY `criteria` array (the per-scholar rubric is generated later). ' +
           stageMarkerRule +
-          " For 3 activities use commit, capture, reckon exactly once each; for 4 use all four exactly once. The marker is stripped after the bake. Learn before you build: if you make an app activity at all, it comes after at least one online activity with a deliverable where the scholar figures it out — never first.",
+          " For 3 activities use commit, capture, reckon exactly once each; for 4 use all four exactly once. The marker is stripped after the bake. " +
+          (SCHOLAR_LED_APP_BUILDING
+            ? "Learn before you build: if you make an app activity at all, it comes after at least one online activity with a deliverable where the scholar figures it out — never first."
+            : 'Make no app activity: a Quest has no app-building steps, and no deliverable is kind:"artifact" (that is an app). If the scholar described a game or app they want to make, the quest teaches the idea it runs on and is complete without it: no activity plays, playtests, or designs for a game or app, because none will be built. Title each activity for what the scholar actually does (e.g. "Test your rulebook on someone else\'s mistakes", not "Playtest the game").'),
       ];
   const promptStep = build
     ? '5. generate_activity_prompt — write the tutor system prompt for EACH of the three design steps before you finish (NEVER for the app activity: its systemPrompt is the build brief you already wrote). In those prompts, tell the tutor to acknowledge the scholar NEUTRALLY and keep handing the thinking back — NOT to validate every turn with "that\'s exactly right" / "perfect" (constant praise short-circuits a gifted kid\'s own checking).'
@@ -240,7 +247,7 @@ function buildBuildFirstInstruction(spec: BakeSpec): string {
     "Build it end-to-end, in this order, using your tools:",
     "1. update_unit — a big idea, 2 essential questions, and 1-2 enduring understandings grounded in the concept their build runs on.",
     "2. create_lesson — exactly ONE lesson (core strand).",
-    '3. create_activity — EXACTLY ONE activity on that lesson: kind:"app", the build. Its `systemPrompt` is the BUILD BRIEF: build what the scholar described, starting from their words; whenever the build reaches a choice that carries the concept (a rule, a number, a relationship), the scholar decides it and the builder hands that thinking back instead of deciding for them. Its deliverable is { kind:"artifact", mode:"auto", prompt: what their finished app does, notes: starting with `[bake-stage:build]` then the quality bar, criteria: [] }. It ALWAYS carries a buildContract: `invariants` = 1-3 statements of the concept their app must get right, as testable cause→effect ("when X goes up, Y …"), `freedoms` = everything else the scholar owns (characters, look, story, rules of play), `gate` = "The core mechanic runs once."',
+    '3. create_activity — EXACTLY ONE activity on that lesson: kind:"app", the build. Its `systemPrompt` is the BUILD BRIEF: build what the scholar described, starting from their words; whenever the build reaches a choice that carries the concept (a rule, a number, a relationship), the scholar decides it and the builder hands that thinking back instead of deciding for them. Its deliverable is { kind:"artifact", mode:"auto", prompt: what their finished app does, notes: starting with `[bake-stage:build]` then the quality bar, criteria: [] }. It ALWAYS carries a buildContract: `invariants` = 1-3 statements of the concept their app must get right, as testable cause→effect ("when X goes up, Y …"), `freedoms` = everything else the scholar owns (characters, look, story, rules of play), `gate` = the mission line the scholar sees: ONE open understanding goal of at most 60 characters, naming the concept their app must get right (e.g. "Understand escape velocity"), never a build step',
     "4. Do NOT call generate_activity_prompt — the build brief is the activity's prompt.",
     "",
     "The build can span several sittings; the scholar returns to keep extending it. When the activity exists with its build brief, deliverable, and buildContract, you're done; end with a one-line summary.",
@@ -479,8 +486,7 @@ export const normalizeBakedActivityOrder = internalMutation({
 /**
  * The patch that makes a baked build stage an app activity whose deliverable
  * is the app, for a bot that missed either. A missing contract is logged, not
- * fatal: the builder runs with the default app gate (lib/mission.ts
- * DEFAULT_APP_GATE).
+ * fatal: the builder then runs with no mission line.
  */
 function buildStageRepair(
   unitId: Id<"units">,
@@ -497,7 +503,7 @@ function buildStageRepair(
   }
   if (!a.buildContract) {
     console.log(
-      `[bake ${unitId}] build stage "${a.title}" has no buildContract; the default app gate applies`,
+      `[bake ${unitId}] build stage "${a.title}" has no buildContract; it runs with no mission line`,
     );
   }
   if (Object.keys(patch).length > 0) {

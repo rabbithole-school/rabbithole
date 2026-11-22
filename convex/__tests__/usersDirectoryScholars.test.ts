@@ -58,6 +58,7 @@ describe("users.listDirectoryScholars", () => {
         image: "https://example.com/kai.png",
         username: "kai",
         enrollmentStanding: "program_guest",
+        withdrawnOn: null,
         hasCredential: true,
       },
     ]);
@@ -68,6 +69,7 @@ describe("users.listDirectoryScholars", () => {
       "image",
       "name",
       "username",
+      "withdrawnOn",
     ]);
   });
 

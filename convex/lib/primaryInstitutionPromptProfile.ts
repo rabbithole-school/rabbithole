@@ -14,4 +14,5 @@ export const PRIMARY_INSTITUTION_PROMPT_PROFILE: InstitutionPromptProfile = {
   timeZoneAbbrev: "UTC",
   clockRegion: "UTC",
   timeZoneOffsetNote: ", UTC+0",
+  technologyPageUrl: null,
 };

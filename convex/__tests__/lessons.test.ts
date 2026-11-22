@@ -351,3 +351,31 @@ describe("lessons.moveToUnit", () => {
     ).rejects.toThrow(/Forbidden/);
   });
 });
+
+describe("lessons.listByUnitPublic", () => {
+  test("a unit's own scholar and a teacher get its lessons; another scholar gets an empty list", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedTeacher(t);
+    const ownerId = await seedScholar(t);
+    const otherId = await t.run(async (ctx) =>
+      ctx.db.insert("users", { name: "Scholar B", username: "scholarb", role: "scholar" }),
+    );
+    const unitId = await t.run(async (ctx) =>
+      ctx.db.insert("units", {
+        teacherId: ownerId, authorScholarId: ownerId, title: "Private", isActive: true,
+      }),
+    );
+    await seedLesson(t, unitId, "Secret title", 0);
+
+    const asOwner = await withUser(t, ownerId);
+    expect(await asOwner.query(api.lessons.listByUnitPublic, { unitId })).toHaveLength(1);
+    // A teacher's catalog unit is readable by a scholar and its teacher.
+    const catalogId = await seedUnit(t, teacherId);
+    await seedLesson(t, catalogId, "Catalog lesson", 0);
+    const asTeacher = await withTeacher(t, teacherId);
+    expect(await asTeacher.query(api.lessons.listByUnitPublic, { unitId: catalogId })).toHaveLength(1);
+    expect(await asOwner.query(api.lessons.listByUnitPublic, { unitId: catalogId })).toHaveLength(1);
+    const asOther = await withUser(t, otherId);
+    expect(await asOther.query(api.lessons.listByUnitPublic, { unitId })).toEqual([]);
+  });
+});

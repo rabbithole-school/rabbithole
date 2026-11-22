@@ -18,94 +18,48 @@ function rotateRight(value: number, count: number): number {
   return (value >>> count) | (value << (32 - count));
 }
 
-function utf8ByteLength(value: string): number {
-  let length = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit < 0x80) {
-      length += 1;
-    } else if (codeUnit < 0x800) {
-      length += 2;
-    } else if (
-      codeUnit >= 0xd800 &&
-      codeUnit <= 0xdbff &&
-      index + 1 < value.length &&
-      value.charCodeAt(index + 1) >= 0xdc00 &&
-      value.charCodeAt(index + 1) <= 0xdfff
-    ) {
-      length += 4;
-      index += 1;
-    } else {
-      length += 3;
-    }
-  }
-  return length;
-}
+// Hashing a bundled library runs on the JS thread, and p5 or three.js is close
+// to a megabyte: in one pass that froze every tap on screen (the builder's Chat
+// button included) for as long as the app took to load on an iPad. So the
+// hash works through the input in slices and lets the thread breathe between
+// them; the digest is identical either way.
+const BLOCKS_PER_SLICE = 512; // 32 KiB of input per slice
 
-function writeUtf8(value: string, output: Uint8Array): number {
-  let offset = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    let codePoint = value.charCodeAt(index);
-    if (codePoint < 0x80) {
-      output[offset++] = codePoint;
-    } else if (codePoint < 0x800) {
-      output[offset++] = 0xc0 | (codePoint >>> 6);
-      output[offset++] = 0x80 | (codePoint & 0x3f);
-    } else if (
-      codePoint >= 0xd800 &&
-      codePoint <= 0xdbff &&
-      index + 1 < value.length
-    ) {
-      const low = value.charCodeAt(index + 1);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + (low - 0xdc00);
-        output[offset++] = 0xf0 | (codePoint >>> 18);
-        output[offset++] = 0x80 | ((codePoint >>> 12) & 0x3f);
-        output[offset++] = 0x80 | ((codePoint >>> 6) & 0x3f);
-        output[offset++] = 0x80 | (codePoint & 0x3f);
-        index += 1;
-      } else {
-        output[offset++] = 0xef;
-        output[offset++] = 0xbf;
-        output[offset++] = 0xbd;
-      }
-    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
-      output[offset++] = 0xef;
-      output[offset++] = 0xbf;
-      output[offset++] = 0xbd;
-    } else {
-      output[offset++] = 0xe0 | (codePoint >>> 12);
-      output[offset++] = 0x80 | ((codePoint >>> 6) & 0x3f);
-      output[offset++] = 0x80 | (codePoint & 0x3f);
-    }
-  }
-  return offset;
-}
+const yieldToEventLoop = () =>
+  new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-export function sha256Hex(value: string): string {
-  const byteLength = utf8ByteLength(value);
+function paddedMessage(value: string): DataView {
+  const encoded = new TextEncoder().encode(value);
+  const byteLength = encoded.length;
   const paddedLength = Math.ceil((byteLength + 9) / 64) * 64;
   const bytes = new Uint8Array(paddedLength);
-  writeUtf8(value, bytes);
+  bytes.set(encoded);
   bytes[byteLength] = 0x80;
   const bitLength = byteLength * 8;
-  const lengthView = new DataView(bytes.buffer);
-  lengthView.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000));
-  lengthView.setUint32(paddedLength - 4, bitLength >>> 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000));
+  view.setUint32(paddedLength - 4, bitLength >>> 0);
+  return view;
+}
 
-  let h0 = 0x6a09e667;
-  let h1 = 0xbb67ae85;
-  let h2 = 0x3c6ef372;
-  let h3 = 0xa54ff53a;
-  let h4 = 0x510e527f;
-  let h5 = 0x9b05688c;
-  let h6 = 0x1f83d9ab;
-  let h7 = 0x5be0cd19;
-  const words = new Uint32Array(64);
+function initialState(): Uint32Array {
+  return new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+}
 
-  for (let offset = 0; offset < paddedLength; offset += 64) {
+/** Fold the 64-byte blocks in [start, end) of `view` into `state`. */
+function compressBlocks(
+  state: Uint32Array,
+  view: DataView,
+  words: Uint32Array,
+  start: number,
+  end: number,
+): void {
+  for (let offset = start; offset < end; offset += 64) {
     for (let index = 0; index < 16; index += 1) {
-      words[index] = lengthView.getUint32(offset + index * 4);
+      words[index] = view.getUint32(offset + index * 4);
     }
     for (let index = 16; index < 64; index += 1) {
       const s0 =
@@ -120,14 +74,14 @@ export function sha256Hex(value: string): string {
         (words[index - 16] + s0 + words[index - 7] + s1) >>> 0;
     }
 
-    let a = h0;
-    let b = h1;
-    let c = h2;
-    let d = h3;
-    let e = h4;
-    let f = h5;
-    let g = h6;
-    let h = h7;
+    let a = state[0];
+    let b = state[1];
+    let c = state[2];
+    let d = state[3];
+    let e = state[4];
+    let f = state[5];
+    let g = state[6];
+    let h = state[7];
 
     for (let index = 0; index < 64; index += 1) {
       const sigma1 =
@@ -154,27 +108,51 @@ export function sha256Hex(value: string): string {
       a = (temp1 + temp2) >>> 0;
     }
 
-    h0 = (h0 + a) >>> 0;
-    h1 = (h1 + b) >>> 0;
-    h2 = (h2 + c) >>> 0;
-    h3 = (h3 + d) >>> 0;
-    h4 = (h4 + e) >>> 0;
-    h5 = (h5 + f) >>> 0;
-    h6 = (h6 + g) >>> 0;
-    h7 = (h7 + h) >>> 0;
+    state[0] = (state[0] + a) >>> 0;
+    state[1] = (state[1] + b) >>> 0;
+    state[2] = (state[2] + c) >>> 0;
+    state[3] = (state[3] + d) >>> 0;
+    state[4] = (state[4] + e) >>> 0;
+    state[5] = (state[5] + f) >>> 0;
+    state[6] = (state[6] + g) >>> 0;
+    state[7] = (state[7] + h) >>> 0;
   }
-
-  return [h0, h1, h2, h3, h4, h5, h6, h7]
-    .map((word) => word.toString(16).padStart(8, "0"))
-    .join("");
 }
 
-export function assertAppKitSourceIntegrity(
+function toHex(state: Uint32Array): string {
+  return Array.from(state, (word) => word.toString(16).padStart(8, "0")).join(
+    "",
+  );
+}
+
+/** SHA-256 of the UTF-8 bytes of `value`, yielding between 32 KiB slices. */
+export async function sha256Hex(
+  value: string,
+  yieldBetweenSlices: () => Promise<void> = yieldToEventLoop,
+): Promise<string> {
+  const view = paddedMessage(value);
+  const state = initialState();
+  const words = new Uint32Array(64);
+  const sliceBytes = BLOCKS_PER_SLICE * 64;
+  for (let start = 0; start < view.byteLength; start += sliceBytes) {
+    if (start > 0) await yieldBetweenSlices();
+    compressBlocks(
+      state,
+      view,
+      words,
+      start,
+      Math.min(start + sliceBytes, view.byteLength),
+    );
+  }
+  return toHex(state);
+}
+
+export async function assertAppKitSourceIntegrity(
   file: string,
   source: string,
   expectedSha256: string,
-): void {
-  const actualSha256 = sha256Hex(source);
+): Promise<void> {
+  const actualSha256 = await sha256Hex(source);
   if (actualSha256 !== expectedSha256) {
     throw new Error(
       `Bundled app-kit integrity mismatch for ${file}: expected ${expectedSha256}, found ${actualSha256}`,

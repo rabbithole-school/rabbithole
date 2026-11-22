@@ -20,6 +20,7 @@
 
 import { internalMutation } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { writeSchedule } from "./lib/scheduleStore";
 
 const SCHOLAR_USERNAMES = [
   "test-scholar-001",
@@ -161,7 +162,8 @@ export const seed = internalMutation({
         startedAt: Date.now() - 2 * 86_400_000,
         // Activity 1 pushed as class focus that has since ended (the
         // natural "now review what happened" moment).
-        activitySchedule: [
+      });
+      await writeSchedule(ctx, assignmentId, [
           {
             activityId: activity1,
             mode: "classFocus" as const,
@@ -169,8 +171,7 @@ export const seed = internalMutation({
             startsAt: Date.now() - 2 * 86_400_000,
             endsAt: Date.now() - 1 * 86_400_000,
           },
-        ],
-      });
+        ]);
     }
 
     // ── Per-scholar projects / deliverables / completions ──

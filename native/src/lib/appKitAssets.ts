@@ -57,7 +57,7 @@ async function loadSource(file: AppKitFile): Promise<string> {
       `Bundled app-kit manifest has no integrity entry for ${asset.version}/${file}`,
     );
   }
-  assertAppKitSourceIntegrity(file, source, metadata.sha256);
+  await assertAppKitSourceIntegrity(file, source, metadata.sha256);
   resolvedSources.set(file, source);
   return source;
 }

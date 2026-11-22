@@ -163,6 +163,10 @@ export interface SeedPortfolioItem {
   caption: string;
   scholarKeys: Key[];
   svg: string;
+  /** Absent = a Robotics capture-station capture. */
+  source?: "capture_station" | "google_drive";
+  /** Filed to this assignment's activity; absent = unfiled. */
+  filedTo?: { assignmentKey: Key; activityKey: Key };
 }
 
 // ── Design (curriculum) ─────────────────────────────────────────────────────
@@ -197,7 +201,6 @@ export interface SeedActivity {
   deliverable?: SeedDeliverable;
   /** Resolve a process by slug (slug-idempotent shared building block). */
   processSlug?: string;
-  defaultMode?: "classFocus" | "homework" | "either";
   hasScholarAngles?: boolean;
   recipe?: "baseline" | "exitTicket";
   /** Link materials attached as `activityResources` (program scheduling of
@@ -331,7 +334,6 @@ export interface SeedSession {
   /** 0–5 integer, matching the observer's pulseScore scale (observerShared.ts). */
   pulseScore?: number;
   analysisSummary?: string;
-  teacherWhisper?: string;
   /** lastMessageAt offset; messages anchor relative to this. */
   lastMessageAgoMinutes: number;
   activityCompletedAgoMinutes?: number;

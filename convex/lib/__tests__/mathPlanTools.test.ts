@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "../../__tests__/scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../../schema";
 import type { Id } from "../../_generated/dataModel";
@@ -123,8 +124,9 @@ function parse(result: string) {
         probesAnswered: number;
         placedThroughGrade?: string;
       };
-      shownInDomainSwitcher: boolean;
+      shownInDomainSwitcher?: boolean;
     }>;
+    domainSwitcher: string;
   };
 }
 
@@ -241,6 +243,7 @@ describe("Math plan aide tools", () => {
       ],
     });
 
+    expect(result.domainSwitcher).toMatch(/^shown: /);
     const algebra = result.domains.find(
       (domain) => domain.domain === ALGEBRA_1_DOMAIN,
     )!;
@@ -278,6 +281,7 @@ describe("Math plan aide tools", () => {
     const { teacherId, scholarId } = await seedTeacherAndScholar(t);
     await seedDomain(t, ALGEBRA_1_DOMAIN, "expressions_equations", "8");
     await seedDomain(t, GEOMETRY_MEASUREMENT_DOMAIN, "measurement", "4");
+    await seedDomain(t, WHOLE_NUMBER_ARITHMETIC_DOMAIN, "counting", "K");
     await t.run(async (ctx) => {
       await ctx.db.insert("scholarMathPlans", {
         scholarId,
@@ -290,6 +294,17 @@ describe("Math plan aide tools", () => {
         skillKey: `${ALGEBRA_1_DOMAIN}-expressions_equations-8`,
         domain: ALGEBRA_1_DOMAIN,
         strand: "expressions_equations",
+        repetition: 1,
+        halfLifeDays: 1,
+        frontier: true,
+        source: "practice",
+        updatedAt: 1,
+      });
+      await ctx.db.insert("practiceMastery", {
+        scholarId,
+        skillKey: `${WHOLE_NUMBER_ARITHMETIC_DOMAIN}-counting-K`,
+        domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+        strand: "counting",
         repetition: 1,
         halfLifeDays: 1,
         frontier: true,
@@ -344,12 +359,15 @@ describe("Math plan aide tools", () => {
       await tools.get_scholar_math_plan.run({ scholarName: "Hoku Makani" }),
     );
     expect(result.scopeSource).toBe("open_default");
-    expect(
-      result.domains.find((domain) => domain.domain === ALGEBRA_1_DOMAIN),
-    ).toMatchObject({
-      inPlan: true,
-      shownInDomainSwitcher: false,
-    });
+    // No picker: say so once, and don't stamp every domain `false` (the staff
+    // aide read that as "hidden from the scholar", 2026-11-19).
+    expect(result.domainSwitcher).toMatch(/^none: /);
+    expect(result.domainSwitcher).toContain("hides nothing");
+    const algebra = result.domains.find(
+      (domain) => domain.domain === ALGEBRA_1_DOMAIN,
+    )!;
+    expect(algebra).toMatchObject({ inPlan: true });
+    expect(algebra).not.toHaveProperty("shownInDomainSwitcher");
   });
 
   test("legacy standing switcher domains come from the same active-standing projection as the frontends", async () => {
@@ -358,7 +376,7 @@ describe("Math plan aide tools", () => {
     await seedDomain(t, ALGEBRA_1_DOMAIN, "expressions_equations", "8");
     await seedDomain(t, GEOMETRY_MEASUREMENT_DOMAIN, "measurement", "4");
     await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId,
         scholarIds: [scholarId],
         practiceMode: "standing",
@@ -378,18 +396,42 @@ describe("Math plan aide tools", () => {
     );
     expect(result.scopeSource).toBe("legacy_standing");
     expect(result.practiceScope).toEqual({ kind: "open" });
-    expect(
-      result.domains.find((domain) => domain.domain === ALGEBRA_1_DOMAIN),
-    ).toMatchObject({
-      shownInDomainSwitcher: true,
-    });
-    expect(
-      result.domains.find(
-        (domain) => domain.domain === GEOMETRY_MEASUREMENT_DOMAIN,
-      ),
-    ).toMatchObject({
-      shownInDomainSwitcher: false,
-    });
+    // One legacy domain leaves nothing to pick between.
+    expect(result.domainSwitcher).toMatch(/^none: /);
+  });
+
+  test("a two-domain legacy standing row offers exactly its domains in the switcher", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId } = await seedTeacherAndScholar(t);
+    await seedDomain(t, ALGEBRA_1_DOMAIN, "expressions_equations", "8");
+    await seedDomain(t, GEOMETRY_MEASUREMENT_DOMAIN, "measurement", "4");
+    await seedDomain(t, WHOLE_NUMBER_ARITHMETIC_DOMAIN, "counting", "K");
+    await t.run((ctx) =>
+      insertAssignmentWithSchedule(ctx, {
+        teacherId,
+        scholarIds: [scholarId],
+        practiceMode: "standing",
+        practiceConfig: {
+          domain: ALGEBRA_1_DOMAIN,
+          domains: [ALGEBRA_1_DOMAIN, WHOLE_NUMBER_ARITHMETIC_DOMAIN],
+        },
+        startedAt: 1,
+        activitySchedule: [],
+      }),
+    );
+
+    const tools = await toolsFor(t, teacherId, "teacher");
+    const result = parse(
+      await tools.get_scholar_math_plan.run({ scholarName: "Hoku Makani" }),
+    );
+    expect(result.scopeSource).toBe("legacy_standing");
+    expect(result.domainSwitcher).toMatch(/^shown: /);
+    const shown = (domain: string) =>
+      result.domains.find((entry) => entry.domain === domain)
+        ?.shownInDomainSwitcher;
+    expect(shown(ALGEBRA_1_DOMAIN)).toBe(true);
+    expect(shown(WHOLE_NUMBER_ARITHMETIC_DOMAIN)).toBe(true);
+    expect(shown(GEOMETRY_MEASUREMENT_DOMAIN)).toBe(false);
   });
 
   test("shadow placement is reported as placed without a converged check-in", async () => {
@@ -569,10 +611,9 @@ describe("Math plan aide tools", () => {
       result.domains.find(
         (domain) => domain.domain === GEOMETRY_MEASUREMENT_DOMAIN,
       ),
-    ).toMatchObject({
-      inPlan: false,
-      shownInDomainSwitcher: false,
-    });
+    ).toMatchObject({ inPlan: false });
+    // A one-domain plan leaves nothing to pick between, so no picker renders.
+    expect(result.domainSwitcher).toMatch(/^none: /);
     const stored = await t.run((ctx) =>
       ctx.db
         .query("scholarMathPlans")

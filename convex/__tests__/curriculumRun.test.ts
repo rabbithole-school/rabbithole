@@ -1,3 +1,4 @@
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { convexTest, type TestConvex } from "convex-test";
 import { getFunctionName } from "convex/server";
 import { describe, expect, test } from "vitest";
@@ -145,11 +146,9 @@ describe("curriculum:run — the run path for the units she builds", () => {
       ["enrollmentStanding", "id", "image", "name", "username"].sort(),
     );
 
-    const assignmentId = await runner.mutation(api.assignments.assignWork, {
+    const assignmentId = await runner.mutation(api.assignments.create, {
       unitId: s.unit,
       scholarIds: s.homeScholarIds,
-      startsAt: Date.now(),
-      target: { kind: "unit" },
     });
     const assignment = await t.run((ctx) => ctx.db.get(assignmentId));
     expect(assignment?.teacherId).toBe(s.runnerId);
@@ -289,11 +288,9 @@ describe("curriculum:run — the run path for the units she builds", () => {
     const teacher = await asUser(t, s.home.teacher.id);
 
     // Someone else's assignment on the very unit she built.
-    const teacherAssignment = await teacher.mutation(api.assignments.assignWork, {
+    const teacherAssignment = await teacher.mutation(api.assignments.create, {
       unitId: s.unit,
       scholarIds: s.homeScholarIds,
-      startsAt: Date.now(),
-      target: { kind: "unit" },
     });
     await expect(
       runner.mutation(api.assignments.pushActivity, {
@@ -309,7 +306,7 @@ describe("curriculum:run — the run path for the units she builds", () => {
         mode: "classFocus",
         startsAt: Date.now() + DAY,
       }),
-    ).rejects.toThrow(/Not your assignment/);
+    ).rejects.toThrow(/Only the teacher who gave this, or a school admin, can move it/);
     expect(
       await runner.query(api.assignments.get, { assignmentId: teacherAssignment }),
     ).toBeNull();
@@ -337,6 +334,7 @@ describe("curriculum:run — the run path for the units she builds", () => {
         scholarIds: s.otherScholarIds,
         startsAt: Date.now(),
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       }),
     ).rejects.toThrow(/Forbidden|not allowed/);
     await expect(
@@ -353,6 +351,7 @@ describe("curriculum:run — the run path for the units she builds", () => {
         scholarIds: [s.homeScholarIds[0], s.otherScholarIds[0]],
         startsAt: Date.now(),
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       }),
     ).rejects.toThrow(/not at this unit's school/);
     // Her unit, but another unit's activity as the target.
@@ -431,11 +430,9 @@ describe("curriculum:run — the run path for the units she builds", () => {
     const s = await seed(t);
     const editor = await asUser(t, s.editorId);
     const teacher = await asUser(t, s.home.teacher.id);
-    const teacherAssignment = await teacher.mutation(api.assignments.assignWork, {
+    const teacherAssignment = await teacher.mutation(api.assignments.create, {
       unitId: s.unit,
       scholarIds: s.homeScholarIds,
-      startsAt: Date.now(),
-      target: { kind: "unit" },
     });
 
     expect(
@@ -447,6 +444,7 @@ describe("curriculum:run — the run path for the units she builds", () => {
         scholarIds: s.homeScholarIds,
         startsAt: Date.now(),
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       }),
     ).rejects.toThrow(/teacher or admin role required/);
     await expect(
@@ -497,11 +495,9 @@ describe("curriculum:run — the run path for the units she builds", () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
     const teacher = await asUser(t, s.home.teacher.id);
-    const assignmentId = await teacher.mutation(api.assignments.assignWork, {
+    const assignmentId = await teacher.mutation(api.assignments.create, {
       unitId: s.unit,
       scholarIds: s.homeScholarIds,
-      startsAt: Date.now(),
-      target: { kind: "unit" },
     });
     await teacher.mutation(api.assignments.pushActivity, {
       assignmentId,
@@ -536,16 +532,14 @@ describe("curriculum:run list and schedule reads end with the grant", () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
     const runner = await asUser(t, s.runnerId);
-    const mine = await runner.mutation(api.assignments.assignWork, {
+    const mine = await runner.mutation(api.assignments.create, {
       unitId: s.unit,
       scholarIds: s.homeScholarIds,
-      startsAt: Date.now(),
-      target: { kind: "unit" },
     });
     // A row she "owns" on a unit at a school where she holds no grant (the
     // reviewer's probe), and an old unit-less row (an ex-teacher's dispatch).
     const foreignRow = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: s.runnerId,
         unitId: s.foreignUnit,
         scholarIds: s.otherScholarIds,
@@ -560,7 +554,7 @@ describe("curriculum:run list and schedule reads end with the grant", () => {
       }),
     );
     const oldDispatch = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: s.runnerId,
         scholarIds: s.homeScholarIds,
         startedAt: Date.now(),
@@ -627,11 +621,9 @@ describe("curriculum:run list and schedule reads end with the grant", () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
     const teacher = await asUser(t, s.home.teacher.id);
-    await teacher.mutation(api.assignments.assignWork, {
+    await teacher.mutation(api.assignments.create, {
       unitId: s.unit,
       scholarIds: s.homeScholarIds,
-      startsAt: Date.now(),
-      target: { kind: "unit" },
     });
     // Demoted to base staff with no grants: no run standing anywhere.
     await t.run((ctx) => ctx.db.patch(s.home.teacher.id, { role: "staff" }));
@@ -728,15 +720,12 @@ describe("curriculum:run in the staff aide (Slack / MCP / web)", () => {
     const s = await seed(t);
     const names = (await toolsFor(t, s.runnerId)).map((tool) => tool.name);
     for (const name of [
-      "assign_unit",
-      "assign_activity_now",
+      "give",
       "list_assignments",
       "get_assignment",
       "get_assignment_progress",
-      "schedule_activity",
       "reschedule_activity",
       "clear_activity",
-      "push_activity_now",
     ]) {
       expect(names).toContain(name);
     }
@@ -757,9 +746,11 @@ describe("curriculum:run in the staff aide (Slack / MCP / web)", () => {
     const tools = await toolsFor(t, s.runnerId);
     const tool = (name: string) => tools.find((x) => x.name === name)!;
     const ok = JSON.parse(
-      await tool("assign_unit").run({
+      await tool("give").run({
         unitId: s.unit,
         scholarNames: [s.home.scholars[0].name],
+        startsAtMs: Date.now() + 24 * 60 * 60_000,
+        finish: "2099-01-02",
       }),
     ) as { assignmentId?: Id<"assignments"> };
     expect(ok.assignmentId).toBeTruthy();
@@ -772,25 +763,38 @@ describe("curriculum:run in the staff aide (Slack / MCP / web)", () => {
     expect(progress.roster.every((r) => r.sessionUrl === null)).toBe(true);
 
     // Group names and membership are not hers to read: groupName is refused.
-    const byGroup = await tool("assign_unit").run({
+    const byGroup = await tool("give").run({
       unitId: s.unit,
       groupName: "Geckos",
     });
     expect(byGroup).toMatch(/Name the scholars instead/);
 
     // A scholar at another school can't even be resolved by name.
-    const refused = await tool("assign_unit").run({
+    const refused = await tool("give").run({
       unitId: s.unit,
       scholarNames: [s.other.scholars[0].name],
     });
     expect(refused).toMatch(/Could not resolve/);
+
+    // A new one-off activity builds no unit, so it isn't hers to give.
+    const before = (await t.run((ctx) => ctx.db.query("assignments").collect()))
+      .length;
+    const oneOff = await tool("give").run({
+      newActivity: { title: "A side quest" },
+      scholarNames: [s.home.scholars[0].name],
+      startsNow: true,
+      finish: "inClass",
+    });
+    expect(oneOff).not.toMatch(/"assignmentId"/);
+    expect(
+      (await t.run((ctx) => ctx.db.query("assignments").collect())).length,
+    ).toBe(before);
   });
 
   test("curriculum:edit alone gets no assignment tools", async () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
     const names = (await toolsFor(t, s.editorId)).map((tool) => tool.name);
-    expect(names).not.toContain("assign_unit");
-    expect(names).not.toContain("push_activity_now");
+    expect(names).not.toContain("give");
   });
 });

@@ -77,3 +77,49 @@ export function voiceMark(mark: Mark): void {
     console.info(`[voice-perf] ${segments.join(" | ")} | ${total}`);
   }
 }
+
+/**
+ * The front half of a take: how long from the mic opening (key down or tap) to
+ * each startup milestone. Same flag as voiceMark. `micOpen` arms a take; it
+ * reports once both `listening` and `sessionReady` have happened, in either
+ * order, with every mark as an offset from the open:
+ *
+ *   [voice-start] secret +2ms | capture +180ms | listening +180ms | transport +640ms | sessionReady +700ms
+ *
+ * `listening` is when the UI first says so; `capture` is when audio first
+ * reaches the hook, so the gap between the two is the kept-audio guarantee.
+ */
+type StartMark =
+  | "micOpen"
+  | "secret"
+  | "capture"
+  | "listening"
+  | "transport"
+  | "sessionReady";
+
+let startAt: number | null = null;
+const startMarks: Partial<Record<StartMark, number>> = {};
+
+export function voiceStartMark(mark: StartMark): void {
+  if (!enabled()) return;
+  const now = performance.now();
+  if (mark === "micOpen") {
+    for (const key of Object.keys(startMarks)) {
+      delete startMarks[key as StartMark];
+    }
+    startAt = now;
+    return;
+  }
+  if (startAt === null || startMarks[mark] !== undefined) return;
+  startMarks[mark] = now - startAt;
+  if (
+    startMarks.listening !== undefined &&
+    startMarks.sessionReady !== undefined
+  ) {
+    const parts = (Object.entries(startMarks) as [StartMark, number][])
+      .sort((a, b) => a[1] - b[1])
+      .map(([name, offset]) => `${name} +${Math.round(offset)}ms`);
+    startAt = null;
+    console.info(`[voice-start] ${parts.join(" | ")}`);
+  }
+}

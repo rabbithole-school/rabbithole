@@ -29,8 +29,10 @@ vi.mock("react-native", async () => {
     ({ children, ...props }: Props) =>
       react.createElement(name, props, children);
   return {
+    ActionSheetIOS: { showActionSheetWithOptions: vi.fn(), dismissActionSheet: vi.fn() },
     ActivityIndicator: () => null,
     Alert: { alert: vi.fn() },
+    findNodeHandle: () => 1,
     AppState: {
       currentState: "active",
       addEventListener: (_event: string, listener: (state: string) => void) => {
@@ -74,8 +76,15 @@ vi.mock("react-native-reanimated", async () => {
   const view = ({ children, ...props }: Props) =>
     react.createElement("animated-view", props, children);
   return {
-    default: { View: view },
+    default: {
+      View: view,
+      ScrollView: ({ children, ...props }: Props) =>
+        react.createElement("scroll-view", props, children),
+    },
+    useAnimatedRef: () => ({ current: null }),
     runOnJS: <T,>(fn: T) => fn,
+    useAnimatedReaction: () => undefined,
+    withTiming: <T,>(value: T) => value,
     useAnimatedStyle: () => ({}),
     useSharedValue: <T,>(initial: T) => {
       let current = initial;
@@ -95,6 +104,7 @@ vi.mock("react-native-reanimated", async () => {
   };
 });
 
+vi.mock("react-native-sortables", () => import("./sortablesTestMock"));
 vi.mock("expo-symbols", () => ({ SymbolView: () => null }));
 vi.mock("phosphor-react-native", () => ({ ScribbleIcon: () => null }));
 vi.mock("@/theme", () => ({

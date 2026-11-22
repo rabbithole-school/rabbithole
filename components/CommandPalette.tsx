@@ -43,6 +43,7 @@ type Scholar = {
   username?: string | null;
   name?: string | null;
   image?: string | null;
+  withdrawnOn?: string | null;
 };
 type UnitInfo = {
   _id: string;
@@ -178,7 +179,11 @@ export function buildEntries(
       .map((s) => ({
         kind: "scholar" as const, key: s._id,
         href: `/teacher/scholars/${s.username ?? s._id}`,
-        label: s.name ?? "Scholar", sublabel: s.username ?? undefined, scholar: s,
+        label: s.name ?? "Scholar",
+        sublabel: s.withdrawnOn
+          ? [s.username, "Withdrawn"].filter(Boolean).join(" · ")
+          : s.username ?? undefined,
+        scholar: s,
       })),
     // Admissions: already matched server-side (child name, parent name or
     // email), so no client `match`.

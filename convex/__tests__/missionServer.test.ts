@@ -4,11 +4,19 @@
 //
 // Fictional names only.
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+
+// These tests cover Quest app building, which is OFF in the product
+// (shared/missionCopy.ts SCHOLAR_LED_APP_BUILDING) but kept for a revisit, so
+// they run with it on. scholarAppBuildingOff.test.ts covers the off state.
+vi.mock("../../shared/missionCopy", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../shared/missionCopy")>()),
+  SCHOLAR_LED_APP_BUILDING: true,
+}));
+
 import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
-import { questBuildLockLabel } from "../../shared/missionCopy";
 import {
   grantInstitutionMembership,
   seedScholarInInstitution,
@@ -141,62 +149,21 @@ async function complete(t: T, w: World, scholarId: Id<"users">, activityId: Id<"
   );
 }
 
-describe("B6: the Quest build step lock", () => {
-  test("opening a locked build step throws the exact lock label", async () => {
+describe("the learn-first lock is retired", () => {
+  test("a kid's own multi-step Quest opens its later step before the learning step is done", async () => {
     const t = convexTest(schema, modules);
     const w = await questWorld(t);
     const as = await asUser(t, w.scholarId);
-    await expect(
-      as.mutation(api.sessions.create, { activityId: w.buildId }),
-    ).rejects.toThrow(questBuildLockLabel(LEARN_TITLE));
-    expect(questBuildLockLabel(LEARN_TITLE)).toBe(
-      "Unlocks when you finish Work out how herons hunt",
-    );
-    const opened = await t.run((ctx) => ctx.db.query("sessions").collect());
-    expect(opened).toHaveLength(0);
+    const { id } = await as.mutation(api.sessions.create, { activityId: w.buildId });
+    const session = await t.run((ctx) => ctx.db.get(id));
+    expect(session?.activityId).toBe(w.buildId);
+    expect(session?.sessionMode).toBe("vibecode");
   });
 
-  test("a mismatched client unitId cannot skip the lock: the activity's own unit decides", async () => {
-    const t = convexTest(schema, modules);
-    const w = await questWorld(t);
-    // Another Quest of the same scholar, with nothing locked in it.
-    const otherUnitId = await t.run((ctx) =>
-      ctx.db.insert("units", {
-        teacherId: w.scholarId,
-        institutionId: w.institutionId,
-        title: "Another quest",
-        isActive: true,
-        authorScholarId: w.scholarId,
-      }),
-    );
-    const as = await asUser(t, w.scholarId);
-    await expect(
-      as.mutation(api.sessions.create, {
-        unitId: otherUnitId,
-        activityId: w.buildId,
-      }),
-    ).rejects.toThrow(questBuildLockLabel(LEARN_TITLE));
-    await expect(
-      as.mutation(api.sessions.create, {
-        unitId: otherUnitId,
-        lessonId: w.lessonId,
-        activityId: w.buildId,
-      }),
-    ).rejects.toThrow(questBuildLockLabel(LEARN_TITLE));
-  });
-
-  test("a build step the scholar already started stays open: the lock never takes work away (migration)", async () => {
+  test("a session already on the later step can be messaged", async () => {
     const t = convexTest(schema, modules);
     const w = await questWorld(t);
     const as = await asUser(t, w.scholarId);
-    // Not started yet: locked everywhere (open refused, row locked).
-    await expect(
-      as.mutation(api.sessions.create, { activityId: w.buildId }),
-    ).rejects.toThrow(questBuildLockLabel(LEARN_TITLE));
-    const before = await as.query(api.units.get, { id: w.unitId });
-    expect(before?.questLocks[String(w.buildId)]).toBeDefined();
-
-    // A build-step session from before the lock existed (prod data at deploy).
     const sessionId = await t.run((ctx) =>
       ctx.db.insert("sessions", {
         userId: w.scholarId,
@@ -212,80 +179,13 @@ describe("B6: the Quest build step lock", () => {
     await expect(
       as.mutation(api.sessions.sendMessage, { sessionId, message: "make it fly" }),
     ).resolves.toBeTruthy();
-    const after = await as.query(api.units.get, { id: w.unitId });
-    expect(after?.questLocks[String(w.buildId)]).toBeUndefined();
-
-    // A rehearsal session never counts as the scholar having started it.
-    const t2 = convexTest(schema, modules);
-    const w2 = await questWorld(t2);
-    await t2.run((ctx) =>
-      ctx.db.insert("sessions", {
-        userId: w2.scholarId,
-        institutionId: w2.institutionId,
-        unitId: w2.unitId,
-        lessonId: w2.lessonId,
-        activityId: w2.buildId,
-        sessionMode: "vibecode",
-        title: "Rehearsal",
-        isArchived: false,
-        isTestDrive: true,
-      }),
-    );
-    const as2 = await asUser(t2, w2.scholarId);
-    await expect(
-      as2.mutation(api.sessions.create, { activityId: w2.buildId }),
-    ).rejects.toThrow(questBuildLockLabel(LEARN_TITLE));
   });
 
-  test("the learning step and the away step are never locked", async () => {
-    const t = convexTest(schema, modules);
-    const w = await questWorld(t);
-    const as = await asUser(t, w.scholarId);
-    const { id } = await as.mutation(api.sessions.create, {
-      activityId: w.learnId,
-    });
-    expect(id).toBeTruthy();
-  });
-
-  test("finishing the learning step unlocks the build step (the away step does not matter)", async () => {
-    const t = convexTest(schema, modules);
-    const w = await questWorld(t);
-    const as = await asUser(t, w.scholarId);
-    await expect(
-      as.mutation(api.sessions.create, { activityId: w.buildId }),
-    ).rejects.toThrow(/Unlocks when you finish/);
-    await complete(t, w, w.scholarId, w.learnId);
-    const { id } = await as.mutation(api.sessions.create, {
-      activityId: w.buildId,
-    });
-    const session = await t.run((ctx) => ctx.db.get(id));
-    expect(session?.activityId).toBe(w.buildId);
-    expect(session?.sessionMode).toBe("vibecode");
-  });
-
-  test("another scholar's completion does not unlock mine", async () => {
-    const t = convexTest(schema, modules);
-    const w = await questWorld(t);
-    await complete(t, w, w.otherScholarId, w.learnId);
-    const as = await asUser(t, w.scholarId);
-    await expect(
-      as.mutation(api.sessions.create, { activityId: w.buildId }),
-    ).rejects.toThrow(/Unlocks when you finish/);
-  });
-
-  test("a teacher's unit is never locked", async () => {
+  test("a teacher's unit and a teacher's rehearsal open as before", async () => {
     const t = convexTest(schema, modules);
     const w = await questWorld(t, { teacherUnit: true });
     const as = await asUser(t, w.scholarId);
-    const { id } = await as.mutation(api.sessions.create, {
-      activityId: w.buildId,
-    });
-    expect(id).toBeTruthy();
-  });
-
-  test("a teacher's rehearsal of a Quest build step is never blocked", async () => {
-    const t = convexTest(schema, modules);
-    const w = await questWorld(t);
+    expect((await as.mutation(api.sessions.create, { activityId: w.buildId })).id).toBeTruthy();
     const asTeacher = await asUser(t, w.teacherId);
     const { id } = await asTeacher.mutation(api.sessions.create, {
       activityId: w.buildId,
@@ -294,49 +194,26 @@ describe("B6: the Quest build step lock", () => {
     expect(id).toBeTruthy();
   });
 
-  test("units.get reports the lock for the author only, and drops it on completion", async () => {
+  test("units.get keeps the old shape: questLocks empty, canUnlockBuild false", async () => {
     const t = convexTest(schema, modules);
     const w = await questWorld(t);
     const as = await asUser(t, w.scholarId);
-    const locked = await as.query(api.units.get, { id: w.unitId });
-    expect(locked?.questLocks).toEqual({
-      [String(w.buildId)]: { prerequisiteTitle: LEARN_TITLE, prerequisiteId: String(w.learnId) },
-    });
-    expect(locked?.canUnlockBuild).toBe(false);
-
-    // Not the author: never locked (a teacher viewing it).
-    const asTeacher = await asUser(t, w.teacherId);
-    const seen = await asTeacher.query(api.units.get, { id: w.unitId });
-    expect(seen?.questLocks).toEqual({});
-    expect(seen?.canUnlockBuild).toBe(false);
-
-    await complete(t, w, w.scholarId, w.learnId);
-    const open = await as.query(api.units.get, { id: w.unitId });
-    expect(open?.questLocks).toEqual({});
-  });
-
-  test("units.get on a teacher's unit carries no locks", async () => {
-    const t = convexTest(schema, modules);
-    const w = await questWorld(t, { teacherUnit: true });
-    const asTeacher = await asUser(t, w.teacherId);
-    const unit = await asTeacher.query(api.units.get, { id: w.unitId });
+    const unit = await as.query(api.units.get, { id: w.unitId });
     expect(unit?.questLocks).toEqual({});
     expect(unit?.canUnlockBuild).toBe(false);
   });
 });
 
 describe("B6: appendBuildStep (the badge moment)", () => {
-  test("requires the Quest to be complete; canUnlockBuild flips true when it is", async () => {
+  test("requires the Quest to be complete", async () => {
     const t = convexTest(schema, modules);
     const w = await questWorld(t, { withBuild: false });
     const as = await asUser(t, w.scholarId);
-    expect((await as.query(api.units.get, { id: w.unitId }))?.canUnlockBuild).toBe(false);
     await expect(
       as.mutation(api.quests.appendBuildStep, { unitId: w.unitId }),
     ).rejects.toThrow(/Finish the Quest/);
 
     await complete(t, w, w.scholarId, w.learnId);
-    expect((await as.query(api.units.get, { id: w.unitId }))?.canUnlockBuild).toBe(true);
     const { activityId } = await as.mutation(api.quests.appendBuildStep, {
       unitId: w.unitId,
     });
@@ -356,8 +233,6 @@ describe("B6: appendBuildStep (the badge moment)", () => {
     expect(built?.order).toBe(0);
     expect(built?.systemPrompt).toContain("simulation");
     expect(built?.systemPrompt).toContain("Heron migration");
-    // Offered once: the Quest now has a build step.
-    expect((await as.query(api.units.get, { id: w.unitId }))?.canUnlockBuild).toBe(false);
   });
 
   test("idempotent: a second call returns the same build step", async () => {
@@ -451,7 +326,6 @@ describe("B6: appendBuildStep (the badge moment)", () => {
       }),
     );
     const as = await asUser(t, w.scholarId);
-    expect((await as.query(api.units.get, { id: w.unitId }))?.canUnlockBuild).toBe(true);
     const { activityId } = await as.mutation(api.quests.appendBuildStep, {
       unitId: w.unitId,
     });
@@ -463,22 +337,6 @@ describe("B6: appendBuildStep (the badge moment)", () => {
     const { id } = await as.mutation(api.sessions.create, { activityId });
     expect(id).toBeTruthy();
     expect(optionB).toBeTruthy();
-  });
-
-  test("an UNsatisfied choice lesson still locks the build step after it", async () => {
-    const t = convexTest(schema, modules);
-    const w = await questWorld(t);
-    // Make the learning step's lesson a pick-1 choice with a second option.
-    await t.run(async (ctx) => {
-      await ctx.db.patch(w.lessonId, {
-        selectionMode: "choice",
-        choicePickCount: 1,
-      });
-    });
-    const as = await asUser(t, w.scholarId);
-    await expect(
-      as.mutation(api.sessions.create, { activityId: w.buildId }),
-    ).rejects.toThrow(/Unlocks when you finish/);
   });
 });
 

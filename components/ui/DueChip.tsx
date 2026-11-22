@@ -19,13 +19,17 @@
  *   loud  — overdue or due today. The two cases a scholar must act on tonight.
  *   quiet — due later. Real information, but not an alarm.
  *
+ * `closures` applies the "this week" display rule (TRA-581): work due on its
+ * week's last school day says "due this week" instead of a weekday. Still the
+ * same pill; only the phrase changes.
+ *
  * `floor` lets a surface RAISE the minimum emphasis (a printed take-home sheet
  * treats everything on it as tonight's business) without inventing a different
  * form. A surface may set a floor; it may never change the shape.
  */
 
 import { Box, Text } from "@chakra-ui/react";
-import { dueStatus } from "@/shared/institutionDay";
+import { homeworkDueStatus, type WeekClosure } from "@/shared/homeworkWeek";
 
 export type DueTone = "quiet" | "loud";
 
@@ -59,14 +63,18 @@ export function DueChip({
   nowMs,
   timeZone,
   floor,
+  closures,
 }: {
   dueAt: number | null | undefined;
   nowMs: number;
   timeZone: string;
   /** Raise the minimum tone for this surface. Never lowers a loud deadline. */
   floor?: DueTone;
+  /** The school's closures. Given, a due date on its week's last school day
+   *  reads "due this week" / "due next week" (shared/homeworkWeek.ts). */
+  closures?: readonly WeekClosure[];
 }) {
-  const due = dueStatus(dueAt, nowMs, timeZone);
+  const due = homeworkDueStatus(dueAt, nowMs, timeZone, closures);
   // No deadline is not an empty chip — it is no chip. An assigned activity with
   // no due date is a real, common case and must not render a hole.
   if (!due) return null;

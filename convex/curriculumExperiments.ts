@@ -53,6 +53,7 @@ import { preflightResultValidator } from "./lib/curriculumPreflightResult";
 import { meanProbe } from "./lib/curriculumProbe";
 import { MAX_TURNS, turnsForMinutes } from "./lib/rehearsalBudget";
 import { serializeUnitDesign } from "./lib/unitDesignSerializer";
+import { assertMakerActivityUnchanged } from "./lib/questStructure";
 
 // ─── Tutor prompt assembly (production builder) ──────────────────────
 
@@ -90,7 +91,6 @@ function assembleTutorPrompt(
   isFirstTurn: boolean,
 ): string {
   const promptContext: TutorPromptContext = {
-    teacherWhisper: null,
     readingLevel: profile.readingLevel,
     scholarName: profile.name,
     unitContext: activity.unitContext,
@@ -405,7 +405,11 @@ export const promoteVariant = authedMutation({
   handler: async (ctx, args) => {
     const variant = await ctx.db.get(args.variantId);
     if (!variant) throw new Error("Variant not found");
-    await requireUnitEditAccess(ctx, { activityId: variant.activityId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      activityId: variant.activityId,
+    });
+    // An approved Quest's maker keeps the brief its teacher approved (TRA-685).
+    assertMakerActivityUnchanged(unit, variant.activityId, user._id);
 
     // Apply the variant's systemPrompt to the live activity (trim → undefined
     // when empty, exactly as activities.update does for systemPrompt).

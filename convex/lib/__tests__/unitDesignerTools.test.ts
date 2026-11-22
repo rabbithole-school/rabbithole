@@ -62,17 +62,14 @@ const UNIT_CRUD = [
 // bot needs the same tools the global Curriculum Assistant has; without them
 // it truthfully refused "assign this unit to the Geckos".
 const ASSIGNMENT_TOOLS = [
-  "assign_unit",
-  "assign_activity_now",
+  "give",
   "list_assignments",
   "get_schedule",
   "get_assignment",
   "get_assignment_progress",
   "get_granule_coverage",
-  "schedule_activity",
   "reschedule_activity",
   "clear_activity",
-  "push_activity_now",
   "set_assignment_scholars",
   "add_assignment_scholars",
   "archive_assignment",
@@ -107,6 +104,16 @@ describe("assembleUnitDesignerTools", () => {
   test("teacher can also RUN the unit — the assignment group is registered", async () => {
     const got = await names(ROLES.TEACHER);
     for (const t of ASSIGNMENT_TOOLS) expect(got).toContain(t);
+    // The five give verbs `give` replaced (TRA-573) are gone.
+    for (const t of [
+      "assign_unit",
+      "assign_activity_now",
+      "push_activity_now",
+      "schedule_activity",
+      "dispatch_activity",
+    ]) {
+      expect(got).not.toContain(t);
+    }
     // Folding in a second toolset can only ever be safe if the names stay
     // unique — the Anthropic API rejects a duplicate tool name outright.
     expect(new Set(got).size).toBe(got.length);

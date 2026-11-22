@@ -13,6 +13,7 @@
 // Runtime note: dynamically imports betaTool, no static SDK import (keeps
 // node:* out of the edge bundle).
 
+import type { ClassPlanConfirmScope } from "./classPlanTools";
 import {
   internalMutation,
   internalQuery,
@@ -24,6 +25,7 @@ import type { Id } from "../_generated/dataModel";
 import { makeFunctionReference } from "convex/server";
 import { v } from "convex/values";
 import { isTeacherRole, type Role } from "./roles";
+import { SCHOLAR_LED_APP_BUILDING } from "../../shared/missionCopy";
 import {
   deliverableSchemaFragment,
   advanceRubricSchemaFragment,
@@ -32,16 +34,20 @@ import {
   parseAdvanceRubricArg,
   refusedRecoveryMessage,
   buildContractSchemaFragment,
-  allowSilenceSchemaFragment,
   assessesWritingMechanicsSchemaFragment,
   scholarEditSchemaFragment,
   scholarEditToEditAccess,
   WEB_SEARCH_TOOL,
   WEB_FETCH_TOOL,
+  UNIT_TITLE_DESCRIPTION,
+  UNIT_DESCRIPTION_DESCRIPTION,
   type RawBotDeliverable,
   type RawBotAdvanceRubric,
 } from "./botTools";
 import { parseBuildContractArg } from "./buildContract";
+import { unitSubjectFiledNote, unitSubjectNotAClass } from "./unitSubject";
+import { UNIT_GRADE_DESCRIPTION, unitGradeUnreadable } from "./unitGrade";
+import { toolErrorText } from "./toolLabels";
 import {
   makeScholarReadTools,
   makeListScholarGroupsTool,
@@ -445,6 +451,9 @@ function noLessonMatch(query: string, lessons: readonly { title: string }[]): st
   return `No lesson found matching "${query}".` + listTitles("Existing lesson titles", lessons);
 }
 
+const SCHOLAR_APP_STEP_REFUSAL =
+  "Not allowed: a scholar's Quest has no app-building steps (apps are built in activities a teacher assigns). Make it an online activity instead.";
+
 /**
  * Build the unit-designer (Curriculum Bot) toolset: scholar-read tools
  * (role-scoped) + unit-scoped CRUD over the given unit. Closed over the
@@ -465,9 +474,25 @@ export async function assembleUnitDesignerTools(
     /** Institution id/slug owning the open unit. Falls back to the caller's
      * home institution for transports that do not have a loaded unit yet. */
     institutionScope?: string;
+    /** This turn, for the class-plan writes (lib/classPlanTools.ts). Only the
+     *  unit page's own stream sets it; MCP and the bake job don't. */
+    classPlanConfirmScope?: ClassPlanConfirmScope;
   },
 ) {
-  const { teacherId, unitId, role, unitTitle, institutionScope } = opts;
+  const { teacherId, unitId, role, unitTitle, institutionScope, classPlanConfirmScope } = opts;
+  // A scholar's bake of their own Quest designs no app step while
+  // SCHOLAR_LED_APP_BUILDING is off: new apps come from a teacher's activity
+  // (shared/missionCopy.ts). Keyed on the unit, not the role, so curriculum
+  // staff on a teacher's unit keep app steps. Read once, on first use.
+  let ownQuestLookup: Promise<boolean> | null = null;
+  const scholarAppBuildRefused = async (): Promise<boolean> => {
+    if (SCHOLAR_LED_APP_BUILDING) return false;
+    ownQuestLookup ??= (async () =>
+      (await ctx.runQuery(internal.curriculumAssistant.unitAuthorScholarId, {
+        unitId,
+      })) === teacherId)();
+    return ownQuestLookup;
+  };
 
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
@@ -546,7 +571,10 @@ export async function assembleUnitDesignerTools(
     callerUserId: teacherId,
     currentUnit: unitTitle ? { id: unitId, title: unitTitle } : null,
     allowedScholarIds,
+    // Resolved just above: no id set here means an unrestricted lens.
+    scholarLensResolved: true,
     institutionScope,
+    classPlanConfirmScope,
   });
 
   const readUnitStructureTool = betaTool({
@@ -572,6 +600,12 @@ export async function assembleUnitDesignerTools(
       );
       if (!freshCtx) return "Unit not found.";
       const u = freshCtx.unit;
+      // The classes a subject is picked from, so update_unit gets it right
+      // the first time (TRA-723).
+      const subjectOptions = await ctx.runQuery(
+        internal.curriculumAssistant.unitSubjectOptionsInternal,
+        { unitId, at: Date.now() },
+      );
       const lessonLines = await Promise.all(
         freshCtx.lessons.map(async (l) => {
           const head = `  [${l.strand ?? "none"}] ${l.title}${l.processTitle ? ` (${l.processEmoji} ${l.processTitle}, processId: ${l.processId})` : " (no process)"} (lessonId: ${l._id})`;
@@ -622,6 +656,9 @@ export async function assembleUnitDesignerTools(
       const lines = [
         `Unit: ${u.title}`,
         u.subject ? `Subject: ${u.subject}` : null,
+        subjectOptions.length
+          ? `The school's classes (a subject is one of these): ${subjectOptions.join(", ")}`
+          : null,
         u.gradeLevel ? `Grade: ${u.gradeLevel}` : null,
         u.bigIdea ? `Big Idea: ${u.bigIdea}` : "Big Idea: (not set)",
         u.essentialQuestions?.length
@@ -645,10 +682,18 @@ export async function assembleUnitDesignerTools(
   const updateUnitTool = betaTool({
     name: "update_unit",
     description:
-      "Update unit fields: Big Idea, Essential Questions, Enduring Understandings, subject, grade level.",
+      "Update unit fields: title, description, Big Idea, Essential Questions, Enduring Understandings, subject, grade level. Send only the fields you are changing.",
     inputSchema: {
       type: "object" as const,
       properties: {
+        title: {
+          type: "string" as const,
+          description: UNIT_TITLE_DESCRIPTION,
+        },
+        description: {
+          type: "string" as const,
+          description: UNIT_DESCRIPTION_DESCRIPTION,
+        },
         bigIdea: { type: "string" as const, description: "The unit's Big Idea" },
         essentialQuestions: {
           type: "array" as const,
@@ -660,25 +705,44 @@ export async function assembleUnitDesignerTools(
           items: { type: "string" as const },
           description: "Enduring Understandings (replaces all existing)",
         },
-        subject: { type: "string" as const, description: "Subject area" },
-        gradeLevel: { type: "string" as const, description: "Grade level" },
+        subject: {
+          type: "string" as const,
+          description:
+            "The one class on the school's timetable this unit belongs to, by the class's name. read_unit_structure lists the school's classes.",
+        },
+        gradeLevel: { type: "string" as const, description: UNIT_GRADE_DESCRIPTION },
       },
       required: [] as const,
     },
     run: async (input) => {
       const updates: Record<string, unknown> = {};
+      if (input.title !== undefined) updates.title = input.title;
+      if (input.description !== undefined) updates.description = input.description || null;
       if (input.bigIdea !== undefined) updates.bigIdea = input.bigIdea || null;
       if (input.essentialQuestions !== undefined) updates.essentialQuestions = input.essentialQuestions;
       if (input.enduringUnderstandings !== undefined) updates.enduringUnderstandings = input.enduringUnderstandings;
       if (input.subject !== undefined) updates.subject = input.subject || null;
       if (input.gradeLevel !== undefined) updates.gradeLevel = input.gradeLevel || null;
 
-      await ctx.runMutation(internal.curriculumAssistant.updateUnitInternal, {
-        unitId,
-        ...updates,
-      });
+      let result;
+      try {
+        result = await ctx.runMutation(internal.curriculumAssistant.updateUnitInternal, {
+          unitId,
+          ...updates,
+        });
+      } catch (e) {
+        return `Could not update the unit: ${toolErrorText(e)}`;
+      }
+      if (result.kind === "subject_not_a_class") {
+        return unitSubjectNotAClass("update_unit", result.given, result.options);
+      }
+      if (result.kind === "grade_unreadable") {
+        return unitGradeUnreadable("update_unit", result.given);
+      }
       emit({ toolComplete: { name: "update_unit", result: "Unit updated" } });
-      return "Unit updated successfully.";
+      return result.filedUnder
+        ? `Unit updated successfully. ${unitSubjectFiledNote(result.filedUnder)}`
+        : "Unit updated successfully.";
     },
   });
 
@@ -904,7 +968,7 @@ export async function assembleUnitDesignerTools(
       "  • advanceRubric { criteria } — when the learning happens IN CONVERSATION with NO produced artifact: a Socratic discussion or an interactive map/geography discovery activity. The tutor grades the scholar's talk + map interactions against the criteria and a full pass completes the activity. For a geography/map activity, use advanceRubric when the learning is the discovery sequence; use deliverable kind 'map' only when the saved map itself is the product scholars should check or send.\n\n" +
       "Make criteria DIMENSIONAL (specificity, length, structure, evidence; or 'located the places', 'explained the why', 'transferred the pattern') — not procedural (drafted, revised, published). Never write a criterion about spelling, punctuation, capitalization, handwriting or typing unless the activity is explicitly about spelling or typing (scholars may dictate, and dictated work earns full credit). Give each a short label and put the concrete quality bar in its description. Vague criteria produce vague verdicts.\n\n" +
       "Offline activities (kind='offline') are teacher-planned classroom moments — lab demos, discussions, worksheets. No tutor session or evaluation shape.\n\n" +
-      "App activities (kind='app'; 'vibecode' is the older name) are online activities with app settings: scholars build or use an app in the full-screen app builder, and the app is the deliverable (no other evaluation shape). Any online activity's tutor can also build a scholar a side app on request, so make an app activity only when the app IS the work. The systemPrompt is the BUILD BRIEF, and you ALWAYS also write a buildContract (2–3 testable invariants, the scholar's freedoms, one gate) with allowSilence: true — see the buildContract property. Never ask the teacher how off-topic scholar ideas should be handled. Set scholarEdit too: `build` when scholars make/remix the app (the default when omitted), `play` when they only use it — ask the teacher one short question first if it's genuinely unclear.\n\n" +
+      "App activities (kind='app'; 'vibecode' is the older name) are online activities with app settings: scholars build or use an app in the full-screen app builder, and the app is the deliverable (no other evaluation shape). Any online activity's tutor in a teacher's unit can also build a scholar a side app on request (not in a scholar's Quest), so make an app activity only when the app IS the work. The systemPrompt is the BUILD BRIEF, and you ALWAYS also write a buildContract (2–3 testable invariants, the scholar's freedoms, and a gate that is the one-line mission scholars see, an open goal like 'Understand escape velocity') — see the buildContract property. Before you write them, know what thinking the app should prompt (what scholars should figure out, explain or test by building it): when the teacher names only a topic or a product ('an app about volcanoes', 'have them build their world'), ask one short question first, offering two or three concrete options from the unit. 'Not a game' or 'not gamified' rules out points, scores, levels, timers, enemies and win/lose screens, never cause and effect: the world can still change because of rules the scholar sets (crops grow, the river floods); ask if you can't tell whether the teacher wants it to stay still. Never ask the teacher how off-topic scholar ideas should be handled. Set scholarEdit too: `build` when scholars make/remix the app (the default when omitted), `play` when they only use it — ask the teacher one short question first if it's genuinely unclear.\n\n" +
       "TWO AUDIENCES — keep them separate: `description` is teacher-facing (design intent, facilitation notes; the tutor also reads it) and is NEVER shown to scholars; `scholarDescription` is the scholar-facing card blurb, written TO the scholar in the 2nd person and free of any pedagogy/assessment framing. Author both when you know them.\n\n" +
       "CONVERSATION RECIPE (recipe='baseline' | 'exitTicket'): mark an activity as the unit's pre/post understanding assessment of its essential questions / enduring understandings. 'baseline' opens the unit (surface current thinking, no teaching); 'exitTicket' closes it (revisit the EQs, show growth). Works for BOTH kinds: an ONLINE recipe runs through the tutor; an OFFLINE recipe assesses the scholar's uploaded written work (typed or scanned). Both feed the teacher's Understanding grid. Only set a recipe when the teacher wants a stealth assessment activity — most activities have no recipe. Requires the unit to have essential questions / enduring understandings set.",
     inputSchema: {
@@ -923,7 +987,6 @@ export async function assembleUnitDesignerTools(
         advanceRubric: advanceRubricSchemaFragment(),
         recipe: { type: "string" as const, enum: ["baseline", "exitTicket"] as const, description: "Optional. Marks this as the unit's baseline (opening) or exit-ticket (closing) EQ/EU assessment. Online → tutor-run; offline → assesses uploaded written work. Omit for a normal activity." },
         buildContract: buildContractSchemaFragment(),
-        allowSilence: allowSilenceSchemaFragment(),
         assessesWritingMechanics: assessesWritingMechanicsSchemaFragment(),
         scholarEdit: scholarEditSchemaFragment(),
       },
@@ -936,6 +999,7 @@ export async function assembleUnitDesignerTools(
       // kind "vibecode", which every write path normalizes to an online
       // activity with app settings (TRA-519).
       const isApp = input.kind === "app" || input.kind === "vibecode";
+      if (isApp && (await scholarAppBuildRefused())) return SCHOLAR_APP_STEP_REFUSAL;
       const kind = (isApp ? "vibecode" : input.kind) as
         | "online"
         | "offline"
@@ -948,9 +1012,10 @@ export async function assembleUnitDesignerTools(
       const advanceRubric = parseAdvanceRubricArg(
         input.advanceRubric as RawBotAdvanceRubric | undefined,
       );
+      let existed = false;
       try {
         const rawContract = parseBuildContractArg(input.buildContract);
-        await ctx.runMutation(internal.activities.upsertInternal, {
+        ({ existed } = await ctx.runMutation(internal.activities.upsertInternal, {
           parent: { kind: "lesson", lessonId: f.lesson._id },
           match: { byTitle: input.title },
           title: input.title,
@@ -972,11 +1037,10 @@ export async function assembleUnitDesignerTools(
           recipe: input.recipe as "baseline" | "exitTicket" | undefined,
           // The mutation normalizes per activity shape (lib/buildContract.ts).
           buildContract: rawContract ?? undefined,
-          allowSilence: input.allowSilence === true ? true : undefined,
           assessesWritingMechanics:
             input.assessesWritingMechanics === true ? true : undefined,
           editAccess: scholarEditToEditAccess(input.scholarEdit),
-        });
+        }));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         emit({
@@ -1009,6 +1073,19 @@ export async function assembleUnitDesignerTools(
           input.kind === "online"
             ? " NOTE: no system prompt was saved yet — call generate_activity_prompt to give the tutor its prompt before you tell the teacher it's ready."
             : " NOTE: no build brief was saved yet — set the systemPrompt (the build brief) before you tell the teacher it's ready.";
+      }
+      // A play-only app has no app until the teacher builds one; rehearsing
+      // it is that build (lib/appActivity.ts rehearsalBuildRequest).
+      const editAccess = scholarEditToEditAccess(input.scholarEdit);
+      if (
+        isApp &&
+        !existed &&
+        gotPrompt &&
+        editAccess !== undefined &&
+        editAccess !== "always"
+      ) {
+        note =
+          " NOTE: scholars only play this app, and it isn't built yet. Tell the teacher to rehearse the activity: the build partner builds it from this brief and saves it as the app scholars open.";
       }
       if (input.kind === "simulator") {
         note =
@@ -1075,7 +1152,6 @@ export async function assembleUnitDesignerTools(
         durationMinutes: { type: "number" as const, description: "New duration in minutes" },
         deliverable: deliverableSchemaFragment(),
         buildContract: buildContractSchemaFragment(),
-        allowSilence: allowSilenceSchemaFragment(),
         assessesWritingMechanics: assessesWritingMechanicsSchemaFragment(),
         scholarEdit: scholarEditSchemaFragment(),
         recipe: { type: "string" as const, enum: ["baseline", "exitTicket", "none"] as const, description: "Conversation recipe: 'baseline' (opens unit) / 'exitTicket' (closes unit) marks this as an EQ/EU assessment; 'none' clears it. Works for online (tutor-run) and offline (assesses uploaded work)." },
@@ -1099,6 +1175,7 @@ export async function assembleUnitDesignerTools(
         // app (or vibecode) → the write path's app-activity input; online on an
         // app activity explicitly turns the app settings off (TRA-519).
         if (input.kind === "app" || input.kind === "vibecode") {
+          if (await scholarAppBuildRefused()) return SCHOLAR_APP_STEP_REFUSAL;
           patch.kind = "vibecode";
         } else {
           patch.kind = input.kind;
@@ -1114,7 +1191,6 @@ export async function assembleUnitDesignerTools(
       if (deliverable !== undefined) patch.deliverable = deliverable;
       if (input.recipe !== undefined)
         patch.recipe = input.recipe === "none" ? null : input.recipe;
-      if (input.allowSilence !== undefined) patch.allowSilence = input.allowSilence;
       if (input.assessesWritingMechanics !== undefined)
         patch.assessesWritingMechanics = input.assessesWritingMechanics === true;
       try {

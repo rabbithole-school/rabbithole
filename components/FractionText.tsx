@@ -33,6 +33,7 @@ import {
   type StaticRadicalNode,
 } from "@/shared/fractions";
 import { MathText } from "@/components/MathText";
+import { hasStemMath, latexToPlainSpeech, renderableMathLatex, splitStemMath } from "@/shared/stemMath";
 
 const FRAC_SCALE = 0.82;
 
@@ -97,6 +98,26 @@ export function FractionText({
  * whole part and its stack and split the number in half.
  */
 function renderNodes(value: string, fontSize: number): ReactNode[] {
+  // Typeset `\( … \)` / `\[ … \]` spans (shared/stemMath) go to KaTeX; the
+  // prose between them takes the usual path. No span ⇒ exactly the old render.
+  if (hasStemMath(value)) {
+    return splitStemMath(value).map((segment, i) =>
+      segment.kind === "math" ? (
+        <MathText
+          key={`m${i}`}
+          latex={renderableMathLatex(segment.latex, segment.display)}
+          ariaLabel={latexToPlainSpeech(segment.latex)}
+          display={segment.display}
+        />
+      ) : (
+        <Fragment key={`t${i}`}>{renderProse(segment.text, fontSize)}</Fragment>
+      ),
+    );
+  }
+  return renderProse(value, fontSize);
+}
+
+function renderProse(value: string, fontSize: number): ReactNode[] {
   const nodes = parsePracticeText(value);
   const out: ReactNode[] = [];
   for (let i = 0; i < nodes.length; i++) {

@@ -11,11 +11,14 @@
 // placement gate, and the Socratic "talk it through" handoff stay in the surface
 // files — they call into this core. Anything that legitimately DIFFERS between
 // web and native (e.g. the keypad grid: native adds a decimal `.` key the web
-// pad omits) is deliberately NOT modeled here. This module imports nothing so it
-// resolves standalone under Metro when vendored.
+// pad omits) is deliberately NOT modeled here. Its only import is the keypad package's
+// flat-pad rules; native/scripts/sync-vendor.js vendors that package next to
+// this file and rewrites the path, so the copy still resolves under Metro.
+
+import type { PadAnswerType } from "../react-native-math-keypad/model/flatPad";
 
 /** The numeric-ish answer types that render a tappable keypad (not MC / manipulative). */
-export type PadAnswerType = "integer" | "decimal" | "fraction" | "expression";
+export type { PadAnswerType };
 
 /** The full served-item answer-type union — mirrors the server's `ServedItem`
  *  (convex/lib/practice/session.ts), widened for stored manipulative items. */
@@ -459,154 +462,23 @@ export const STREAK_PULSE_EVERY = 3;
 /** Delay (ms) before the second success pulse on a streak milestone. */
 export const STREAK_PULSE_DELAY_MS = 140;
 
-export function isPadAnswerType(t: string): t is PadAnswerType {
-  return t === "integer" || t === "decimal" || t === "fraction" || t === "expression";
-}
-
-/** Expression answers (whole-number division) can carry a remainder → an `R` key. */
-export function padShowRemainder(t: PadAnswerType): boolean {
-  return t === "expression";
-}
-
-/** Numeric-valued pad types (integer/decimal/fraction) can lead with a sign
- *  toggle; expression (the "7 R 2" remainder form) never needs one. */
-export function padShowSign(t: PadAnswerType): boolean {
-  return t !== "expression";
-}
-
-/** Decimal items get a wide `/ (fraction)` accessory key (fraction/expression
- *  pads already carry `/` in the grid). The grader compares numeric answers by
- *  VALUE (105/16 ≡ 6.5625 in `answersEqual`), but before this key the decimal
- *  pad offered no way to ENTER a fraction — a scholar who worked a problem in
- *  fourths had to convert to decimal notation just to type the answer (pretest
- *  audit, 2026-07-13). Representation must never gate a correct answer. */
-export function padShowFraction(t: PadAnswerType): boolean {
-  return t === "decimal";
-}
-
-/** Which flat pad types accept a fraction slash `/` at all — the same set the
- *  hardware-keyboard allowlist (`sanitizePadInput`) lets through and native's
- *  grid carries. Integer answers never take a slash. Web reads this to decide
- *  whether to offer an on-screen `/` key (its flat surface has no number grid,
- *  so a touch/embedded scholar otherwise has no way to enter a fraction —
- *  parity with the native pad's `/` key). */
-export function padAcceptsFraction(t: PadAnswerType): boolean {
-  return t === "decimal" || t === "fraction" || t === "expression";
-}
-
-/**
- * Apply one keypad press to the current input string. Backspace trims one char,
- * `R` inserts a spaced remainder token (so the submitted string matches the
- * expression `"7 R 2"` form the server's `parseAnswer` grades), `±` (the pad's
- * dedicated sign key) or a hardware-typed `-` TOGGLES a leading minus sign —
- * never inserts one mid-number, and pressing it again removes it — any other
- * key appends. The returned value is fed straight to `submitAnswer`.
- */
-export function applyKey(prev: string, key: string): string {
-  if (key === "⌫") return prev.slice(0, -1);
-  if (key === "R") return `${prev} R `;
-  if (key === "±" || key === "-") {
-    return prev.startsWith("-") ? prev.slice(1) : `-${prev}`;
-  }
-  return prev + key;
-}
-
-/** A synchronously updated input snapshot for controls whose rendered state may
- * commit after a rapid final-key + submit sequence. */
-export type InputBuffer = { current: string };
-
-export function setInputBuffer(buffer: InputBuffer, value: string): string {
-  buffer.current = value;
-  return value;
-}
-
-export function applyKeyToInputBuffer(buffer: InputBuffer, key: string): string {
-  return setInputBuffer(buffer, applyKey(buffer.current, key));
-}
-
-/**
- * Filter raw text (e.g. from a HARDWARE keyboard on the native pad surface) down
- * to only the characters a given pad answer type can legitimately contain, so a
- * physical keyboard enters the same values the on-screen pad produces. Mirrors
- * the on-screen pad's key set — digits everywhere; `.` for decimal only; `/` for
- * decimal/fraction/expression; the remainder token (`R` + spaces) for expression — plus
- * a LEADING `-` sign for negatives (web's practice keydown handler also accepts
- * `-`), never mid-number, matching the on-screen `±` key's leading-only rule.
- * A lowercase `r` is normalized to `R` so a HW-typed "7 r 2" grades like the
- * pad's "7 R 2". The native pad is otherwise touch-only (no soft keyboard), so
- * this only runs for physically-typed characters.
- *
- * `opts.allowUnit` is the UNIT-BEARING item's carve-out: when the item asks for
- * an answer "in cubic centimeters" the unit IS part of the answer, so the
- * numeric filter would otherwise make it literally untypeable (it drops every
- * letter). It widens the numeric charset with letters, spaces, and the exponent
- * glyphs a unit can carry (`^`, `²`, `³`) — nothing else. Omit `opts` and the
- * behavior is byte-identical to before, so every existing caller is unchanged.
- */
-export function sanitizePadInput(
-  answerType: PadAnswerType,
-  raw: string,
-  opts?: { allowUnit?: boolean },
-): string {
-  const allowUnit = opts?.allowUnit === true;
-  let out = "";
-  for (const ch of raw) {
-    if (ch >= "0" && ch <= "9") out += ch;
-    else if (ch === "-" && out === "") out += ch;
-    else if (ch === "." && answerType === "decimal") out += ch;
-    else if (ch === "/" && padAcceptsFraction(answerType)) out += ch;
-    else if (answerType === "expression" && (ch === "R" || ch === "r")) out += "R";
-    else if (answerType === "expression" && /[A-Za-z()+*^.\s]/.test(ch)) out += ch;
-    // The unit tail: letters + spaces + exponent glyphs + the degree sign.
-    // Applied AFTER the numeric charset above, so digits/sign/separators keep
-    // their exact per-type rules and only the unit vocabulary is added on top.
-    else if (allowUnit && /[a-zA-Z ^²³°]/.test(ch)) out += ch;
-  }
-  return out;
-}
-
-/**
- * The on-screen pad's unit keys for a unit-bearing item, derived from the
- * served display unit ("cm³" → ["cm", "cm²", "cm³"]). The pad deliberately
- * offers the whole DIMENSION FAMILY of the base unit, not just the expected
- * one: picking length vs. area vs. volume is part of the answer (a single
- * pre-filled key would type the unit for the scholar and grade nothing).
- * Kept here (not answers.ts) because this module must import nothing.
- */
-export function unitKeyFamily(displayUnit: string): string[] {
-  // Degrees is dimensionless — there is no ² / ³ member to choose between, so
-  // the family is the single ° key (the cm/m branch below would wrongly offer
-  // "°²" / "°³"). Kept as a literal here because this module imports nothing.
-  if (displayUnit.trim() === "°") return ["°"];
-  const base = displayUnit.replace(/[²³]/g, "").trim();
-  if (!base) return [];
-  return [base, `${base}²`, `${base}³`];
-}
-
-/**
- * A trailing unit token as it can exist mid-typing: letters, then EITHER a
- * hardware-typed caret exponent (`^`, with or without its digit yet — `cm^`
- * is a valid in-progress state) OR an already-superscripted digit (`²`/`³`) —
- * or a lone degree sign (`°`). Mirrors answers.ts's `GENERIC_UNIT_SUFFIX`,
- * which this module can't import (it must import nothing so it vendors as a
- * flat copy) — kept in sync by the shared round-trip test in practiceLoop.test.ts.
- */
-const TRAILING_UNIT_RE = /\s*(?:[a-zA-Z]+\s*(?:\^\s*[0-9]*|[²³])?|°)\s*$/;
-
-/**
- * Apply a tapped unit key to the current input: replace any trailing unit
- * token (letters/spaces/exponents in EITHER the caret or superscript form, OR a
- * degree sign) with the tapped one, so switching cm² → cm³ — or cm^2 → cm³ — is
- * one tap, never a backspace dance, and re-tapping ° is idempotent. A bare unit
- * with no number yet is allowed through — the empty-input submit guard already
- * covers it. Degrees binds to the number with no space ("65°"); every other
- * unit keeps the "112 cm³" spacing.
- */
-export function applyUnitKey(prev: string, unitDisplay: string): string {
-  const numeric = prev.replace(TRAILING_UNIT_RE, "").trim();
-  if (numeric === "") return unitDisplay;
-  return unitDisplay === "°" ? `${numeric}${unitDisplay}` : `${numeric} ${unitDisplay}`;
-}
+// The flat pad's rules (which keys a type shows, what a key does, the
+// hardware-keyboard filter, unit keys) live in the MIT-licensed keypad package,
+// packages/react-native-math-keypad/src/model/flatPad.ts. Edit them there.
+export {
+  applyKey,
+  applyKeyToInputBuffer,
+  applyUnitKey,
+  isPadAnswerType,
+  padAcceptsFraction,
+  padShowFraction,
+  padShowRemainder,
+  padShowSign,
+  sanitizePadInput,
+  setInputBuffer,
+  unitKeyFamily,
+  type InputBuffer,
+} from "../react-native-math-keypad/model/flatPad";
 
 /**
  * The two lines a unit-bearing item can say about its unit, here in the
@@ -625,6 +497,33 @@ export function unitOutcomeNudge(outcome: "missing" | "wrong" | undefined): stri
   if (outcome === "wrong") return UNIT_WRONG_NUDGE;
   if (outcome === "missing") return UNIT_MISSING_NUDGE;
   return null;
+}
+
+/**
+ * The "so close" lines for a right VALUE in the wrong FORM — an item whose skill
+ * is the representation ("Simplify 8/32", "Write 82/100 as a decimal"). Like
+ * `UNIT_WRONG_NUDGE` these only ever come from the server's grade; the attempt
+ * is still a miss.
+ */
+export const FORM_LOWEST_TERMS_NUDGE = "Same value — now write it in lowest terms.";
+export const FORM_DECIMAL_NUDGE = "Same value — now write it as a decimal.";
+
+/** The nudge for a graded `formOutcome`, or null when the form wasn't the problem. */
+export function formOutcomeNudge(
+  outcome: "notLowestTerms" | "notDecimal" | undefined,
+): string | null {
+  if (outcome === "notLowestTerms") return FORM_LOWEST_TERMS_NUDGE;
+  if (outcome === "notDecimal") return FORM_DECIMAL_NUDGE;
+  return null;
+}
+
+/** The one "so close" line a graded miss earns — the unit's or the form's (a
+ *  grade carries at most one) — or null for an ordinary miss. */
+export function nearMissNudge(grade: {
+  unitOutcome?: "missing" | "wrong";
+  formOutcome?: "notLowestTerms" | "notDecimal";
+}): string | null {
+  return unitOutcomeNudge(grade.unitOutcome) ?? formOutcomeNudge(grade.formOutcome);
 }
 
 /** The answer string submitted for a tapped multiple-choice option (its index). */

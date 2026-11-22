@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * The Now | Day | Week | List segmented toggle for the Assignments tab. Lives in
+ * The Now | Day | Week | List | Homework segmented toggle for the Assignments tab. Lives in
  * its own file because every surface renders it: the schedule folds it into its
  * consolidated header rail, and the Now / List views show it in a thin bar above
  * the finder. A thin wrapper over the shared {@link ./ui/ViewToggle} lens
@@ -11,19 +11,22 @@
  * live cross-section, Day/Week are the timetable, and List is the exhaustive
  * assignment/standing-practice inventory (the finder + Run page).
  */
-import { CalendarDot, GridFour, Lightning, ListBullets } from "@phosphor-icons/react";
+import { BookOpen, CalendarDot, GridFour, Lightning, ListBullets } from "@phosphor-icons/react";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 
-export type AssignmentsView = "now" | "day" | "week" | "list";
+export type AssignmentsView = "now" | "day" | "week" | "list" | "homework";
 
 export function AssignmentsViewToggle({
   view,
   onChange,
   includeNow = true,
+  includeHomework = true,
 }: {
   view: AssignmentsView;
   onChange: (v: AssignmentsView) => void;
   includeNow?: boolean;
+  /** The Homework planner (TRA-581): teachers' week-by-week homework. */
+  includeHomework?: boolean;
 }) {
   const items = [
     ...(includeNow
@@ -32,6 +35,9 @@ export function AssignmentsViewToggle({
     { value: "day" as const, label: "Day", icon: <CalendarDot size={14} /> },
     { value: "week" as const, label: "Week", icon: <GridFour size={14} /> },
     { value: "list" as const, label: "List", icon: <ListBullets size={14} /> },
+    ...(includeHomework
+      ? [{ value: "homework" as const, label: "Homework", icon: <BookOpen size={14} /> }]
+      : []),
   ];
 
   return (

@@ -314,8 +314,6 @@ export const sessions: SeedSession[] = [
     pulseScore: 5,
     analysisSummary:
       "Kalei demonstrated strong intuitive fraction sense — immediately articulated the inverse relationship between denominator size and piece size. Ready for equivalence without scaffolding.",
-    teacherWhisper:
-      "Push him straight to the hard version — he already grasps denominator meaning. Don't let him coast. Ask about equivalent fractions before he asks you.",
     messages: [
       {
         role: "user",

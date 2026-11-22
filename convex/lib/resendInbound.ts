@@ -99,11 +99,52 @@ export type ReceivedEmail = {
   from: string;
   text: string | null;
   html: string | null;
+  /** An out-of-office or other automatic reply (RFC 3834), by its headers.
+   *  False when the response carries no headers. */
+  autoReply: boolean;
 };
 
-type ReceivedEmailResponse = Omit<ReceivedEmail, "receivedFor"> & {
+type ReceivedEmailResponse = Omit<ReceivedEmail, "receivedFor" | "autoReply"> & {
   received_for?: unknown;
+  headers?: unknown;
 };
+
+/** Header name (lowercased) → value, from either an object or a list of
+ *  `{ name, value }` — whichever shape the response uses. */
+function headerMap(raw: unknown): Map<string, string> {
+  const headers = new Map<string, string>();
+  const add = (name: unknown, value: unknown) => {
+    if (typeof name === "string" && typeof value === "string") {
+      headers.set(name.toLowerCase(), value);
+    }
+  };
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (entry && typeof entry === "object") {
+        const { name, value } = entry as { name?: unknown; value?: unknown };
+        add(name, value);
+      }
+    }
+  } else if (raw && typeof raw === "object") {
+    for (const [name, value] of Object.entries(raw)) add(name, value);
+  }
+  return headers;
+}
+
+/** Only explicit automatic-reply markers count; a missing header never does. */
+export function isAutoReply(raw: unknown): boolean {
+  const headers = headerMap(raw);
+  // RFC 3834 allows parameters and comments after the keyword ("no; x=y",
+  // "no (a person wrote this)"): compare the keyword alone.
+  const autoSubmitted = headers
+    .get("auto-submitted")
+    ?.trim()
+    .toLowerCase()
+    .split(/[\s;(]/, 1)[0];
+  if (autoSubmitted && autoSubmitted !== "no") return true;
+  if (headers.has("x-autoreply") || headers.has("x-autorespond")) return true;
+  return headers.get("precedence")?.trim().toLowerCase() === "auto_reply";
+}
 
 /** Resend webhooks contain metadata only; retrieve the actual message body. */
 export async function retrieveReceivedEmail(
@@ -149,6 +190,7 @@ export async function retrieveReceivedEmail(
       : [],
     text: typeof email.text === "string" ? email.text : null,
     html: typeof email.html === "string" ? email.html : null,
+    autoReply: isAutoReply(email.headers),
   };
 }
 
@@ -158,7 +200,7 @@ export function findThreadReplyAddress(
 ): string | null {
   return (
     [...email.receivedFor, ...email.to, ...email.cc, ...email.bcc].find(
-      (address) => /reply\+[a-z0-9]+@/i.test(address),
+      (address) => /reply\+[a-z0-9]+(?:\.[a-z0-9]+)?@/i.test(address),
     ) ?? null
   );
 }

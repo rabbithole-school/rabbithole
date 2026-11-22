@@ -4,6 +4,7 @@ import {
   type ImageContentPart,
   type TextContentPart,
 } from "./imageBytes";
+import { withoutAppStateDefaults } from "../../shared/appStateDefaults";
 
 export const APP_SNAPSHOT_MAX_BYTES = 400 * 1024;
 export const APP_SNAPSHOT_MARKER =
@@ -110,12 +111,27 @@ export type RenderCheckAnswer = {
   consoleLines?: string[];
 };
 
+export function sanitizeRenderCheckStateJson(stateJson: string): string {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(stateJson);
+  } catch (error) {
+    if (error instanceof SyntaxError) return stateJson;
+    throw error;
+  }
+  return doc !== null && typeof doc === "object" && !Array.isArray(doc)
+    ? JSON.stringify(withoutAppStateDefaults(doc))
+    : stateJson;
+}
+
 export function buildRenderCheckToolResult(
   toolResult: string,
   answer: RenderCheckAnswer,
   imagePart: ImageContentPart | null,
 ): Array<TextContentPart | ImageContentPart> {
-  const stateJson = answer.stateJson?.trim() || "{}";
+  const stateJson = sanitizeRenderCheckStateJson(
+    answer.stateJson?.trim() || "{}",
+  );
   const stateText =
     stateJson.length <= RENDER_CHECK_STATE_MAX_CHARS
       ? stateJson

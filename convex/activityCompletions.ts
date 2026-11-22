@@ -21,12 +21,23 @@ import {
   scholarCanSelfMarkHomeworkKind,
   teacherCanMarkCompleteForGroup,
 } from "./lib/activityCompletionCore";
-import { entryTargetsScholar, isLiveEntry, targetsScholar } from "./assignments";
+import {
+  entryTargetsScholar,
+  isLiveEntry,
+  targetsScholar,
+  timeZoneForAssignment,
+} from "./assignments";
 import { isConversationCompletable } from "./lib/activityCompletionEligibility";
+import { readSchedule } from "./lib/scheduleStore";
+import { isOpenUntil } from "../shared/openUntil";
 import type { Id, Doc } from "./_generated/dataModel";
 import { fanOutScholarEvent, fanOutClassEvent, scholarDeepLink } from "./slackNotifications";
 import { resolveAssignmentClass } from "./classResolver";
-import { effectiveActivityKind } from "../shared/appSurface";
+import { effectiveActivityKind, isAppActivity } from "../shared/appSurface";
+import {
+  BARE_DONE_DECLARATION_GUIDANCE,
+  isBareDoneDeclaration,
+} from "./lib/activityCompletionTool";
 
 /**
  * List the scholar's completed activities within a unit. Returns an array of
@@ -346,6 +357,38 @@ export const markCompleteFromTool = internalMutation({
       );
     }
 
+    // An app activity never closes on a scholar's bare "I'm done": that is a
+    // declaration, not the work (lib/activityCompletionTool.ts). What
+    // "complete" should mean for an app activity is still open (2026-11);
+    // this only stops the declaration itself from being the trigger.
+    if (isAppActivity(activity)) {
+      // The scholar's own newest line: an app's askTutor row, a staff-typed
+      // row and the `<start>` marker are role "user" too, and none is
+      // something the scholar said (the same filter as
+      // shared/appTutorRequest.ts hasPriorScholarAuthoredTurn).
+      let latest: Doc<"messages"> | null = null;
+      for await (const row of ctx.db
+        .query("messages")
+        .withIndex("by_session_role", (q) =>
+          q.eq("sessionId", args.sessionId).eq("role", "user"),
+        )
+        .order("desc")) {
+        if (
+          row.inputModality === "app" ||
+          row.byStaff ||
+          row.content.trim() === "<start>" ||
+          row.content.trim() === ""
+        ) {
+          continue;
+        }
+        latest = row;
+        break;
+      }
+      if (latest && isBareDoneDeclaration(latest.content)) {
+        return refuse("bare_done_declaration", BARE_DONE_DECLARATION_GUIDANCE);
+      }
+    }
+
     // Run the SAME single completion cascade as every other path (canonical
     // row → unit badge → session card state incl. activityCompletedAt +
     // processState fast-forward → seed/quest completion), so a tutor completion
@@ -385,7 +428,7 @@ type ScholarHomeworkRefusal = {
  * off answers "was this ever mine?" for an ended entry.
  */
 export async function resolveScholarHomework(
-  ctx: Pick<QueryCtx, "db">,
+  ctx: QueryCtx,
   scholarId: Id<"users">,
   assignmentId: Id<"assignments">,
   activityId: Id<"activities">,
@@ -408,10 +451,19 @@ export async function resolveScholarHomework(
       message: "This homework isn't assigned to you.",
     };
   }
-  const entries = (assignment.activitySchedule ?? []).filter(
+  // Offline work given "Open until a date" is the scholar's own-time work
+  // too (shared/openUntil.ts `isOnOwnTime`): it opens the same read-only page
+  // (sessions.openOfflineHomework) and is finished the same way. Online
+  // open-until work keeps finishing through its own session.
+  const timeZone =
+    activity.kind === "offline"
+      ? await timeZoneForAssignment(ctx, assignment)
+      : null;
+  const entries = (await readSchedule(ctx, assignment)).filter(
     (entry) =>
       String(entry.activityId) === String(activityId) &&
-      entry.mode === "homework" &&
+      (entry.mode === "homework" ||
+        (timeZone !== null && isOpenUntil(entry, timeZone))) &&
       entryTargetsScholar(entry, scholarId),
   );
   if (entries.length === 0) {
@@ -653,6 +705,17 @@ export const unmarkComplete = authedMutation({
         if (completedSession?.assignmentId === undefined) existing ??= c;
       }
     }
+    // The session the caller is looking at is no longer done, even when the
+    // completion row now points at a NEWER session for the same activity
+    // (upsertActivityCompletion moves `sessionId` to the latest finish) or is
+    // already gone. Without this, "Mark not done" on the older session
+    // reopened the newer one and left the open one stamped done.
+    if (session?.activityCompletedAt) {
+      await ctx.db.patch(session._id, {
+        activityCompletedAt: undefined,
+        activityCompletionMessageId: undefined,
+      });
+    }
     if (!existing) return;
     const inferredBareIds =
       session?.assignmentId && session.unitId
@@ -723,7 +786,13 @@ async function coreMarkCompleteForGroup(
   if (!activity) throw new Error("Activity not found");
   // Lesson-anchored, or the one lesson-less exception (ad-hoc offline/web
   // homework) — see teacherCanMarkCompleteForGroup.
-  if (!teacherCanMarkCompleteForGroup(assignment, activity)) {
+  if (
+    !teacherCanMarkCompleteForGroup(
+      assignment,
+      activity,
+      await readSchedule(ctx, assignment),
+    )
+  ) {
     throw new Error(
       "markCompleteForGroup is only valid for lesson-anchored activities or ad-hoc offline/web homework",
     );

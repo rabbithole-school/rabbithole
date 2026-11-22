@@ -37,9 +37,6 @@ export interface PushForDisplay {
   endsAt: number | null;
 }
 
-/** Fixed section heading. Not authored per-push. */
-export const FOCUS_STRIP_HEADING = "Right now";
-
 /**
  * The lead glyph for a card. Chosen from the TARGET, never from the note —
  * a teacher shouldn't be able to make a video look like an activity.
@@ -68,6 +65,45 @@ export function pushActionLabel(
 }
 
 /**
+ * "until 10:20 AM" in the school's time zone, or null when open-ended. A
+ * scholar's pushed card states when it ends as a time, like the other Home
+ * rows, never a ticking countdown.
+ */
+export function pushUntilLabel(
+  endsAt: number | null,
+  timeZone: string,
+): string | null {
+  if (endsAt == null) return null;
+  try {
+    return `until ${new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(endsAt))}`;
+  } catch {
+    return null;
+  }
+}
+
+/** The card's meta line: the teacher's note, then when it ends.
+ *  "Graph the tide data · until 10:20 AM". An open-until give passes its
+ *  pill wording (shared/openUntil.ts `openUntilPhrase`) as `openUntilLabel`,
+ *  so it reads "Open until Fri" like the rows beside it, never a clock time. */
+export function pushMetaLine(
+  push: Pick<PushForDisplay, "note" | "endsAt">,
+  timeZone: string,
+  openUntilLabel: string | null = null,
+): string | null {
+  const parts = [
+    push.note?.trim() || null,
+    openUntilLabel ?? pushUntilLabel(push.endsAt, timeZone),
+  ];
+  const line = parts.filter((part): part is string => !!part).join(" · ");
+  return line || null;
+}
+
+/**
+ * Teacher-facing (LiveFocusBar, the staff aide):
  * "18 min left" / "Less than a minute left" / "" when open-ended.
  *
  * Rounds UP, deliberately: a scholar told "1 min left" with 20 seconds
@@ -88,17 +124,4 @@ export function pushTimeLeftLabel(
   const rest = minutes % 60;
   if (rest === 0) return `${hours} hr left`;
   return `${hours} hr ${rest} min left`;
-}
-
-/**
- * The one-line summary a teacher-facing surface (and the Slack agent) shows
- * back after a push, so a confirmation reads like a sentence rather than a
- * row of fields.
- */
-export function pushSummaryLine(opts: {
-  title: string;
-  audienceLabel: string;
-  minutes: number;
-}): string {
-  return `${opts.title} → ${opts.audienceLabel}, for ${opts.minutes} min`;
 }

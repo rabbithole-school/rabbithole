@@ -3334,7 +3334,7 @@ const STORY_REGISTRY_BASE: RegistryStory[] = [
     narrative:
       "In 1844, Gabriel Lamé proved that for numbers of a given size, the Euclidean algorithm takes the most steps precisely when fed two consecutive Fibonacci numbers — because their ratio approaches the golden ratio, the number that is provably the hardest of all to approximate well with fractions, forcing the algorithm through its slowest possible path.",
     probe:
-      "Run the Euclidean algorithm on 21 and 13 and count the divisions (5). Now try 21 with 20, 15, and 8. The Fibonacci neighbor 13 makes the algorithm work hardest for its size — every remainder is the largest it can be.",
+      "Run the Euclidean algorithm on 21 and 13 and count the divisions (6). Now try 21 with 20, 15, and 8. The Fibonacci neighbor 13 makes the algorithm work hardest for its size — every remainder is the largest it can be.",
     visualEmoji: "🐚",
     source:
       "Gabriel Lamé, \"Note sur la limite du nombre des divisions dans la recherche du plus grand commun diviseur,\" Comptes Rendus de l'Académie des Sciences 19 (1844), pp. 867–870.",

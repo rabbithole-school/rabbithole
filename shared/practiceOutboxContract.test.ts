@@ -307,6 +307,69 @@ describe("enqueue/drain concurrency", () => {
   });
 });
 
+describe("form nudges and the outbox", () => {
+  const nudge = { correct: false, formNudge: { form: "simplifiedRadical", message: "Now simplify it." } };
+
+  it("a live first submit carries formNudgesUsed 0 and is not marked as a replay", async () => {
+    const submit = vi.fn().mockResolvedValue({ correct: true });
+    await submitWithOutboxBarrier({
+      adapter: memoryAdapter(),
+      scholarId: "scholar1",
+      entry: answer({ clientEventId: "evt-live", formNudgesUsed: 0 }),
+      submit,
+    });
+    expect(submit.mock.calls[0]![0]).toMatchObject({ clientEventId: "evt-live", formNudgesUsed: 0 });
+    expect("fromOutbox" in submit.mock.calls[0]![0]).toBe(false);
+  });
+
+  it("a queued answer drains marked fromOutbox (the submitters then send it at the cap)", async () => {
+    const adapter = memoryAdapter();
+    await enqueueOutboxAnswer(adapter, "scholar1", answer({ clientEventId: "evt-old", formNudgesUsed: 0 }));
+    const submit = vi.fn().mockResolvedValue({ correct: false });
+    const onSubmitted = vi.fn();
+    const outcome = await drainOutbox({ adapter, scholarId: "scholar1", submit, isCancelled: () => false, onSubmitted });
+    expect(submit.mock.calls[0]![0]).toMatchObject({ clientEventId: "evt-old", formNudgesUsed: 0, fromOutbox: true });
+    expect(outcome).toEqual({ status: "drained" });
+    expect(onSubmitted).toHaveBeenCalledWith({ correct: false });
+  });
+
+  it("a drained answer that comes back as a form nudge is asked once more and recorded, never dropped", async () => {
+    const adapter = memoryAdapter();
+    await enqueueOutboxAnswer(adapter, "scholar1", answer({ clientEventId: "evt-root", answer: "√18", formNudgesUsed: 0 }));
+    const submit = vi.fn().mockResolvedValueOnce(nudge).mockResolvedValueOnce({ correct: false });
+    const onSubmitted = vi.fn();
+    const outcome = await drainOutbox({ adapter, scholarId: "scholar1", submit, isCancelled: () => false, onSubmitted });
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(submit.mock.calls[1]![0]).toMatchObject({ clientEventId: "evt-root", fromOutbox: true });
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+    expect(onSubmitted).toHaveBeenCalledWith({ correct: false });
+    expect(outcome).toEqual({ status: "drained" });
+    expect(await loadOutbox(adapter, "scholar1")).toEqual([]);
+  });
+
+  it("a drained answer nudged twice stays queued", async () => {
+    const adapter = memoryAdapter();
+    await enqueueOutboxAnswer(adapter, "scholar1", answer({ clientEventId: "evt-stuck", formNudgesUsed: 0 }));
+    const submit = vi.fn().mockResolvedValue(nudge);
+    const onSubmitted = vi.fn();
+    const outcome = await drainOutbox({ adapter, scholarId: "scholar1", submit, isCancelled: () => false, onSubmitted });
+    expect(outcome).toMatchObject({ status: "blocked", reason: "form-nudged", remaining: 1 });
+    expect(onSubmitted).not.toHaveBeenCalled();
+    expect((await loadOutbox(adapter, "scholar1")).map((e) => e.clientEventId)).toEqual(["evt-stuck"]);
+  });
+
+  it("an entry that never set it (a don't-know) sends no formNudgesUsed", async () => {
+    const submit = vi.fn().mockResolvedValue({ correct: false });
+    await submitWithOutboxBarrier({
+      adapter: memoryAdapter(),
+      scholarId: "scholar1",
+      entry: answer({ clientEventId: "evt-dk", dontKnow: true }),
+      submit,
+    });
+    expect("formNudgesUsed" in submit.mock.calls[0]![0]).toBe(false);
+  });
+});
+
 describe("submitWithOutboxBarrier", () => {
   it("submits live and returns 'submitted' when the outbox is empty", async () => {
     const adapter = memoryAdapter();

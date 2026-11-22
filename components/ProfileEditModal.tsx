@@ -33,6 +33,7 @@ import { GoogleAccountConnect } from "@/components/GoogleAccountConnect";
 import { PasskeyManager } from "@/components/PasskeyManager";
 import { McpConnections } from "@/components/McpConnections";
 import { isClientStaffRole } from "@/hooks/useSchoolOperationsAccess";
+import { CODING_CHALLENGES_COPY } from "@/shared/questRows";
 
 const FONT_OPTIONS = [
   { value: "", label: "System Default" },
@@ -53,6 +54,8 @@ interface ProfileEditModalProps {
     image?: string;
     dateOfBirth?: string;
     preferredFont?: string;
+    /** A scholar turned unlocked "Code it" challenges off. */
+    codeItEnabled?: boolean;
     role?: string;
   };
 }
@@ -188,11 +191,13 @@ function AccountEmailRow({ currentEmail }: { currentEmail?: string }) {
 export function ProfileEditModal({ open, onClose, isSetup, user }: ProfileEditModalProps) {
   const updateProfile = useMutation(api.users.updateProfile);
   const updatePreferredFont = useMutation(api.users.updatePreferredFont);
+  const setCodeItEnabled = useMutation(api.users.setCodeItEnabled);
   const generateUploadUrl = useMutation(api.files.generateUploadUrl);
 
   const [name, setName] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
   const [preferredFont, setPreferredFont] = useState("");
+  const [codingChallengesOn, setCodingChallengesOn] = useState(true);
   const [avatarPreview, setAvatarPreview] = useState<string | undefined>();
   const [pendingStorageId, setPendingStorageId] = useState<Id<"_storage"> | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -251,6 +256,7 @@ export function ProfileEditModal({ open, onClose, isSetup, user }: ProfileEditMo
       setName(user.name ?? "");
       setDateOfBirth(user.dateOfBirth ?? "");
       setPreferredFont(user.preferredFont ?? "");
+      setCodingChallengesOn(user.codeItEnabled === true);
       setAvatarPreview(user.image ?? undefined);
     }
     if (!open) {
@@ -388,6 +394,9 @@ export function ProfileEditModal({ open, onClose, isSetup, user }: ProfileEditMo
       await updateProfile(args);
       if (isScholar) {
         await updatePreferredFont({ preferredFont: preferredFont || null });
+        if (!isSetup && codingChallengesOn !== (user.codeItEnabled === true)) {
+          await setCodeItEnabled({ enabled: codingChallengesOn });
+        }
       }
       setPendingStorageId(null);
       if (isSetup) {
@@ -404,7 +413,7 @@ export function ProfileEditModal({ open, onClose, isSetup, user }: ProfileEditMo
     } finally {
       setIsSaving(false);
     }
-  }, [updateProfile, updatePreferredFont, name, dateOfBirth, preferredFont, pendingStorageId, isScholar, isSetup, onClose]);
+  }, [updateProfile, updatePreferredFont, setCodeItEnabled, name, dateOfBirth, preferredFont, codingChallengesOn, user.codeItEnabled, pendingStorageId, isScholar, isSetup, onClose]);
 
   const handleSkipOrCancel = useCallback(async () => {
     if (isSetup) {
@@ -619,6 +628,39 @@ export function ProfileEditModal({ open, onClose, isSetup, user }: ProfileEditMo
                       </select>
                       <Text fontSize="xs" color="charcoal.300" fontFamily="heading">
                         Applies to your chat view.
+                      </Text>
+                    </VStack>
+                  </Flex>
+                )}
+
+                {isScholar && !isSetup && (
+                  <Flex gap={3} w="full" align="start">
+                    <Text fontSize="sm" fontFamily="heading" color="charcoal.400" fontWeight="500" w="120px" flexShrink={0} mt={2.5}>
+                      {CODING_CHALLENGES_COPY.label}
+                    </Text>
+                    <VStack gap={1} align="stretch" flex={1}>
+                      <select
+                        aria-label={CODING_CHALLENGES_COPY.label}
+                        value={codingChallengesOn ? "on" : "off"}
+                        onChange={(e) => setCodingChallengesOn(e.target.value === "on")}
+                        style={{
+                          background: "var(--chakra-colors-gray-50)",
+                          border: "1px solid var(--chakra-colors-gray-300)",
+                          borderRadius: "var(--chakra-radii-lg)",
+                          fontFamily: "var(--chakra-fonts-body)",
+                          height: "40px",
+                          paddingLeft: "12px",
+                          paddingRight: "12px",
+                          fontSize: "14px",
+                          width: "100%",
+                          appearance: "auto",
+                        }}
+                      >
+                        <option value="on">{CODING_CHALLENGES_COPY.on}</option>
+                        <option value="off">{CODING_CHALLENGES_COPY.off}</option>
+                      </select>
+                      <Text fontSize="xs" color="charcoal.300" fontFamily="heading">
+                        {CODING_CHALLENGES_COPY.hint}
                       </Text>
                     </VStack>
                   </Flex>

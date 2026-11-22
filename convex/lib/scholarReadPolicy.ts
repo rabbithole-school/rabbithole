@@ -125,6 +125,64 @@ export function allowedScholarReadTools(
   return entry === "all" ? SCHOLAR_READ_TOOLS : entry;
 }
 
+const SCHOLAR_READ_TOOL_SET: ReadonlySet<string> = new Set(SCHOLAR_READ_TOOLS);
+
+/**
+ * Named like a read but writes. `get_mentava_progress` saves the level it
+ * fetches to `mentavaLinks` on every call (convex/mentava.ts recordLevels), so
+ * the read-only connector leaves it out. Every other `get_`/`list_` tool the
+ * aide assembles makes only queries (audited 2026-11-07). The pinned list in
+ * convex/__tests__/mcp.test.ts fails when a new one reaches a teacher, a
+ * platform admin or operations staff; tools gated to other roles are not
+ * pinned.
+ */
+const WRITES_DESPITE_NAME: ReadonlySet<string> = new Set(["get_mentava_progress"]);
+
+/**
+ * Reads whose names don't say so (audited 2026-11-09):
+ * - `find_candidate_or_family`: `get_candidate_status` needs the ids it
+ *   returns, and the lookup only queries (convex/admissionsSlack.ts
+ *   findCandidates).
+ * - `find_staff_account` (audited 2026-11-12): one internalQuery
+ *   (convex/staffCapabilities.ts aideFindStaffAccounts), which scopes to the
+ *   caller's schools and returns no email, phone or scholar data. Kept under
+ *   the aide's name rather than renamed `get_…` so the in-app aide, Slack and
+ *   both MCP endpoints share one tool.
+ * - `search_code`, `read_repo_file`, `read_system_doc`, `recent_changes`:
+ *   GET the GitHub REST API as the App installation (convex/github.ts
+ *   searchCode / readFile / recentChanges); nothing is stored.
+ *
+ * `read_drive_link` and `search_drive` stay out: reaching Drive goes through
+ * getValidAccessToken (lib/googleTokens.ts), which saves a refreshed Google
+ * token to `googleAccounts`, or marks the link for reconnect, when it has to.
+ */
+const READS_DESPITE_NAME: ReadonlySet<string> = new Set([
+  "find_candidate_or_family",
+  "find_staff_account",
+  "search_code",
+  "read_repo_file",
+  "read_system_doc",
+  "recent_changes",
+]);
+
+/**
+ * Whether a connector tool only reads, judged by its name: the scholar-read
+ * tools above, plus any tool named `get_…` or `list_…`, the settled naming
+ * convention for reads across the aide tool layer. Two surfaces depend on it:
+ * the OAuth consent page, which tells a person what a connection can change,
+ * and the read-only connector (/api/mcp/read), which offers nothing else.
+ *
+ * Judging by name means a new tool counts as a change until it is named like
+ * a read, which is wrong in the cautious direction. The other direction is
+ * the one to guard: name a tool that writes `get_`/`list_` only if you also
+ * add it to WRITES_DESPITE_NAME.
+ */
+export function isReadOnlyToolName(name: string): boolean {
+  if (SCHOLAR_READ_TOOL_SET.has(name) || READS_DESPITE_NAME.has(name)) return true;
+  if (WRITES_DESPITE_NAME.has(name)) return false;
+  return name.startsWith("get_") || name.startsWith("list_");
+}
+
 export function isScholarReadToolAllowed(
   role: Role | undefined | null,
   tool: ScholarReadToolName,

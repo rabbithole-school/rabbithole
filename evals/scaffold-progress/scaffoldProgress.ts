@@ -109,13 +109,23 @@ function parseNarratedStem(stem: string): NarratedStem | null {
     };
   }
 
-  const ratio = stem.match(/^(\d+) of the (\d+) .+\. Write that probability in simplest form\.$/);
-  if (ratio) return { kind: "probability", favorable: Number(ratio[1]), total: Number(ratio[2]) };
+  const ratio = stem.match(/^A bag holds (\d+) marbles, and (\d+) of them are \w+\. .+ in simplest form\.$/);
+  if (ratio) return { kind: "probability", favorable: Number(ratio[2]), total: Number(ratio[1]) };
 
   // These are the only fair-die wordings emitted by the probability templates.
   // The quantities are authored facts (six faces and the enumerated favorable
   // faces), not inferred from loose natural-language similarity.
   if (/^A fair die is rolled\. What is the probability of /.test(stem)) {
+    // The NOT forms come first: "rolling a number greater than k?" also matches
+    // the tail of "NOT rolling a number greater than k?".
+    const notGreater = stem.match(/NOT rolling a number greater than (\d+)\?$/);
+    if (notGreater) {
+      return { kind: "probability", favorable: 6 - Number(notGreater[1]), total: 6, complement: true };
+    }
+    const notLess = stem.match(/NOT rolling a number less than (\d+)\?$/);
+    if (notLess) {
+      return { kind: "probability", favorable: Number(notLess[1]) - 1, total: 6, complement: true };
+    }
     if (/probability of rolling an (?:even|odd) number\?$/.test(stem)) {
       return { kind: "probability", favorable: 3, total: 6 };
     }
@@ -181,6 +191,15 @@ function narratedFactsMatch(stem: NarratedStem, steps: WorkedStep[]): boolean {
     case "probability":
       if (stem.complement) {
         return first === `First find the probability of the event happening: ${stem.favorable}/${stem.total}.`;
+      }
+      if (
+        first ===
+        `A probability is the favorable outcomes over all the equally likely outcomes. Here there are ${stem.total} equally likely outcomes, so the fraction is over ${stem.total}.`
+      ) {
+        // The already-in-simplest-form shape: the total is revealed and the
+        // favorable count is the blank, narrated in the final step.
+        const last = steps[steps.length - 1]?.text ?? "";
+        return new RegExp(`there (is|are) ${stem.favorable} out of ${stem.total}\\b`).test(last);
       }
       return first ===
         `Count the favorable outcomes (${stem.favorable}) out of all the equally likely outcomes (${stem.total}).`;

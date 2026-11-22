@@ -5,6 +5,7 @@ import { action } from "./_generated/server";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import type { ActionCtx } from "./_generated/server";
+import { assertWritableAction } from "./lib/auth";
 import {
   validateDeck,
   type Deck,
@@ -494,6 +495,9 @@ async function storeDeckExport(
   ctx: ActionCtx,
   args: { artifactId: Id<"artifacts">; format: "pptx" | "pdf" },
 ): Promise<Id<"_storage">> {
+  // Storing the rendered file is a write; a read-only identity
+  // (users.readOnly) is refused before any rendering work.
+  await assertWritableAction(ctx);
   // getById is the canonical owner/staff access gate and runs with this
   // action's auth identity. Null intentionally does not reveal existence.
   const artifact = await ctx.runQuery(api.artifacts.getById, {
@@ -520,9 +524,9 @@ async function storeDeckExport(
 }
 
 /**
- * Export a deck and return a serving URL for the file. Clients use this rather
- * than resolving `exportDeck`'s storage id through the generic file endpoint,
- * which minted URLs for any storage id (TRA-389).
+ * Export a deck and return a serving URL for the file. The URL comes from the
+ * action that just checked access to the deck, so clients never need a
+ * generic storage-id resolver (TRA-389).
  */
 export const exportDeckFile = action({
   args: exportArgs,
@@ -531,14 +535,4 @@ export const exportDeckFile = action({
     if (!url) throw new Error("The exported file could not be opened.");
     return { url };
   },
-});
-
-/**
- * Kept for iPads still on a build that calls it and then `files.getUrl`;
- * remove with that endpoint once the fleet has updated.
- */
-export const exportDeck = action({
-  args: exportArgs,
-  handler: async (ctx, args): Promise<Id<"_storage">> =>
-    await storeDeckExport(ctx, args),
 });

@@ -41,8 +41,8 @@ import {
 import { offSchedulePushes } from "@/components/MasterSchedule/offSchedulePushes";
 import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 import { ActivityModeBadge } from "@/lib/activityMode";
+import { giveBadge } from "@/lib/giveBadge";
 import {
-  dueStatus,
   minuteOfDayForTimezone,
   weekdayForTimezone,
 } from "@/shared/institutionDay";
@@ -105,7 +105,9 @@ export function HappeningNow() {
     : null;
   const grid = useQuery(
     api.masterSchedule.grid,
-    termId && weekStartMs != null ? { periodId: termId, weekStartMs } : "skip",
+    termId && weekStartMs != null
+      ? { periodId: termId, weekStartMs, skipGives: true }
+      : "skip",
   );
 
   // Live pushes across ALL the teacher's assignments (term-independent). Used to
@@ -278,7 +280,7 @@ export function HappeningNow() {
           </Text>
         </Box>
         <Box px={4} pb={4}>
-          <OffScheduleRail pushes={offSchedule} />
+          <OffScheduleRail pushes={offSchedule} nowMs={nowMs} />
         </Box>
         <AssignWorkDrawer open={assignTarget !== null} onClose={() => setAssignTarget(null)} target={assignTarget} />
       </Flex>
@@ -364,7 +366,7 @@ export function HappeningNow() {
         </Box>
 
         {/* Live pushes with no timetable placement — otherwise invisible here. */}
-        {offSchedule.length > 0 && <OffScheduleRail pushes={offSchedule} />}
+        {offSchedule.length > 0 && <OffScheduleRail pushes={offSchedule} nowMs={nowMs} />}
       </Box>
 
       <AssignWorkDrawer open={assignTarget !== null} onClose={() => setAssignTarget(null)} target={assignTarget} />
@@ -605,7 +607,13 @@ function RowFragment({
   );
 }
 
-function OffScheduleRail({ pushes }: { pushes: ActivePush[] }) {
+function OffScheduleRail({
+  pushes,
+  nowMs,
+}: {
+  pushes: ActivePush[];
+  nowMs: number;
+}) {
   const clearActivity = useMutation(api.assignments.clearActivity);
   // Group by assignment so the rail reads "Aviation cohort is live on X, Y"
   // rather than a flat list — same grouping instinct as ClassActiveView.
@@ -695,7 +703,11 @@ function OffScheduleRail({ pushes }: { pushes: ActivePush[] }) {
                   borderColor="gray.100"
                   borderRadius="md"
                 >
-                  <ActivityModeBadge mode={p.mode} variant="soft" />
+                  <ActivityModeBadge
+                    mode={p.mode}
+                    variant="soft"
+                    label={giveBadge(p, { nowMs, timeZone: p.timeZone }).text}
+                  />
                   <Stack gap={0} flex={1} minW={0}>
                     <HStack gap={1.5}>
                       <Text
@@ -708,7 +720,7 @@ function OffScheduleRail({ pushes }: { pushes: ActivePush[] }) {
                         {p.activityTitle}
                       </Text>
                       {p.mode === "classFocus" &&
-                        isClassFocusRunningLong(Date.now(), p.setAt, p.endsAt) && (
+                        isClassFocusRunningLong(nowMs, p.setAt, p.endsAt) && (
                           <Box
                             as="span"
                             px={1.5}
@@ -736,19 +748,20 @@ function OffScheduleRail({ pushes }: { pushes: ActivePush[] }) {
                       </Text>
                     )}
                   </Stack>
-                  {(p.dueAt || p.endsAt) && (
-                    <Text
-                      fontSize="2xs"
-                      color="charcoal.300"
-                      fontFamily="heading"
-                      whiteSpace="nowrap"
-                      flexShrink={0}
-                    >
-                      {p.dueAt
-                        ? `${dueStatus(p.dueAt, Date.now(), p.timeZone)?.phrase ?? ""}`
-                        : `${formatRemaining(p.endsAt!)} left`}
-                    </Text>
-                  )}
+                  {/* The badge carries the due day and the open-until day
+                      (TRA-722); only an in-class give adds its time left. */}
+                  {p.endsAt != null &&
+                    giveBadge(p, { nowMs, timeZone: p.timeZone }).kind === "inClass" && (
+                      <Text
+                        fontSize="2xs"
+                        color="charcoal.300"
+                        fontFamily="heading"
+                        whiteSpace="nowrap"
+                        flexShrink={0}
+                      >
+                        {`${formatRemaining(p.endsAt)} left`}
+                      </Text>
+                    )}
                   {p.mode === "classFocus" ? (
                     <Button
                       size="2xs"

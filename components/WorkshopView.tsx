@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Box, Flex, Heading, Text, Textarea, IconButton, Badge, Stack, Spinner, VisuallyHidden } from "@chakra-ui/react";
 import { ArrowRight, CaretRight, PaperPlaneTilt } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
+import { flavorOf } from "@/shared/scholarThreadFlavor";
 import type { Id } from "@/convex/_generated/dataModel";
 import { threadPreview } from "@/components/messaging/MessageWorkspace";
 import { formatRelative } from "@/lib/relativeTime";
@@ -74,7 +75,7 @@ function SeedChip({ label, onSpark }: { label: string; onSpark?: (phrase: string
 
 /** "Answered" means A HUMAN WROTE BACK — so it keys off the thread (any staff
  *  message), never the row's `status`. `status` is a staff-side concern (the
- *  open queue, the scholar's five-open cap); a staffer replying deliberately
+ *  open queue); a staffer replying deliberately
  *  does NOT close the idea. Parity with native/src/app/meta.tsx. */
 function StatusChip({ answered }: { answered: boolean }) {
   return (
@@ -187,8 +188,8 @@ function IdeaCard({
         head
       )}
 
-      {/* The scholar's own lever: the five-open limit is a prioritization
-          lesson pointed at THEM, so they decide when a slot frees. Quiet by
+      {/* The scholar's own lever: their board, so they decide what is still
+          on their plate. Quiet by
           design and LAST in the card — it never competes with the
           conversation. Archive/Restore is the house pair for a scholar
           (ScholarPlate, ScholarHomeMirrorCard) — don't invent a warmer
@@ -286,7 +287,7 @@ export function WorkshopView({ onSpark }: { onSpark?: (phrase: string) => void }
   // page holds one subscription, not two.
   const scholarThreads = useQuery(api.scholarMessages.listThreads, {});
   const teamThreads = (scholarThreads?.threads ?? []).filter(
-    (thread) => thread.kind === "workshop" && thread.startedByStaff,
+    (thread) => flavorOf(thread) === "workshop" && thread.startedByStaff,
   );
   const whatsNew = useQuery(api.changelog.listRecent, {});
   const flags = useQuery(api.metaChat.workshopFlags, {});
@@ -307,7 +308,7 @@ export function WorkshopView({ onSpark }: { onSpark?: (phrase: string) => void }
   // Archive/Restore lives in the ideas zone, NOT the composer — and the
   // composer is hidden entirely when idea conversations are on. A refusal
   // routed to the composer's `error` would be invisible exactly when the
-  // scholar needs it (a restore over the five-open limit), so it gets its own
+  // scholar needs it, so it gets its own
   // state rendered beside the board.
   const [archiveError, setArchiveError] = useState<string | null>(null);
 
@@ -349,8 +350,7 @@ export function WorkshopView({ onSpark }: { onSpark?: (phrase: string) => void }
         archived,
       });
     } catch (e) {
-      // Restoring one can hit the five-open limit — the server's message names
-      // the number and what to do, so show it verbatim.
+      // Show the server's refusal verbatim (e.g. "Idea not found").
       setArchiveError(serverErrorMessage(e));
     }
   };

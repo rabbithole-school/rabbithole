@@ -22,7 +22,7 @@ export const units: SeedUnit[] = [
     slug: "fraction-sense",
     emoji: "🍕",
     subject: "Math Workshop",
-    gradeLevel: "Grade 3",
+    gradeLevel: "3",
     targetBloomLevel: "understand",
     bigIdea:
       "A fraction names a relationship between a part and an equal-sized whole — not just 'a number on top of a number'.",
@@ -72,7 +72,6 @@ export const units: SeedUnit[] = [
             kind: "online",
             recipe: "baseline",
             durationMinutes: 15,
-            defaultMode: "classFocus",
             description:
               "A stealth pre-assessment: the tutor draws out how the scholar already thinks about fractions, without teaching.",
             scholarDescription:
@@ -87,7 +86,6 @@ export const units: SeedUnit[] = [
             order: 1,
             kind: "online",
             durationMinutes: 30,
-            defaultMode: "homework",
             description:
               "The scholar builds an argument (drawing, words, or a folded-paper photo) that two different-looking fractions name the same amount of the same whole.",
             scholarDescription:
@@ -137,7 +135,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "offline",
             durationMinutes: 30,
-            defaultMode: "homework",
             description:
               "Scholars find three real fractions in their home or neighborhood (a measuring cup, a sliced fruit, a song's beat) and sketch how the whole was split into equal parts. Optional enrichment: include one chance fraction, like the outcomes on a die that are even.",
             scholarDescription:
@@ -162,7 +159,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "offline",
             durationMinutes: 25,
-            defaultMode: "classFocus",
             description:
               "A hands-on sort: scholars group picture cards into 'truly equal parts' vs 'not equal', then match equivalent fractions (1/2 ↔ 2/4 ↔ 3/6).",
             scholarDescription:
@@ -180,7 +176,7 @@ export const units: SeedUnit[] = [
     slug: "feel-for-chance",
     emoji: "🎲",
     subject: "Math Workshop",
-    gradeLevel: "Grade 3 enrichment",
+    gradeLevel: "3",
     targetBloomLevel: "analyze",
     bigIdea:
       "Probability is a fraction of a carefully named sample space: favorable outcomes over total equally likely outcomes.",
@@ -229,7 +225,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 30,
-            defaultMode: "classFocus",
             description:
               "Scholars roll a die and flip a coin to explore chance language, then name every possible outcome before making any prediction.",
             scholarDescription:
@@ -256,7 +251,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 40,
-            defaultMode: "homework",
             description:
               "Scholars make reasoned predictions for P(even), P(heads), P(>4), and a two-dice stretch, writing each probability as favorable outcomes over total outcomes.",
             scholarDescription:
@@ -313,7 +307,6 @@ export const units: SeedUnit[] = [
             order: 1,
             kind: "online",
             durationMinutes: 20,
-            defaultMode: "homework",
             description:
               "Scholars lay out every outcome of a real chance setup — a die's six faces, a coin's two sides, two dice paired up — photograph it, then defend in conversation why that layout is the COMPLETE set of possibilities. The photo is the deliverable; the tutor cannot see it, so the argument has to come from the scholar.",
             scholarDescription:
@@ -360,7 +353,7 @@ export const units: SeedUnit[] = [
     slug: "small-moments",
     emoji: "✏️",
     subject: "Language Arts",
-    gradeLevel: "Grade 2",
+    gradeLevel: "2",
     targetBloomLevel: "create",
     bigIdea:
       "The best stories come from zooming in on one small moment and filling it with exactly what you saw, heard, felt, and thought.",
@@ -408,7 +401,6 @@ export const units: SeedUnit[] = [
             kind: "online",
             recipe: "baseline",
             durationMinutes: 15,
-            defaultMode: "classFocus",
             description:
               "A stealth pre-assessment: the tutor invites the scholar to share a story from their life and listens for how wide or narrow the moment is, and whether sensory detail appears spontaneously.",
             scholarDescription:
@@ -423,7 +415,6 @@ export const units: SeedUnit[] = [
             order: 1,
             kind: "online",
             durationMinutes: 35,
-            defaultMode: "homework",
             description:
               "The scholar picks one narrow moment, drafts 3–5 sentences, and polishes with at least one sensory detail and a closing sentence that shows what the moment meant.",
             scholarDescription:
@@ -507,7 +498,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 20,
-            defaultMode: "classFocus",
             description:
               "A kickoff conversation where you explain what you think builds an island, and the tutor draws out questions to investigate.",
             scholarDescription:
@@ -558,7 +548,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 25,
-            defaultMode: "classFocus",
             description:
               "Plan a tiny three-panel comic of a real small moment, deciding what each panel shows and what happens in the gutters between them.",
             scholarDescription:
@@ -582,7 +571,7 @@ export const units: SeedUnit[] = [
     slug: "ten-and-more",
     emoji: "🔟",
     subject: "Math Workshop",
-    gradeLevel: "Grade 1",
+    gradeLevel: "1",
     targetBloomLevel: "understand",
     bigIdea:
       "Ten is a friendly anchor: we can see any teen number as a full ten and some extra ones.",
@@ -623,7 +612,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 25,
-            defaultMode: "classFocus",
             description:
               "Scholars see a filled ten-frame and a few loose counters, then say the teen number as 'ten and some more'.",
             scholarDescription:
@@ -642,7 +630,7 @@ export const units: SeedUnit[] = [
     slug: "community-helpers",
     emoji: "🏘️",
     subject: "Humanities",
-    gradeLevel: "Grade 1",
+    gradeLevel: "1",
     targetBloomLevel: "understand",
     bigIdea:
       "A community works because many people do jobs that take care of each other.",
@@ -683,7 +671,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 25,
-            defaultMode: "classFocus",
             description:
               "Scholars pick one community helper, describe their job, and explain who that job helps.",
             scholarDescription:
@@ -702,7 +689,7 @@ export const units: SeedUnit[] = [
     slug: "weather-watchers",
     emoji: "⛅",
     subject: "Science",
-    gradeLevel: "Grade 1",
+    gradeLevel: "1",
     targetBloomLevel: "understand",
     bigIdea:
       "We can observe the sky and describe today's weather, and patterns start to appear when we watch over time.",
@@ -743,7 +730,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 20,
-            defaultMode: "homework",
             description:
               "Scholars record today's weather with a word and a sentence, then guess what tomorrow might bring.",
             scholarDescription:
@@ -767,7 +753,7 @@ export const units: SeedUnit[] = [
     slug: "book-clubs",
     emoji: "📚",
     subject: "Language Arts",
-    gradeLevel: "Grade 4",
+    gradeLevel: "4",
     targetBloomLevel: "analyze",
     bigIdea:
       "What a character wants — and how that want changes — is how a story carries its themes.",
@@ -808,7 +794,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 40,
-            defaultMode: "classFocus",
             description:
               "Scholars name their character's central want, cite a scene that shows it, and propose a theme the book may be exploring.",
             scholarDescription:
@@ -827,7 +812,7 @@ export const units: SeedUnit[] = [
     slug: "mapping-our-islands",
     emoji: "🗺️",
     subject: "Humanities",
-    gradeLevel: "Grade 4",
+    gradeLevel: "4",
     targetBloomLevel: "analyze",
     bigIdea:
       "Where people settle and how they live is shaped by the land and water around them.",
@@ -868,13 +853,68 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 40,
-            defaultMode: "homework",
             description:
               "Scholars choose a spot on an island map and explain, using landforms and water, why a community might have grown there.",
             scholarDescription:
               "Choose a spot on an island map and explain — using the landforms and water around it — why a community might have grown there.",
             systemPrompt:
               "Ask the scholar to pick a place on the map and argue why people would settle there — access to fresh water, farmable land, a protected shore. Push for reasons tied to the geography, not just 'it looks nice'.",
+          },
+        ],
+      },
+      // A second lesson so the unit has a run of activities left to plan
+      // across class days (the aide's give_class_days, TRA-582).
+      {
+        key: "l.islands.waterways",
+        unitKey: "u.islands",
+        title: "Water shapes the land",
+        order: 1,
+        strand: "connections",
+        durationMinutes: 40,
+        systemPrompt:
+          "For a Grade-4 scholar. Explore how streams, rainfall, and the shore shape where people farm, fish, and travel on an island. Keep asking for evidence from a map. Target ideas: map_reading and geography_shapes_community.",
+        activities: [
+          {
+            key: "a.islands.streams",
+            lessonKey: "l.islands.waterways",
+            title: "Follow the stream",
+            order: 0,
+            kind: "online",
+            durationMinutes: 40,
+            description:
+              "Scholars trace a stream from the mountains to the sea and explain what each stretch of land could be used for.",
+            scholarDescription:
+              "Trace a stream from the mountains to the sea. What could people do with the land along each stretch?",
+            systemPrompt:
+              "Have the scholar trace a stream on an island map and reason about the land along it: where water is plentiful, where it floods, where it meets the sea. Ask for map evidence before agreeing with any claim.",
+          },
+          {
+            key: "a.islands.windward",
+            lessonKey: "l.islands.waterways",
+            title: "Windward and leeward",
+            order: 1,
+            kind: "online",
+            durationMinutes: 40,
+            description:
+              "Scholars compare the wet windward side and the dry leeward side of an island and predict how life differs on each.",
+            scholarDescription:
+              "Compare the windward and leeward sides of an island. How would life be different on each side?",
+            systemPrompt:
+              "Ask the scholar to compare an island's windward and leeward sides using rainfall and vegetation on a map. Push them to predict how farming, fishing, and settlement differ, and to say what evidence would change their mind.",
+          },
+          {
+            key: "a.islands.mapmaker",
+            lessonKey: "l.islands.waterways",
+            title: "Make your own island map",
+            order: 2,
+            kind: "online",
+            durationMinutes: 40,
+            description:
+              "Scholars design a map of an imagined island and place a community where the geography supports it.",
+            scholarDescription:
+              "Design a map of an imagined island, then decide where a community would grow and explain why.",
+            systemPrompt:
+              "Help the scholar design an imagined island map — mountains, streams, reefs, and shore — and then place a community. Ask them to defend the location with the geography they drew, and to name one tradeoff.",
           },
         ],
       },
@@ -887,7 +927,7 @@ export const units: SeedUnit[] = [
     slug: "tide-pools",
     emoji: "🐚",
     subject: "Science",
-    gradeLevel: "Grade 4",
+    gradeLevel: "4",
     targetBloomLevel: "analyze",
     bigIdea:
       "A tide pool is a small ecosystem where living things depend on each other and on the rhythm of the tides.",
@@ -928,7 +968,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "online",
             durationMinutes: 40,
-            defaultMode: "homework",
             description:
               "Scholars list tide-pool organisms, sketch one feeding connection, and explain how the tide changes life in the pool.",
             scholarDescription:
@@ -952,7 +991,7 @@ export const units: SeedUnit[] = [
     slug: "robot-builders",
     emoji: "🤖",
     subject: "Robotics",
-    gradeLevel: "Grades K-5",
+    gradeLevel: "K-5",
     bigIdea:
       "Engineers improve a robot by testing one change at a time and noticing what the test shows.",
     description:
@@ -973,7 +1012,6 @@ export const units: SeedUnit[] = [
             order: 0,
             kind: "offline",
             durationMinutes: 30,
-            defaultMode: "classFocus",
             description:
               "Teams run the drive base at three motor speeds on the same course and record which speed stays on the line.",
             scholarDescription:
@@ -992,7 +1030,6 @@ export const units: SeedUnit[] = [
             order: 1,
             kind: "offline",
             durationMinutes: 15,
-            defaultMode: "homework",
             description:
               "Each builder sketches one change to try at the next session and predicts what the test will show.",
             scholarDescription:

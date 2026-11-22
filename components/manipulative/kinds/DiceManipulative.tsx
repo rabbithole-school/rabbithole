@@ -11,7 +11,7 @@ import { Box, Button, Field, Flex, HStack, SimpleGrid, Text } from "@chakra-ui/r
 import type { KindProps } from "../Manipulative";
 import type { DiceEvent, DiceSpec, DiceType } from "@/lib/manipulative/types";
 import type { DiceFraction, DiceState } from "@/lib/manipulative/logic";
-import { clamp, diceCount, diceFaces, diceSolved, initialDice, parseDicePrediction, rollDiceFaces, DICE_BATCH_SIZE } from "@/lib/manipulative/logic";
+import { clamp, diceCount, diceFaces, diceSolved, diceSubmittableState, initialDice, parseDicePrediction, rollDiceFaces, DICE_BATCH_SIZE } from "@/lib/manipulative/logic";
 import { applyKey } from "@/shared/practiceLoop";
 import { C, wash } from "../colors";
 
@@ -494,7 +494,7 @@ export function DiceManipulative({ spec, onSolvedChange, onStateChange }: KindPr
   const state = useMemo<DiceState>(() => ({ rollCount, predicted }), [rollCount, predicted]);
 
   useEffect(() => {
-    onStateChange?.(state);
+    onStateChange?.(diceSubmittableState(spec, state));
     onSolvedChange(diceSolved(spec, state));
   }, [onSolvedChange, onStateChange, spec, state]);
 

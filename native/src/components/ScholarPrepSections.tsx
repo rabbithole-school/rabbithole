@@ -1,34 +1,32 @@
 /**
  * The Scholar's Prep tab — the RN twin of components/ScholarPrepSections.tsx.
- * Three plain questions on one surface style:
+ * Two plain questions on one surface style:
  *
- *   1. "Due"          — assigned homework with its due chip (teacher-owned,
- *                       always dated). Derived; no checkbox, no remove.
- *   2. "Done today?"  — the close-out of today's still-open activities/quests:
+ *   1. "Done today?"  — the close-out of today's still-open activities/quests:
  *                       "✓ Done" (`takeHomePlans.resolveSuggestion`, with a
  *                       durable Undo) or "Keep it open"
  *                       (`takeHomePlans.keepSuggestionOpen`, stop asking today).
- *   3. "Keep going · from your Quests" — the top rows of the scholar's ONE
+ *   2. "Keep going · from your Quests" — the top rows of the scholar's ONE
  *                       queue (`questionQueue.forSelf`), rendered by the same
- *                       row component the Quests tab uses.
+ *                       row component the Quests tab uses, here with its
+ *                       corner × (`dismissable`) to dismiss a row for good.
+ *
+ * Homework is not here. It used to have a "Due" section on this tab; every
+ * homework item now lives in the Homework section on the Now tab (vendored
+ * shared/homeworkList.ts), its one home.
  *
  * The old "To do tonight" plan list (adding quests / notes to tonight) is
- * RETIRED. Sections 1–2 read `api.takeHomePlans.forSelf` (its `assigned` /
- * `suggestions` / `resolvedToday`); its `selected` rows are no longer
- * rendered. Copy: shared/questionQueue.ts (vendored).
+ * RETIRED. Section 1 reads `api.takeHomePlans.forSelf` (its `suggestions` /
+ * `resolvedToday`). Copy: shared/questionQueue.ts (vendored).
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { useConvex, useMutation } from "convex/react";
+import { useMutation } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { useRouter } from "expo-router";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import * as Haptics from "expo-haptics";
 
-import { api, type Id } from "@/lib/convex";
-import { openWebActivity } from "@/lib/externalAppHost";
-import { openGameActivity } from "@/lib/gameHost";
-import { webEmbedUrlError } from "@/lib/webEmbedConfig";
+import { api } from "@/lib/convex";
 import { HOME_GAP } from "@/lib/homeRhythm";
 import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { useExploreSeed } from "@/hooks/useExploreSeed";
@@ -38,7 +36,6 @@ import {
   QuestionQueueRowView,
   useQuestionQueue,
 } from "@/components/QuestionQueue";
-import { DueChip } from "@/components/ui/DueChip";
 import { fonts, useColors, type Colors } from "@/theme";
 import {
   PREP_KEEP_GOING_COUNT,
@@ -46,7 +43,6 @@ import {
 } from "../../vendor/shared/questionQueue";
 
 type Plan = FunctionReturnType<typeof api.takeHomePlans.forSelf>;
-type AssignedItem = Plan["assigned"][number];
 type Suggestion = Plan["suggestions"][number];
 
 const MINUTE_MS = 60_000;
@@ -61,10 +57,8 @@ const suggestionArg = (item: Suggestion) =>
 export function ScholarPrepSections() {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const router = useRouter();
-  const convex = useConvex();
   // Minute-rounded clock as the query's reactive dependency (T11): the plan
-  // re-runs across the institution-local midnight and as homework falls due.
+  // re-runs across the institution-local midnight.
   // Smoothed, not plain: each new `now` is a new subscription, and a plain
   // useQuery would drop to `undefined` for that round-trip once a minute.
   const [now, setNow] = useState(() => floorToMinute(Date.now()));
@@ -74,13 +68,11 @@ export function ScholarPrepSections() {
   }, []);
   const plan = useSmoothedQuery(api.takeHomePlans.forSelf, { now });
   const queue = useQuestionQueue();
-  const { exploreSeed, exploringSeedId, exploreSeedDialog } = useExploreSeed();
+  const { exploreSeed, exploringSeedId } = useExploreSeed();
 
   const resolveSuggestion = useMutation(api.takeHomePlans.resolveSuggestion);
   const keepSuggestionOpen = useMutation(api.takeHomePlans.keepSuggestionOpen);
   const undoResolveSuggestion = useMutation(api.takeHomePlans.undoResolveSuggestion);
-  const createSession = useMutation(api.sessions.create);
-  const openOfflineHomework = useMutation(api.sessions.openOfflineHomework);
   const [pending, setPending] = useState<string | null>(null);
 
   // A promise chain, not try/finally: the React Compiler bails out on a try
@@ -101,85 +93,6 @@ export function ScholarPrepSections() {
       .finally(() => setPending(null));
   };
 
-  const openAssigned = (item: AssignedItem) =>
-    run(
-      `assigned:${item.id}`,
-      async () => {
-        if (item.activityKind === "offline") {
-          const result = await openOfflineHomework({
-            activityId: item.activityId,
-            assignmentId: item.assignmentId,
-          });
-          router.push({
-            pathname: "/session/[id]",
-            params: { id: result.id, title: item.label },
-          });
-          return;
-        }
-        if (item.activityKind === "web") {
-          let webUrl = item.webUrl;
-          let webAllowedHosts = item.webAllowedHosts;
-          let externalAppId: Id<"externalApps"> | null = null;
-          if (!webUrl) {
-            const activity = await convex.query(api.activities.getPublic, {
-              id: item.activityId,
-            });
-            webUrl = activity?.webUrl ?? null;
-            webAllowedHosts = activity?.webAllowedHosts ?? null;
-            externalAppId = activity?.externalAppId ?? null;
-          }
-          if (!webUrl) {
-            Alert.alert(
-              "No website yet",
-              "Ask your teacher to add the website URL for this activity.",
-            );
-            return;
-          }
-          const urlError = webEmbedUrlError(webUrl);
-          if (urlError) {
-            Alert.alert("Couldn’t open this activity", urlError);
-            return;
-          }
-          openWebActivity({
-            activityId: item.activityId,
-            assignmentId: item.assignmentId,
-            title: item.label,
-            url: webUrl,
-            allowedHosts: webAllowedHosts,
-            externalAppId,
-            gestureMode: "page",
-          });
-          return;
-        }
-        if (item.activityKind === "game") {
-          openGameActivity({
-            activityId: item.activityId,
-            assignmentId: item.assignmentId,
-            activityTitle: item.label,
-          });
-          return;
-        }
-        if (item.activityKind === "problem_set" && item.practiceSkillKey) {
-          router.push({
-            pathname: "/practice",
-            params: { skill: item.practiceSkillKey },
-          });
-          return;
-        }
-        const result = await createSession({
-          activityId: item.activityId,
-          assignmentId: item.assignmentId,
-        });
-        if (result?.id) {
-          router.push({
-            pathname: "/session/[id]",
-            params: { id: result.id, title: item.label },
-          });
-        }
-      },
-      "Couldn't open that activity",
-    );
-
   // A non-scholar gets the empty plan shape back (dayKey null).
   const planReady = plan !== undefined && plan.dayKey !== null;
   const keepGoing = (queue.rows ?? []).slice(0, PREP_KEEP_GOING_COUNT);
@@ -189,61 +102,11 @@ export function ScholarPrepSections() {
 
   // Nothing to show yet: render no stack, so the Home's gap stack holds no
   // phantom gap for an empty wrapper (see homeRhythm).
-  if (!planReady && keepGoing.length === 0) return exploreSeedDialog;
+  if (closeOutRows === 0 && keepGoing.length === 0) return null;
 
   return (
     <View style={styles.stack}>
-      {/* ── 1. Due ─────────────────────────────────────────────────── */}
-      {planReady && (
-        <QueueSurface>
-          <Eyebrow>{QUESTION_QUEUE_COPY.prepDue}</Eyebrow>
-          {plan.assigned.length === 0 ? (
-            <Text style={styles.empty}>{QUESTION_QUEUE_COPY.prepDueEmpty}</Text>
-          ) : (
-            plan.assigned.map((item, index) => {
-              const meta = [
-                item.meta,
-                item.teacherName ? `with ${item.teacherName}` : null,
-              ]
-                .filter(Boolean)
-                .join(" · ");
-              return (
-                <Pressable
-                  key={item.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Open ${item.label}`}
-                  disabled={pending !== null}
-                  onPress={() => openAssigned(item)}
-                  style={({ pressed }) => [
-                    styles.assignedRow,
-                    index > 0 && styles.divided,
-                    pressed && styles.rowPressed,
-                  ]}
-                >
-                  <Text style={styles.glyph} accessible={false}>
-                    {item.unitEmoji ?? "📘"}
-                  </Text>
-                  <View style={styles.rowBody}>
-                    {meta ? (
-                      <Text style={styles.meta} numberOfLines={1}>
-                        {meta}
-                      </Text>
-                    ) : null}
-                    <Text style={styles.title}>{item.label}</Text>
-                  </View>
-                  <DueChip dueAt={item.dueAt} nowMs={now} timeZone={plan.timeZone} />
-                  <View style={styles.cta} accessibilityElementsHidden>
-                    <Text style={styles.ctaText}>Open</Text>
-                    <Text style={styles.ctaCaret}>›</Text>
-                  </View>
-                </Pressable>
-              );
-            })
-          )}
-        </QueueSurface>
-      )}
-
-      {/* ── 2. Done today? ─────────────────────────────────────────── */}
+      {/* ── 1. Done today? ─────────────────────────────────────────── */}
       {planReady && closeOutRows > 0 && (
         <QueueSurface>
           <Eyebrow>{QUESTION_QUEUE_COPY.prepDoneToday}</Eyebrow>
@@ -347,7 +210,7 @@ export function ScholarPrepSections() {
         </QueueSurface>
       )}
 
-      {/* ── 3. Keep going · from your Quests ───────────────────────── */}
+      {/* ── 2. Keep going · from your Quests ───────────────────────── */}
       {keepGoing.length > 0 && (
         <QueueSurface>
           <Eyebrow>{QUESTION_QUEUE_COPY.prepKeepGoing}</Eyebrow>
@@ -357,13 +220,13 @@ export function ScholarPrepSections() {
               row={row}
               queue={queue}
               divided={index > 0}
+              dismissable
               onStartTeacherQuest={exploreSeed}
               startingSeedId={exploringSeedId}
             />
           ))}
         </QueueSurface>
       )}
-      {exploreSeedDialog}
     </View>
   );
 }

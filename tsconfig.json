@@ -40,6 +40,7 @@
     "mcp-server",
     "native",
     "marshal-ui",
+    "packages",
     "foundation/templates"
   ]
 }

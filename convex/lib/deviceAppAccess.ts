@@ -35,6 +35,10 @@ export const APP_ACCESS_LABELS: Record<ManagedNativeAppKey, string> = {
   "stop-motion-studio": "Stop Motion Studio Pro",
   "mentava-reading": "Mentava Reading",
   "google-arts-culture": "Google Arts & Culture",
+  "adobe-lightroom": "Adobe Lightroom",
+  brilliant: "Brilliant",
+  carnets: "Carnets",
+  "sage-teacher": "Sage Teacher",
 };
 
 export type AppAccessAllowed = "yes" | "no" | "pending" | "not-bound";
@@ -191,12 +195,16 @@ function allowedFor(
   return applied === true ? "pending" : "no";
 }
 
-function installedFor(
+export function installedFor(
   bundleId: string,
   args: { installedBundleIds: readonly string[] | null; installedAppsAt: number | null },
 ): boolean | null {
   if (args.installedAppsAt === null) return null;
-  return (args.installedBundleIds ?? []).includes(bundleId);
+  // Case-insensitive: iOS bundle ids are, and a constant typed with different
+  // case than SimpleMDM reports must not read an installed app as missing
+  // (the launcher refuses a tap on "missing").
+  const wanted = bundleId.toLowerCase();
+  return (args.installedBundleIds ?? []).some((id) => id.toLowerCase() === wanted);
 }
 
 /**

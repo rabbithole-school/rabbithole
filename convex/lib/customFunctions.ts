@@ -3,10 +3,33 @@ import {
   customMutation,
   customAction,
 } from "convex-helpers/server/customFunctions";
-import { query, mutation, action } from "../_generated/server";
+import { getAuthUserId } from "@convex-dev/auth/server";
+import { query as baseQuery, mutation, action, type QueryCtx } from "../_generated/server";
+import { getSessionOwner } from "./auth";
+import { redactCustomAppTokens } from "./readOnlyRedaction";
 import { requireUser, requireTeacher, requirePlatformAdmin, requireSchoolAdmin, requireCurriculumAccess, requireCurriculumAccessSelf, requireStaffSelf, requireScholarAdmin, requireStaff, requireStaffAction, assertCanWrite, assertWritableAction } from "./auth";
+import { internal } from "../_generated/api";
 import { Doc } from "../_generated/dataModel";
 import { canRunAssignments } from "./curriculumRun";
+
+// ── Read-only redaction for every query wrapper ───────────────────────
+// Every customQuery below is built on this instead of the stock `query`: for a
+// read-only session owner (users.readOnly) the result is passed through
+// redactCustomAppTokens, which withholds custom-app bearer tokens — a write
+// credential that rides inside otherwise readable launch URLs (see
+// ./readOnlyRedaction.ts). Everyone else gets the result untouched; the extra
+// cost is one cached read of the caller's own user row.
+const query = ((definition: Parameters<typeof baseQuery>[0]) => {
+  const handler = typeof definition === "function" ? definition : definition.handler;
+  const redacting = async (ctx: QueryCtx, args: Record<string, unknown>) => {
+    const result = await handler(ctx, args);
+    const owner = await getSessionOwner(ctx);
+    return owner?.readOnly === true ? redactCustomAppTokens(result) : result;
+  };
+  return baseQuery(
+    typeof definition === "function" ? redacting : { ...definition, handler: redacting },
+  );
+}) as typeof baseQuery;
 
 // ── Authenticated queries/mutations (any logged-in user) ──────────────
 
@@ -30,8 +53,12 @@ export const authedMutation = customMutation(mutation, {
 export const authedAction = customAction(action, {
   args: {},
   input: async (ctx) => {
-    // Actions don't have db access directly, but we can pass user info
+    // Actions have no db, so the signed-in check reads the auth identity
+    // directly. Without it this wrapper admitted anonymous callers (TRA-496).
+    if (!(await getAuthUserId(ctx))) throw new Error("Not authenticated");
     await assertWritableAction(ctx);
+    // requireUser's suspended-institution check, which getAuthUserId skips.
+    await ctx.runQuery(internal.users.assertActiveCaller, {});
     return { ctx, args: {} };
   },
 });

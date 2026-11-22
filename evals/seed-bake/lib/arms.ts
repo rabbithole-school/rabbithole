@@ -120,36 +120,35 @@ export function assembleAdLibPrompt(
   isFirstTurn: boolean,
 ): string {
   return buildSystemPrompt(
-    null, // 1 teacherWhisper
-    profile.readingLevel, // 2 readingLevel
-    profile.name, // 3 scholarName
-    null, // 4 unitContext
-    null, // 5 personaContext
-    null, // 6 perspectiveContext
-    null, // 7 processContext
-    null, // 8 processStateData
-    null, // 9 artifactData
-    profile.dossier, // 10 dossierContent
-    null, // 11 seedsData
-    null, // 12 masteryContext
-    null, // 13 signalContext
-    null, // 14 timingContext
-    null, // 15 lessonContext
-    null, // 16 teacherDirectives
-    null, // 17 lessonActivityContext
-    null, // 18 priorActivityContext
-    null, // 19 activityContext
-    null, // 20 standaloneDeliverableContext
-    null, // 21 currentVerdictsContext
-    isFirstTurn, // 22 isFirstTurn
-    true, // 23 isFirstSession
-    null, // 24 lastSessionAt
-    null, // 25 webPracticeContext
-    null, // 26 granuleStatusContext
-    null, // 27 activityRecipe
-    null, // 28 baselineEvidenceContext
+    profile.readingLevel, // 1 readingLevel
+    profile.name, // 2 scholarName
+    null, // 3 unitContext
+    null, // 4 personaContext
+    null, // 5 perspectiveContext
+    null, // 6 processContext
+    null, // 7 processStateData
+    null, // 8 artifactData
+    profile.dossier, // 9 dossierContent
+    null, // 10 seedsData
+    null, // 11 masteryContext
+    null, // 12 signalContext
+    null, // 13 timingContext
+    null, // 14 lessonContext
+    null, // 15 teacherDirectives
+    null, // 16 lessonActivityContext
+    null, // 17 priorActivityContext
+    null, // 18 activityContext
+    null, // 19 standaloneDeliverableContext
+    null, // 20 currentVerdictsContext
+    isFirstTurn, // 21 isFirstTurn
+    true, // 22 isFirstSession
+    null, // 23 lastSessionAt
+    null, // 24 webPracticeContext
+    null, // 25 granuleStatusContext
+    null, // 26 activityRecipe
+    null, // 27 baselineEvidenceContext
     {
-      // 29 seedOriginContext — anchorless, ad-lib (the current behavior)
+      // 28 seedOriginContext — anchorless, ad-lib (the current behavior)
       topic: topic.topic,
       domain: topic.domain ?? null,
       rationale: topic.rationale ?? null,

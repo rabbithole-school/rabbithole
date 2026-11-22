@@ -15,8 +15,18 @@
 // email set here is pre-verified — see lib/email + auth.ts), passkey
 // optional.
 
+import { withoutUnstartedTileSessions } from "./lib/tileSessions";
+import { loadScheduleRows, readSchedule } from "./lib/scheduleStore";
+import {
+  firstClassIdByWork,
+  homeworkSubjectLabel,
+  scheduleWorkKey,
+} from "./lib/homeworkSubject";
+import { openUntilClosesAt } from "../shared/openUntil";
 import { v } from "convex/values";
 import { talkLevelOf } from "./lib/readingLevels";
+import { isEnrichmentSubject, REPORT_SECTION_KEY, reportTitle } from "./lib/parentReport";
+import { familyPortfolioItems } from "./portfolio";
 import { authedQuery, authedMutation, scholarAdminQuery, scholarAdminMutation } from "./lib/customFunctions";
 import {
   canReadScholarAsTeacher,
@@ -26,10 +36,18 @@ import {
 import { internalQuery, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import {
+  isGuardianOf,
   requireGuardianOf,
   requireGuardianOrStaffPreview,
   hasGuardianships,
 } from "./lib/auth";
+import { libraryCardStatusFor } from "./libraryCards";
+import {
+  guardianClearanceRequestsFor,
+  guardianFormsAvailableFor,
+  guardianHealthRecordStatusFor,
+  guardianPhysicalExamFor,
+} from "./scholarHealthRecords";
 import { resolveValidatedProfileImageUrl } from "./lib/profileImage";
 import { isApplicantOnlyParent } from "./lib/applicantParent";
 import { ensureDefaultMembershipForUser, ensureMembership } from "./memberships";
@@ -44,6 +62,17 @@ import { gatherMathPortrait } from "./mathPortrait";
 import { parentInLens, resolveInstitutionLens, scholarIdsInLens } from "./lib/institutionLens";
 import { isProgramGuest } from "./lib/enrollmentStanding";
 import { EXTENDED_EDUCATION_LABEL } from "../shared/scholarGroupRouting";
+import { unstartedAssignedRowSurface } from "./scholarPlate";
+import { closuresForInstitution, hasUsableDays } from "./academicCalendar";
+import { tripsForScholar } from "./fieldTrips";
+import { ONBOARDING_UNIT_SLUG } from "./onboardingData";
+import { homeworkPlanWindowStart } from "../shared/homeworkPlanWeeks";
+import { dayKeyForTimezone } from "../shared/institutionDay";
+import {
+  hasScholarMembership,
+  scholarInstitutionId,
+} from "./lib/scholarEnrollment";
+import { timeZoneForInstitution } from "./lib/institutionTime";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 
@@ -468,7 +497,11 @@ export const listAllParents = scholarAdminQuery({
     const scholarScope =
       lens.isAdmin && args.scope === undefined
         ? null
-        : await scholarIdsInLens(ctx, lens, { includeProgramGuests: true });
+        : await scholarIdsInLens(ctx, lens, {
+            includeProgramGuests: true,
+            // A withdrawn family's contact record stays in the directory.
+            includeWithdrawn: true,
+          });
 
     const parents = await ctx.db
       .query("users")
@@ -575,55 +608,82 @@ async function requireEnrolledGuardianChild(
  */
 export const listMyChildren = authedQuery({
   args: {},
-  handler: async (ctx) => {
-    const links = await ctx.db
-      .query("guardianships")
-      .withIndex("by_parent", (q) => q.eq("parentUserId", ctx.user._id))
-      .collect();
-    const children = await Promise.all(
-      links.map(async (link) => {
-        const scholar = await ctx.db.get(link.scholarUserId);
-        return scholar && scholar.role === ROLES.SCHOLAR
-          ? {
-              _id: scholar._id,
-              name: scholar.name ?? "Scholar",
-              image: scholar.image ?? null,
-              enrollmentStanding: scholar.enrollmentStanding ?? "enrolled",
-            }
-          : null;
-      }),
-    );
-    return children.filter((c): c is NonNullable<typeof c> => c !== null);
-  },
+  handler: async (ctx) => myChildren(ctx, ctx.user._id),
 });
 
+async function myChildren(ctx: QueryCtx, parentUserId: Id<"users">) {
+  const links = await ctx.db
+    .query("guardianships")
+    .withIndex("by_parent", (q) => q.eq("parentUserId", parentUserId))
+    .collect();
+  const children = await Promise.all(
+    links.map(async (link) => {
+      const scholar = await ctx.db.get(link.scholarUserId);
+      return scholar && scholar.role === ROLES.SCHOLAR
+        ? {
+            _id: scholar._id,
+            name: scholar.name ?? "Scholar",
+            image: scholar.image ?? null,
+            enrollmentStanding: scholar.enrollmentStanding ?? "enrolled",
+          }
+        : null;
+    }),
+  );
+  return children.filter((c): c is NonNullable<typeof c> => c !== null);
+}
+
 /**
- * "View as parent": the child row a TEACHER previews the parent portal for —
- * the same shape `listMyChildren` returns, so `/parent?remote=<id>` renders
- * the ordinary portal with this one child. Same boundary as
- * `requireGuardianOrStaffPreview` (teacher-role membership access, never
- * guardianship, never operations-only staff). Takes the raw URL param and
- * returns null for anything that isn't a reachable scholar — a malformed id,
- * a non-scholar, another school — so the page fails legibly instead of
- * tripping argument validation.
+ * "View as parent": the children a TEACHER previews the parent portal for —
+ * the same row shape `portalContext` returns, so `/parent?remote=<id>`
+ * renders the ordinary portal. The requested scholar comes first, then the
+ * brothers and sisters who share a guardian with them, so the child switcher
+ * looks the way it does for the family. Every child, the requested one
+ * included, must pass the same boundary as `requireGuardianOrStaffPreview`
+ * (teacher-role membership access, never guardianship, never
+ * operations-only staff); a sibling at another school is simply left out.
+ * Takes the raw URL param and returns an empty list for anything that isn't
+ * a reachable scholar — a malformed id, a non-scholar, another school — so
+ * the page fails legibly instead of tripping argument validation.
  */
-export const previewChildForStaff = authedQuery({
+export const previewFamilyForStaff = authedQuery({
   args: { scholarId: v.string() },
   handler: async (ctx, args) => {
-    if (!isTeacherRole(ctx.user.role)) return null;
+    if (!isTeacherRole(ctx.user.role)) return [];
     const scholarId = ctx.db.normalizeId("users", args.scholarId);
-    if (!scholarId) return null;
-    if (!(await canReadScholarAsTeacher(ctx, ctx.user, scholarId))) {
-      return null;
+    if (!scholarId) return [];
+
+    const guardianLinks = await ctx.db
+      .query("guardianships")
+      .withIndex("by_scholar", (q) => q.eq("scholarUserId", scholarId))
+      .collect();
+    const familyIds: Id<"users">[] = [scholarId];
+    for (const link of guardianLinks) {
+      const siblingLinks = await ctx.db
+        .query("guardianships")
+        .withIndex("by_parent", (q) => q.eq("parentUserId", link.parentUserId))
+        .collect();
+      for (const sibling of siblingLinks) {
+        if (!familyIds.includes(sibling.scholarUserId)) {
+          familyIds.push(sibling.scholarUserId);
+        }
+      }
     }
-    const scholar = await ctx.db.get(scholarId);
-    if (!scholar || scholar.role !== ROLES.SCHOLAR) return null;
-    return {
-      _id: scholar._id,
-      name: scholar.name ?? "Scholar",
-      image: scholar.image ?? null,
-      enrollmentStanding: scholar.enrollmentStanding ?? "enrolled",
-    };
+
+    const children = [];
+    for (const id of familyIds) {
+      if (!(await canReadScholarAsTeacher(ctx, ctx.user, id))) continue;
+      const scholar = await ctx.db.get(id);
+      if (!scholar || scholar.role !== ROLES.SCHOLAR) continue;
+      children.push({
+        _id: scholar._id,
+        name: scholar.name ?? "Scholar",
+        image: scholar.image ?? null,
+        enrollmentStanding: scholar.enrollmentStanding ?? "enrolled",
+      });
+    }
+    // The requested scholar anchors the preview: if the teacher can't reach
+    // them, siblings alone don't make a parent view.
+    return children[0]?._id === scholarId ? children : [];
   },
 });
 
@@ -656,6 +716,31 @@ export const setChildPhoto = authedMutation({
 });
 
 /**
+ * The `parent_view_link` aide tool's server-side check (lib/aideTools.ts):
+ * may this caller open `/parent?remote=<scholarId>`, and how many parents
+ * does that family have? Same boundary as `previewFamilyForStaff`, so the
+ * aide never hands out a link the page would refuse. The caller id comes
+ * from the transport (Slack identity link, in-app session), never the model.
+ */
+export const parentViewLinkCheck = internalQuery({
+  args: { callerUserId: v.id("users"), scholarId: v.id("users") },
+  handler: async (ctx, { callerUserId, scholarId }) => {
+    const caller = await ctx.db.get(callerUserId);
+    if (!caller || !isTeacherRole(caller.role)) return { ok: false as const };
+    if (!(await canReadScholarAsTeacher(ctx, caller, scholarId))) {
+      return { ok: false as const };
+    }
+    const scholar = await ctx.db.get(scholarId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR) return { ok: false as const };
+    const guardians = await ctx.db
+      .query("guardianships")
+      .withIndex("by_scholar", (q) => q.eq("scholarUserId", scholarId))
+      .collect();
+    return { ok: true as const, guardianCount: guardians.length };
+  },
+});
+
+/**
  * Whether the signed-in user has a "parent context" (≥1 guardianship). Drives
  * the parent-shell access guard + the account-menu "Parent view" entry for a
  * staff/admin user who is also a guardian. Role-agnostic.
@@ -682,6 +767,28 @@ export const applicantContext = authedQuery({
     return {
       applicantOnly: await isApplicantOnlyParent(ctx, ctx.user._id),
     };
+  },
+});
+
+/**
+ * Everything the /parent shell needs before it can draw the tab bar, in one
+ * read: whether the caller is a guardian at all (`hasParentContext`), whether
+ * they are an applicant-only family (`applicantContext`), and their children
+ * (`listMyChildren`). Same bodies as those three queries, so the portal
+ * decides its tabs from one result instead of waiting on three. Not used by
+ * the staff preview, which reads `previewFamilyForStaff` instead.
+ */
+export const portalContext = authedQuery({
+  args: {},
+  handler: async (ctx) => {
+    const [hasParentContext, applicantOnly, children] = await Promise.all([
+      (async () =>
+        ctx.user.role === ROLES.PARENT ||
+        (await hasGuardianships(ctx, ctx.user._id)))(),
+      isApplicantOnlyParent(ctx, ctx.user._id),
+      myChildren(ctx, ctx.user._id),
+    ]);
+    return { hasParentContext, applicantOnly, children };
   },
 });
 
@@ -721,30 +828,91 @@ export const childSummary = authedQuery({
       ctx,
       args.scholarId,
     );
+    return summaryOf(ctx, scholar);
+  },
+});
 
-    const sessions = await ctx.db
-      .query("sessions")
-      .withIndex("by_user", (q) => q.eq("userId", args.scholarId))
-      .order("desc")
-      .take(10);
-    const recentPulse = sessions.find((p) => p.pulseScore != null);
+/** `childSummary`'s body after its gate; shared with `recordsTab`. */
+async function summaryOf(ctx: QueryCtx, scholar: Doc<"users">) {
+  const sessions = await ctx.db
+    .query("sessions")
+    .withIndex("by_user", (q) => q.eq("userId", scholar._id))
+    .order("desc")
+    .take(10);
+  const recentPulse = sessions.find((p) => p.pulseScore != null);
 
-    const masteryObs = await ctx.db
-      .query("masteryObservations")
-      .withIndex("by_scholar_current", (q) =>
-        q.eq("scholarId", args.scholarId).eq("isSuperseded", false),
-      )
-      .collect();
-    const domains = new Set(masteryObs.map((o) => o.domain));
+  const masteryObs = await ctx.db
+    .query("masteryObservations")
+    .withIndex("by_scholar_current", (q) =>
+      q.eq("scholarId", scholar._id).eq("isSuperseded", false),
+    )
+    .collect();
+  const domains = new Set(masteryObs.map((o) => o.domain));
 
+  return {
+    name: scholar.name ?? "Scholar",
+    readingLevel: talkLevelOf(scholar.readingLevel),
+    dateOfBirth: scholar.dateOfBirth ?? null,
+    recentPulseScore: recentPulse?.pulseScore ?? null,
+    totalSessions: sessions.length,
+    masteryDomainCount: domains.size,
+    masteryObservationCount: masteryObs.length,
+  };
+}
+
+/**
+ * Everything the parent portal's Records tab shows, in one read, so the tab
+ * renders once instead of card by card. Each part reuses the body of the
+ * query that used to fetch it, gate included:
+ *
+ * - `summary` — `childSummary` (guardian or staff preview; null for an
+ *   Extended Education guest, who has no school record).
+ * - `family` — the guardian-only parts, null for a staff previewer, who sees
+ *   a placeholder instead. Inside it, the health-form parts follow
+ *   `scholarFormsAvailable`: the signed record, physical and clearances only
+ *   when the forms are available to an enrolled child; the forms list (`listForGuardian`) for an
+ *   Extended Education guest or when the forms are available; the library
+ *   card (`libraryCards.getStatus`) for an enrolled child only.
+ *
+ * `scholarId` comes back with the data so the client can tell which child a
+ * retained result belongs to while the next child's loads.
+ */
+export const recordsTab = authedQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, { scholarId }) => {
+    await requireGuardianOrStaffPreview(ctx, scholarId);
+    const scholar = await ctx.db.get(scholarId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR) {
+      throw new Error("Scholar not found");
+    }
+    const programGuest = isProgramGuest(scholar);
+    const summary = programGuest ? null : await summaryOf(ctx, scholar);
+    if (!(await isGuardianOf(ctx, ctx.user._id, scholarId))) {
+      return { scholarId, programGuest, summary, family: null };
+    }
+
+    const formsAvailable = await guardianFormsAvailableFor(ctx, scholarId);
+    // The health-form reads refuse an Extended Education guest outright, so
+    // they're skipped for one even when `formsAvailable` (a platform admin).
+    const healthForms = formsAvailable && !programGuest;
+    const [healthRecord, physicalExam, clearanceRequests, libraryCard] =
+      await Promise.all([
+        healthForms ? guardianHealthRecordStatusFor(ctx, scholarId) : null,
+        healthForms ? guardianPhysicalExamFor(ctx, scholarId) : null,
+        healthForms ? guardianClearanceRequestsFor(ctx, scholarId) : [],
+        programGuest ? null : libraryCardStatusFor(ctx, scholarId),
+      ]);
     return {
-      name: scholar.name ?? "Scholar",
-      readingLevel: talkLevelOf(scholar.readingLevel),
-      dateOfBirth: scholar.dateOfBirth ?? null,
-      recentPulseScore: recentPulse?.pulseScore ?? null,
-      totalSessions: sessions.length,
-      masteryDomainCount: domains.size,
-      masteryObservationCount: masteryObs.length,
+      scholarId,
+      programGuest,
+      summary,
+      family: {
+        formsAvailable,
+        healthRecord,
+        physicalExam,
+        clearanceRequests,
+        libraryCard,
+      },
     };
   },
 });
@@ -755,6 +923,11 @@ export const childSummary = authedQuery({
  * staff instrument and are NEVER returned here (§3 prose-only). Guardian-gated,
  * own-children-only. Only `status: "shared"` narratives are visible.
  */
+function parentVisibleSections<S extends { key: string; body: string }>(sections: S[]): S[] {
+  const report = sections.find((s) => s.key === REPORT_SECTION_KEY && s.body.trim());
+  return report ? [report] : sections.filter((s) => s.body.trim());
+}
+
 export const childSharedNarratives = authedQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
@@ -775,16 +948,28 @@ export const childSharedNarratives = authedQuery({
       .query("courseNarratives")
       .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
       .collect();
+    // "Work in this report": only pieces the portfolio already shows this
+    // family, read once and only when a published report lists any.
+    const linksPieces = courseRows.some((n) => n.status === "shared" && (n.pieces ?? []).length > 0);
+    const familyPieces = new Map(
+      (linksPieces ? await familyPortfolioItems(ctx, args.scholarId) : []).map((item) => [String(item._id), item]),
+    );
     const course = await Promise.all(
       courseRows
         .filter((n) => n.status === "shared")
         .map(async (n) => ({
+          pieces: (n.pieces ?? []).flatMap((id) => familyPieces.get(String(id)) ?? []),
           _id: n._id,
-          subject: n.subject,
+          periodId: n.periodId,
+          // The enrichment row reads as its title, "Enrichment and projects".
+          subject: reportTitle(n.subject),
+          enrichment: isEnrichmentSubject(n.subject),
           periodLabel: await periodLabel(n.periodId),
           sharedAt: n.sharedAt ?? n._creationTime,
           // PROSE ONLY — omit pcmRatings/courseRating/aiSuggested/workingLevel.
-          sections: n.sections.filter((s) => s.body.trim()),
+          // A prose report is the whole parent text; retired rubric sections on
+          // the same row are teacher notes and never leave staff.
+          sections: parentVisibleSections(n.sections),
           goals: await goalTitles(n.goalIds),
         })),
     );
@@ -805,8 +990,16 @@ export const childSharedNarratives = authedQuery({
         })),
     );
 
+    // Newest first, except that a term's "Enrichment and projects" row comes
+    // right after that term's other reports: it is the last report of a term.
+    const termEnd = new Map<string, number>();
+    for (const n of course)
+      if (!n.enrichment)
+        termEnd.set(String(n.periodId), Math.min(termEnd.get(String(n.periodId)) ?? n.sharedAt, n.sharedAt));
+    const order = (n: (typeof course)[number]) =>
+      n.enrichment ? Math.min(n.sharedAt, termEnd.get(String(n.periodId)) ?? n.sharedAt) - 0.5 : n.sharedAt;
     return {
-      course: course.sort((a, b) => b.sharedAt - a.sharedAt),
+      course: course.sort((a, b) => order(b) - order(a)).map(({ periodId: _p, enrichment: _e, ...n }) => n),
       wholeChild: wholeChild.sort((a, b) => b.sharedAt - a.sharedAt),
     };
   },
@@ -825,21 +1018,21 @@ export const childSessions = authedQuery({
       .take(20);
 
     const result = [];
-    for (const p of sessions) {
+    // An unused tile session is not a session yet (lib/tileSessions.ts).
+    // No transcript reads here: the portal's "Recent work" card shows the
+    // title, unit, date and summary, all on the session row. A per-session
+    // message count used to be read here for a field nothing displayed, which
+    // made the card's cost grow with every message the child wrote.
+    for (const p of await withoutUnstartedTileSessions(ctx, sessions)) {
       let unitTitle: string | null = null;
       if (p.unitId) {
         const unit = await ctx.db.get(p.unitId);
         unitTitle = unit?.title ?? null;
       }
-      const messages = await ctx.db
-        .query("messages")
-        .withIndex("by_session", (q) => q.eq("sessionId", p._id))
-        .collect();
       result.push({
         title: p.title,
         unitTitle,
         pulseScore: p.pulseScore ?? null,
-        messageCount: messages.length,
         createdAt: p._creationTime,
         analysisSummary: p.analysisSummary ?? null,
       });
@@ -913,15 +1106,21 @@ export const childSignals = authedQuery({
   },
 });
 
-// A guardian-safe Math Skills portrait — the SAME per-domain grade level +
-// real growth trajectory the teacher subtab shows, gated to this parent's own
-// child. Non-sensitive by construction: grade bands + month-over-month growth
-// off the practice frontier, no raw transcripts, no learner↔learner comparison.
+// A guardian-safe Math Skills portrait — the SAME per-domain grade level the
+// teacher subtab shows, gated to this parent's own child, plus what the parent
+// Math page draws from it: the overall level and this term's learned pace (the
+// two stat tiles), each area's new learning this term ("New this term"), and
+// each area's three most recently demonstrated skills (never the full list).
+// Non-sensitive by construction: levels and skill names off the practice
+// engine, no raw transcripts, no learner↔learner comparison.
 export const childMathPortrait = authedQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
     await requireEnrolledGuardianChild(ctx, args.scholarId);
-    return await gatherMathPortrait(ctx.db, args.scholarId);
+    return await gatherMathPortrait(ctx.db, args.scholarId, {
+      withOverall: true,
+      withRecentSkills: true,
+    });
   },
 });
 
@@ -929,6 +1128,275 @@ export const childSeeds = authedQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
     await requireEnrolledGuardianChild(ctx, args.scholarId);
-    return await readScholarSeeds(ctx, args.scholarId);
+    // Always the parent audience, including a staff "View as parent"
+    // preview: the family sees the scholar's own seed text, never the
+    // teacher-private rationale.
+    return await readScholarSeeds(ctx, args.scholarId, ROLES.PARENT);
+  },
+});
+
+// ── The homework plan (Homework tab + parent aide) ──────────────────────
+
+/**
+ * One item of a child's homework plan as a parent sees it. Deliberately the
+ * PLAN, never STATUS (TRA-574): no done, late or started marks and no
+ * completion data of any kind ride this shape, so none can leak through a UI
+ * that forgets to hide it. Finished work is listed like everything else.
+ */
+const homeworkPlanItemValidator = v.object({
+  key: v.string(),
+  title: v.string(),
+  subject: v.union(v.string(), v.null()),
+  teacherName: v.union(v.string(), v.null()),
+  dueAt: v.union(v.number(), v.null()),
+  /** Open-until work (shared/openUntil.ts): when its window closes, shown
+   *  where a due date would go. Null for homework. */
+  openUntil: v.union(v.number(), v.null()),
+  awayFromBunnyPad: v.boolean(),
+  /** The unit's emoji, the same glyph the child's own Homework row leads with. */
+  emoji: v.union(v.string(), v.null()),
+});
+
+const homeworkPlanValidator = v.object({
+  timeZone: v.string(),
+  items: v.array(homeworkPlanItemValidator),
+});
+
+export type HomeworkPlan = {
+  timeZone: string;
+  items: Array<{
+    key: string;
+    title: string;
+    subject: string | null;
+    teacherName: string | null;
+    dueAt: number | null;
+    openUntil: number | null;
+    awayFromBunnyPad: boolean;
+    emoji: string | null;
+  }>;
+};
+
+/**
+ * A child's homework plan: every live homework give that reaches this child,
+ * read straight from the assignments. Membership never depends on what the
+ * child did, so this reads no sessions and no completions at all: starting,
+ * finishing, archiving or a re-push that keeps a started copy on the child's
+ * list can't change which items exist or how they read. An item leaves only
+ * when the teacher withdraws or clears the give (the assignment is archived,
+ * the entry is removed, or it no longer targets this child), or when it falls
+ * before the window: last week's Monday, or an earlier `fromDayKey`
+ * (shared/homeworkPlanWeeks.ts). A dated item falls before it once it was due
+ * before that day; an undated one (no due date, no open-until window) once it
+ * was given (`setAt`) before that day (TRA-620).
+ *
+ * Open-until work (a class focus that ends on a later day, shared/openUntil.ts)
+ * is on the child's list too, in its own "Open from class" section, so it is in
+ * the plan, placed by when its window closes (the tab draws it after the weeks,
+ * TRA-724). Like homework, it stays listed after that.
+ *
+ * The rows a give can produce match the child's own Homework section
+ * (scholarPlate.ts `unstartedAssignedRowSurface`, BunnyPad rows), and the
+ * onboarding unit is left out as it is there. The order is fixed by plan facts
+ * alone: due time, then title, then the give's key. Callers authorize first.
+ */
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The earlier of the default window start and a well-formed `fromDayKey`.
+ *  A malformed one is ignored rather than trusted as a string compare. */
+function earliestDayKey(windowStart: string, fromDayKey: string | undefined) {
+  return fromDayKey && DAY_KEY.test(fromDayKey) && fromDayKey < windowStart
+    ? fromDayKey
+    : windowStart;
+}
+
+export async function homeworkPlanForScholar(
+  ctx: QueryCtx,
+  scholar: Doc<"users">,
+  nowMs: number,
+  /** The earliest day to include (the month calendar's first row), when it
+   *  is before the default window's last-week Monday. */
+  fromDayKey?: string,
+): Promise<HomeworkPlan> {
+  const timeZone = await timeZoneForInstitution(
+    ctx,
+    await scholarInstitutionId(ctx, scholar._id),
+  );
+  if (!(await hasScholarMembership(ctx, scholar._id))) {
+    return { timeZone, items: [] };
+  }
+  const windowStart = earliestDayKey(
+    homeworkPlanWindowStart(nowMs, timeZone),
+    fromDayKey,
+  );
+  const onboardingUnit = await ctx.db
+    .query("units")
+    .withIndex("by_slug", (q) => q.eq("slug", ONBOARDING_UNIT_SLUG))
+    .first();
+  const teacherNames = new Map<Id<"users">, string | null>();
+  const items: HomeworkPlan["items"] = [];
+  const seen = new Set<string>();
+
+  for (const assignment of await ctx.db.query("assignments").collect()) {
+    if (assignment.archivedAt) continue;
+    if (!assignment.scholarIds.includes(scholar._id)) continue;
+    if (onboardingUnit && assignment.unitId === onboardingUnit._id) continue;
+    // The give's class labels its subject (shared with the teacher planner
+    // and the family Portfolio, lib/homeworkSubject.ts).
+    const classIds = firstClassIdByWork(
+      await loadScheduleRows(ctx, assignment._id),
+    );
+    for (const entry of await readSchedule(ctx, assignment)) {
+      if (entry.setAt == null) continue;
+      const openUntil = openUntilClosesAt(entry, timeZone);
+      if (entry.mode !== "homework" && openUntil == null) continue;
+      if (
+        entry.scholarIds != null &&
+        entry.scholarIds.length > 0 &&
+        !entry.scholarIds.some((id) => id === scholar._id)
+      ) {
+        continue;
+      }
+      // On homework, endsAt means "ended early"; on open-until it is the
+      // window, which stays in the plan after it closes.
+      if (openUntil == null && entry.endsAt != null && entry.endsAt <= nowMs) {
+        continue;
+      }
+      // One window for every item: dated work is placed by the day it closes,
+      // undated work by the day it was given (TRA-620).
+      const closesAt = entry.dueAt ?? openUntil;
+      const placedOn =
+        closesAt != null
+          ? dayKeyForTimezone(closesAt - (openUntil != null ? 1 : 0), timeZone)
+          : dayKeyForTimezone(entry.setAt, timeZone);
+      if (placedOn < windowStart) continue;
+      const key = `${assignment._id}::${entry.activityId}`;
+      if (seen.has(key)) continue;
+      const activity = await ctx.db.get(entry.activityId);
+      if (
+        !activity ||
+        !(await unstartedAssignedRowSurface(
+          ctx,
+          activity,
+          entry.mode,
+          true,
+          openUntil != null,
+        ))
+      ) {
+        continue;
+      }
+      seen.add(key);
+      const lesson = activity.lessonId ? await ctx.db.get(activity.lessonId) : null;
+      const unit = lesson?.unitId ? await ctx.db.get(lesson.unitId) : null;
+      const subject = await homeworkSubjectLabel(ctx, {
+        classId: classIds.get(scheduleWorkKey(entry.activityId, entry.mode)),
+        activityId: entry.activityId,
+      });
+      if (!teacherNames.has(assignment.teacherId)) {
+        const teacher = await ctx.db.get(assignment.teacherId);
+        teacherNames.set(assignment.teacherId, teacher?.name?.trim() || null);
+      }
+      items.push({
+        key,
+        title: activity.title,
+        subject,
+        teacherName: teacherNames.get(assignment.teacherId) ?? null,
+        dueAt: openUntil == null ? (entry.dueAt ?? null) : null,
+        openUntil,
+        awayFromBunnyPad: activity.kind === "offline",
+        emoji: unit?.emoji ?? null,
+      });
+    }
+  }
+  const closes = (item: HomeworkPlan["items"][number]) =>
+    item.dueAt ?? item.openUntil ?? Number.MAX_SAFE_INTEGER;
+  items.sort(
+    (a, b) =>
+      closes(a) - closes(b) ||
+      a.title.localeCompare(b.title) ||
+      (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+  );
+  return { timeZone, items };
+}
+
+/**
+ * The parent portal Homework tab's plan for one linked child, plus the
+ * school's closures from last week on (the Calendar tab's source,
+ * academicCalendar.ts), so a no-school day can sit inside its week, and the
+ * child's field trips (TRA-601) from the same day on, for the same reason.
+ * Guardian-gated like every portal read (a guardian, or a teacher previewing
+ * "View as parent"); another family's child throws.
+ */
+export const childHomeworkPlan = authedQuery({
+  args: {
+    scholarId: v.id("users"),
+    // Minute-rounded client clock: it places the week window and re-arms the
+    // reactive query after institution midnight (T11).
+    now: v.optional(v.number()),
+    // The month calendar's first day ("2026-11-02"), so a month before last
+    // week still shows its homework. Only ever widens the default window.
+    fromDayKey: v.optional(v.string()),
+  },
+  returns: v.object({
+    timeZone: v.string(),
+    items: v.array(homeworkPlanItemValidator),
+    closures: v.array(
+      v.object({
+        id: v.string(),
+        startDayKey: v.string(),
+        endDayKey: v.string(),
+        label: v.string(),
+      }),
+    ),
+    trips: v.array(
+      v.object({
+        dayKey: v.string(),
+        startLocal: v.string(),
+        endLocal: v.string(),
+        destination: v.string(),
+      }),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    const scholar = await requireEnrolledGuardianChild(ctx, args.scholarId);
+    // t11-ok: fallback for a client that sends no clock; the page always does.
+    const nowMs = args.now ?? Date.now();
+    const plan = await homeworkPlanForScholar(ctx, scholar, nowMs, args.fromDayKey);
+    const institutionId = await scholarInstitutionId(ctx, scholar._id);
+    const windowStart = earliestDayKey(
+      homeworkPlanWindowStart(nowMs, plan.timeZone),
+      args.fromDayKey,
+    );
+    const closures = institutionId
+      ? (await closuresForInstitution(ctx, institutionId))
+          .filter(hasUsableDays)
+          .filter((closure) => closure.endDayKey >= windowStart)
+          .sort((a, b) => a.startDayKey.localeCompare(b.startDayKey))
+          .map((closure) => ({
+            id: String(closure._id),
+            startDayKey: closure.startDayKey,
+            endDayKey: closure.endDayKey,
+            label: closure.label,
+          }))
+      : [];
+    const { trips } = await tripsForScholar(ctx, scholar._id, windowStart, "9999-12-31");
+    return { ...plan, closures, trips };
+  },
+});
+
+/**
+ * The parent aide's read (get_school_calendar adds the plan for a parent).
+ * Authorization is one level up: `makeScholarReadTools` resolves a name only
+ * inside the parent's own guardianship set.
+ */
+export const getChildHomeworkPlan = internalQuery({
+  args: { scholarId: v.id("users") },
+  returns: v.union(homeworkPlanValidator, v.null()),
+  handler: async (ctx, args) => {
+    const scholar = await ctx.db.get(args.scholarId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR || isProgramGuest(scholar)) {
+      return null;
+    }
+    // t11-ok: an internal read only the aide's tool action calls, once per turn.
+    return await homeworkPlanForScholar(ctx, scholar, Date.now());
   },
 });

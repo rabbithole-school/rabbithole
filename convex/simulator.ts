@@ -26,6 +26,7 @@ import {
 import { resyncCooperationConflictContent } from "./seed/cooperationConflict";
 import { resolveBenchSimulator } from "./simulatorBenches";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
+import { assertMakerActivityUnchanged } from "./lib/questStructure";
 
 function validatedSimulator(activity: Doc<"activities">) {
   const stored = activity.simulatorSpec;
@@ -185,7 +186,12 @@ export const simulatorDesign = authedQuery({
 export const saveSimulatorSpec = authedMutation({
   args: { activityId: v.id("activities"), spec: v.any() },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { activityId: args.activityId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      activityId: args.activityId,
+    });
+    // Saving a spec turns the activity into a simulator: an approved Quest's
+    // maker stays the kind its teacher approved (TRA-685).
+    assertMakerActivityUnchanged(unit, args.activityId, user._id);
     const activity = await ctx.db.get(args.activityId);
     if (!activity) throw new Error("Activity not found");
     const spec = args.spec as SimulatorSpec;

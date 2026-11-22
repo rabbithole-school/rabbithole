@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -102,7 +103,7 @@ async function seedPlanWorld(t: ReturnType<typeof convexTest>) {
   const today = dayKeyForTimezone(Date.now(), TIME_ZONE);
   const dueAt = dayStartForDayKey(nextWeekday(today), TIME_ZONE) + 12 * 60 * 60_000;
   await t.run((ctx) =>
-    ctx.db.insert("assignments", {
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds: [scholarId],
@@ -176,7 +177,7 @@ describe("takeHomePlans", () => {
     expect(plan).toMatchObject({ isPrimary: true, printsTonight: false });
   });
 
-  test("does not add a dormant Quest before it has a session to open", async () => {
+  test("does not resolve a dormant Quest before it has a session to open", async () => {
     const t = convexTest(schema, modules);
     const world = await seedPlanWorld(t);
     const dormantUnitId = await t.run((ctx) =>
@@ -191,7 +192,7 @@ describe("takeHomePlans", () => {
     const asScholar = await withUser(t, world.scholarId);
 
     await expect(
-      asScholar.mutation(api.takeHomePlans.addSuggestion, {
+      asScholar.mutation(api.takeHomePlans.resolveSuggestion, {
         suggestion: { kind: "quest", unitId: dormantUnitId },
       }),
     ).rejects.toThrow(/no longer available/i);
@@ -273,130 +274,6 @@ describe("takeHomePlans", () => {
     );
   });
 
-  test("records scholar actions, returns removed work to suggestions, and supports completion undo", async () => {
-    const t = convexTest(schema, modules);
-    const world = await seedPlanWorld(t);
-    const asScholar = await withUser(t, world.scholarId);
-
-    const activityItemId = await asScholar.mutation(api.takeHomePlans.addSuggestion, {
-      suggestion: { kind: "activity", sessionId: world.sessionId },
-    });
-    await expect(
-      asScholar.mutation(api.takeHomePlans.addSuggestion, {
-        suggestion: { kind: "activity", sessionId: world.sessionId },
-      }),
-    ).rejects.toThrow(/no longer available/i);
-    await asScholar.mutation(api.takeHomePlans.markActivityDone, {
-      itemId: activityItemId,
-    });
-    expect(
-      await t.run((ctx) =>
-        ctx.db
-          .query("activityCompletions")
-          .withIndex("by_scholar_activity", (q) =>
-            q.eq("scholarId", world.scholarId).eq("activityId", world.suggestedActivityId),
-          )
-          .collect(),
-      ),
-    ).toHaveLength(1);
-    expect(
-      await t.run((ctx) =>
-        ctx.db
-          .query("activityCompletions")
-          .withIndex("by_scholar_activity", (q) =>
-            q.eq("scholarId", world.scholarId).eq("activityId", world.suggestedActivityId),
-          )
-          .unique(),
-      ),
-    ).toMatchObject({
-      source: "scholar_home",
-      action: "scholar_marked_take_home_done",
-    });
-    await asScholar.mutation(api.takeHomePlans.undoMarkActivityDone, {
-      itemId: activityItemId,
-    });
-    expect(
-      await t.run((ctx) =>
-        ctx.db
-          .query("activityCompletions")
-          .withIndex("by_scholar_activity", (q) =>
-            q.eq("scholarId", world.scholarId).eq("activityId", world.suggestedActivityId),
-          )
-          .collect(),
-      ),
-    ).toHaveLength(0);
-    await asScholar.mutation(api.takeHomePlans.removeItem, { itemId: activityItemId });
-    expect(
-      (await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() })).suggestions,
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "activity", sessionId: world.sessionId }),
-      ]),
-    );
-
-    const noteId = await asScholar.mutation(api.takeHomePlans.addNote, {
-      text: "  Pack colored pencils.  ",
-    });
-    await asScholar.mutation(api.takeHomePlans.editNote, {
-      itemId: noteId,
-      text: "Pack field notebook.",
-    });
-    await asScholar.mutation(api.takeHomePlans.setNoteChecked, {
-      itemId: noteId,
-      checked: true,
-    });
-    await asScholar.mutation(api.takeHomePlans.removeItem, { itemId: noteId });
-    expect(await t.run((ctx) => ctx.db.get(noteId))).toBeNull();
-
-    const removedQuestItemId = await asScholar.mutation(api.takeHomePlans.addSuggestion, {
-      suggestion: { kind: "quest", unitId: world.questUnitId },
-    });
-    await asScholar.mutation(api.takeHomePlans.removeItem, {
-      itemId: removedQuestItemId,
-    });
-    expect(
-      (await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() }))
-        .suggestions,
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "quest", unitId: world.questUnitId }),
-      ]),
-    );
-    const questItemId = await asScholar.mutation(api.takeHomePlans.addSuggestion, {
-      suggestion: { kind: "quest", unitId: world.questUnitId },
-    });
-    await asScholar.mutation(api.takeHomePlans.closeQuest, { itemId: questItemId });
-    expect(await t.run((ctx) => ctx.db.get(world.questSessionId))).toMatchObject({
-      isArchived: true,
-    });
-    expect(
-      await t.run((ctx) => ctx.db.query("scholarUnitBadges").collect()),
-    ).toHaveLength(0);
-    await asScholar.mutation(api.takeHomePlans.undoCloseQuest, {
-      itemId: questItemId,
-    });
-
-    expect(await t.run((ctx) => ctx.db.get(world.questSessionId))).toMatchObject({
-      isArchived: false,
-    });
-
-    const plan = await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() });
-    expect(plan.selected).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "quest",
-          unitId: world.questUnitId,
-          checked: false,
-        }),
-      ]),
-    );
-    expect(plan.selected).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "note", text: "Pack field notebook." }),
-      ]),
-    );
-  });
-
   test("caps suggestions at three cards", async () => {
     const t = convexTest(schema, modules);
     const world = await seedPlanWorld(t);
@@ -443,11 +320,6 @@ describe("takeHomePlans", () => {
     });
     expect(activity).toMatchObject({ kind: "activity", undoAvailable: true });
     const plan = await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() });
-    expect(plan.selected).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ activityId: world.suggestedActivityId }),
-      ]),
-    );
     expect(plan.resolvedToday).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ itemId: activity.itemId, kind: "activity", actions: ["undo"] }),
@@ -491,6 +363,25 @@ describe("takeHomePlans", () => {
     });
   });
 
+  test("undoing a closed quest leaves it archived once a teacher has retracted it", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedPlanWorld(t);
+    const asScholar = await withUser(t, world.scholarId);
+
+    const quest = await asScholar.mutation(api.takeHomePlans.resolveSuggestion, {
+      suggestion: { kind: "quest", unitId: world.questUnitId },
+    });
+    // The teacher retracts the quest between the close and the undo.
+    await t.run((ctx) => ctx.db.patch(world.questUnitId, { isActive: false }));
+    await asScholar.mutation(api.takeHomePlans.undoResolveSuggestion, {
+      itemId: quest.itemId,
+    });
+
+    expect(await t.run((ctx) => ctx.db.get(world.questSessionId))).toMatchObject({
+      isArchived: true,
+    });
+  });
+
   test("Keep it open stops today's close-out asking, with no side effect", async () => {
     const t = convexTest(schema, modules);
     const world = await seedPlanWorld(t);
@@ -509,9 +400,8 @@ describe("takeHomePlans", () => {
 
     const plan = await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() });
     expect(plan.suggestions).toEqual([]);
-    // Not "marked done", not on a list, nothing archived or completed.
+    // Not "marked done", nothing archived or completed.
     expect(plan.resolvedToday).toEqual([]);
-    expect(plan.selected).toEqual([]);
     expect(await t.run((ctx) => ctx.db.get(world.questSessionId))).toMatchObject({
       isArchived: false,
     });
@@ -522,70 +412,6 @@ describe("takeHomePlans", () => {
         suggestion: { kind: "quest", unitId: world.questUnitId },
       }),
     ).toBeNull();
-  });
-
-  test("idempotently adds a present Quest and recreates it after removal", async () => {
-    const t = convexTest(schema, modules);
-    const world = await seedPlanWorld(t);
-    const asScholar = await withUser(t, world.scholarId);
-
-    const itemId = await asScholar.mutation(api.takeHomePlans.addSessionToPlan, {
-      sessionId: world.questSessionId,
-    });
-    expect(await t.run((ctx) => ctx.db.get(itemId))).toMatchObject({
-      kind: "quest",
-      unitId: world.questUnitId,
-      sessionId: world.questSessionId,
-    });
-    expect(
-      await asScholar.mutation(api.takeHomePlans.addSessionToPlan, {
-        sessionId: world.questSessionId,
-      }),
-    ).toBe(itemId);
-    await asScholar.mutation(api.takeHomePlans.removeItem, { itemId });
-    const replacementItemId = await asScholar.mutation(
-      api.takeHomePlans.addSessionToPlan,
-      { sessionId: world.questSessionId },
-    );
-    expect(replacementItemId).not.toBe(itemId);
-    expect(await t.run((ctx) => ctx.db.get(itemId))).toBeNull();
-  });
-
-  test("returns narrow Quest pins and starts canonical teacher suggestions in today's plan", async () => {
-    const t = convexTest(schema, modules);
-    const world = await seedPlanWorld(t);
-    const { selectedSeedId } = await t.run(async (ctx) => {
-      const selectedSeedId = await ctx.db.insert("seeds", {
-        scholarId: world.scholarId,
-        origin: "teacher",
-        status: "active",
-        topic: "Tide-pool Quest",
-        suggestionType: "teacher_suggestion",
-        rationale: "Teacher-only diagnostic detail",
-        scholarInvitation: "Trace one pattern in the tide pools.",
-        unitId: world.unitId,
-      });
-      return { selectedSeedId };
-    });
-    const asScholar = await withUser(t, world.scholarId);
-
-    const before = await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() });
-    expect(before).not.toHaveProperty("newQuestCandidates");
-
-    const started = await asScholar.mutation(api.takeHomePlans.startSeedInPlan, {
-      seedId: selectedSeedId,
-    });
-    expect(started.kind).toBe("quest");
-    expect(await t.run((ctx) => ctx.db.get(started.itemId))).toMatchObject({
-      kind: "quest",
-      unitId: world.unitId,
-      sessionId: started.sessionId,
-    });
-    const pins = await asScholar.query(api.takeHomePlans.pinningForSelf, { now: Date.now() });
-    expect(pins).toMatchObject({
-      dayKey: dayKeyForTimezone(Date.now(), TIME_ZONE),
-      pins: [{ itemId: started.itemId, unitId: world.unitId, sessionId: started.sessionId }],
-    });
   });
 
   test("does not let a scholar mutate another institution's plan item", async () => {
@@ -601,12 +427,12 @@ describe("takeHomePlans", () => {
     });
     const asFirst = await withUser(t, first.scholarId);
     const asSecond = await withUser(t, secondScholarId);
-    const itemId = await asFirst.mutation(api.takeHomePlans.addNote, {
-      text: "Private note",
+    const { itemId } = await asFirst.mutation(api.takeHomePlans.resolveSuggestion, {
+      suggestion: { kind: "activity", sessionId: first.sessionId },
     });
 
-    await expect(asSecond.mutation(api.takeHomePlans.removeItem, { itemId })).rejects.toThrow(
-      /plan item not found/i,
-    );
+    await expect(
+      asSecond.mutation(api.takeHomePlans.undoResolveSuggestion, { itemId }),
+    ).rejects.toThrow(/plan item not found/i);
   });
 });

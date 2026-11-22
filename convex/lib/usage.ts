@@ -66,6 +66,38 @@ export function normalizeAnthropicUsage(
   };
 }
 
+/** The subset of an OpenAI Responses API `usage` object we read. */
+export interface OpenAIResponsesUsage {
+  input_tokens?: number | null;
+  input_tokens_details?: {
+    cached_tokens?: number | null;
+    cache_write_tokens?: number | null;
+  } | null;
+  output_tokens?: number | null;
+}
+
+/**
+ * Normalize an OpenAI Responses `usage` into our breakdown. OpenAI's
+ * `input_tokens` INCLUDES its cached and cache-written tokens (Anthropic's
+ * excludes them), so subtract both to get the uncached base the report prices
+ * at the full input rate. `output_tokens` already includes reasoning tokens,
+ * which bill at the output rate.
+ */
+export function normalizeOpenAIResponsesUsage(
+  u: OpenAIResponsesUsage | null | undefined,
+): UsageBreakdown {
+  if (!u) return emptyUsage();
+  const cacheReadTokens = n(u.input_tokens_details?.cached_tokens);
+  const cacheWriteTokens = n(u.input_tokens_details?.cache_write_tokens);
+  return {
+    inputTokens: Math.max(0, n(u.input_tokens) - cacheReadTokens - cacheWriteTokens),
+    cacheWriteTokens,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens,
+    outputTokens: n(u.output_tokens),
+  };
+}
+
 /**
  * Fold a streaming `message_start` usage (which carries the input + cache
  * counts for that message) into an accumulator. Output is intentionally

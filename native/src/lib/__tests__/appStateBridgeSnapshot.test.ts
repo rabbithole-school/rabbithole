@@ -85,7 +85,10 @@ describe("native app snapshot bridge vendor", () => {
       "document.querySelectorAll(\"canvas\")",
     );
     expect(bridge.RABBITHOLE_APP_SNAPSHOT_SDK).toContain(
-      'n.tagName!=="CANVAS"&&n.tagName!=="SCRIPT"',
+      `filter:${bridge.APP_SNAPSHOT_NODE_FILTER_SOURCE}`,
+    );
+    expect(bridge.RABBITHOLE_APP_SNAPSHOT_SDK).toContain(
+      bridge.APP_SNAPSHOT_PAINT_SOURCE,
     );
     expect(bridge.injectAppStateSdk("<body>App</body>")).toContain(
       `<script>${DOM_TO_IMAGE_SOURCE}</script>`,
@@ -115,6 +118,7 @@ describe("native app snapshot bridge vendor", () => {
       "three.iife.min.js",
       "rh-expression-editor.js",
       "rh-expression-editor.css",
+      "highlight-python.min.js",
     ]);
     expect(csp).toBe(APP_SANDBOX_CSP);
     expect(srcDoc).not.toContain('src="/app-kit/');

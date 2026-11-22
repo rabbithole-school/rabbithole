@@ -22,6 +22,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  type TextInput,
   View,
 } from "react-native";
 import { fetch as expoFetch } from "expo/fetch";
@@ -55,10 +56,13 @@ export function SidelineTutorSheet({
   sessionId,
   open,
   onClose,
+  focusRequest = 0,
 }: {
   sessionId: Id<"sessions">;
   open: boolean;
   onClose: () => void;
+  /** Bumped by ⌘/ (src/lib/voiceKey.ts): focus the composer. */
+  focusRequest?: number;
 }) {
   const colors = useColors();
   const bubbleStyles = useMemo(() => chatBubbleStyles(colors), [colors]);
@@ -67,7 +71,17 @@ export function SidelineTutorSheet({
   const [streamingText, setStreamingText] = useState("");
   const [activity, setActivity] = useState<TutorActivity | null>(null);
   const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
   const authToken = useAuthToken();
+  // Each ⌘/ focuses once; a later tap on the header's Tutor button does not.
+  const focusedRequestRef = useRef(0);
+  useEffect(() => {
+    if (!open || focusRequest === focusedRequestRef.current) return;
+    focusedRequestRef.current = focusRequest;
+    // The sheet may be mid-slide; focus once it has mounted.
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [focusRequest, open]);
   // Aborts the in-flight tutor stream on Stop / steer. The turn-seq guard keeps
   // an aborted turn's cleanup from clobbering the turn that replaced it.
   const abortRef = useRef<AbortController | null>(null);
@@ -287,9 +301,10 @@ export function SidelineTutorSheet({
 
         <View style={[styles.composer, { borderTopColor: colors.border }]}>
           <AppTextInput
+            ref={inputRef}
             value={input}
             onChangeText={onChangeInput}
-            placeholder="reply to the tutor…"
+            placeholder="Reply to the tutor…"
             placeholderTextColor={colors.fgMuted}
             style={[styles.input, { color: colors.fg, borderColor: colors.border }]}
             multiline

@@ -95,6 +95,17 @@ export function CoordinatePlaneManipulative({
               {String(v)}
             </Text>
           ))}
+        {/* axis names (e.g. Re / Im for the complex plane) at each axis's positive end */}
+        {spec.axisLabels && (
+          <>
+            <Text x={xMax} y={(yMin <= 0 && yMax >= 0 ? 0 : yMin) + pad * 0.5} size={16} color={C.navy} attach="w">
+              {spec.axisLabels.x}
+            </Text>
+            <Text x={(xMin <= 0 && xMax >= 0 ? 0 : xMin) + pad * 0.3} y={yMax} size={16} color={C.navy} attach="e">
+              {spec.axisLabels.y}
+            </Text>
+          </>
+        )}
         {/* fixed decorative segments (polygon outlines, etc.) */}
         {(spec.segments ?? []).map((seg, i) => (
           <Line.Segment key={`seg${i}`} point1={[seg[0].x, seg[0].y]} point2={[seg[1].x, seg[1].y]} color={C.teal} weight={2} />

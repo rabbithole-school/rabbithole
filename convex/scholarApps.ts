@@ -10,6 +10,12 @@
 //
 // See review/external-apps-launcher.html §2 & §4.
 
+import { getSessionOwner } from "./lib/auth";
+import {
+  customAppForTile,
+  tileSessionApp,
+  userOpensTileSessions,
+} from "./lib/tileSessions";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalMutation } from "./_generated/server";
@@ -150,6 +156,16 @@ export const listForLauncher = authedQuery({
       }
     }
 
+    // Tile sessions (lib/tileSessions.ts): only the signed-in scholar's own
+    // launcher routes a tap to a session, never a staff remote view, a
+    // view-as overlay or a read-only account (the mutation refuses all three).
+    const owner = await getSessionOwner(ctx);
+    const opensSessions =
+      scholarId === ctx.user._id &&
+      userOpensTileSessions(ctx.user) &&
+      owner?._id === ctx.user._id &&
+      owner.readOnly !== true;
+
     const tiles = [];
     for (const appIdStr of showIds) {
       const appId = ctx.db.normalizeId("externalApps", appIdStr);
@@ -167,6 +183,11 @@ export const listForLauncher = authedQuery({
         color: app.color ?? null,
         nativeUrlScheme: app.nativeUrlScheme ?? null,
         nativeBundleId: app.nativeBundleId ?? null,
+        // A tap opens this scholar's session of the app in the Workshop
+        // (vibecode.openTileForSelf) instead of the bare app host.
+        opensAsSession:
+          opensSessions &&
+          tileSessionApp(await customAppForTile(ctx, app)) !== null,
       });
     }
     // Stable order: alphabetical by name (no per-scholar ordering — <4 apps).
@@ -416,47 +437,90 @@ export const openForScholar = scholarAdminMutation({
     if (!app || app.archived) {
       throw new Error("That app is no longer in the catalog");
     }
-    const timeZone = await timeZoneForScholar(ctx, args.scholarId);
-    const today = dayKeyForTimezone(Date.now(), timeZone);
-    const throughDay = args.throughDay ?? today;
-    let expiresAt: number;
-    try {
-      expiresAt = dayStartForDayKey(shiftDayKey(throughDay, 1), timeZone);
-    } catch {
-      throw new Error("Pick a valid day");
-    }
-    if (throughDay < today) throw new Error("Pick today or a later day");
-    const existing = await ctx.db
-      .query("scholarApps")
-      .withIndex("by_scholar_app", (q) =>
-        q.eq("scholarId", args.scholarId).eq("appId", args.appId),
-      )
-      .first();
-    if (
-      existing?.enabled &&
-      (existing.source === "manual" || existing.source === "default") &&
-      (existing.expiresAt === undefined || existing.expiresAt >= expiresAt)
-    ) {
-      return {
-        scholarAppId: existing._id,
-        throughDay:
-          existing.expiresAt === undefined
-            ? null
-            : dayKeyForTimezone(existing.expiresAt - 1, timeZone),
-        expiresAt: existing.expiresAt ?? null,
-      };
-    }
-    const { scholarAppId } = await coreAddToScholar(
+    const r = await coreOpenForScholarThrough(
       ctx,
       args.scholarId,
       args.appId,
       ctx.user._id,
       "ui",
-      expiresAt,
+      args.throughDay,
     );
-    return { scholarAppId, throughDay, expiresAt };
+    return {
+      scholarAppId: r.scholarAppId,
+      throughDay: r.throughDay,
+      expiresAt: r.expiresAt,
+    };
   },
 });
+
+/**
+ * The core of `openForScholar`: open an app to one scholar through the end of
+ * `throughDay` (today, from the server clock, when omitted) in the scholar's
+ * school's time zone, never shortening an add that already runs longer. Also
+ * the one-day GROUP grant (`appAudiences.aideSetGroupAccess` with a
+ * `throughDay`), which opens it this way for each member, so "all day" for a
+ * group is the same row and the same `expireDirectGrant` as for one scholar.
+ * The caller checks the app and enforces access and tenancy.
+ * `kept` is true when an existing add already ran at least that long.
+ */
+export async function coreOpenForScholarThrough(
+  ctx: MutationCtx,
+  scholarId: Id<"users">,
+  appId: Id<"externalApps">,
+  addedBy: Id<"users">,
+  via: "ui" | "aide" | "slack",
+  throughDayArg?: string,
+  /** The group opening it for the day, recorded on a row this writes so the
+   *  group's disable can find exactly its own adds (TRA-636). */
+  openedForGroupId?: Id<"scholarGroups">,
+): Promise<{
+  scholarAppId: Id<"scholarApps">;
+  throughDay: string | null;
+  expiresAt: number | null;
+  kept: boolean;
+}> {
+  const timeZone = await timeZoneForScholar(ctx, scholarId);
+  const today = dayKeyForTimezone(Date.now(), timeZone);
+  const throughDay = throughDayArg ?? today;
+  let expiresAt: number;
+  try {
+    expiresAt = dayStartForDayKey(shiftDayKey(throughDay, 1), timeZone);
+  } catch {
+    throw new Error("Pick a valid day");
+  }
+  if (throughDay < today) throw new Error("Pick today or a later day");
+  const existing = await ctx.db
+    .query("scholarApps")
+    .withIndex("by_scholar_app", (q) =>
+      q.eq("scholarId", scholarId).eq("appId", appId),
+    )
+    .first();
+  if (
+    existing?.enabled &&
+    (existing.source === "manual" || existing.source === "default") &&
+    (existing.expiresAt === undefined || existing.expiresAt >= expiresAt)
+  ) {
+    return {
+      scholarAppId: existing._id,
+      throughDay:
+        existing.expiresAt === undefined
+          ? null
+          : dayKeyForTimezone(existing.expiresAt - 1, timeZone),
+      expiresAt: existing.expiresAt ?? null,
+      kept: true,
+    };
+  }
+  const { scholarAppId } = await coreAddToScholar(
+    ctx,
+    scholarId,
+    appId,
+    addedBy,
+    via,
+    expiresAt,
+    { openedForGroupId },
+  );
+  return { scholarAppId, throughDay, expiresAt, kept: false };
+}
 
 // ── Shared per-scholar link core (public mutation, aide* wrapper, and the
 //    customApps installs) ─────────────────────────────────────────────────
@@ -481,7 +545,14 @@ export const openForScholar = scholarAdminMutation({
  *    enable, app installs). A live end is kept, so "enable Stop Motion for
  *    Kai" cannot quietly turn a day's access into a standing grant; an end
  *    already past is cleared, since the add is being given again.
- *  A new end schedules `expireDirectGrant` for that instant. */
+ *  A new end schedules `expireDirectGrant` for that instant.
+ *
+ *  `opts.openedForGroupId` marks the row as written by that group's one-day
+ *  opening. Every write here sets the marker to what this caller passed, so
+ *  another path that re-enables the row or changes its end clears it, and the
+ *  group's disable no longer owns the row (TRA-636). A call that changes
+ *  nothing (the row is already enabled with that end) writes nothing, so the
+ *  marker stays with the group that set the end. */
 export async function coreAddToScholar(
   ctx: MutationCtx,
   scholarId: Id<"users">,
@@ -489,7 +560,13 @@ export async function coreAddToScholar(
   addedBy: Id<"users"> | undefined,
   via: "ui" | "aide" | "slack" | "merge-webhook" = "ui",
   end?: number | null,
-): Promise<{ scholarAppId: Id<"scholarApps">; added: boolean }> {
+  opts: { openedForGroupId?: Id<"scholarGroups"> } = {},
+): Promise<{
+  scholarAppId: Id<"scholarApps">;
+  added: boolean;
+  /** When the add now ends on its own; null for a standing add. */
+  expiresAt: number | null;
+}> {
   const existing = await ctx.db
     .query("scholarApps")
     .withIndex("by_scholar_app", (q) =>
@@ -509,10 +586,18 @@ export async function coreAddToScholar(
     const expiresAt = end === undefined ? liveEnd : (end ?? undefined);
     const endChanged = existing.expiresAt !== expiresAt;
     if (parked || !existing.enabled || endChanged) {
-      const patch: Partial<Doc<"scholarApps">> = { enabled: true };
+      const patch: Partial<Doc<"scholarApps">> = {
+        enabled: true,
+        // `undefined` removes the field: another path now owns this add.
+        openedForGroupId: opts.openedForGroupId,
+      };
       if (parked) {
         patch.source = "manual";
         patch.addedBy = addedBy;
+        // The parked login outlives this add: removeLink parks it again.
+        if (existing.loginUsername || existing.loginPassword) {
+          patch.promotedFromParkedLogin = true;
+        }
       }
       if (endChanged) {
         // `undefined` removes the field: a standing add. Whoever sets the end
@@ -559,7 +644,7 @@ export async function coreAddToScholar(
       externalAppId: appId,
       scholarIds: [scholarId],
     });
-    return { scholarAppId: existing._id, added: parked };
+    return { scholarAppId: existing._id, added: parked, expiresAt: expiresAt ?? null };
   }
   const expiresAt = end ?? undefined;
   const scholarAppId = await ctx.db.insert("scholarApps", {
@@ -569,6 +654,7 @@ export async function coreAddToScholar(
     source: "manual",
     addedBy,
     ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(opts.openedForGroupId ? { openedForGroupId: opts.openedForGroupId } : {}),
   });
   if (addedBy) await auditManagedClaim(
     ctx,
@@ -595,23 +681,32 @@ export async function coreAddToScholar(
     externalAppId: appId,
     scholarIds: [scholarId],
   });
-  return { scholarAppId, added: true };
+  return { scholarAppId, added: true, expiresAt: expiresAt ?? null };
 }
 
 /** Take a scholar's DIRECT link off their launcher. Deletes it — unless it
- *  holds a saved login and a live grant still gives them the app, in which case
- *  it goes back to parking that login (source:"grant"): undoing a direct add
- *  must not take the grant's autofill with it (TRA-431). A paused grant does
- *  not count, the same rule `coreSetCredentials` parks a login under. A
- *  parked row keeps no end: the end belonged to the direct add. */
+ *  holds a saved login that must outlive the add, in which case it goes back
+ *  to parking that login (source:"grant"). That is when a live grant still
+ *  gives them the app, since undoing a direct add must not take the grant's
+ *  autofill with it (TRA-431), or when the add was promoted from a row that
+ *  already parked the login, since the login predates the add (TRA-636). A
+ *  paused grant does not count, the same rule `coreSetCredentials` parks a
+ *  login under. A parked row keeps no end and no group marker: both belonged
+ *  to the direct add. */
 async function removeLink(ctx: MutationCtx, link: Doc<"scholarApps">) {
   if (link.loginUsername || link.loginPassword) {
-    const scholar = await ctx.db.get(link.scholarId);
-    if (scholar && (await scholarHasGrantForApp(ctx, scholar, link.appId))) {
+    let park = link.promotedFromParkedLogin === true;
+    if (!park) {
+      const scholar = await ctx.db.get(link.scholarId);
+      park = !!scholar && (await scholarHasGrantForApp(ctx, scholar, link.appId));
+    }
+    if (park) {
       await ctx.db.patch(link._id, {
         enabled: true,
         source: "grant",
         expiresAt: undefined,
+        openedForGroupId: undefined,
+        promotedFromParkedLogin: undefined,
       });
       return;
     }
@@ -673,7 +768,7 @@ export const expireDirectGrant = internalMutation({
 
 /** Remove a scholar's DIRECT (manual/default) link to an app — never a
  *  grant-parked credential row (those are visibility-neutral + retained). */
-async function coreRemoveByScholarAndApp(
+export async function coreRemoveByScholarAndApp(
   ctx: MutationCtx,
   scholarId: Id<"users">,
   appId: Id<"externalApps">,
@@ -820,14 +915,28 @@ export const aideSetScholarAccess = internalMutation({
     const scholar = await resolveScholarByNameOrUsername(ctx, scholarQuery, scope);
     const scholarLabel = scholar.name ?? scholar.username ?? "the scholar";
     if (enabled) {
-      await coreAddToScholar(
+      const { expiresAt } = await coreAddToScholar(
         ctx,
         scholar._id,
         app._id,
         caller._id,
         via ?? "aide",
       );
-      return { app: app.name, scholar: scholarLabel, enabled: true };
+      // An add someone opened for a day or until a date keeps its end here
+      // (coreAddToScholar), so say so: a bare "enabled" reads as standing
+      // access, and the model would repeat it as such (TRA-448).
+      return {
+        app: app.name,
+        scholar: scholarLabel,
+        enabled: true,
+        throughDay:
+          expiresAt === null
+            ? null
+            : dayKeyForTimezone(
+                expiresAt - 1,
+                await timeZoneForScholar(ctx, scholar._id),
+              ),
+      };
     }
     const r = await coreRemoveByScholarAndApp(
       ctx,
@@ -988,9 +1097,16 @@ async function coreSetCredentials(
   }
 
   if (!link) throw new Error("Scholar has no link for this app");
-  const patch: { loginUsername?: string | undefined; loginPassword?: string | undefined } = {};
+  const patch: Partial<Doc<"scholarApps">> = {};
   if (args.username !== undefined) patch.loginUsername = args.username.trim() || undefined;
   if (args.password !== undefined) patch.loginPassword = args.password || undefined;
+  // A login cleared off a promoted add leaves nothing parked to restore, so a
+  // later login typed onto that add follows the plain direct-add rule.
+  const username = "loginUsername" in patch ? patch.loginUsername : link.loginUsername;
+  const password = "loginPassword" in patch ? patch.loginPassword : link.loginPassword;
+  if (!username && !password && link.promotedFromParkedLogin) {
+    patch.promotedFromParkedLogin = undefined;
+  }
   await ctx.db.patch(link._id, patch);
 }
 

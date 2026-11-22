@@ -5,7 +5,6 @@ import {
   fetchThreadReplies,
   fetchConversationMembers,
   postMessage,
-  postContext,
   addReaction,
   removeReaction,
   escapeSlackText,
@@ -18,6 +17,8 @@ import {
   getFilePermalink,
   setConversationTopic,
   SLACK_TOPIC_MAX,
+  renameAgentSession,
+  setAgentSessionStatus,
 } from "../slackApi";
 
 // Capture the last fetch call so we can assert HOW each Slack method is
@@ -71,6 +72,16 @@ describe("read methods are form-encoded (not JSON)", () => {
     expect(captured!.url).toContain("users.info");
     expect(contentType(captured!.init)).toBe("application/x-www-form-urlencoded");
     expect(String(captured!.init.body)).toBe("user=U999");
+  });
+
+  test("fetchSlackUserInfo reports whether the account is a bot", async () => {
+    stubFetch({ ok: true, user: { is_bot: true, profile: { display_name: "Deploys" } } });
+    expect(await fetchSlackUserInfo("xoxb-tok", "U0DEPLOYBOT")).toMatchObject({
+      name: "Deploys",
+      isBot: true,
+    });
+    stubFetch({ ok: true, user: { profile: { display_name: "Lehua" } } });
+    expect((await fetchSlackUserInfo("xoxb-tok", "U999")).isBot).toBe(false);
   });
 
   test("fetchThreadReplies caps aide context while preserving the root and newest turns", async () => {
@@ -142,13 +153,23 @@ describe("write methods stay JSON", () => {
     expect(body.unfurl_media).toBe(true);
   });
 
-  test("postContext suppresses unfurls by default", async () => {
-    stubFetch({ ok: true, ts: "1.2" });
-    await postContext("xoxb-tok", { channel: "C1", text: "aside" });
-    expect(captured!.url).toContain("chat.postMessage");
-    const body = JSON.parse(String(captured!.init.body));
-    expect(body.unfurl_links).toBe(false);
-    expect(body.unfurl_media).toBe(false);
+  test("agent-session calls go to agents.sessions.*, never the legacy assistant.threads.*", async () => {
+    stubFetch({ ok: true });
+    await renameAgentSession("xoxb-tok", { channelId: "C1", threadTs: "1.1", title: "Tide pools" });
+    expect(captured!.url).toMatch(/\/agents\.sessions\.rename$/);
+    expect(JSON.parse(String(captured!.init.body))).toEqual({
+      channel_id: "C1",
+      thread_ts: "1.1",
+      title: "Tide pools",
+    });
+
+    await setAgentSessionStatus("xoxb-tok", { channelId: "C1", threadTs: "1.1", status: "processing" });
+    expect(captured!.url).toMatch(/\/agents\.sessions\.setStatus$/);
+    expect(JSON.parse(String(captured!.init.body))).toEqual({
+      channel_id: "C1",
+      thread_ts: "1.1",
+      status: "processing",
+    });
   });
 });
 
@@ -381,7 +402,9 @@ describe("SlackStreamer responsiveness", () => {
     await s.finish();
   });
 
-  test("taskUpdate sends a task_update chunk on the open stream", async () => {
+  test("text goes as markdown_text chunks, never the top-level argument", async () => {
+    // Slack rejects a stream that mixes the two styles (streaming_mode_mismatch,
+    // live-probed 2026-11-08), and task cards only exist as chunks.
     const calls = captureAll();
     const { SlackStreamer } = await import("../slackApi");
     const s = new SlackStreamer("xoxb-tok", {
@@ -389,34 +412,242 @@ describe("SlackStreamer responsiveness", () => {
       threadTs: "1.1",
       recipientUserId: "U1",
     });
-    await s.start();
-    s.taskUpdate({ id: "thinking", title: "Thinking", status: "in_progress" });
-    s.taskUpdate({
-      id: "thinking",
-      title: "Thinking",
-      status: "complete",
-      details: "x".repeat(300), // over Slack's 256 cap → must truncate
+    s.append("hello");
+    await s.flush();
+    s.append(" again");
+    await s.finish();
+
+    const appends = calls.filter((c) => c.url.includes("chat.appendStream"));
+    expect(appends).toHaveLength(2);
+    for (const a of appends) {
+      expect(a.body.markdown_text).toBeUndefined();
+      expect(a.body.chunks).toEqual([
+        { type: "markdown_text", text: expect.any(String) },
+      ]);
+    }
+    expect(
+      appends.map((a) => (a.body.chunks as Array<{ text: string }>)[0].text).join(""),
+    ).toBe("hello again");
+  });
+
+  test("setTasks puts cards after the text before them, and updates them in place", async () => {
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
     });
+    // All queued before any send happens: order must still hold.
+    s.append("Let me look.");
+    s.setTasks([{ id: "run0-0", title: "Reading scholar profile", status: "in_progress" }]);
+    s.append("Still looking.");
+    await s.flush();
+    s.setTasks([
+      {
+        id: "run0-0",
+        title: "x".repeat(300), // over Slack's 256 cap → must truncate
+        status: "complete",
+      },
+    ]);
+    s.append("Done.");
+    await s.finish();
+
+    const chunks = calls
+      .filter((c) => c.url.includes("chat.appendStream"))
+      .flatMap((c) => c.body.chunks as Array<Record<string, unknown>>);
+    expect(chunks.map((c) => `${c.type}:${c.status ?? c.text}`)).toEqual([
+      "markdown_text:Let me look.",
+      "task_update:in_progress",
+      "markdown_text:Still looking.",
+      "task_update:complete",
+      "markdown_text:Done.",
+    ]);
+    expect(chunks[1]).toMatchObject({ id: "run0-0", title: "Reading scholar profile" });
+    expect((chunks[3].title as string).length).toBe(256);
+  });
+
+  test("a card first described after some text never goes out ahead of it", async () => {
+    // Live-caught 2026-11-08: with a shared "latest cards" state, an earlier
+    // queued update carried a card added later and jumped the text between.
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+    });
+    s.setTasks([{ id: "run0-0", title: "Added 3 activities", status: "complete" }]);
+    s.append("Now I'll assign it.");
+    s.setTasks([{ id: "run1-0", title: "Assigning unit", status: "in_progress" }]);
+    await s.finish();
+
+    const order = calls
+      .filter((c) => c.url.includes("chat.appendStream"))
+      .flatMap((c) => c.body.chunks as Array<Record<string, unknown>>)
+      .map((c) => (c.type === "task_update" ? c.id : c.text));
+    expect(order).toEqual(["run0-0", "Now I'll assign it.", "run1-0"]);
+  });
+
+  test("setTasks resends only the cards that changed", async () => {
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+    });
+    const done = { id: "run0-0", title: "Read 7 sessions", status: "complete" as const };
+    const planting = { id: "run0-1", title: "Planting seed", status: "in_progress" as const };
+    s.setTasks([done]);
+    await s.flush();
+    s.setTasks([done, planting]);
+    await s.flush();
+    s.setTasks([done, planting]);
+    await s.finish();
+
+    const sent = calls
+      .filter((c) => c.url.includes("chat.appendStream"))
+      .map((c) => (c.body.chunks as Array<{ id: string }>).map((t) => t.id));
+    expect(sent).toEqual([["run0-0"], ["run0-1"]]);
+  });
+
+  test("card updates queued back to back go out once, in their latest state", async () => {
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+    });
+    s.setTasks([{ id: "run0-0", title: "Adding activity…", status: "in_progress" }]);
+    s.setTasks([{ id: "run0-0", title: "Added activity", status: "complete" }]);
+    await s.finish();
+
+    const chunks = calls
+      .filter((c) => c.url.includes("chat.appendStream"))
+      .flatMap((c) => c.body.chunks as Array<Record<string, unknown>>);
+    expect(chunks).toEqual([
+      { type: "task_update", id: "run0-0", title: "Added activity", status: "complete" },
+    ]);
+  });
+
+  test("a carded reply's cleanup rebuilds the blocks instead of erasing the cards", async () => {
+    // chat.update with markdown_text replaces the whole message, cards
+    // included (live-probed 2026-11-08), so a reply with cards is rebuilt.
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+    });
+    s.append("Checking.");
+    s.setTasks([
+      { id: "run0-0", title: "Assigning unit", status: "error", details: "No cohort named Otters" },
+    ]);
+    s.append("See (https://github.example/org/site/pull/56)).");
+    await s.finish();
+
+    const update = calls.at(-1)!;
+    expect(update.url).toContain("chat.update");
+    expect(update.body.markdown_text).toBeUndefined();
+    // No `text`: beside blocks Slack caps it at 4,000 characters
+    // (msg_too_long), and without it Slack builds it from the blocks.
+    expect(update.body).not.toHaveProperty("text");
+    expect(update.body.blocks).toEqual([
+      { type: "markdown", text: "Checking." },
+      {
+        type: "task_card",
+        task_id: "run0-0",
+        title: "Assigning unit",
+        status: "error",
+        details: {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [{ type: "text", text: "No cohort named Otters" }],
+            },
+          ],
+        },
+      },
+      { type: "markdown", text: "See (<https://github.example/org/site/pull/56>))." },
+    ]);
+  });
+
+  test("a carded reply whose cleanup changes nothing is left as streamed", async () => {
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+    });
+    s.append("Checking.");
+    s.setTasks([{ id: "run0-0", title: "Read 7 sessions", status: "complete" }]);
+    s.append("All good.");
+    await s.finish();
+    expect(calls.at(-1)!.url).toContain("chat.stopStream");
+  });
+
+  test("a card update Slack rejected is retried once before the stream stops", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let rejectedOnce = false;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ url: String(url), body });
+      const chunks = (body.chunks ?? []) as Array<{ status?: string }>;
+      const settling = chunks.some((c) => c.status === "complete");
+      if (String(url).includes("appendStream") && settling && !rejectedOnce) {
+        rejectedOnce = true;
+        return Response.json({ ok: false, error: "ratelimited" });
+      }
+      return Response.json({ ok: true, ts: "5.5" });
+    }) as typeof fetch;
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", { channel: "C1", threadTs: "1.1", recipientUserId: "U1" });
+    s.setTasks([{ id: "run0-0", title: "Adding activity…", status: "in_progress" }]);
+    await s.flush();
+    s.setTasks([{ id: "run0-0", title: "Added activity", status: "complete" }]);
     await s.flush();
     await s.finish();
 
-    const taskCalls = calls.filter(
-      (c) => c.url.includes("chat.appendStream") && Array.isArray(c.body.chunks),
-    );
-    expect(taskCalls).toHaveLength(2);
-    const first = (taskCalls[0].body.chunks as Array<Record<string, unknown>>)[0];
-    expect(first).toMatchObject({
-      type: "task_update",
-      id: "thinking",
-      title: "Thinking",
-      status: "in_progress",
-    });
-    const second = (taskCalls[1].body.chunks as Array<Record<string, unknown>>)[0];
-    expect(second.status).toBe("complete");
-    expect((second.details as string).length).toBe(256);
+    const methods = calls.map((c) => c.url.split("/").pop());
+    expect(methods).toEqual([
+      "chat.startStream",
+      "chat.appendStream", // in_progress, accepted
+      "chat.appendStream", // complete, rejected
+      "chat.appendStream", // complete, retried
+      "chat.stopStream",
+    ]);
   });
 
-  test("taskUpdate degrades silently when streaming is unavailable", async () => {
+  test("an open stream that stops taking text gets closed, and only the rest is posted", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let appends = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ url: String(url), body });
+      if (String(url).includes("appendStream") && ++appends === 2) {
+        return Response.json({ ok: false, error: "message_not_in_streaming_state" });
+      }
+      return Response.json({ ok: true, ts: "5.5" });
+    }) as typeof fetch;
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", { channel: "C1", threadTs: "1.1", recipientUserId: "U1" });
+    s.append("First part.");
+    await s.flush();
+    s.append("\n\nSecond part.");
+    await s.flush();
+    await s.finish();
+
+    const tail = calls.map((c) => c.url.split("/").pop()).slice(-2);
+    expect(tail).toEqual(["chat.stopStream", "chat.postMessage"]);
+    expect(calls.at(-1)!.body.markdown_text).toBe("Second part.");
+  });
+
+  test("setTasks degrades silently when streaming is unavailable", async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       calls.push({
@@ -437,7 +668,7 @@ describe("SlackStreamer responsiveness", () => {
       recipientUserId: "U1",
     });
     await s.start();
-    s.taskUpdate({ id: "t", title: "T", status: "in_progress" });
+    s.setTasks([{ id: "t", title: "T", status: "in_progress" }]);
     s.append('the <cite index="source-1">reply</cite>');
     await s.finish();
 
@@ -554,6 +785,54 @@ describe("SlackStreamer responsiveness", () => {
       "See <https://docs.google.com/document/d/correct-id/edit>",
     );
   });
+
+  test("streams a person's @Name as a real mention, even split across deltas", async () => {
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+      mentions: [{ slackUserId: "U_LEHUA", name: "Lehua Torres" }],
+    });
+    s.append("One question for @Lehua To");
+    await s.flush();
+    s.append("rres: should it stay?");
+    await s.finish();
+
+    const texts = calls
+      .filter((c) => c.url.includes("chat.appendStream"))
+      .flatMap((c) => c.body.chunks as Array<{ text?: string }>)
+      .map((c) => c.text);
+    // The half-written name was held back rather than sent as text.
+    expect(texts).toEqual(["One question for ", "<@U_LEHUA>: should it stay?"]);
+    // Already a mention when it streamed, so nothing needed a later edit.
+    expect(calls.some((c) => c.url.includes("chat.update"))).toBe(false);
+  });
+
+  test("a name held back at the end of a text run goes out before the next card", async () => {
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+      mentions: [{ slackUserId: "U_LEHUA", name: "Lehua Torres" }],
+    });
+    s.append("Checking with @Lehua Torres");
+    s.setTasks([{ id: "run0-0", title: "Reading roster", status: "in_progress" }]);
+    s.append("Done.");
+    await s.finish();
+
+    const chunks = calls
+      .filter((c) => c.url.includes("chat.appendStream"))
+      .flatMap((c) => c.body.chunks as Array<Record<string, unknown>>);
+    expect(chunks.map((c) => `${c.type}:${c.status ?? c.text}`)).toEqual([
+      "markdown_text:Checking with <@U_LEHUA>",
+      "task_update:in_progress",
+      "markdown_text:Done.",
+    ]);
+  });
 });
 
 describe("SlackStreamer.discard — react-only retract", () => {
@@ -615,6 +894,133 @@ describe("SlackStreamer.discard — react-only retract", () => {
 
     // Nothing to stop or delete.
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("SlackStreamer and Slack's Stop button", () => {
+  // Slack does not end a stream on the click: appends keep succeeding until
+  // the app stops the stream itself (live-probed 2026-11-08).
+  function fakeSlack() {
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(url).split("/").pop() ?? "";
+      calls.push({ method, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true, ts: "42.7" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    return calls;
+  }
+
+  async function newStreamer() {
+    const { SlackStreamer } = await import("../slackApi");
+    return new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+    });
+  }
+
+  test("halt() drops the unsent words, settles the cards Slack shows, then stops the stream", async () => {
+    const calls = fakeSlack();
+    const s = await newStreamer();
+    s.append("Let me look.");
+    s.setTasks([{ id: "run0-0", title: "Reading recent sessions…", status: "in_progress" }]);
+    await s.flush();
+    const sentBefore = calls.length;
+    s.append(" Kai has three sessions this week"); // buffered, not yet sent
+
+    const halted = await s.halt([
+      { id: "run0-0", title: "Read 3 sessions", status: "complete" },
+      { id: "run0-1", title: "never shown", status: "complete" },
+    ]);
+    await s.finish(); // a no-op once halted
+
+    expect(halted).toEqual({ shown: true, unsentChars: " Kai has three sessions this week".length });
+    const after = calls.slice(sentBefore);
+    expect(after.map((c) => c.method)).toEqual(["chat.appendStream", "chat.stopStream"]);
+    // Only the card Slack already shows, in its settled state; no text.
+    expect(after[0].body.chunks).toEqual([
+      { type: "task_update", id: "run0-0", title: "Read 3 sessions", status: "complete" },
+    ]);
+    expect(JSON.stringify(calls)).not.toContain("Kai has three");
+    expect(JSON.stringify(calls)).not.toContain("never shown");
+  });
+
+  test("halt() never sends the words queued behind a send still in flight", async () => {
+    const calls: string[] = [];
+    let release: () => void = () => {};
+    const blocked = new Promise<void>((resolve) => (release = resolve));
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(url).split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body)) as { chunks?: Array<{ text?: string }> };
+      if (method === "chat.appendStream") {
+        calls.push(body.chunks?.[0]?.text ?? "");
+        if (calls.length === 1) await blocked;
+      }
+      return new Response(JSON.stringify({ ok: true, ts: "42.7" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const s = await newStreamer();
+    s.append("Let me look."); // goes out at once, and Slack is slow to answer
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    s.append(" Kai has three"); // queued behind it
+    const halted = s.halt();
+    release();
+    expect(await halted).toEqual({ shown: true, unsentChars: " Kai has three".length });
+    expect(calls).toEqual(["Let me look."]);
+  });
+
+  test("halt() counts unsent text in the model's characters, mentions included", async () => {
+    // The caller trims its copy of the model's text by unsentChars, so a
+    // rewritten mention must count as the name the model wrote.
+    const calls = fakeSlack();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+      mentions: [{ slackUserId: "U0123456789", name: "Avery Stone" }],
+    });
+    s.append("Thanks @Avery Stone. ");
+    await s.flush(); // sent, with the mention rewritten
+    // Queued with one mention rewritten, and a half-written name held back.
+    const unsent = "Next, @Avery Stone, then @Avery Sto";
+    s.append(unsent);
+    const halted = await s.halt();
+
+    expect(halted).toEqual({ shown: true, unsentChars: unsent.length });
+    const sent = calls
+      .filter((c) => c.method === "chat.appendStream")
+      .flatMap((c) => c.body.chunks as Array<{ text?: string }>)
+      .map((c) => c.text);
+    expect(sent).toEqual(["Thanks <@U0123456789>. "]);
+  });
+
+  test("halt() before anything reached Slack says so and sends nothing", async () => {
+    const calls = fakeSlack();
+    const s = await newStreamer();
+    expect(await s.halt()).toEqual({ shown: false, unsentChars: 0 });
+    await s.finish(); // still a no-op: no "(no response)" post
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a message closed mid-turn keeps the session processing, so Stop stays up", async () => {
+    const calls = fakeSlack();
+    const s = await newStreamer();
+    s.append("A long first part.");
+    await s.finish(undefined, { keepSessionProcessing: true });
+    const last = await newStreamer();
+    last.append("The end.");
+    await last.finish();
+
+    const stops = calls.filter((c) => c.method === "chat.stopStream");
+    expect(stops[0].body.session_status).toBe("processing");
+    // The turn's last message leaves it to Slack's default (`active`).
+    expect(stops[1].body).not.toHaveProperty("session_status");
   });
 });
 

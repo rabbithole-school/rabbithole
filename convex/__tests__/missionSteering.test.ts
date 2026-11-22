@@ -16,7 +16,7 @@ import {
   type DesignerBuildContract,
 } from "../prompts";
 import { buildTutorSystemPromptParts } from "../sessionStreamHelpers";
-import { DEFAULT_APP_GATE, type SessionMission } from "../lib/mission";
+import type { SessionMission } from "../lib/mission";
 import { PARK_IDEA_TOOL_NAME } from "../lib/designerTools";
 
 const modules = (
@@ -91,9 +91,9 @@ describe("the builder steers by the mission", () => {
     freedoms: ["FREE-fish-look"],
   };
 
-  test("an authored contract is used verbatim; otherwise the mission's gate with no MUST BE TRUE items", () => {
+  test("an authored contract is used verbatim; a Quest mission supplies a mission line", () => {
     expect(
-      designerContractFor({ ...MISSION, source: "authored", gate: DEFAULT_APP_GATE }, AUTHORED),
+      designerContractFor({ ...MISSION, source: "authored", gate: "Understand waves" }, AUTHORED),
     ).toBe(AUTHORED);
     expect(designerContractFor(null, AUTHORED)).toBe(AUTHORED);
     expect(designerContractFor(null, null)).toBeNull();
@@ -330,7 +330,7 @@ describe("the MISSION section and the parking lot, by session", () => {
     }
   });
 
-  test("an app activity steers in the builder lead-in, never the tutor section", async () => {
+  test("an app activity without a contract keeps the builder's tools, with no mission line", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const u = await seedUnit(t, scholarId, [
@@ -343,11 +343,10 @@ describe("the MISSION section and the parking lot, by session", () => {
       { sessionMode: "vibecode" },
     );
     const r = await render(t, sessionId);
-    expect(r.context.mission?.gate).toBe(DEFAULT_APP_GATE);
+    expect(r.context.mission).toMatchObject({ source: "default", gate: "" });
     expect(r.hasTutorMission).toBe(false);
-    expect(r.stable).toContain(DEFAULT_APP_GATE);
     expect(r.stable).toContain(PARK_IDEA_TOOL_NAME);
-    expect(r.hasLot).toBe(true);
+    expect(r.stable).toContain("THIS APP: The teacher left what it is about to the scholar.");
   });
 
   test("a teacher build gets neither the section nor the lot", async () => {
@@ -418,7 +417,7 @@ describe("the scholar's own Quest", () => {
     expect(count(planning.stable)).toBeGreaterThan(count(step.stable));
   });
 
-  test("a side app in a locked Quest learning step says the app waits for the build step", async () => {
+  test("a side app in a Quest learning step no longer says the app waits for the build step", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const u = await seedUnit(
@@ -437,7 +436,7 @@ describe("the scholar's own Quest", () => {
       { withApp: true },
     );
     const r = await render(t, sessionId);
-    expect(r.stable).toContain(
+    expect(r.stable).not.toContain(
       buildSideAppSection("text", {
         hasMission: true,
         lockedBuild: "BUILD-a-wave-simulation",
@@ -456,7 +455,7 @@ describe("the scholar's own Quest", () => {
     expect(r.stable).toContain("set_quest_mission");
   });
 
-  test("a learning step names the build it unlocks, until it is complete", async () => {
+  test("a learning step points at the build step, which is open from the start", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const u = await seedUnit(
@@ -473,10 +472,11 @@ describe("the scholar's own Quest", () => {
       lessonId: u.lessonId,
       activityId: u.activityIds[0],
     });
-    const locked = await render(t, sessionId);
-    expect(locked.context.mission?.unlocksBuild).toBe("BUILD-a-wave-simulation");
-    expect(locked.hasTutorMission).toBe(true);
-    expect(locked.stable).toContain("BUILD-a-wave-simulation");
+    const before = await render(t, sessionId);
+    expect(before.context.mission?.unlocksBuild).toBe("BUILD-a-wave-simulation");
+    expect(before.context.mission?.buildStepOpen).toBe(true);
+    expect(before.hasTutorMission).toBe(true);
+    expect(before.stable).toContain("BUILD-a-wave-simulation");
 
     await t.run((ctx) =>
       ctx.db.insert("activityCompletions", {
@@ -497,7 +497,7 @@ describe("the scholar's own Quest", () => {
     expect(unlocked.hasTutorMission).toBe(true);
   });
 
-  test("every learning step before a locked build names it; the build step itself does not", async () => {
+  test("every learning step before the build step names it as open; the build step itself does not", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const u = await seedUnit(
@@ -517,7 +517,8 @@ describe("the scholar's own Quest", () => {
         activityId,
       });
       const r = await render(t, sessionId);
-      expect(r.context.unitContext?.questBuildLocked).toBe("BUILD-a-wave-simulation");
+      expect(r.context.unitContext?.questBuildLocked ?? null).toBeNull();
+      expect(r.context.unitContext?.questBuildOpen).toBe("BUILD-a-wave-simulation");
       expect(r.context.mission?.unlocksBuild).toBe("BUILD-a-wave-simulation");
       expect(r.stable).toContain("BUILD-a-wave-simulation");
     }
@@ -530,7 +531,7 @@ describe("the scholar's own Quest", () => {
     expect(b.unitContext?.questBuildLocked ?? null).toBeNull();
   });
 
-  test("the planning chat of a Quest with a locked build step gets the unlock framing", async () => {
+  test("the planning chat of a Quest with a build step sees it as open", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const u = await seedUnit(
@@ -543,8 +544,9 @@ describe("the scholar's own Quest", () => {
       { quest: true },
     );
     const sessionId = await seedSession(t, scholarId, { unitId: u.unitId });
-    const locked = await render(t, sessionId);
-    expect(locked.context.unitContext?.questBuildLocked).toBe("BUILD-a-wave-simulation");
+    const before = await render(t, sessionId);
+    expect(before.context.unitContext?.questBuildLocked ?? null).toBeNull();
+    expect(before.context.unitContext?.questBuildOpen).toBe("BUILD-a-wave-simulation");
 
     await t.run((ctx) =>
       ctx.db.insert("activityCompletions", {

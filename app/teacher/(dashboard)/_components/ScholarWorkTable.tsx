@@ -35,7 +35,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { Avatar } from "@/components/Avatar";
 import { SortableColumnHeader } from "@/components/ui/SortableColumnHeader";
 import { sortRows, type SortColumn, type SortDir as TableSortDir } from "@/lib/tableSort";
-import { gradeForAgeFromDob } from "@/components/practice/chronologicalGrade";
+import { gradeEquivalentFromTag } from "@/shared/gradeEquivalent";
 import type { RoundsCadenceKind } from "@/lib/roundsCadence";
 import {
   RoundsRowContent,
@@ -55,10 +55,10 @@ import { AssignQuestionMenu } from "./AssignQuestionMenu";
 export type WorkTab = "homework" | "academic-rounds" | "sel-rounds";
 type SortDir = TableSortDir;
 
-/** Grade-for-age, youngest first; a missing grade (no valid DOB) sorts last. */
-const GRADE_COLUMN: SortColumn<{ gradeForAge: number | null }> = {
-  compare: (a, b) => a.gradeForAge! - b.gradeForAge!,
-  isMissing: (r) => r.gradeForAge === null,
+/** Grade equivalent, lowest first; a missing grade (no enrolled grade) sorts last. */
+const GRADE_COLUMN: SortColumn<{ gradeEquivalent: number | null }> = {
+  compare: (a, b) => a.gradeEquivalent! - b.gradeEquivalent!,
+  isMissing: (r) => r.gradeEquivalent === null,
 };
 type WeekPayload = FunctionReturnType<typeof api.rounds.week>;
 
@@ -105,18 +105,18 @@ export function ScholarWorkTable({
   const cadence: RoundsCadenceKind = sel ? "sel" : "academic";
 
   // T11: one clock read for the whole table, shared by every row's grade — two
-  // scholars born a day apart can never straddle a midnight mid-scroll.
+  // rows can never straddle a month boundary mid-scroll.
   const [mountedAtMs] = useState(() => Date.now());
   const nowDate = useMemo(() => new Date(mountedAtMs), [mountedAtMs]);
 
-  // The rows, sorted client-side by chronological grade-for-age. Ascending =
-  // youngest first (lowest grade at the top). A null grade (missing/invalid
-  // DOB) sorts LAST in either direction. This is the single ordering for all
+  // The rows, sorted client-side by grade equivalent (enrolled grade + school
+  // month). Ascending = lowest grade at the top. A null grade (no recognisable
+  // enrolled grade) sorts LAST in either direction. This is the single ordering for all
   // three tabs (Homework's old newest-active order is gone).
   const rows = useMemo(() => {
     const withGrade = scholars.map((scholar) => ({
       scholar,
-      gradeForAge: gradeForAgeFromDob(scholar.dateOfBirth, nowDate),
+      gradeEquivalent: gradeEquivalentFromTag(scholar.gradeLevel, nowDate),
     }));
     return sortRows(withGrade, GRADE_COLUMN, sortDir);
   }, [scholars, sortDir, nowDate]);
@@ -298,7 +298,7 @@ export function ScholarWorkTable({
             data-testid={rounds ? "scholar-work-table" : "homework-list"}
           >
             {/* Sortable "Grade" column header — sits over the leading grade
-                column; clicking cycles ascending ↔ descending grade-for-age. */}
+                column; clicking cycles ascending ↔ descending grade equivalent. */}
             <HStack
               px={{ base: 3, md: 4 }}
               py={2}
@@ -313,24 +313,24 @@ export function ScholarWorkTable({
                 label="Grade"
                 dir={sortDir}
                 onToggle={onToggleSort}
-                ariaLabel={`Sort by grade, currently ${sortDir === "asc" ? "ascending — youngest first" : "descending — oldest first"}`}
+                ariaLabel={`Sort by grade, currently ${sortDir === "asc" ? "ascending — lowest grade first" : "descending — highest grade first"}`}
                 testId="rounds-sort-grade"
               />
             </HStack>
 
-            {rows.map(({ scholar, gradeForAge }, i) => (
+            {rows.map(({ scholar, gradeEquivalent }, i) => (
               <ScholarWorkRow
                 key={scholar.id}
                 scholarId={scholar.id}
                 name={scholar.name || "Scholar"}
                 image={scholar.image ?? null}
-                gradeForAge={gradeForAge}
+                gradeEquivalent={gradeEquivalent}
                 href={hrefForScholar(scholar.id)}
                 isRounds={rounds}
                 ariaLabel={
                   rounds
                     ? `${scholar.name || "Scholar"}${
-                        gradeForAge == null ? "" : `, grade for age ${gradeForAge.toFixed(1)}`
+                        gradeEquivalent == null ? "" : `, grade equivalent ${gradeEquivalent.toFixed(1)}`
                       } — open the full Rounds view.`
                     : `${scholar.name || "Scholar"} — open scholar.`
                 }
@@ -356,7 +356,7 @@ export function ScholarWorkRow({
   scholarId,
   name,
   image,
-  gradeForAge,
+  gradeEquivalent,
   href,
   isRounds,
   ariaLabel,
@@ -367,7 +367,7 @@ export function ScholarWorkRow({
   scholarId: string;
   name: string;
   image: string | null;
-  gradeForAge: number | null;
+  gradeEquivalent: number | null;
   href: string;
   isRounds: boolean;
   ariaLabel: string;
@@ -412,7 +412,7 @@ export function ScholarWorkRow({
               fontVariantNumeric="tabular-nums"
               data-testid="rounds-grade"
             >
-              {gradeForAge == null ? "—" : gradeForAge.toFixed(1)}
+              {gradeEquivalent == null ? "—" : gradeEquivalent.toFixed(1)}
             </Text>
             <HStack gap={2.5} w={IDENTITY_COL_W} flexShrink={0} minW={0}>
               <Avatar size="sm" name={name} src={image || undefined} colorKey={scholarId} />

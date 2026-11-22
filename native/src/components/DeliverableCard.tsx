@@ -16,10 +16,14 @@ import {
 } from "react-native";
 import Animated, { FadeIn, LinearTransition } from "react-native-reanimated";
 
+import { previewWritingItalics } from "../../vendor/shared/writingItalics";
 import { Markdown } from "@/components/Markdown";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useImageAttachment } from "@/hooks/useImageAttachment";
+import { confirmFinishAndSend } from "@/lib/confirmFinishAndSend";
 import { api, type Doc, type Id } from "@/lib/convex";
+import { useQuestSession } from "@/lib/questSession";
+import { FINISH_AND_SEND_LABEL } from "../../vendor/shared/finishAndSend";
 import { fonts, useColors } from "@/theme";
 import { isTextArtifact } from "../../vendor/shared/textArtifacts";
 import type { CodeArtifactWebViewHandle } from "@/components/CodeArtifactWebView";
@@ -30,6 +34,8 @@ import { FlairChips } from "./FlairChips";
 import {
   artifactIdForDeliverableLookup,
   dedicatedDeliverableArtifact,
+  isWorkSurfaceArtifact,
+  sideDeckPlacement,
   workSurfaceFor,
 } from "@/lib/deliverableArtifactSelection";
 type DeliverableKind =
@@ -95,6 +101,7 @@ export function DeliverableCard({
 }: DeliverableCardProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
+  const questSession = useQuestSession();
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const [selectedArtifactId, setSelectedArtifactId] = useState<Id<"artifacts"> | null>(null);
   const [busy, setBusy] = useState(false);
@@ -163,6 +170,32 @@ export function DeliverableCard({
           ) ??
           textArtifacts[textArtifacts.length - 1] ??
           null);
+  // A deck the tutor made outside a slides activity (`edit_slides` works in
+  // every session). Where it goes is `sideDeckPlacement`: a tab beside the
+  // documents, or after a photo/audio/map deliverable's work. It renders
+  // through the same SlidesDeliverable a slides deliverable uses (T1), and it
+  // never becomes `activeArtifact` — status, flair and the check stay on the
+  // work the activity asked for.
+  const deckPlacement = sideDeckPlacement(activity?.deliverable?.kind);
+  const sideDeck =
+    deckPlacement === "none"
+      ? null
+      : (artifacts.find((artifact) => artifact.type === "slides") ?? null);
+  const switcherDeck = deckPlacement === "switcher" ? sideDeck : null;
+  const newestText = textArtifacts[textArtifacts.length - 1] ?? null;
+  // Like the documents, the newest piece of work shows until the scholar picks
+  // a tab — so a deck the tutor just made is the one on screen.
+  const deckShown =
+    !!switcherDeck &&
+    (selectedArtifactId === switcherDeck._id ||
+      (selectedArtifactId === null &&
+        (!newestText ||
+          switcherDeck._creationTime > newestText._creationTime)));
+  const tabArtifacts = switcherDeck
+    ? [...textArtifacts, switcherDeck].sort(
+        (a, b) => a._creationTime - b._creationTime,
+      )
+    : textArtifacts;
   const textCheckDisabled = checkDisabled || !activeArtifact?.content.trim();
   const deliverableArtifactId = artifactIdForDeliverableLookup(
     activeArtifact?._id,
@@ -172,8 +205,10 @@ export function DeliverableCard({
   const surface = workSurfaceFor({
     hasActivity: !!activityId,
     activity,
-    textArtifactCount:
-      artifactsResult === undefined ? undefined : textArtifacts.length,
+    workArtifactCount:
+      artifactsResult === undefined
+        ? undefined
+        : artifacts.filter(isWorkSurfaceArtifact).length,
   });
   const deliverable = useQuery(
     api.deliverables.getForSessionActivity,
@@ -260,6 +295,8 @@ export function DeliverableCard({
 
   const handleAskCheck = async () => {
     if (!activeArtifact || !onAskCheck || textCheckDisabled || busy) return;
+    // No rubric: this press finishes the activity, so ask first.
+    if (spec?.mode === "none" && !(await confirmFinishAndSend())) return;
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setBusy(true);
     try {
@@ -344,14 +381,16 @@ export function DeliverableCard({
         </>
       ) : null}
 
-      {!isMap && !isSlides && textArtifacts.length > 1 && (
+      {!isMap && !isSlides && tabArtifacts.length > 1 && (
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.tabs}
         >
-          {textArtifacts.map((artifact) => {
-            const selected = artifact._id === activeArtifact?._id;
+          {tabArtifacts.map((artifact) => {
+            const selected = deckShown
+              ? artifact._id === switcherDeck?._id
+              : artifact._id === activeArtifact?._id;
             return (
               <Pressable
                 key={artifact._id}
@@ -388,6 +427,9 @@ export function DeliverableCard({
 
       {!isMap && !isSlides && !isPendingKind && (
       <>
+      {deckShown && switcherDeck ? (
+        <SlidesDeliverable key={switcherDeck._id} sessionId={sessionId} />
+      ) : (
       <Pressable
         onPress={() => {
           if (!hasWork) return;
@@ -475,7 +517,17 @@ export function DeliverableCard({
                 ]}
                 numberOfLines={4}
               >
-                {textContent || "No writing yet."}
+                {textContent
+                  ? previewWritingItalics(textContent, 600).map((seg, i) =>
+                      seg.kind === "italic" ? (
+                        <Text key={i} style={styles.previewItalic}>
+                          {seg.text}
+                        </Text>
+                      ) : (
+                        seg.text
+                      ),
+                    )
+                  : "No writing yet."}
               </Text>
             )}
           </>
@@ -497,6 +549,7 @@ export function DeliverableCard({
           </View>
         )}
       </Pressable>
+      )}
 
       {deliverable?.rubricFeedback && expanded && (
         <View style={styles.feedback}>
@@ -516,6 +569,9 @@ export function DeliverableCard({
         // never treat the other one's flair as arriving.
         key={activeArtifact?._id ?? activityId}
         flairEarned={deliverable?.flairEarned}
+        // A map session's spotted flair shows on its GeoMapCard, which sits
+        // beside this card in portrait; showing it here too would double it.
+        sessionId={isMap ? null : sessionId}
         criteria={criteria}
         deliverableId={deliverable?._id}
         resolved={deliverable !== undefined}
@@ -575,9 +631,12 @@ export function DeliverableCard({
               />
             </>
           )
-        ) : activeArtifact &&
-          activeArtifact.type === "code" &&
-          spec.kind !== "artifact" ? (
+        ) : (deckShown && activeArtifact) ||
+          (activeArtifact &&
+            activeArtifact.type === "code" &&
+            spec.kind !== "artifact") ? (
+          // The tutor's deck is not the deliverable either: no check on its
+          // tab. With no document yet, Start document still shows below it.
           // A side app is not the deliverable: its chip shows the app card,
           // never the writing's check (same rule as DeliverablePanel).
           null
@@ -599,13 +658,18 @@ export function DeliverableCard({
                 busy={busy}
                 onPress={handleRetrySetup}
               />
+            ) : spec.mode === "none" && questSession !== null ? (
+              // A Quest's session hands in from the header's "I'm ready to
+              // show" (TRA-720): no Finish and send here, nor while that is
+              // still being looked up.
+              null
             ) : (
               <ActionButton
                 label={
                   criteriaPending
                     ? "Preparing check…"
                     : spec.mode === "none"
-                      ? "Send it"
+                      ? FINISH_AND_SEND_LABEL
                       : "Check my work"
                 }
                 icon={
@@ -634,6 +698,10 @@ export function DeliverableCard({
       ) : null}
       </>
       )}
+
+      {deckPlacement === "below" && sideDeck ? (
+        <SlidesDeliverable sessionId={sessionId} />
+      ) : null}
     </Animated.View>
   );
 }
@@ -959,6 +1027,9 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     fontSize: 16,
     lineHeight: 23,
     color: c.charcoal,
+  },
+  previewItalic: {
+    fontFamily: fonts.italic,
   },
   codePreviewFrame: {
     height: 360,

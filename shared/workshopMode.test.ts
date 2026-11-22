@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  canResetAppState,
   defaultChatOpen,
   defaultWorkshopMode,
   editControlFor,
@@ -35,7 +36,22 @@ describe("defaultWorkshopMode", () => {
     // A server Edit default still lets a scholar-facing app character open
     // the scholar in Play.
     expect(
-      defaultWorkshopMode({ serverDefault: "edit", hasAppRequest: true }),
+      defaultWorkshopMode({ serverDefault: "edit", hasAppCharacter: true }),
+    ).toBe("play");
+  });
+
+  test("a coached session not handed the starter defaults to edit", () => {
+    expect(
+      defaultWorkshopMode({ hasAppRequest: true, openedOnStarter: false }),
+    ).toBe("edit");
+    expect(
+      defaultWorkshopMode({ hasAppRequest: true, openedOnStarter: true }),
+    ).toBe("play");
+    // Unknown (session still loading) keeps the coached default.
+    expect(defaultWorkshopMode({ hasAppRequest: true })).toBe("play");
+    // An app with a character still plays, starter or not.
+    expect(
+      defaultWorkshopMode({ hasAppCharacter: true, openedOnStarter: false }),
     ).toBe("play");
   });
 
@@ -304,6 +320,26 @@ describe("playSurfaceFor", () => {
     expect(
       playSurfaceFor({ ...scholarPlaying, mode: "edit", access: "allowed" }),
     ).toEqual({ showResetAppState: false, showViewerChrome: true });
+  });
+});
+
+describe("canResetAppState", () => {
+  test("the owner who builds the app may reset it in either mode", () => {
+    expect(
+      canResetAppState({ access: "allowed", isStaff: false, isSessionOwner: true }),
+    ).toBe(true);
+    expect(
+      canResetAppState({ access: "hidden", isStaff: true, isSessionOwner: true }),
+    ).toBe(true);
+  });
+
+  test("a play-only scholar and a non-owner may not", () => {
+    expect(
+      canResetAppState({ access: "locked", isStaff: false, isSessionOwner: true }),
+    ).toBe(false);
+    expect(
+      canResetAppState({ access: "allowed", isStaff: true, isSessionOwner: false }),
+    ).toBe(false);
   });
 });
 

@@ -2,7 +2,7 @@
 
 /**
  * ScholarHomeTabs — the pill row for the scholar Home:
- * Now · All · <subjects> · Other · Scholar’s Prep · Quests.
+ * Now · <subjects> · Other · Scholar’s Prep · Quests.
  * Wraps ViewToggle (the canonical segmented-pill idiom) with the tab types from
  * shared/scholarHomeNow.
  *

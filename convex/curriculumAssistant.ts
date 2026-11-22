@@ -13,8 +13,10 @@ import {
 } from "./lib/roles";
 import { schoolOperationsInstitutionIds } from "./lib/staffCapabilities";
 import { requireActiveScholarAccess } from "./lib/access";
-import { requireUnitEditAccessForUser } from "./lib/auth";
+import { withoutWonders } from "./lib/seeds";
+import { requireAgentUnitEditAccess, requireUnitEditAccessForUser } from "./lib/auth";
 import { curriculumUnitLensPredicate } from "./units";
+import { assertProposalTakesNoStructure } from "./lib/questStructure";
 import {
   readScholarRoster,
   readScholarGroups,
@@ -26,6 +28,7 @@ import {
   readScholarInterests,
   readScholarSessions,
   readSessionTranscript,
+  readScholarAppPlay,
   readScholarWebActivity,
   readScholarPractice,
   readScholarMathCheckIn,
@@ -37,6 +40,9 @@ import {
 } from "./lib/institutionLens";
 import { toKeyedGranules } from "./lib/granules";
 import { activityHasScholarWork, deleteActivityCascade } from "./lib/activityCascade";
+import { syncClassesForPlacements, unitSubjectOptions } from "./lib/classLink";
+import { resolveUnitSubjectEdit } from "./lib/unitSubject";
+import { resolveUnitGradeEdit } from "./lib/unitGrade";
 import { presentationState } from "./lib/activityPresentationResources";
 import { renderStoppedAssistantContent } from "../shared/stoppedTurn";
 import { effectiveActivityKind } from "../shared/appSurface";
@@ -131,7 +137,8 @@ async function loadScholarPromptContext(
     .query("seeds")
     .withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId))
     .collect();
-  const seeds = allSeeds
+  // A scholar's own wonders are not seeds suggested to them (isWonderSeed).
+  const seeds = withoutWonders(allSeeds)
     .filter((s) => s.status === "active" || s.status === "pending")
     .map((s) => ({
       topic: s.topic,
@@ -395,6 +402,14 @@ export const clearHistoryForUnit = curriculumMutation({
       await ctx.db.delete(msg._id);
     }
   },
+});
+
+/** The scholar who authored this unit (a Quest), or null for a teacher's
+ * unit. The designer tools refuse an app step in the caller's own Quest. */
+export const unitAuthorScholarId = internalQuery({
+  args: { unitId: v.id("units") },
+  handler: async (ctx, args): Promise<Id<"users"> | null> =>
+    (await ctx.db.get(args.unitId))?.authorScholarId ?? null,
 });
 
 export const getUnitDesignerContext = internalQuery({
@@ -1248,6 +1263,9 @@ export const getContextForChat = internalQuery({
                 )
               : [],
             driveAttachments: m.driveAttachments ?? [],
+            // Set on turns relayed from a multi-author Slack thread or a bug
+            // report; absent on what the chat's owner typed here.
+            speakerName: m.speakerName ?? null,
           })),
       ),
       scholarContext,
@@ -1294,12 +1312,20 @@ export const listScholarsInternal = internalQuery({
   args: {
     includeProgramGuests: v.boolean(),
     allowedScholarIds: v.optional(v.array(v.id("users"))),
+    // Withdrawn scholars (users.withdrawnOn). Defaults to TRUE: every caller
+    // but list_scholars resolves a scholar by name, and naming a scholar who
+    // has left is how staff reach their history. The enumeration tool passes
+    // false so the roster lists current scholars only.
+    includeWithdrawn: v.optional(v.boolean()),
   },
   handler: async (ctx, args) =>
     readScholarRoster(
       ctx,
       args.allowedScholarIds ? new Set(args.allowedScholarIds) : null,
-      { includeProgramGuests: args.includeProgramGuests },
+      {
+        includeProgramGuests: args.includeProgramGuests,
+        includeWithdrawn: args.includeWithdrawn ?? true,
+      },
     ),
 });
 
@@ -1341,7 +1367,12 @@ export const resolveAideScholarLens = internalQuery({
     if (lens.scope === "all" && lens.isAdmin) {
       return { scholarIds: null, lensLabel: null, unrestricted: true } as const;
     }
-    const ids = await scholarIdsInLens(ctx, lens, { includeProgramGuests: true });
+    // Withdrawn scholars stay in the ACCESS scope so their history can still be
+    // looked up by name; the roster tool leaves them out (readScholarRoster).
+    const ids = await scholarIdsInLens(ctx, lens, {
+      includeProgramGuests: true,
+      includeWithdrawn: true,
+    });
     const lensLabel =
       lens.scope === "all"
         ? "all institutions you can access"
@@ -1387,8 +1418,11 @@ export const getScholarSignals = internalQuery({
 });
 
 export const getScholarSeeds = internalQuery({
-  args: { scholarId: v.id("users") },
-  handler: async (ctx, args) => readScholarSeeds(ctx, args.scholarId),
+  args: { scholarId: v.id("users"), role: v.optional(v.string()) },
+  // The caller's role picks the tier (readScholarSeeds): only teacher/admin
+  // get the teacher-private rationale; a missing role gets the scholar text.
+  handler: async (ctx, args) =>
+    readScholarSeeds(ctx, args.scholarId, args.role as Role | undefined),
 });
 
 export const getScholarObservations = internalQuery({
@@ -1417,6 +1451,11 @@ export const getSessionTranscript = internalQuery({
       sessionId: args.sessionId,
       limit: args.limit,
     }),
+});
+
+export const getScholarAppPlay = internalQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, args) => readScholarAppPlay(ctx, args.scholarId),
 });
 
 export const getScholarWebActivity = internalQuery({
@@ -1468,6 +1507,9 @@ export const listUnitsInternal = internalQuery({
         description: u.description ?? null,
         targetBloomLevel: u.targetBloomLevel ?? null,
         isActive: u.isActive,
+        // A scholar's own unit: archive_unit refuses it, and the Quests tab
+        // owns its lifecycle.
+        isQuest: !!u.authorScholarId,
         // Teachers only until published or assigned (TRA-490).
         unpublished: u.unpublished === true,
         personaTitle: persona?.title ?? null,
@@ -1573,30 +1615,165 @@ export const getTestDriveContext = internalQuery({
 
 // ── Internal mutations (called by unit-designer-stream HTTP action) ───
 
-export const updateUnitInternal = internalMutation({
-  args: {
-    unitId: v.id("units"),
-    bigIdea: v.optional(v.union(v.string(), v.null())),
-    essentialQuestions: v.optional(v.array(v.string())),
-    enduringUnderstandings: v.optional(v.array(v.string())),
-    subject: v.optional(v.union(v.string(), v.null())),
-    gradeLevel: v.optional(v.union(v.string(), v.null())),
+/** The class names a unit's subject is picked from (TRA-723,
+ *  `unitSubjectOptions`). `at` comes from the calling action, so this query
+ *  never reads the clock. */
+export const unitSubjectOptionsInternal = internalQuery({
+  args: { unitId: v.id("units"), at: v.number() },
+  returns: v.array(v.string()),
+  handler: async (ctx, args) => {
+    const unit = await ctx.db.get(args.unitId);
+    return unit ? await unitSubjectOptions(ctx, unit, args.at) : [];
   },
+});
+
+const unitMetadataFields = {
+  title: v.optional(v.string()),
+  description: v.optional(v.union(v.string(), v.null())),
+  bigIdea: v.optional(v.union(v.string(), v.null())),
+  essentialQuestions: v.optional(v.array(v.string())),
+  enduringUnderstandings: v.optional(v.array(v.string())),
+  subject: v.optional(v.union(v.string(), v.null())),
+  gradeLevel: v.optional(v.union(v.string(), v.null())),
+};
+
+const unitMetadataResult = v.union(
+  v.object({
+    kind: v.literal("updated"),
+    /** Set when the subject was filed under a class by meaning (TRA-723). */
+    filedUnder: v.optional(v.string()),
+    /** The fields written. An echo of the current subject is not one. */
+    updatedFields: v.array(v.string()),
+  }),
+  /** The subject is not one of the school's classes: nothing was written. */
+  v.object({
+    kind: v.literal("subject_not_a_class"),
+    given: v.string(),
+    options: v.array(v.string()),
+  }),
+  /** The grade level can't be read (lib/unitGrade.ts): nothing was written. */
+  v.object({ kind: v.literal("grade_unreadable"), given: v.string() }),
+);
+
+type UnitMetadataFields = {
+  title?: string;
+  description?: string | null;
+  bigIdea?: string | null;
+  essentialQuestions?: string[];
+  enduringUnderstandings?: string[];
+  subject?: string | null;
+  gradeLevel?: string | null;
+};
+
+/**
+ * The one write behind every bot's `update_unit`: the unit page's Curriculum
+ * Bot (`updateUnitInternal`, whose stream already checked the unit) and the
+ * global staff aide in the app and in Slack (`updateUnitForCaller`, which
+ * checks the caller first). Caller-agnostic on purpose; never reach it
+ * without a gate.
+ */
+async function applyUnitMetadata(
+  ctx: MutationCtx,
+  unit: Doc<"units">,
+  input: UnitMetadataFields,
+) {
+  const fields = { ...input };
+  // A blank title would leave a unit nobody can find or name. Refuse it
+  // before anything is written.
+  if (fields.title !== undefined && !fields.title.trim()) {
+    throw new Error("A unit title can't be blank. Nothing was changed.");
+  }
+  // A Quest's title is its scholar's own words (they named it, or it names
+  // their free-form session). No bot renames it; a teacher who needs to can
+  // do it on the unit page.
+  if (
+    fields.title !== undefined &&
+    unit.authorScholarId &&
+    fields.title.trim() !== unit.title
+  ) {
+    throw new Error(
+      "This is a scholar's own Quest, and its title is theirs, so it isn't renamed from chat. Nothing was changed.",
+    );
+  }
+  // A subject names one of the school's classes (TRA-723), by the rule the
+  // web editor's `units.update` shares (`resolveUnitSubjectEdit`).
+  let filedUnder: string | undefined;
+  if (fields.subject !== undefined) {
+    const edit = await resolveUnitSubjectEdit(unit, fields.subject, () =>
+      unitSubjectOptions(ctx, unit, Date.now()),
+    );
+    // Nothing in the call is written.
+    if (edit.kind === "ask") {
+      return {
+        kind: "subject_not_a_class" as const,
+        given: edit.given,
+        options: edit.options,
+      };
+    }
+    // A re-sent subject that stays as stored is not an edit, so it stays out
+    // of `updatedFields`.
+    fields.subject = edit.subject === unit.subject ? undefined : edit.subject ?? null;
+    if (edit.mapped) filedUnder = edit.subject;
+  }
+  // One grade or a span within K–8 in one form (lib/unitGrade.ts). A re-sent
+  // grade stays as stored, so it stays out of `updatedFields`.
+  if (fields.gradeLevel !== undefined) {
+    const grade = resolveUnitGradeEdit(unit, fields.gradeLevel);
+    // Nothing in the call is written.
+    if (grade.kind === "unreadable") {
+      return { kind: "grade_unreadable" as const, given: grade.given };
+    }
+    fields.gradeLevel =
+      grade.gradeLevel === unit.gradeLevel ? undefined : grade.gradeLevel ?? null;
+  }
+  const updates: Partial<Doc<"units">> = {};
+  if (fields.title !== undefined) updates.title = fields.title.trim();
+  // Teacher-facing copy only, as the unit page's own edit writes it: a
+  // Quest's scholar copy (scholarDescription) is the scholar's to write.
+  if (fields.description !== undefined)
+    updates.description = fields.description?.trim() || undefined;
+  if (fields.bigIdea !== undefined) updates.bigIdea = fields.bigIdea ?? undefined;
+  if (fields.essentialQuestions !== undefined)
+    updates.essentialQuestions = toKeyedGranules(
+      fields.essentialQuestions, unit.essentialQuestions, "eq");
+  if (fields.enduringUnderstandings !== undefined)
+    updates.enduringUnderstandings = toKeyedGranules(
+      fields.enduringUnderstandings, unit.enduringUnderstandings, "eu");
+  if (fields.subject !== undefined) updates.subject = fields.subject ?? undefined;
+  if (fields.gradeLevel !== undefined) updates.gradeLevel = fields.gradeLevel ?? undefined;
+  await ctx.db.patch(unit._id, updates);
+  return {
+    kind: "updated" as const,
+    filedUnder,
+    updatedFields: Object.keys(updates),
+  };
+}
+
+export const updateUnitInternal = internalMutation({
+  args: { unitId: v.id("units"), ...unitMetadataFields },
+  returns: unitMetadataResult,
   handler: async (ctx, args) => {
     const { unitId, ...fields } = args;
     const unit = await ctx.db.get(unitId);
     if (!unit) throw new Error("Unit not found");
-    const updates: Record<string, unknown> = {};
-    if (fields.bigIdea !== undefined) updates.bigIdea = fields.bigIdea ?? undefined;
-    if (fields.essentialQuestions !== undefined)
-      updates.essentialQuestions = toKeyedGranules(
-        fields.essentialQuestions, unit.essentialQuestions, "eq");
-    if (fields.enduringUnderstandings !== undefined)
-      updates.enduringUnderstandings = toKeyedGranules(
-        fields.enduringUnderstandings, unit.enduringUnderstandings, "eu");
-    if (fields.subject !== undefined) updates.subject = fields.subject ?? undefined;
-    if (fields.gradeLevel !== undefined) updates.gradeLevel = fields.gradeLevel ?? undefined;
-    await ctx.db.patch(unitId, updates);
+    return await applyUnitMetadata(ctx, unit, fields);
+  },
+});
+
+/**
+ * `update_unit` for the global staff aide (the app's Chat tab and the Slack
+ * bot), which names a unit by title rather than standing on its page. The
+ * same write as the unit page's bot, run only after the caller's own
+ * unit-edit check (`requireAgentUnitEditAccess`: curriculum standing at the
+ * unit's school, a writable account, scholar access for a Quest).
+ */
+export const updateUnitForCaller = internalMutation({
+  args: { callerUserId: v.id("users"), unitId: v.id("units"), ...unitMetadataFields },
+  returns: unitMetadataResult,
+  handler: async (ctx, args) => {
+    const { callerUserId, unitId, ...fields } = args;
+    const { unit } = await requireAgentUnitEditAccess(ctx, callerUserId, unitId);
+    return await applyUnitMetadata(ctx, unit, fields);
   },
 });
 
@@ -1613,6 +1790,8 @@ export const createLessonInternal = internalMutation({
     durationMinutes: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // A waiting or declined Quest proposal takes no lesson (TRA-685).
+    assertProposalTakesNoStructure(await ctx.db.get(args.unitId));
     const existing = await ctx.db
       .query("lessons")
       .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
@@ -1673,9 +1852,11 @@ export const deleteLessonInternal = internalMutation({
         );
       }
     }
+    const removedPlacements: Doc<"schedulePlacements">[] = [];
     for (const a of acts) {
-      await deleteActivityCascade(ctx, a._id, { skipWorkGuard: true });
+      await deleteActivityCascade(ctx, a._id, { skipWorkGuard: true, removedPlacements });
     }
+    await syncClassesForPlacements(ctx, removedPlacements);
     await ctx.db.delete(args.lessonId);
   },
 });
@@ -1691,6 +1872,9 @@ export const deleteLessonInternal = internalMutation({
  * lesson, move and activity tools ask this first. Returns a refusal string
  * instead of throwing so the tool can hand the model a recoverable message.
  */
+// Keep in step with `requireAgentUnitEditAccess` (lib/auth.ts), the same
+// check for the aide's mutations, which can also refuse a read-only account
+// and a view-as session.
 export const checkUnitEditAccessForAide = internalQuery({
   args: {
     callerUserId: v.id("users"),

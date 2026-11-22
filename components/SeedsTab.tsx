@@ -38,28 +38,17 @@ function SeedCard({
   showActions,
 }: {
   seed: Doc<"seeds">;
-  showActions: "review" | "active" | "none";
+  showActions: "hide" | "none";
 }) {
-  const reviewSeed = useMutation(api.seeds.review);
+  const setSeedStatus = useMutation(api.seeds.setStatus);
   const [isActing, setIsActing] = useState(false);
 
-  const handleReview = async (action: "accept" | "dismiss") => {
+  const handleHide = async () => {
     setIsActing(true);
     try {
-      await reviewSeed({ id: seed._id, action });
+      await setSeedStatus({ id: seed._id, status: "dismissed" });
     } catch (err) {
-      console.error("Error reviewing seed:", err);
-    } finally {
-      setIsActing(false);
-    }
-  };
-
-  const handleDismiss = async () => {
-    setIsActing(true);
-    try {
-      await reviewSeed({ id: seed._id, action: "dismiss" });
-    } catch (err) {
-      console.error("Error dismissing seed:", err);
+      console.error("Error hiding seed:", err);
     } finally {
       setIsActing(false);
     }
@@ -78,6 +67,12 @@ function SeedCard({
         : seed.origin === "parked"
           ? // A parked idea the scholar made a Quest of (TRA-519 B2).
             { label: "Saved idea", color: "purple" }
+          : seed.origin === "saved_question"
+            ? // A question the scholar asked mid-build, saved (TRA-682).
+              { label: "Saved question", color: "purple" }
+            : seed.origin === "follow_up"
+              ? // A next step saved from the scholar's own Quest (TRA-682).
+                { label: "Follow-up", color: "purple" }
           : seed.suggestionType === "frontier"
             ? { label: "Frontier", color: "cyan" }
             : seed.suggestionType === "depth_probe"
@@ -158,34 +153,7 @@ function SeedCard({
         )}
 
       {/* Action buttons */}
-      {showActions === "review" && (
-        <HStack gap={2} mt={2}>
-          <Button
-            size="xs"
-            bg="green.500"
-            color="white"
-            _hover={{ bg: "green.600" }}
-            fontFamily="heading"
-            onClick={() => handleReview("accept")}
-            disabled={isActing}
-          >
-            <Sparkle weight="fill" style={{ marginRight: "3px" }} /> Accept
-          </Button>
-          <Button
-            size="xs"
-            variant="ghost"
-            color="red.500"
-            _hover={{ bg: "red.50" }}
-            fontFamily="heading"
-            onClick={() => handleReview("dismiss")}
-            disabled={isActing}
-          >
-            <X style={{ marginRight: "3px" }} /> Dismiss
-          </Button>
-        </HStack>
-      )}
-
-      {showActions === "active" && (
+      {showActions === "hide" && (
         <HStack gap={2} mt={2}>
           <Button
             size="xs"
@@ -193,10 +161,10 @@ function SeedCard({
             color="charcoal.400"
             _hover={{ bg: "gray.100" }}
             fontFamily="heading"
-            onClick={handleDismiss}
+            onClick={handleHide}
             disabled={isActing}
           >
-            <X style={{ marginRight: "3px" }} /> Dismiss
+            <X style={{ marginRight: "3px" }} /> Hide
           </Button>
         </HStack>
       )}
@@ -361,17 +329,15 @@ export function SeedsTab({ scholarId }: SeedsTabProps) {
         />
       )}
 
-      {/* Pending review */}
+      {/* Suggested: still waiting to go live; teachers can only hide them */}
       {pending.length > 0 && (
         <Box>
-          <HStack mb={2}>
-            <Badge bg="orange.100" color="orange.700" fontSize="xs">
-              {pending.length} pending review
-            </Badge>
-          </HStack>
+          <Text fontSize="xs" fontWeight="600" fontFamily="heading" color="charcoal.400" mb={2}>
+            Suggested ({pending.length})
+          </Text>
           <VStack gap={2} align="stretch">
             {pending.map((seed) => (
-              <SeedCard key={seed._id} seed={seed} showActions="review" />
+              <SeedCard key={seed._id} seed={seed} showActions="hide" />
             ))}
           </VStack>
         </Box>
@@ -385,7 +351,7 @@ export function SeedsTab({ scholarId }: SeedsTabProps) {
           </Text>
           <VStack gap={2} align="stretch">
             {active.map((seed) => (
-              <SeedCard key={seed._id} seed={seed} showActions="active" />
+              <SeedCard key={seed._id} seed={seed} showActions="hide" />
             ))}
           </VStack>
         </Box>

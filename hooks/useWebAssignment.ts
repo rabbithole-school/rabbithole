@@ -18,6 +18,10 @@ import { useCallback, useState } from "react";
 import { useConvex } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import {
+  CUSTOM_APP_FROM_ASSIGNMENT,
+  CUSTOM_APP_FROM_PARAM,
+} from "@/shared/appKind";
 import { haptic } from "@/lib/native";
 import { toaster } from "@/lib/toaster";
 
@@ -34,6 +38,22 @@ export type LaunchWebAssignmentArgs = {
   webUrl?: string | null;
   webAllowedHosts?: string[] | null;
 };
+
+/** The session row above already records this visit. When the target is a
+ *  custom-app tile, tell its /custom-apps page so the page's own launcher
+ *  tracking (useCustomAppActivity) does not log the same minutes twice. */
+export function assignmentLaunchUrl(webUrl: string): string {
+  try {
+    const url = new URL(webUrl, window.location.origin);
+    if (url.origin !== window.location.origin || url.pathname !== "/custom-apps") {
+      return webUrl;
+    }
+    url.searchParams.set(CUSTOM_APP_FROM_PARAM, CUSTOM_APP_FROM_ASSIGNMENT);
+    return url.toString();
+  } catch {
+    return webUrl;
+  }
+}
 
 export function useWebAssignment() {
   const convex = useConvex();
@@ -66,7 +86,7 @@ export function useWebAssignment() {
         );
         const activityTitle = title ?? "Web assignment";
 
-        window.open(webUrl, "_blank", "noopener,noreferrer");
+        window.open(assignmentLaunchUrl(webUrl), "_blank", "noopener,noreferrer");
         setDonePrompt({ sessionId, activityTitle });
       } catch (err) {
         console.error("Web assignment launch failed:", err);

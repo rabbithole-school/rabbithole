@@ -3,11 +3,11 @@ import {
   deriveStartCta,
   effectiveDomainSet,
   expandMoreLabel,
-  isDomainOutsideEffectiveSet,
   needsCheckInGate,
   nextTileSelection,
   playlistTileIconName,
   practiceCtaAccessibleLabel,
+  strandPickStartParams,
   type PlaylistChoiceCard,
 } from "./practiceChoiceSelection";
 
@@ -122,13 +122,7 @@ describe("deriveStartCta", () => {
   });
 });
 
-describe("effectiveDomainSet + isDomainOutsideEffectiveSet", () => {
-  // Regression coverage for the PR #892 review finding: a scholar under a
-  // standing assignment pinning domain A who taps a tile for domain B must
-  // get an explicit domain override on the Start link, or the practice
-  // screen's own standing resolution silently serves A instead of the B the
-  // preview promised ("what you see isn't what you'll start", again).
-
+describe("effectiveDomainSet", () => {
   it("a mixed standing pin (2+ domains) wins as the effective set", () => {
     const set = effectiveDomainSet({
       standingDomains: ["whole-number-arithmetic", "fraction-arithmetic"],
@@ -152,29 +146,39 @@ describe("effectiveDomainSet + isDomainOutsideEffectiveSet", () => {
     });
     expect(set).toEqual(["geometry", "probability"]);
   });
+});
 
-  it("a new-territory tile for a domain OUTSIDE a standing pin needs an explicit override", () => {
-    // Scholar has a standing assignment pinning "whole-number-arithmetic" and
-    // taps a "new territory" tile for "geometry" (not started, not pinned).
-    const domainSet = effectiveDomainSet({
-      standingDomain: "whole-number-arithmetic",
-      startedDomains: [],
+describe("strandPickStartParams", () => {
+  // Scholar report: picking "Chance & Likelihood" before starting math served
+  // ordinary whole-number problems. The pick was IN the scholar's blend
+  // (whole-number + probability), so Start sent only choiceDomain/choiceStrand
+  // and the practice screen re-resolved the MIXED blend, where the pick is just
+  // a ×2 weight inside one domain's queue. Start must target the picked domain
+  // alone — exactly what the Home preview shows.
+
+  it("pins the picked domain even when it is already inside a mixed blend", () => {
+    const blend = effectiveDomainSet({
+      startedDomains: ["whole-number-arithmetic", "probability"],
     });
-    expect(isDomainOutsideEffectiveSet("geometry", domainSet)).toBe(true);
+    expect(blend).toContain("probability");
+    expect(strandPickStartParams({ domain: "probability", strand: "chance" })).toEqual({
+      choiceDomain: "probability",
+      choiceStrand: "chance",
+      domain: "probability",
+    });
   });
 
-  it("a tile whose domain IS inside the standing pin needs no override", () => {
-    const domainSet = effectiveDomainSet({
-      standingDomains: ["whole-number-arithmetic", "fraction-arithmetic"],
-      standingDomain: "whole-number-arithmetic",
-      startedDomains: [],
+  it("pins the picked domain for a new-territory pick outside a standing pin", () => {
+    expect(strandPickStartParams({ domain: "geometry-measurement", strand: "angles" })).toEqual({
+      choiceDomain: "geometry-measurement",
+      choiceStrand: "angles",
+      domain: "geometry-measurement",
     });
-    expect(isDomainOutsideEffectiveSet("fraction-arithmetic", domainSet)).toBe(false);
   });
 
-  it("a tile whose domain is inside the scholar's own started set (no pin) needs no override", () => {
-    const domainSet = effectiveDomainSet({ startedDomains: ["geometry", "probability"] });
-    expect(isDomainOutsideEffectiveSet("probability", domainSet)).toBe(false);
+  it("always sends choiceDomain === domain, which folds the picked domain's mapping band like the preview", () => {
+    const params = strandPickStartParams(cardA);
+    expect(params.domain).toBe(params.choiceDomain);
   });
 });
 
@@ -220,6 +224,7 @@ describe("playlistTileIconName", () => {
     "integers-coordinates",
     "early-algebra",
     "algebra-1",
+    "algebra-2",
   ];
 
   it("every tile kind resolves a non-empty icon name (carousel completeness)", () => {

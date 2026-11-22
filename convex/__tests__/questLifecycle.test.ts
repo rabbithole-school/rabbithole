@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -208,7 +209,7 @@ async function seedAssignment(
   },
 ) {
   return await t.run(async (ctx) =>
-    ctx.db.insert("assignments", {
+    insertAssignmentWithSchedule(ctx, {
       teacherId: args.teacherId,
       unitId: args.unitId,
       scholarIds: [args.scholarId],
@@ -1109,7 +1110,7 @@ describe("questsForScholar — catalog free-starts", () => {
     const unitId = await seedCatalogUnit(t, { teacherId: teacher });
     const { activityId } = await seedOnlineActivity(t, unitId);
     const assignmentId = await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId,
         scholarIds: [scholar],

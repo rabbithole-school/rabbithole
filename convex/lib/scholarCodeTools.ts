@@ -532,7 +532,7 @@ export async function makeScholarCodeTools(
       emit({
         toolComplete: {
           name: "list_rabbithole_files",
-          result: input.prefix ? input.prefix : "(all)",
+          result: input.prefix ? `Listed ${input.prefix}` : "Listed all files",
         },
       });
       return result;
@@ -559,7 +559,7 @@ export async function makeScholarCodeTools(
       emit({
         toolComplete: {
           name: "read_rabbithole_file",
-          result: input.path,
+          result: `Read ${input.path}`,
         },
       });
       return result;

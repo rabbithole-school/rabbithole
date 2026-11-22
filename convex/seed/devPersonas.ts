@@ -27,6 +27,7 @@ import { internalMutation } from "../_generated/server";
 import type { MutationCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { ROLES } from "../lib/roles";
+import { syncClassesForPlacements } from "../lib/classLink";
 import { ensureMembership } from "../memberships";
 import { ensureActiveStaffCapabilityGrant } from "../lib/staffCapabilities";
 import { ensureDevInstitutions } from "./institutions";
@@ -74,15 +75,12 @@ async function assignSeededProgramAccess(
   // The timetable avatar represents the assigned instructor, not the group's
   // authorization owner. Keep the seeded program handoff coherent on both
   // surfaces instead of leaving the rich fixture's placeholder teacher behind.
-  const placements = await ctx.db.query("schedulePlacements").collect();
+  const placements = (await ctx.db.query("schedulePlacements").collect())
+    .filter((p) => p.groupId === group._id && p.teacherId !== args.granteeUserId);
   for (const placement of placements) {
-    if (
-      placement.groupId === group._id &&
-      placement.teacherId !== args.granteeUserId
-    ) {
-      await ctx.db.patch(placement._id, { teacherId: args.granteeUserId });
-    }
+    await ctx.db.patch(placement._id, { teacherId: args.granteeUserId });
   }
+  await syncClassesForPlacements(ctx, placements);
   await ensureActiveStaffCapabilityGrant(ctx, {
     granteeUserId: args.granteeUserId,
     institutionId: args.institutionId,

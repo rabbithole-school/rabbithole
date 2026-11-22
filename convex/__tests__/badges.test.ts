@@ -363,6 +363,66 @@ describe("awardUnitBadge", () => {
     ).rejects.toThrow(/not a scholar|Forbidden/i);
   });
 
+  // TRA-672: the badge text a scholar reads in their trophy case never falls
+  // back to the unit's teacher-facing description.
+  test("the badge description falls back to scholar copy, never the teacher description", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedTeacher(t, "teacher7");
+    const scholarId = await seedScholar(t, "scholar7");
+    const teacherNote = "Avoids writing — teacher note about this child.";
+    const insertUnit = (fields: {
+      title: string;
+      scholarDescription?: string;
+      badgeDescription?: string;
+    }) =>
+      t.run((ctx) =>
+        ctx.db.insert("units", {
+          title: fields.title,
+          description: teacherNote,
+          scholarDescription: fields.scholarDescription,
+          isActive: true,
+          teacherId,
+          badgeOnCompletion: {
+            title: `${fields.title} — completed`,
+            description: fields.badgeDescription,
+          },
+        }),
+      );
+    const teacherOnly = await insertUnit({ title: "Comics" });
+    const withScholarCopy = await insertUnit({
+      title: "Volcanoes",
+      scholarDescription: "Find out what makes a volcano blow.",
+    });
+    const withBadgeText = await insertUnit({
+      title: "Planes",
+      scholarDescription: "Make a plane that loops.",
+      badgeDescription: "Earned by finishing every plane.",
+    });
+
+    const teacher = await asScholar(t, teacherId);
+    const descriptionOf = async (unitId: Id<"units">) => {
+      const { badgeId } = await teacher.mutation(api.badges.awardUnitBadge, {
+        scholarId,
+        unitId,
+      });
+      return (await t.run((ctx) => ctx.db.get(badgeId)))?.badgeSnapshot
+        .description;
+    };
+    expect(await descriptionOf(teacherOnly)).toBeUndefined();
+    expect(await descriptionOf(withScholarCopy)).toBe(
+      "Find out what makes a volcano blow.",
+    );
+    expect(await descriptionOf(withBadgeText)).toBe(
+      "Earned by finishing every plane.",
+    );
+    const mine = await (await asScholar(t, scholarId)).query(
+      api.scholarUnitBadges.myEarnedBadges,
+      {},
+    );
+    expect(mine).toHaveLength(3);
+    expect(JSON.stringify(mine)).not.toContain(teacherNote);
+  });
+
   test("a scholar cannot award badges (teacher-gated)", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedTeacher(t, "teacher6");

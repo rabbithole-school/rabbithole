@@ -128,6 +128,12 @@ export type Colors = { readonly [K in keyof typeof lightColors]: string };
 // in index.tsx which runs at module scope). Components should use useColors().
 export const colors: Colors = lightColors;
 
+/**
+ * The dark set, whatever the system appearance: for a screen that is always
+ * dark, like the decibel meter at the back of a classroom.
+ */
+export const darkThemeColors: Colors = darkColors;
+
 // ─── Hook — the right way to consume colors in components ────────────────────
 /**
  * Returns the resolved color set for the current system appearance.
@@ -150,8 +156,11 @@ export const fonts = {
   medium: "HankenGrotesk_500Medium",
   semibold: "HankenGrotesk_600SemiBold",
   bold: "HankenGrotesk_700Bold",
-  // Hanken Grotesk ships no italic; synthesize italics via fontStyle. Code uses
-  // the platform monospace face.
+  // The real italic face. iOS does NOT slant a custom font for
+  // `fontStyle: "italic"` when no italic face is loaded — it draws it upright
+  // (seen on a sim, 2026-11-19) — so italic text names this family instead.
+  italic: "HankenGrotesk_400Regular_Italic",
+  // Code uses the platform monospace face.
   mono: Platform.OS === "ios" ? "Menlo" : "monospace",
 };
 

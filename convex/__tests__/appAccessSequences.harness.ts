@@ -474,7 +474,7 @@ async function seedWorld(t: TestClient, seed: Seed): Promise<World> {
         institutionId,
         target: { kind: "app", externalAppId: appId },
         audience: { kind: "group", groupId },
-        timing: { kind: "focus", endsAt: setAt + HOUR },
+        timing: { kind: "focus" }, endsAt: setAt + HOUR, afterEnd: "fade",
         blocking: false,
         setAt,
         pushedBy: teacherId,
@@ -516,7 +516,7 @@ async function seedWorld(t: TestClient, seed: Seed): Promise<World> {
         institutionId,
         target: { kind: "app", externalAppId: appId },
         audience: { kind: "group", groupId },
-        timing: { kind: "focus", endsAt: WINDOW_CLOSES },
+        timing: { kind: "focus" }, endsAt: WINDOW_CLOSES, afterEnd: "fade",
         blocking: false,
         startsAt: WINDOW_OPENS,
         pushedBy: teacherId,
@@ -1951,21 +1951,7 @@ type Known = {
  * fixed entry whose trace is deeper than CI explores moves to FIXED, below,
  * where that trace keeps running.
  */
-const KNOWN: readonly Known[] = [
-  // TRA-435: archive or rescheme doesn't re-mark push-only scholars.
-  // coreSetArchived and coreUpdateApp choose whom to kick with
-  // liveReachOfExternalApp: direct links and audience grants, not pushes. A
-  // scholar whose only route is a live push is not kicked, so the iPad keeps
-  // the app, and any lease on it stays open, until a later cron pass finds
-  // the device due (5-minute cadence).
-  {
-    check: "L1L2_catalogRevocationMarksTheDevice",
-    id: "a push-only catalog revocation",
-    cite: "TRA-435",
-    shortest: { seed: "focus", path: ["archive"] },
-    explains: (_trace, detail) => detail.includes("its only route was a push"),
-  },
-];
+const KNOWN: readonly Known[] = [];
 
 type Fixed = { check: CheckName; cite: string; shortest: { seed: Seed; path: string[] } };
 

@@ -129,3 +129,71 @@ describe("masteryObservations.record — write-path dedup backstop", () => {
     expect((await currentLabels(t, scholarId)).length).toBe(2);
   });
 });
+
+describe("masteryObservations.record — model-supplied supersedesObservationId", () => {
+  test("an id from another table is ignored instead of failing the insert", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seed(t);
+
+    // The observer hallucinated a session id where an observation id belongs.
+    const newId = await t.mutation(internal.masteryObservations.record, {
+      ...recordArgs(scholarId, sessionId, "Recursion", { domain: "Computer Science" }),
+      supersedesObservationId: sessionId,
+    });
+
+    const row = await t.run(async (ctx) => ctx.db.get(newId));
+    expect(row?.supersedesId).toBeUndefined();
+    expect(row?.isSuperseded).toBe(false);
+  });
+
+  test("a malformed id is ignored", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seed(t);
+
+    const newId = await t.mutation(internal.masteryObservations.record, {
+      ...recordArgs(scholarId, sessionId, "Recursion", { domain: "Computer Science" }),
+      supersedesObservationId: "not-an-id",
+    });
+
+    expect((await t.run(async (ctx) => ctx.db.get(newId)))?.supersedesId).toBeUndefined();
+  });
+
+  test("another scholar's observation is neither superseded nor linked", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seed(t);
+    const otherScholarId = await t.run(async (ctx) =>
+      ctx.db.insert("users", { name: "Other Scholar", username: "otherscholar", role: "scholar" }),
+    );
+    const othersId = await t.mutation(
+      internal.masteryObservations.record,
+      recordArgs(otherScholarId, sessionId, "Fractions", { domain: "Mathematics" }),
+    );
+
+    const newId = await t.mutation(internal.masteryObservations.record, {
+      ...recordArgs(scholarId, sessionId, "Recursion", { domain: "Computer Science" }),
+      supersedesObservationId: othersId,
+    });
+
+    const [others, mine] = await t.run(async (ctx) => [await ctx.db.get(othersId), await ctx.db.get(newId)]);
+    expect(others?.isSuperseded).toBe(false);
+    expect(mine?.supersedesId).toBeUndefined();
+  });
+
+  test("a valid id for the same scholar still supersedes and links", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seed(t);
+    const oldId = await t.mutation(
+      internal.masteryObservations.record,
+      recordArgs(scholarId, sessionId, "Loops", { domain: "Computer Science" }),
+    );
+
+    const newId = await t.mutation(internal.masteryObservations.record, {
+      ...recordArgs(scholarId, sessionId, "Iteration with loops", { domain: "Computer Science" }),
+      supersedesObservationId: oldId,
+    });
+
+    const [old, fresh] = await t.run(async (ctx) => [await ctx.db.get(oldId), await ctx.db.get(newId)]);
+    expect(old?.isSuperseded).toBe(true);
+    expect(fresh?.supersedesId).toBe(oldId);
+  });
+});

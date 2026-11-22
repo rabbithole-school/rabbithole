@@ -4,7 +4,12 @@ import { prepareCustomAppSandboxWithSources } from "./customAppSandboxCore";
 
 export {
   APP_SANDBOX_CSP,
+  PYODIDE_KIT_ID,
+  PYODIDE_KIT_PATH,
+  PYODIDE_KIT_VERSION,
   appSandboxCsp,
+  pyodideKitBase,
+  requestedAppKits,
   withAppSandboxCsp,
 } from "./customAppSandboxCore";
 
@@ -17,6 +22,8 @@ export async function prepareCustomAppSandbox(
   html: string,
   injectAppStateSdk: AppStateSdkInjector,
   resolveAssetUrl: AppAssetUrlResolver = NO_APP_ASSET_URL,
+  /** Web origin that serves /app-kit/pyodide/; see PYODIDE_KIT_PATH. */
+  kitOrigin?: string,
 ): Promise<{ csp: string; srcDoc: string }> {
   const requestedFiles = requestedAppKitFiles(html);
   const resolveSource =
@@ -30,5 +37,6 @@ export async function prepareCustomAppSandbox(
     injectAppStateSdk,
     resolveSource,
     resolveAssetUrl,
+    kitOrigin,
   );
 }

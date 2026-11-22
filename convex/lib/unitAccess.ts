@@ -112,8 +112,18 @@ export async function requireUnitAccessForUser(
   );
   if (user.institutionId) {
     callerInstitutionIds.add(user.institutionId);
-  } else if (user.role === ROLES.SCHOLAR && primary) {
-    // Mirrors scholarInLens: an unstamped legacy scholar belongs to primary.
+  } else if (
+    user.role === ROLES.SCHOLAR &&
+    primary &&
+    !memberships.some(
+      (membership) =>
+        membership.role === ROLES.SCHOLAR ||
+        membership.role === ROLES.LIFELONG_LEARNER,
+    )
+  ) {
+    // Mirrors scholarInLens: an unstamped scholar with no learner membership
+    // belongs to primary. One enrolled elsewhere through `memberships` is
+    // that school's alone (TRA-654).
     callerInstitutionIds.add(primary._id);
   } else if (
     isStaffRole(user.role) &&

@@ -14,6 +14,7 @@ import {
   normalizeFrame,
   PLACEHOLDER_CASCADE_STEP,
   summarizeDeckForModel,
+  MAX_TEXT_LENGTH,
   textCommitOps,
   validateDeck,
   validateDeckLenient,
@@ -27,6 +28,8 @@ import {
   canRedo,
   DEFAULT_HISTORY_LIMIT,
   DEFAULT_TEXT_STYLE,
+  resolveSlideCursor,
+  textDraftTarget,
   normColor,
   SLIDE_TEXT_COLORS,
   SLIDE_BACKGROUND_COLORS,
@@ -567,6 +570,33 @@ describe("summarizeDeckForModel", () => {
     expect(out.split("\n")).toHaveLength(5);
   });
 
+  it("marks a cut text preview so the model never reads a fragment as the whole box", () => {
+    const text = `${"w".repeat(60)} the sentence the scholar just added`;
+    const out = summarizeDeckForModel(
+      deckWith({ type: "text", frame: { x: 0, y: 0, w: 100, h: 100 }, text }),
+    );
+    expect(out).toContain(`"${"w".repeat(60)}… [+${text.length - 60} more characters not shown]"`);
+    expect(out).not.toContain("just added");
+  });
+
+  it("carries long notes and alt text whole at the full-text cap", () => {
+    const alt = `${"a".repeat(200)} end of alt`;
+    const d = deckWith({ type: "image", frame: { x: 0, y: 0, w: 100, h: 100 }, assetId: "asset-1", alt });
+    d.slides[0].speakerNotes = `${"n".repeat(300)} end of notes`;
+    const out = summarizeDeckForModel(d, MAX_TEXT_LENGTH);
+    expect(out).toContain("end of alt");
+    expect(out).toContain("end of notes");
+    expect(out).not.toContain("not shown");
+  });
+
+  it("leaves a preview that fits unmarked", () => {
+    const out = summarizeDeckForModel(
+      deckWith({ type: "text", frame: { x: 0, y: 0, w: 100, h: 100 }, text: "Short" }),
+    );
+    expect(out).toContain('"Short"');
+    expect(out).not.toContain("not shown");
+  });
+
   it("keeps image alt text beyond the old 40-character cap", () => {
     const alt = "A labeled cutaway diagram showing magma rising through a volcanic vent.";
     const out = summarizeDeckForModel(
@@ -1004,5 +1034,189 @@ describe("author color palettes", () => {
 
   it("the first text color is the deck default", () => {
     expect(SLIDE_TEXT_COLORS[0]?.value).toBe(DEFAULT_TEXT_STYLE.color);
+  });
+});
+
+describe("addSlide content: restore keeps ids, paste makes them unique", () => {
+  // validateDeck accepts the same element id on two slides; tutor-built decks
+  // can look like this. Only a paste (uniqueElementIds) may re-id an element.
+  function deckReusingAnId(): Deck {
+    const el = { type: "text", frame: { x: 10, y: 10, w: 300, h: 80 }, text: "same id" };
+    const v = validateDeck({
+      schemaVersion: 1,
+      title: "Deck",
+      width: CANVAS_W,
+      height: CANVAS_H,
+      revision: 0,
+      slides: [
+        { id: "s1", background: "#ffffff", elementIds: ["el1"], elements: { el1: el } },
+        { id: "s2", background: "#ffffff", elementIds: ["el1"], elements: { el1: el } },
+      ],
+    });
+    if (!v.ok) throw new Error(v.errors.join("; "));
+    return v.deck;
+  }
+
+  it("undoing a slide deletion brings its element ids back exactly, so older undo steps still apply", () => {
+    let deck = deckReusingAnId();
+    let history = createHistory();
+    const record = (ops: SlideOp[]) => {
+      const r = applySlideOps(deck, ops, makeDeckIdFactory(deck));
+      if (!r.ok) throw new Error(r.error);
+      history = pushHistory(history, deck, ops, r.createdIds);
+      deck = r.deck;
+    };
+    const step = () => {
+      const s = undo(history);
+      if (!s) throw new Error("nothing to undo");
+      history = s.history;
+      const r = applySlideOps(deck, s.ops, makeDeckIdFactory(deck));
+      if (!r.ok) throw new Error(r.error);
+      deck = r.deck;
+    };
+
+    record([{ op: "patchElement", slideId: "s2", id: "el1", text: "edited" }]);
+    record([{ op: "removeSlide", slideId: "s2" }]);
+    step(); // restore s2
+    expect(deck.slides[1].elementIds).toEqual(["el1"]);
+    step(); // undo the edit, which names s2/el1
+    const restored = deck.slides[1].elements.el1;
+    expect(restored.type === "text" ? restored.text : null).toBe("same id");
+  });
+
+  it("re-ids an element only when the op asks for unique ids", () => {
+    const deck = deckReusingAnId();
+    const content = deck.slides[0];
+    const kept = applySlideOps(deck, [{ op: "addSlide", slide: content }], makeDeckIdFactory(deck));
+    const unique = applySlideOps(
+      deck,
+      [{ op: "addSlide", slide: content, uniqueElementIds: true }],
+      makeDeckIdFactory(deck),
+    );
+    if (!kept.ok || !unique.ok) throw new Error("apply failed");
+    expect(kept.deck.slides[2].elementIds).toEqual(["el1"]);
+    const newId = unique.deck.slides[2].elementIds[0];
+    expect(newId).not.toBe("el1");
+    expect(newId.startsWith(unique.deck.slides[2].id)).toBe(true);
+  });
+});
+
+describe("moveSlide — reorder without touching content (TRA-704)", () => {
+  /** Four slides: s1 + three added after it, in order. */
+  function fourSlides(): Deck {
+    let d = emptyDeck("Deck", "s1");
+    d = applyOk(d, [
+      { op: "addElement", slideId: "s1", element: TEXT },
+      { op: "addSlide" },
+      { op: "addSlide" },
+      { op: "addSlide" },
+    ]).deck;
+    return d;
+  }
+  const ids = (d: Deck) => d.slides.map((s) => s.id);
+
+  it("moves a slide to the front, after another slide, and to the end", () => {
+    const d = fourSlides();
+    const [a, b, c, e] = ids(d);
+    expect(ids(applyOk(d, [{ op: "moveSlide", slideId: c, afterSlideId: null }]).deck)).toEqual([c, a, b, e]);
+    expect(ids(applyOk(d, [{ op: "moveSlide", slideId: a, afterSlideId: c }]).deck)).toEqual([b, c, a, e]);
+    expect(ids(applyOk(d, [{ op: "moveSlide", slideId: a }]).deck)).toEqual([b, c, e, a]);
+  });
+
+  it("keeps each slide's content with it", () => {
+    const d = fourSlides();
+    const moved = applyOk(d, [{ op: "moveSlide", slideId: "s1" }]).deck;
+    expect(moved.slides.at(-1)).toEqual(d.slides[0]);
+  });
+
+  it("refuses an unknown slide, an unknown target, and moving after itself", () => {
+    const d = fourSlides();
+    expect(applySlideOps(d, [{ op: "moveSlide", slideId: "nope" }], idFactory()).ok).toBe(false);
+    expect(applySlideOps(d, [{ op: "moveSlide", slideId: "s1", afterSlideId: "nope" }], idFactory()).ok).toBe(false);
+    expect(applySlideOps(d, [{ op: "moveSlide", slideId: "s1", afterSlideId: "s1" }], idFactory()).ok).toBe(false);
+  });
+
+  it.each([
+    ["front slide to the end", (d: Deck) => ({ op: "moveSlide", slideId: d.slides[0].id }) as SlideOp],
+    ["last slide to the front", (d: Deck) => ({ op: "moveSlide", slideId: d.slides[3].id, afterSlideId: null }) as SlideOp],
+    ["middle slide after a later one", (d: Deck) => ({ op: "moveSlide", slideId: d.slides[1].id, afterSlideId: d.slides[2].id }) as SlideOp],
+  ])("undo restores the order exactly (%s)", (_label, make) => {
+    const d = fourSlides();
+    expectInverts(d, [make(d)]);
+  });
+
+  it("undo restores a batch of several moves", () => {
+    const d = fourSlides();
+    const [a, b, c, e] = ids(d);
+    expectInverts(d, [
+      { op: "moveSlide", slideId: e, afterSlideId: null },
+      { op: "moveSlide", slideId: a, afterSlideId: c },
+      { op: "moveSlide", slideId: b },
+    ]);
+  });
+});
+
+describe("an editor follows its slide through a tutor reorder (TRA-704)", () => {
+  /**
+   * Three slides whose text boxes all carry the id "t1", as older decks did,
+   * so a draft resolved by position would find a box to overwrite.
+   */
+  function sharedIdDeck(): Deck {
+    const base = applyOk(emptyDeck("Deck", "s1"), [
+      { op: "addElement", slideId: "s1", element: TEXT },
+    ]).deck;
+    const proto = base.slides[0];
+    const box = proto.elements[proto.elementIds[0]];
+    const slide = (id: string, text: string) => ({
+      ...proto,
+      id,
+      elementIds: ["t1"],
+      elements: { t1: { ...box, id: "t1", text } },
+    });
+    return {
+      ...base,
+      slides: [slide("s1", "first"), slide("s2", "second"), slide("s3", "third")],
+    } as Deck;
+  }
+
+  it("keeps the scholar's slide and saves the draft to it, not the slide now at that index", () => {
+    const before = sharedIdDeck();
+    // The scholar is on slide 3 (index 2), typing into its box.
+    const cursor = { slideId: "s3", index: 2 };
+    const draft = { slideId: "s3", elementId: "t1", text: "third, rewritten" };
+
+    // The tutor moves s3 to the front while the draft is still in the box.
+    const after = applyOk(before, [{ op: "moveSlide", slideId: "s3", afterSlideId: null }]).deck;
+    expect(after.slides.map((s) => s.id)).toEqual(["s3", "s1", "s2"]);
+
+    // Same requested index, so the editor follows s3 to its new position.
+    const index = resolveSlideCursor(after.slides, cursor.index, cursor);
+    expect(after.slides[index].id).toBe("s3");
+
+    // The autosave resolves the draft by the ids the edit began on.
+    const target = textDraftTarget(after, draft.slideId, draft.elementId);
+    expect(target?.slide.id).toBe("s3");
+    const saved = applyOk(after, [
+      { op: "patchElement", slideId: target!.slide.id, id: draft.elementId, text: draft.text },
+    ]).deck;
+    const textOf = (id: string) => {
+      const el = saved.slides.find((s) => s.id === id)!.elements.t1;
+      return el.type === "text" ? el.text : null;
+    };
+    expect(textOf("s3")).toBe("third, rewritten");
+    // The slide that now sits at the old index keeps its own words.
+    expect(saved.slides[2].id).toBe("s2");
+    expect(textOf("s2")).toBe("second");
+    expect(textOf("s1")).toBe("first");
+  });
+
+  it("honours navigation, and falls back to the position when the slide is gone", () => {
+    const d = sharedIdDeck();
+    expect(resolveSlideCursor(d.slides, 0, { slideId: "s3", index: 2 })).toBe(0);
+    expect(resolveSlideCursor(d.slides, 1, null)).toBe(1);
+    expect(resolveSlideCursor(d.slides, 9, null)).toBe(2);
+    const removed = applyOk(d, [{ op: "removeSlide", slideId: "s3" }]).deck;
+    expect(resolveSlideCursor(removed.slides, 2, { slideId: "s3", index: 2 })).toBe(1);
+    expect(textDraftTarget(removed, "s3", "t1")).toBeNull();
   });
 });

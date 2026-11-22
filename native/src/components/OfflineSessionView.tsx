@@ -32,6 +32,12 @@ import {
   offlineHomeworkFinishCopy,
   offlineHomeworkMarkedText,
 } from "../../vendor/shared/offlineHomework";
+import {
+  HOMEWORK_DONE_CONFIRMED,
+  HOMEWORK_DONE_LABEL,
+  HOMEWORK_DONE_UNDO,
+} from "../../vendor/shared/homeworkFraming";
+import { useNow } from "@/hooks/useNow";
 import { ResourceShareCard } from "@/components/ResourceShareCard";
 
 type Item = {
@@ -137,6 +143,7 @@ export function OfflineSessionView({
   sessionId: Id<"sessions">;
 }) {
   const data = useQuery(api.portfolio.offlineSessionView, { sessionId });
+  const nowMs = useNow();
 
   if (data === undefined) {
     return (
@@ -155,12 +162,14 @@ export function OfflineSessionView({
   }
 
   const context = offlineHomeworkContext(data);
-  const dueText = offlineHomeworkDueText(data.dueAt, data.timeZone);
+  const dueText = offlineHomeworkDueText(data.dueAt, nowMs, data.timeZone);
   // The finish block replaces the big paper cue with one quiet line: some
   // offline homework is a worksheet, but most (a read-aloud) has no paper.
   const showFinish =
     !data.viewerCanGrade && (data.canMarkDone || data.selfMark != null);
-  const finishCopy = offlineHomeworkFinishCopy(data.teacherName);
+  const finishCopy = offlineHomeworkFinishCopy(data.teacherName, {
+    isHomework: data.isHomework,
+  });
 
   return (
     <ScrollView
@@ -201,7 +210,6 @@ export function OfflineSessionView({
                 ? offlineHomeworkMarkedText(
                     data.selfMark.completedAt,
                     data.timeZone,
-                    data.teacherName,
                   )
                 : null
             }
@@ -298,7 +306,7 @@ function FinishBlock({
       <View style={[styles.finish, styles.finishDone]}>
         <SymbolView name="checkmark.circle.fill" size={26} tintColor={colors.green} />
         <View style={styles.finishDoneText}>
-          <Text style={styles.finishTitle}>You marked this done</Text>
+          <Text style={styles.finishTitle}>{HOMEWORK_DONE_CONFIRMED}</Text>
           {markedText ? <Text style={styles.finishDetail}>{markedText}</Text> : null}
         </View>
         {selfMark.canUndo ? (
@@ -308,10 +316,10 @@ function FinishBlock({
             }
             disabled={busy}
             accessibilityRole="button"
-            accessibilityLabel="Undo marking this done"
+            accessibilityLabel={HOMEWORK_DONE_UNDO}
             style={({ pressed }) => [styles.undoButton, pressed && styles.pressed]}
           >
-            <Text style={styles.undoText}>Undo</Text>
+            <Text style={styles.undoText}>{HOMEWORK_DONE_UNDO}</Text>
           </Pressable>
         ) : null}
       </View>
@@ -334,7 +342,7 @@ function FinishBlock({
         {busy ? (
           <ActivityIndicator color={colors.white} />
         ) : (
-          <Text style={styles.doneButtonText}>I did it</Text>
+          <Text style={styles.doneButtonText}>{HOMEWORK_DONE_LABEL}</Text>
         )}
       </Pressable>
     </View>

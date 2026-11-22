@@ -1,5 +1,5 @@
-// Unit maturity query — assembles the real-data inputs for the maturity
-// rail and runs the pure `computeUnitMaturity`. See
+// Unit maturity query — per-node status dots + Readiness for one unit, from
+// the pure helpers in lib/unitMaturity.ts. See
 // review/curriculum-rehearse-and-maturity.md and lib/unitMaturity.ts.
 
 import { v } from "convex/values";
@@ -13,7 +13,6 @@ import {
   unitReadinessInput,
   REHEARSE_PASS_FITNESS,
   rollupNodeStatus,
-  unitNodeStatus,
   type MaturityInput,
   type NodeStatus,
   type Readiness,
@@ -21,112 +20,10 @@ import {
 import { granuleTexts } from "./lib/granules";
 import { effectiveActivityKind } from "../shared/appSurface";
 
-export const getForUnit = authedQuery({
-  args: { unitId: v.id("units") },
-  handler: async (ctx, args): Promise<ReturnType<typeof computeUnitMaturity>> => {
-    const { user, unit } = await requireUnitEditAccess(ctx, {
-      unitId: args.unitId,
-    });
-    // curriculum:run: her lamps count only her own runs, and grounding (a
-    // sims-vs-real comparison she has no standing for) never lights.
-    const runnerScope = await curriculumRunnerScopeForUnit(
-      ctx,
-      user,
-      args.unitId,
-    );
-
-    const lessons = await ctx.db
-      .query("lessons")
-      .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
-      .collect();
-
-    // Online activities are the only kind a sim can rehearse; the rail's
-    // Rehearsed/Debriefed lamps roll up across them.
-    const activityLists = await Promise.all(
-      lessons.map((l) =>
-        ctx.db
-          .query("activities")
-          .withIndex("by_lesson", (q) => q.eq("lessonId", l._id))
-          .collect(),
-      ),
-    );
-    const online = activityLists.flat().filter((a) => effectiveActivityKind(a) === "online");
-
-    let passing = 0;
-    let grounded = 0;
-    let trustworthy = 0;
-    for (const a of online) {
-      const variants = await ctx.db
-        .query("curriculumVariants")
-        .withIndex("by_activity", (q) => q.eq("activityId", a._id))
-        .collect();
-      const bestFitness = variants.reduce((max, variant) => {
-        const f = (variant.aggregateScores as { fitness?: number } | undefined)
-          ?.fitness;
-        return typeof f === "number" && f > max ? f : max;
-      }, Number.NEGATIVE_INFINITY);
-      if (bestFitness >= REHEARSE_PASS_FITNESS) passing++;
-
-      const experiments = await ctx.db
-        .query("curriculumExperiments")
-        .withIndex("by_activity", (q) => q.eq("activityId", a._id))
-        .collect();
-      const groundedExps = experiments.filter(
-        (e) => e.grounding && typeof e.grounding === "object",
-      );
-      if (groundedExps.length > 0 && runnerScope === null) {
-        grounded++;
-        if (
-          groundedExps.some(
-            (e) => (e.grounding as { trustworthy?: boolean }).trustworthy === true,
-          )
-        ) {
-          trustworthy++;
-        }
-      }
-    }
-
-    const latestReview = await ctx.db
-      .query("unitReviews")
-      .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
-      .order("desc")
-      .first();
-
-    const assignments = await ctx.db
-      .query("assignments")
-      .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
-      .collect();
-    const activeCount = assignments.filter(
-      (a) =>
-        !a.archivedAt &&
-        (runnerScope === null || runnerScope.has(String(a._id))),
-    ).length;
-
-    const input: MaturityInput = {
-      unit: {
-        bigIdea: unit.bigIdea,
-        essentialQuestions: granuleTexts(unit.essentialQuestions),
-        enduringUnderstandings: granuleTexts(unit.enduringUnderstandings),
-      },
-      lessons,
-      review: latestReview ? { openGapCount: latestReview.openGapCount } : null,
-      rehearsal: { onlineCount: online.length, passing },
-      assignment: { activeCount },
-      grounding:
-        grounded > 0
-          ? { groundedCount: grounded, trustworthyCount: trustworthy }
-          : null,
-    };
-
-    return computeUnitMaturity(input);
-  },
-});
-
-// Per-node coarse status for the whole tree — drives the outline status
-// dots (replacing the duration tags) and each node's vertical Summary
-// timeline. One subscription for the unit, every lesson, and every
-// activity. Activity-grained because rehearsal/debrief are; the unit dot
-// rolls up via the full maturity ladder. See lib/unitMaturity.ts and
+// Per-node coarse status + Readiness for the whole tree — drives the outline
+// dots and each node's Summary. One subscription for the unit, every lesson,
+// and every activity. Activity-grained because rehearsal/debrief are; the unit's own
+// row shows its Readiness. See lib/unitMaturity.ts and
 // review/curriculum-rehearse-and-maturity.md.
 export const getNodeStatuses = authedQuery({
   args: { unitId: v.id("units") },
@@ -134,8 +31,6 @@ export const getNodeStatuses = authedQuery({
     ctx,
     args,
   ): Promise<{
-    unit: NodeStatus;
-    unitAssigned: boolean;
     lessons: Record<string, NodeStatus>;
     activities: Record<string, NodeStatus>;
     activitiesAssigned: Record<string, boolean>;
@@ -148,8 +43,8 @@ export const getNodeStatuses = authedQuery({
     const { user, unit } = await requireUnitEditAccess(ctx, {
       unitId: args.unitId,
     });
-    // curriculum:run: "assigned" and the unit's active-run count read only
-    // her own runs; the grounded/trustworthy lamps stay dark for her.
+    // curriculum:run: the per-activity "assigned" flags read only her own
+    // runs; the grounded/trustworthy lamps stay dark for her.
     const runnerScope = await curriculumRunnerScopeForUnit(
       ctx,
       user,
@@ -334,16 +229,6 @@ export const getNodeStatuses = authedQuery({
       );
     }
 
-    const unitAssignments = await ctx.db
-      .query("assignments")
-      .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
-      .collect();
-    const activeAssignments = unitAssignments.filter(
-      (a) =>
-        !a.archivedAt &&
-        (runnerScope === null || runnerScope.has(String(a._id))),
-    ).length;
-
     const maturityInput: MaturityInput = {
       unit: {
         bigIdea: unit.bigIdea,
@@ -353,7 +238,6 @@ export const getNodeStatuses = authedQuery({
       lessons,
       review: reviewInput,
       rehearsal: { onlineCount, passing },
-      assignment: { activeCount: activeAssignments },
       grounding:
         grounded > 0
           ? { groundedCount: grounded, trustworthyCount: trustworthy }
@@ -370,8 +254,6 @@ export const getNodeStatuses = authedQuery({
     );
 
     return {
-      unit: unitNodeStatus(maturity.currentStageId),
-      unitAssigned: activeAssignments > 0,
       lessons: lessonStatuses,
       activities,
       activitiesAssigned,

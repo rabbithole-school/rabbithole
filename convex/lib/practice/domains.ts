@@ -23,6 +23,7 @@ import { RATIO_PROPORTION_PERCENT_DOMAIN } from "../../seed/ratioProportionPerce
 import { INTEGERS_COORDINATES_DOMAIN } from "../../seed/integersCoordinatesGraph";
 import { EARLY_ALGEBRA_DOMAIN } from "../../seed/earlyAlgebraGraph";
 import { ALGEBRA_1_DOMAIN } from "../../seed/algebra1Graph";
+import { ALGEBRA_2_DOMAIN } from "../../seed/algebra2Graph";
 import { DISCRETE_MATH_DOMAIN } from "../../seed/discreteMathGraph";
 // Human labels live in a dependency-free shared module so native can vendor them
 // (this file can't be vendored — it pulls in the seed graphs above). Single
@@ -49,6 +50,7 @@ export const PRACTICE_DOMAINS: PracticeDomainInfo[] = [
   { domain: INTEGERS_COORDINATES_DOMAIN, label: PRACTICE_DOMAIN_LABELS[INTEGERS_COORDINATES_DOMAIN], discipline: "Mathematics" },
   { domain: EARLY_ALGEBRA_DOMAIN, label: PRACTICE_DOMAIN_LABELS[EARLY_ALGEBRA_DOMAIN], discipline: "Mathematics" },
   { domain: ALGEBRA_1_DOMAIN, label: PRACTICE_DOMAIN_LABELS[ALGEBRA_1_DOMAIN], discipline: "Mathematics" },
+  { domain: ALGEBRA_2_DOMAIN, label: PRACTICE_DOMAIN_LABELS[ALGEBRA_2_DOMAIN], discipline: "Mathematics" },
   { domain: DISCRETE_MATH_DOMAIN, label: PRACTICE_DOMAIN_LABELS[DISCRETE_MATH_DOMAIN], discipline: "Mathematics" },
 ];
 

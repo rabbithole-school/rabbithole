@@ -217,7 +217,8 @@ export async function managedAppGrantsForScholar(
  * tile while that read reported nobody could use it (TRA-426).
  */
 export async function openAppPushesForInstitution(
-  ctx: DbCtx,
+  // A bare db reader suffices, so `deviceReachOfExternalApp` can call it too.
+  ctx: Pick<QueryCtx, "db">,
   institutionId: Id<"institutions">,
   nowMs: number,
 ): Promise<{ pushes: Doc<"pushes">[]; clock: FocusClock }> {
@@ -556,7 +557,7 @@ export async function scholarAppAccessAt(
   }
   if (clock) {
     for (const push of pushes) {
-      const endsAt = pushExpiresAt(push.timing);
+      const endsAt = pushExpiresAt(push);
       via.push({
         kind: "push",
         pushId: push._id,

@@ -95,6 +95,8 @@ import {
 // stamps into `expectedAvailableAt`, so the estimate has one definition.
 import { EXPECTED_MDM_PROPAGATION_MS } from "../shared/appAccessLanding";
 import { writeAuditLog } from "./lib/auditLog";
+import { installedFor } from "./lib/deviceAppAccess";
+import { snapshotForInstitutionSerial } from "./lib/simpleMdmSnapshots";
 
 const IDLE_LEASE_DURATION_MS = 60 * 60 * 1_000;
 // An active native-app session cannot report a heartbeat, so it gets a longer
@@ -3426,6 +3428,43 @@ export const nudgeProjection = authedMutation({
     if (state) await ctx.db.patch(state._id, { projectionDueAt: 0 });
     await ctx.scheduler.runAfter(0, reconcileActiveUnlocksRef, {});
     return { nudged: true };
+  },
+});
+
+/**
+ * Is this managed app installed on the scholar's own iPad, as SimpleMDM last
+ * reported it? Asked by the launcher only for an app with no URL scheme
+ * (Carnets, Mentava), because those tiles have no local readiness check:
+ * the tile releases the lock and tells the scholar to find the icon on the
+ * Home Screen. When the app was never installed, that sends a child looking
+ * for an icon that isn't there (a scholar and Carnets, 2026-11-18: granted and
+ * allowlisted, but deployed to the Pilot group only).
+ *
+ * "missing" only when the device's installed-app inventory exists and lacks
+ * the bundle. A device never inventoried, or an iPad the projection does not
+ * cover, answers "unknown" and the launcher keeps today's handoff. The
+ * inventory refreshes hourly, so an app installed in the last hour can still
+ * read "missing"; the scholar-facing copy says "yet" for that reason.
+ */
+export const managedAppInstallState = authedQuery({
+  args: { deviceId: v.string(), externalAppId: v.id("externalApps") },
+  handler: async (ctx, args): Promise<"installed" | "missing" | "unknown"> => {
+    const { claim } = await resolveClaimedDevice(ctx, ctx.user, args.deviceId);
+    // Same authorization the status query uses: only an app this scholar can
+    // see, and only a managed one, so this never answers "is X installed" for
+    // an arbitrary bundle.
+    const appKey = await requireAuthorizedNativeTile(ctx, ctx.user, args.externalAppId);
+    const snapshot = await snapshotForInstitutionSerial(
+      ctx,
+      claim.institutionId,
+      claim.serial,
+    );
+    const installed = installedFor(MANAGED_NATIVE_APPS[appKey].bundleId, {
+      installedBundleIds: snapshot?.installedBundleIds ?? null,
+      installedAppsAt: snapshot?.installedAppsAt ?? null,
+    });
+    if (installed === null) return "unknown";
+    return installed ? "installed" : "missing";
   },
 });
 

@@ -31,6 +31,13 @@ import {
   deleteActivityCascade,
 } from "./lib/activityCascade";
 import { settlePlacementAppPush } from "./masterSchedule";
+import { syncClassesForPlacements } from "./lib/classLink";
+import {
+  assignmentsSchedulingActivity,
+  readSchedule,
+  writeSchedule,
+} from "./lib/scheduleStore";
+import type { ScheduleEntry } from "./lib/pushes";
 // The revocation-recheck primitive lives in its own module so call sites
 // OUTSIDE scholarGroups.ts (enrollment transfer, scholar deletion) can reuse
 // it too without an import cycle — see lib/scholarGroupUnlocks.ts.
@@ -45,16 +52,17 @@ async function hasLiveAssignmentsForGroup(
     .query("assignments")
     .withIndex("by_scholar_group", (q) => q.eq("scholarGroupId", groupId))
     .collect();
-  return assignments.some(
-    (assignment) =>
-      !assignment.archivedAt &&
-      (assignment.activitySchedule ?? []).some(
-        (entry) =>
-          entry.setAt !== undefined &&
-          entry.setAt !== null &&
-          (!entry.endsAt || entry.endsAt > now),
-      ),
-  );
+  for (const assignment of assignments) {
+    if (assignment.archivedAt) continue;
+    const live = (await readSchedule(ctx, assignment)).some(
+      (entry) =>
+        entry.setAt !== undefined &&
+        entry.setAt !== null &&
+        (!entry.endsAt || entry.endsAt > now),
+    );
+    if (live) return true;
+  }
+  return false;
 }
 
 /**
@@ -66,10 +74,11 @@ async function hasLiveAssignmentsForGroup(
 async function deleteOwnedOrphanProgramHandouts(
   ctx: MutationCtx,
   assignmentId: Id<"assignments">,
+  removedPlacements: Doc<"schedulePlacements">[],
 ) {
   const assignment = await ctx.db.get(assignmentId);
   if (!assignment) return;
-  for (const entry of assignment.activitySchedule ?? []) {
+  for (const entry of await readSchedule(ctx, assignment)) {
     const activity = await ctx.db.get(entry.activityId);
     if (
       !activity ||
@@ -79,13 +88,10 @@ async function deleteOwnedOrphanProgramHandouts(
     ) {
       continue;
     }
-    const owners = (await ctx.db.query("assignments").collect()).filter((candidate) =>
-      (candidate.activitySchedule ?? []).some(
-        (candidateEntry) => candidateEntry.activityId === activity._id,
-      ),
-    );
-    if (owners.length === 1 && owners[0]._id === assignmentId) {
-      await deleteActivityCascade(ctx, activity._id);
+    const owners = await assignmentsSchedulingActivity(ctx, activity._id);
+
+    if (owners.length === 1 && owners[0] === assignmentId) {
+      await deleteActivityCascade(ctx, activity._id, { removedPlacements });
     }
   }
 }
@@ -226,7 +232,7 @@ export const update = scholarAdminMutation({
   handler: async (ctx, args) => {
     const group = await ctx.db.get(args.groupId);
     if (!group) throw new Error("Group not found.");
-    await requireGroupInstitutionAccess(ctx, group);
+    await requireGroupInstitutionAccess(ctx, ctx.user, group);
     const patch: {
       name?: string;
       emoji?: string | undefined;
@@ -282,7 +288,7 @@ export const setScholars = scholarAdminMutation({
   handler: async (ctx, args) => {
     const group = await ctx.db.get(args.groupId);
     if (!group) throw new Error("Group not found.");
-    await requireGroupInstitutionAccess(ctx, group);
+    await requireGroupInstitutionAccess(ctx, ctx.user, group);
     await requireScholarsAccessible(ctx, ctx.user, args.scholarIds);
     const scholarIds = await sanitizeScholarIds(ctx, args.scholarIds);
     const participation = args.participation ?? group.participation;
@@ -318,72 +324,93 @@ export const setScholars = scholarAdminMutation({
 });
 
 /**
- * Add a single scholar to a group (idempotent).
+ * Add a single scholar to a group (idempotent). The core is shared with the
+ * agent tool `update_group_membership` (teacherAide.setGroupMembershipAsCaller),
+ * which re-verifies its caller and passes the user doc here.
  */
+export async function addScholarToGroupAs(
+  ctx: MutationCtx,
+  caller: Doc<"users">,
+  groupId: Id<"scholarGroups">,
+  scholarId: Id<"users">,
+): Promise<{ changed: boolean }> {
+  const group = await ctx.db.get(groupId);
+  if (!group) throw new Error("Group not found.");
+  await requireGroupInstitutionAccess(ctx, caller, group);
+  const scholar = await ctx.db.get(scholarId);
+  if (!scholar || !(await hasScholarMembership(ctx, scholarId))) {
+    throw new Error("Not a scholar.");
+  }
+  await requireScholarsAccessible(ctx, caller, [scholarId]);
+  const alreadyPresent = group.scholarIds.includes(scholarId);
+  const scholarIds = alreadyPresent
+    ? group.scholarIds
+    : [...group.scholarIds, scholarId];
+  await assertProgramGuestMembership(ctx, scholarIds, group.participation);
+  const institutionId = await institutionForRoster(
+    ctx,
+    scholarIds,
+    group.institutionId,
+  );
+  if (alreadyPresent && institutionId === group.institutionId) {
+    return { changed: false };
+  }
+  if ((await checkpointRowsForGroup(ctx, groupId)).length > 0) {
+    await assertCheckpointGroupMembershipAvailable(ctx, groupId, [scholarId]);
+  }
+  await ctx.db.patch(groupId, {
+    scholarIds,
+    ...(institutionId ? { institutionId } : {}),
+  });
+  // Joining a group grants every app the group grants or pushes, so this
+  // opening edge nudges the member's device projection the same way leaving
+  // nudges it. Idempotent re-adds return above and never reach here.
+  if (!alreadyPresent) {
+    await recheckUnlocksForRemovedMembers(ctx, groupId, [scholarId]);
+  }
+  return { changed: !alreadyPresent };
+}
+
 export const addScholar = scholarAdminMutation({
   args: {
     groupId: v.id("scholarGroups"),
     scholarId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const group = await ctx.db.get(args.groupId);
-    if (!group) throw new Error("Group not found.");
-    await requireGroupInstitutionAccess(ctx, group);
-    const scholar = await ctx.db.get(args.scholarId);
-    if (!scholar || !(await hasScholarMembership(ctx, args.scholarId))) {
-      throw new Error("Not a scholar.");
-    }
-    await requireScholarsAccessible(ctx, ctx.user, [args.scholarId]);
-    const alreadyPresent = group.scholarIds.includes(args.scholarId);
-    const scholarIds = alreadyPresent
-      ? group.scholarIds
-      : [...group.scholarIds, args.scholarId];
-    await assertProgramGuestMembership(ctx, scholarIds, group.participation);
-    const institutionId = await institutionForRoster(
-      ctx,
-      scholarIds,
-      group.institutionId,
-    );
-    if (alreadyPresent && institutionId === group.institutionId) return;
-    if ((await checkpointRowsForGroup(ctx, args.groupId)).length > 0) {
-      await assertCheckpointGroupMembershipAvailable(ctx, args.groupId, [
-        args.scholarId,
-      ]);
-    }
-    await ctx.db.patch(args.groupId, {
-      scholarIds,
-      ...(institutionId ? { institutionId } : {}),
-    });
-    // Joining a group grants every app the group grants or pushes, so this
-    // opening edge nudges the member's device projection the same way leaving
-    // nudges it. Idempotent re-adds return above and never reach here.
-    if (!alreadyPresent) {
-      await recheckUnlocksForRemovedMembers(ctx, args.groupId, [args.scholarId]);
-    }
+    await addScholarToGroupAs(ctx, ctx.user, args.groupId, args.scholarId);
   },
 });
 
 /**
- * Remove a single scholar from a group (idempotent).
+ * Remove a single scholar from a group (idempotent). Shared with the agent
+ * tool, like `addScholarToGroupAs`.
  */
+export async function removeScholarFromGroupAs(
+  ctx: MutationCtx,
+  caller: Doc<"users">,
+  groupId: Id<"scholarGroups">,
+  scholarId: Id<"users">,
+): Promise<{ changed: boolean }> {
+  const group = await ctx.db.get(groupId);
+  if (!group) throw new Error("Group not found.");
+  await requireGroupInstitutionAccess(ctx, caller, group);
+  const wasPresent = group.scholarIds.includes(scholarId);
+  await ctx.db.patch(groupId, {
+    scholarIds: group.scholarIds.filter((id) => id !== scholarId),
+  });
+  if (wasPresent) {
+    await recheckUnlocksForRemovedMembers(ctx, groupId, [scholarId]);
+  }
+  return { changed: wasPresent };
+}
+
 export const removeScholar = scholarAdminMutation({
   args: {
     groupId: v.id("scholarGroups"),
     scholarId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const group = await ctx.db.get(args.groupId);
-    if (!group) throw new Error("Group not found.");
-    await requireGroupInstitutionAccess(ctx, group);
-    const wasPresent = group.scholarIds.includes(args.scholarId);
-    await ctx.db.patch(args.groupId, {
-      scholarIds: group.scholarIds.filter((id) => id !== args.scholarId),
-    });
-    if (wasPresent) {
-      await recheckUnlocksForRemovedMembers(ctx, args.groupId, [
-        args.scholarId,
-      ]);
-    }
+    await removeScholarFromGroupAs(ctx, ctx.user, args.groupId, args.scholarId);
   },
 });
 
@@ -396,7 +423,7 @@ export const remove = scholarAdminMutation({
   handler: async (ctx, args) => {
     const group = await ctx.db.get(args.groupId);
     if (!group) return;
-    await requireGroupInstitutionAccess(ctx, group);
+    await requireGroupInstitutionAccess(ctx, ctx.user, group);
     const captureStation = await ctx.db
       .query("captureStations")
       .withIndex("by_group", (q) => q.eq("scholarGroupId", args.groupId))
@@ -413,23 +440,22 @@ export const remove = scholarAdminMutation({
       )
       .collect();
     const archivedAt = Date.now();
+    const removedPlacements: Doc<"schedulePlacements">[] = [];
     for (const listedAssignment of programAssignments) {
       // Delete only unworked, exclusively-owned Handouts. The cascade removes
       // their resources and schedule state; anything with scholar work follows
       // the archival lifecycle below instead.
-      await deleteOwnedOrphanProgramHandouts(ctx, listedAssignment._id);
+      await deleteOwnedOrphanProgramHandouts(ctx, listedAssignment._id, removedPlacements);
       const assignment = await ctx.db.get(listedAssignment._id);
       if (!assignment) continue;
-      const activitySchedule: NonNullable<
-        Doc<"assignments">["activitySchedule"]
-      > = [];
-      for (const entry of assignment.activitySchedule ?? []) {
+      const schedule: ScheduleEntry[] = [];
+      for (const entry of await readSchedule(ctx, assignment)) {
         if (entry.scheduledFnId) {
           await ctx.scheduler.cancel(entry.scheduledFnId);
         }
         const entryWithoutJob = { ...entry };
         delete entryWithoutJob.scheduledFnId;
-        activitySchedule.push({
+        schedule.push({
           ...entryWithoutJob,
           ...(entry.setAt &&
           (!entry.endsAt || entry.endsAt > archivedAt)
@@ -451,12 +477,14 @@ export const remove = scholarAdminMutation({
         // shared settle helper (masterSchedule.settlePlacementAppPush).
         await settlePlacementAppPush(ctx, placement);
         await ctx.db.delete(placement._id);
+        removedPlacements.push(placement);
       }
       await ctx.db.patch(assignment._id, {
         archivedAt,
         scholarGroupId: undefined,
-        activitySchedule,
       });
+      await writeSchedule(ctx, assignment, schedule);
+
     }
     const affinities = await ctx.db
       .query("teacherAffinities")
@@ -495,7 +523,9 @@ export const remove = scholarAdminMutation({
       // clear jobs) running for an audience that no longer exists.
       await settlePlacementAppPush(ctx, placement);
       await ctx.db.delete(placement._id);
+      removedPlacements.push(placement);
     }
+    await syncClassesForPlacements(ctx, removedPlacements);
     // The group's own roster is what any `appAudiences` group-grant resolves
     // membership against (lib/appAudiences.ts); deleting the group removes
     // that roster for every current member in one shot, so all of them are
@@ -515,11 +545,12 @@ export const remove = scholarAdminMutation({
  * curriculum-only or other non-read standing (TRA-386); platform admins
  * retain their global reach.
  */
-async function requireGroupInstitutionAccess(
-  ctx: MutationCtx & { user: Doc<"users"> },
+export async function requireGroupInstitutionAccess(
+  ctx: MutationCtx,
+  caller: Doc<"users">,
   group: Doc<"scholarGroups">,
 ): Promise<void> {
-  const lens = await resolveInstitutionLens(ctx, ctx.user, "all");
+  const lens = await resolveInstitutionLens(ctx, caller, "all");
   if (!scholarInstitutionReadableInLens(lens, group.institutionId)) {
     throw new Error("Forbidden: group is not in your institution");
   }

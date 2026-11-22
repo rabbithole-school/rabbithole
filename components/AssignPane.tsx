@@ -148,7 +148,9 @@ function AssignmentRow({
   archived?: boolean;
 }) {
   const href = `/teacher/schedule/${row._id}`;
-  const pushCount = row.classFocusCount + row.homeworkCount;
+  // `?? 0`: a backend that hasn't deployed `openUntilCount` yet (TRA-722).
+  const openUntilCount = row.openUntilCount ?? 0;
+  const pushCount = row.classFocusCount + openUntilCount + row.homeworkCount;
 
   return (
     <HStack
@@ -178,7 +180,12 @@ function AssignmentRow({
           </Text>
           {!archived && row.classFocusCount > 0 && (
             <Badge bg="violet.100" color="violet.700" fontFamily="heading" fontSize="2xs">
-              {row.classFocusCount} class focus
+              {row.classFocusCount} in class
+            </Badge>
+          )}
+          {!archived && openUntilCount > 0 && (
+            <Badge bg="gray.100" color="charcoal.600" fontFamily="heading" fontSize="2xs">
+              {openUntilCount} open until
             </Badge>
           )}
           {!archived && row.homeworkCount > 0 && (

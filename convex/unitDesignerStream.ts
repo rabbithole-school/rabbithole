@@ -1,4 +1,6 @@
+import { appTurnOrder } from "./lib/agentTurn";
 import type { ActionCtx } from "./_generated/server";
+import { GIVING_WORK_PROMPT } from "./lib/giveQuestions";
 import { internal } from "./_generated/api";
 import { Id } from "./_generated/dataModel";
 import { MODELS, type ModelId } from "./lib/models";
@@ -143,7 +145,7 @@ Activities (concrete tasks within a lesson — first-class entities):
 - Each lesson contains a sequence of activities. Each activity has a kind:
   - **online**: scholar opens this activity in Rabbithole; needs its own systemPrompt that drives the AI tutor. May reference a process (D.E.E.P., CRAFT, etc.).
   - **offline**: classroom moment — lab demo, discussion, worksheet, field trip. Teacher-led, no AI prompt.
-  - **app** (an app activity — an online activity with app settings; "vibecode" is the older name): the scholar describes an app or game and DIRECTS an AI builder that writes + iterates a live web app in the full-screen app builder; the app is the work and the activity's deliverable. Here the activity's systemPrompt is the BUILD BRIEF — what to build and the learning goal (e.g. "Build a small game that teaches one true idea you pick") — NOT a tutor prompt. The skill it trains is *directing an agent*: spec, critique, iterate. Reach for it when the teacher wants scholars to make/build/"vibecode" something interactive. No deliverable to write: the app is it. Set the brief via create_activity's systemPrompt. Any online activity's tutor can also build a scholar a side app on request, so make an app activity only when the app IS the work.
+  - **app** (an app activity — an online activity with app settings; "vibecode" is the older name): the scholar describes an app or game and DIRECTS an AI builder that writes + iterates a live web app in the full-screen app builder; the app is the work and the activity's deliverable. Here the activity's systemPrompt is the BUILD BRIEF — what to build and the learning goal (e.g. "Build a small game that teaches one true idea you pick") — NOT a tutor prompt. The skill it trains is *directing an agent*: spec, critique, iterate. Reach for it when the teacher wants scholars to make/build/"vibecode" something interactive. No deliverable to write: the app is it. Set the brief via create_activity's systemPrompt. Any online activity's tutor in a teacher's unit can also build a scholar a side app on request (not in a scholar's Quest), so make an app activity only when the app IS the work.
   - **Simulator** (stored as "simulator"): a fixed-physics "terrarium" the scholar tunes by writing behavior prompts for its automata/species, then runs and revises against a goal. There are exactly TWO physics templates: an **ecosystem grid** (resource/predator survival) and an **iterated prisoner's dilemma** (a cooperation game). You CAN author a Simulator activity from chat: call **list_simulator_templates** to see the templates + exact spec shape, then **create_simulator_activity** (or **update_simulator_spec** on an existing activity) — these set the required, validated simulatorSpec. Do NOT use create_activity for a Simulator (it only makes an empty Draft).
     - A Simulator is **NOT a geographic map** (a map is an ONLINE activity whose tutor calls show_map — see list_geomap_assets) and **NOT a build-your-own place / civilization / culture canvas** (that's an online or app activity). When a teacher asks for a simulator activity, use this primitive; if they actually want map exploration or an open build/creation task, build that as an online or app activity and call it what it is.
 - ${KIND_DISAMBIGUATION_GUIDANCE}
@@ -219,12 +221,12 @@ const buildRunningThisUnitSection = (
 ): string => `
 
 Running this unit (not just designing it):
-- You can put this unit in front of real scholars yourself. \`assign_unit\` creates (or reuses) a cohort assignment — pass the unitId stated in that tool's description for "this unit", plus EITHER a \`groupName\` (a saved scholar group, e.g. "the Geckos") OR explicit \`scholarNames\`. When the teacher says "assign this unit to <group/kids>", just do it — don't send them to the UI to do it by hand.
+- You can put this unit in front of real scholars yourself with \`give\`. For a cohort, pass the unitId stated in that tool's description for "this unit", plus EITHER a \`groupName\` (a saved scholar group, e.g. "the Geckos") OR explicit \`scholarNames\`, and the two give answers (when it shows up, when it's finished); it creates (or reuses) the cohort assignment in the same call. When the teacher says "assign this unit to <group/kids>", just do it — don't send them to the UI to do it by hand.
 - A new unit is UNPUBLISHED: scholars cannot see or start it until it is assigned (assigning publishes it) or published with \`publish_unit\`. Use \`publish_unit\` only when the teacher wants scholars to find it in Start a Quest without assigning it (or \`published: false\` to hide it again).
 - An assignment IS a cohort: one unit for a fixed roster. Read what's already running with \`list_assignments\` / \`get_assignment\` / \`get_schedule\`, and "how's it going / who hasn't started / how many submissions" with \`get_assignment_progress\`.
-- Pace the work with \`schedule_activity\` (plans a future push) and \`push_activity_now\` (goes LIVE for the whole cohort immediately) — or \`assign_activity_now\` to assign + start ONE activity in a single step. Roster + lifecycle: \`set_assignment_scholars\`, \`add_assignment_scholars\`, \`archive_assignment\`.
-- After dispatching or pushing a class focus, confirm how long it will stay, explain that it fades after today unless the teacher asked for longer, and invite a correction.
-- All times are epoch milliseconds${longClockClause(profile)}. Confirm the unit, roster, activity, and mode with the teacher before anything goes live or a roster changes — this appears for real kids.`;
+- Pace the work with \`give\`: \`startsAtMs\` plans it for later, \`startsNow: true\` puts it live immediately. On an existing assignment it reaches the whole cohort, or with \`scholarNames\` just those scholars (e.g. more time for one); \`activityTitle\` or \`lessonTitle\` gives just part of the unit. Change the plan with \`reschedule_activity\` and \`clear_activity\`. Roster + lifecycle: \`set_assignment_scholars\`, \`add_assignment_scholars\`, \`remove_assignment_scholars\`, \`archive_assignment\`.
+- ${GIVING_WORK_PROMPT}
+- All times are epoch milliseconds${longClockClause(profile)}. Confirm the unit, roster, and activity with the teacher before anything goes live or a roster changes — this appears for real kids.`;
 
 /**
  * Inject the deployment's process list into the Curriculum Bot system prompt.
@@ -478,6 +480,8 @@ export async function buildUnitDesignerResponse(
       institutionScope: context.unit.institutionId
         ? String(context.unit.institutionId)
         : "",
+      // One request per user message: a class plan confirms only from a later one.
+      classPlanConfirmScope: { surface: "app", turn: appTurnOrder() },
     });
 
     const apiMessages = await Promise.all(

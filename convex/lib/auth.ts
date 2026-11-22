@@ -1,12 +1,13 @@
 import { QueryCtx, MutationCtx } from "../_generated/server";
 import type { Doc, Id, DataModel } from "../_generated/dataModel";
 import type { GenericActionCtx } from "convex/server";
+import { ConvexError } from "convex/values";
 import { getAuthUserId, getAuthSessionId } from "@convex-dev/auth/server";
 import { internal } from "../_generated/api";
 import { isScholarAdminRole, isStaffRole, isTeacherRole, isPlatformAdminRole, isSchoolAdminRole } from "./roles";
 import { isImpersonationEnabled, isOverlayExpired } from "./impersonationConfig";
 import { assertInstitutionActive } from "./access";
-import { canReadScholarAsTeacher, canUserAccessScholar } from "./access";
+import { canReadScholarAsTeacher, canUserAccessScholar, requireActiveScholarAccess } from "./access";
 import {
   hasAnySchoolOperationsAccess,
   schoolOperationsInstitutionIds,
@@ -174,7 +175,7 @@ export async function assertNotReadOnly(
   ctx: QueryCtx | MutationCtx,
 ): Promise<void> {
   const owner = await getSessionOwner(ctx);
-  if (owner?.readOnly) throw new Error(READ_ONLY_ACCOUNT_ERROR);
+  if (owner?.readOnly) throw new ConvexError(READ_ONLY_ACCOUNT_ERROR);
 }
 
 /**
@@ -198,7 +199,7 @@ export async function assertWritableAction(
   ctx: GenericActionCtx<DataModel>,
 ): Promise<void> {
   if (await ctx.runQuery(internal.users.isSessionOwnerReadOnly, {})) {
-    throw new Error(READ_ONLY_ACCOUNT_ERROR);
+    throw new ConvexError(READ_ONLY_ACCOUNT_ERROR);
   }
 }
 
@@ -226,7 +227,29 @@ export async function requireTeacher(
 export async function requireScholarAdmin(
   ctx: QueryCtx | MutationCtx
 ): Promise<SchoolOperationsPrincipal> {
-  const user = await requireUser(ctx);
+  return await scholarAdminPrincipalFor(ctx, await requireUser(ctx));
+}
+
+/**
+ * The scholar-admin principal for a user who is NOT the Convex Auth identity:
+ * an agent write (Slack bot, MCP, in-app aide) whose surface supplies the
+ * caller id. Applies the same suspension chokepoint `requireUser` applies and
+ * the same role/operations check and operations scope `requireScholarAdmin`
+ * returns, so an agent write files and scopes exactly as the app's own
+ * button does. The caller must still refuse a read-only account.
+ */
+export async function requireScholarAdminFor(
+  ctx: QueryCtx | MutationCtx,
+  user: Doc<"users">,
+): Promise<SchoolOperationsPrincipal> {
+  await assertInstitutionActive(ctx, user);
+  return await scholarAdminPrincipalFor(ctx, user);
+}
+
+async function scholarAdminPrincipalFor(
+  ctx: QueryCtx | MutationCtx,
+  user: Doc<"users">,
+): Promise<SchoolOperationsPrincipal> {
   if (
     !isScholarAdminRole(user.role) &&
     !(await hasAnySchoolOperationsAccess(ctx, user))
@@ -426,7 +449,7 @@ export async function requireStaffSelf(
  * fall back to the caller's ACTIVE school, so a curriculum:edit grant at one
  * school could edit the primary school's unstamped units (TRA-531).
  */
-async function unitOwnInstitutionId(
+export async function unitOwnInstitutionId(
   ctx: QueryCtx | MutationCtx,
   unit: Doc<"units">,
 ): Promise<Id<"institutions"> | undefined> {
@@ -531,6 +554,34 @@ export async function requireUnitEditAccessForUser(
   }
   await requireUnitAccessForUser(ctx, user, unitId);
   return { user, unit };
+}
+
+/**
+ * The unit-edit gate for an agent write (Slack bot, in-app aide, MCP) whose
+ * surface supplies the caller id rather than a Convex Auth identity. It is
+ * the app's own edit check (`requireUnitEditAccessForUser`: curriculum
+ * standing at the unit's school, or the unit's scholar author) run as that
+ * caller, plus what the user-facing mutation wrappers add on top:
+ * a read-only account and a view-as session are refused, as `assertCanWrite`
+ * refuses them. A scholar's own unit (a Quest) also needs access to that
+ * scholar, so a curriculum designer cannot reach into a child's Quests board.
+ * The tools' pre-check, `curriculumAssistant.checkUnitEditAccessForAide`,
+ * runs the same two checks as a query; keep them in step.
+ */
+export async function requireAgentUnitEditAccess(
+  ctx: MutationCtx,
+  callerUserId: Id<"users">,
+  unitId: Id<"units">,
+): Promise<{ user: Doc<"users">; unit: Doc<"units"> }> {
+  await assertNotImpersonating(ctx);
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller) throw new Error("Forbidden");
+  if (caller.readOnly) throw new Error(READ_ONLY_ACCOUNT_ERROR);
+  const { unit } = await requireUnitEditAccessForUser(ctx, caller, { unitId });
+  if (unit.authorScholarId) {
+    await requireActiveScholarAccess(ctx, caller, unit.authorScholarId);
+  }
+  return { user: caller, unit };
 }
 
 export async function requireUnitEditAccess(

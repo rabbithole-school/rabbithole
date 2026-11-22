@@ -71,16 +71,27 @@ export async function acquireLlmLease(
   }
   if (!result.ok) return deniedLease(args.surface, result);
 
+  // A release runs its mutation once, however often it is called. Streams
+  // release before closing and again in a `finally` backstop, which runs
+  // after `controller.close()`; Convex can end an HTTP action at that close,
+  // so a second release mutation started there was left pending on every
+  // tutor turn ("1 unawaited operation: [mutation]", TRA-607). After a
+  // successful release a later call returns the settled promise. A failed
+  // release clears it, so the backstop can still try again.
+  let releasing: Promise<void> | null = null;
   return {
     ok: true,
-    release: async () => {
-      try {
-        await ctx.runMutation(internal.llmLimiter.release, {
-          leaseId: result.leaseId,
-        });
-      } catch (error) {
-        console.error("[llm-limiter] lease release failed:", error);
-      }
+    release: () => {
+      releasing ??= ctx
+        .runMutation(internal.llmLimiter.release, { leaseId: result.leaseId })
+        .then(
+          () => undefined,
+          (error: unknown) => {
+            releasing = null;
+            console.error("[llm-limiter] lease release failed:", error);
+          },
+        );
+      return releasing;
     },
   };
 }

@@ -1,5 +1,6 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
 import { DEFAULT_TIMEZONE, dueStatus } from "../../shared/institutionDay";
@@ -54,12 +55,24 @@ async function seedUnitWithActivity(
     kind: "online",
     systemPrompt: "...",
     order: 0,
-    defaultMode: "classFocus",
   });
   return { unitId, activityId };
 }
 
 describe("class-focus reads carry an institution timeZone", () => {
+  // Pin the clock to mid-day in every zone these tests use (3pm New York,
+  // 2pm Chicago, 10am Honolulu). The focus pushes below end a minute after
+  // `now`; on the real clock, a run in the minute before local midnight put
+  // that end on the next local day and the focus read came back empty
+  // (Merge Marshal gate, PR #4578, 2026-11-09 04:59Z).
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-09T20:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   test("currentClassFocusForMe defaults to Pacific/Honolulu with no institution set", async () => {
     const t = convexTest(schema, modules);
     const world = await makeWorld(t, {
@@ -202,7 +215,7 @@ describe("class-focus reads carry an institution timeZone", () => {
     expect(dueStatus(row?.dueAt, Date.parse("2026-06-16T03:59:59.000Z"), row!.timeZone))
       .toMatchObject({ status: "dueToday", phrase: "due today" });
     expect(dueStatus(row?.dueAt, Date.parse("2026-06-16T04:00:01.000Z"), row!.timeZone))
-      .toMatchObject({ status: "overdue", phrase: "was due yesterday" });
+      .toMatchObject({ status: "overdue", phrase: "was due Mon, Jun 15" });
   });
 
   test("a second school missing a timezone uses only the static legacy default", async () => {
@@ -258,7 +271,7 @@ describe("class-focus reads carry an institution timeZone", () => {
           title: "Legacy Unit",
           isActive: true,
         });
-        const assignmentId = await ctx.db.insert("assignments", {
+        const assignmentId = await insertAssignmentWithSchedule(ctx, {
           teacherId,
           unitId,
           scholarIds: [scholarId],
@@ -308,7 +321,7 @@ describe("class-focus reads carry an institution timeZone", () => {
         title: "Mixed Unit",
         isActive: true,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [legacyScholarId, school.scholars[0].id],

@@ -61,6 +61,7 @@ function matchesName(user: Doc<"users"> | null, needle: string): boolean {
 async function summarizeDetail(
   ctx: QueryCtx,
   detail: string | undefined,
+  timeZone: string,
 ): Promise<string | null> {
   if (!detail) return null;
   let parsed: Record<string, unknown> | null = null;
@@ -97,7 +98,20 @@ async function summarizeDetail(
       x === null ? "none" : x === true ? "on" : x === false ? "off" : String(x);
     parts.push(`${word(from)} → ${word(to)}`);
   }
-  if (typeof parsed.via === "string") parts.push(`via ${parsed.via}`);
+  // A direct add can end on its own (TRA-444). Without these an add opened
+  // for a day read as a standing one, and its expiry as a person removing it
+  // (TRA-448).
+  const expiry = parsed.via === "expiry";
+  if (typeof parsed.previousExpiresAt === "number") {
+    parts.push(`previous end ${localInstant(parsed.previousExpiresAt, timeZone)}`);
+  }
+  if (typeof parsed.expiresAt === "number") {
+    parts.push(
+      `${expiry ? "reached its end" : "ends"} ${localInstant(parsed.expiresAt, timeZone)}`,
+    );
+  }
+  if (expiry) parts.push("via expiry (ended on its own; no one removed it)");
+  else if (typeof parsed.via === "string") parts.push(`via ${parsed.via}`);
   return parts.length > 0 ? parts.join("; ") : null;
 }
 
@@ -304,7 +318,11 @@ export const aideListAuditLog = internalQuery({
             : null,
         detail: isImpersonationAuditAction(row.action)
           ? null
-          : await summarizeDetail(ctx, row.detail),
+          : await summarizeDetail(
+              ctx,
+              row.detail,
+              timeZones.get(institution._id)!,
+            ),
         ...(institutions.length > 1 ? { school: institution.name } : {}),
       });
     }

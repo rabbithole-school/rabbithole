@@ -112,6 +112,16 @@ describe("parseSessionStreamBody", () => {
     ).toBeUndefined();
   });
 
+  test("accepts only an explicit app-script capability", () => {
+    const parse = (supportsAppScripts: unknown) =>
+      parseSessionStreamBody({ sessionId: "p1", assistantMsgId: "a1", supportsAppScripts })
+        .supportsAppScripts;
+    expect(parse(true)).toBe(true);
+    for (const value of [false, "true", 1, {}, undefined]) {
+      expect(parse(value)).toBeUndefined();
+    }
+  });
+
   test("accepts native explicitly and defaults every other platform to web", () => {
     expect(
       parseSessionStreamBody({
@@ -394,7 +404,6 @@ describe("scholarBuildKickoffInstruction selection", () => {
 });
 
 const baseCtx: TutorPromptContext = {
-  teacherWhisper: null,
   readingLevel: null,
   scholarName: null,
   gameRoundContexts: null,
@@ -494,7 +503,6 @@ describe("buildTutorSystemPrompt", () => {
     };
 
     const positional = buildSystemPrompt(
-      rich.teacherWhisper,
       rich.readingLevel,
       rich.scholarName,
       rich.unitContext,
@@ -713,7 +721,6 @@ describe("buildTutorSystemPromptParts (prompt-cache split)", () => {
   test("invariant holds with a fully-populated dynamic context", () => {
     const rich: TutorPromptContext = {
       ...baseCtx,
-      teacherWhisper: "watch for cognitive offloading",
       readingLevel: "grade 4",
       dossierContent: "Prefers visual explanations.",
       seeds: [
@@ -737,7 +744,6 @@ describe("buildTutorSystemPromptParts (prompt-cache split)", () => {
   test("the cached stable prefix carries the base prompt, not the per-turn state", () => {
     const { stable, dynamic, turnSystem } = buildTutorSystemPromptParts({
       ...baseCtx,
-      teacherWhisper: "watch for cognitive offloading",
       teacherDirectives: [{ label: "Pacing", content: "Slow down on fractions." }],
     });
     // The large, session-stable base prompt is in the cached prefix…
@@ -954,7 +960,6 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
       },
     ],
     signalContext: { curiosity: { count: 3, highCount: 1 } },
-    teacherWhisper: "nudge toward a counting argument",
     seeds: [
       {
         topic: "arches",
@@ -989,13 +994,12 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
     expect(dynamic).not.toContain(buildToolsSection());
   });
 
-  test("per-turn scholar record, verdicts, whisper and seeds ride in the per-turn session state", () => {
+  test("per-turn scholar record, verdicts and seeds ride in the per-turn session state", () => {
     const { stable, dynamic, documents, turnSystem, turnContext } =
       buildTutorSystemPromptParts(rich);
     for (const marker of [
       "area conservation", // mastery
       "LEARNER PROFILE (observed tendencies", // signals
-      "nudge toward a counting argument", // whisper
       "arches", // seeds
       "[c1] → half", // current verdicts
     ]) {
@@ -1023,7 +1027,6 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
           verdicts: [{ criterionId: "c1", level: "full" }],
         },
       ],
-      teacherWhisper: null,
       dossierContent: "Updated by the observer.",
     });
     expect(turnB.stable).toBe(turnA.stable);
@@ -1073,7 +1076,6 @@ describe("buildTutorSystemPromptParts — documents are their own cached part", 
     const b = buildTutorSystemPromptParts({
       ...ctx,
       dossierContent: "v2 — rewritten by the observer",
-      teacherWhisper: "new whisper",
     });
     expect(b.stable).toBe(a.stable);
     expect(b.documents).toBe(a.documents);

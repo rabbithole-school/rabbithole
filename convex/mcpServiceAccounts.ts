@@ -18,6 +18,17 @@
 // session, created here and handed to Convex Auth by id, so exchanges never
 // accumulate session rows and `revokeToken` deletes that one row — which the
 // per-request probe in convex/mcp.ts (whoami) turns into an immediate 401.
+//
+// READ-ONLY tokens (`mcpServiceTokens.readOnly`, the default for new tokens):
+// each institution+kind has TWO service users, a full one and a read-only one
+// (`users.readOnly`, the flag the `claude-readonly` prod account uses). A
+// read-only token always signs in as the read-only user, so the guarantee
+// rides on the identity, not on the URL it is used at: every mutation wrapper
+// refuses it (assertCanWrite in convex/lib/auth.ts), the MCP curriculum and
+// unit-designer proxies refuse its writes (assertWritableAction), and the
+// /api/mcp route serves it the read-only tool set even on the full URL
+// (whoami.readOnly). The Convex Auth JWT minted from it is a read-only
+// identity anywhere it is presented.
 
 import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
@@ -42,12 +53,25 @@ function roleForKind(kind: ServiceKind): typeof ROLES.TEACHER | typeof ROLES.STA
   return kind === "teacher" ? ROLES.TEACHER : ROLES.STAFF;
 }
 
-function serviceUsername(institution: Doc<"institutions">, kind: ServiceKind): string {
-  return `svc-${institution.slug}-${kind}`;
+function serviceUsername(
+  institution: Doc<"institutions">,
+  kind: ServiceKind,
+  readOnly: boolean,
+): string {
+  return `svc-${institution.slug}-${kind}${readOnly ? "-readonly" : ""}`;
 }
 
-function serviceName(institution: Doc<"institutions">, kind: ServiceKind): string {
-  return `${institution.name} ${kind} service account`;
+function serviceName(
+  institution: Doc<"institutions">,
+  kind: ServiceKind,
+  readOnly: boolean,
+): string {
+  return `${institution.name} ${kind} service account${readOnly ? " (read-only)" : ""}`;
+}
+
+/** A token row's mode. Rows issued before the flag existed are full tokens. */
+export function isReadOnlyToken(token: Pick<Doc<"mcpServiceTokens">, "readOnly">): boolean {
+  return token.readOnly === true;
 }
 
 /** Active (non-revoked) tokens for an institution, via `by_institution`. */
@@ -75,17 +99,21 @@ async function findOrCreateServiceUser(
   ctx: MutationCtx,
   institution: Doc<"institutions">,
   kind: ServiceKind,
+  readOnly: boolean,
   adminId: Id<"users">,
 ): Promise<Doc<"users">> {
   const role = roleForKind(kind);
-  const name = serviceName(institution, kind);
+  const name = serviceName(institution, kind, readOnly);
 
   let user: Doc<"users"> | null = null;
-  const priorToken = (await activeTokensFor(ctx, institution._id)).find((t) => t.kind === kind);
+  // Match the mode too: a read-only token must never land on the full user.
+  const priorToken = (await activeTokensFor(ctx, institution._id)).find(
+    (t) => t.kind === kind && isReadOnlyToken(t) === readOnly,
+  );
   if (priorToken) user = await ctx.db.get(priorToken.userId);
 
   if (!user) {
-    const username = serviceUsername(institution, kind);
+    const username = serviceUsername(institution, kind, readOnly);
     const existing = await ctx.db
       .query("users")
       .withIndex("by_username", (q) => q.eq("username", username))
@@ -102,6 +130,7 @@ async function findOrCreateServiceUser(
         username,
         role,
         isSystem: true,
+        ...(readOnly ? { readOnly: true } : {}),
         institutionId: institution._id,
         profileSetupComplete: true,
       });
@@ -117,6 +146,8 @@ async function findOrCreateServiceUser(
   if (user.isSystem !== true) patch.isSystem = true;
   if (user.institutionId !== institution._id) patch.institutionId = institution._id;
   if (user.profileSetupComplete !== true) patch.profileSetupComplete = true;
+  // The write gate for a read-only token is this flag; pin it both ways.
+  if ((user.readOnly === true) !== readOnly) patch.readOnly = readOnly ? true : undefined;
   if (Object.keys(patch).length > 0) {
     await ctx.db.patch(user._id, patch);
     user = (await ctx.db.get(user._id))!;
@@ -184,6 +215,7 @@ export const list = schoolAdminQuery({
         activeTokens.push({
           _id: t._id,
           tokenHint: t.tokenHint,
+          readOnly: isReadOnlyToken(t),
           createdAt: t.createdAt,
           createdByName: await nameOf(t.createdBy),
           lastUsedAt: t.lastUsedAt ?? null,
@@ -200,15 +232,31 @@ export const list = schoolAdminQuery({
  * Issue a new token for the institution's teacher or staff service account
  * (creating the account on first use). Returns the plaintext exactly once.
  * Multiple active tokens per kind are allowed so a channel can rotate.
+ *
+ * `readOnly` defaults to TRUE: the shared surface these tokens exist for (a
+ * Claude Tag channel) is a read surface, and a full token is a write
+ * credential anyone in the channel can lift. An admin who needs the channel to
+ * act must ask for a full token explicitly.
  */
 export const issueToken = schoolAdminMutation({
-  args: { scope: v.optional(v.string()), kind: kindValidator },
+  args: {
+    scope: v.optional(v.string()),
+    kind: kindValidator,
+    readOnly: v.optional(v.boolean()),
+  },
   handler: async (ctx, args) => {
     const lens = await resolveInstitutionLens(ctx, ctx.user, args.scope);
     const institution = lens.institution ?? lens.homeInstitution;
     if (!institution) throw new Error("No institution to issue a token for");
+    const readOnly = args.readOnly ?? true;
 
-    const user = await findOrCreateServiceUser(ctx, institution, args.kind, ctx.user._id);
+    const user = await findOrCreateServiceUser(
+      ctx,
+      institution,
+      args.kind,
+      readOnly,
+      ctx.user._id,
+    );
 
     const token = `rhsa_${args.kind}_${randomToken(32)}`;
     await ctx.db.insert("mcpServiceTokens", {
@@ -217,11 +265,12 @@ export const issueToken = schoolAdminMutation({
       kind: args.kind,
       tokenHash: await sha256Hex(token),
       tokenHint: token.slice(-4),
+      readOnly,
       createdBy: ctx.user._id,
       createdAt: Date.now(),
     });
 
-    return { token, tokenHint: token.slice(-4), kind: args.kind };
+    return { token, tokenHint: token.slice(-4), kind: args.kind, readOnly };
   },
 });
 
@@ -296,6 +345,10 @@ export const redeemToken = internalMutation({
     if (!user || user.isSystem !== true) return null;
     if (user.role !== roleForKind(token.kind)) return null;
     if (user.institutionId !== token.institutionId) return null;
+    // A read-only token must sign in as a read-only identity, and a full
+    // token never as one (a drifted flag fails closed until the next issue
+    // reconciles it).
+    if ((user.readOnly === true) !== isReadOnlyToken(token)) return null;
 
     const now = Date.now();
     let sessionId: Id<"authSessions"> | undefined = token.sessionId;

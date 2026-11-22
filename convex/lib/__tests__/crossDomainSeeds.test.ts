@@ -50,13 +50,16 @@ describe("seedCardCopy", () => {
         rationale: "ROW_RATIONALE",
       }),
     ).toEqual({ title: "ROW_TOPIC", teaser: "ROW_INVITATION" });
+  });
+
+  test("a row with only a teacher rationale gets no teaser, never the rationale", () => {
     expect(
       seedCardCopy({
         topic: "ROW_TOPIC",
         suggestionType: "cross_domain",
         rationale: "ROW_RATIONALE",
       }),
-    ).toEqual({ title: "ROW_TOPIC", teaser: "ROW_RATIONALE" });
+    ).toEqual({ title: "ROW_TOPIC", teaser: "" });
   });
 
   test("a non-cross-domain seed never borrows registry copy", () => {

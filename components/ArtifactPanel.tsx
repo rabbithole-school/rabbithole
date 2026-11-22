@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { Box, Dialog, Flex, IconButton, Input, Text, Textarea, Button, HStack, Menu, Portal } from "@chakra-ui/react";
-import { Plus, Trash, CaretDown, CaretRight, Check, PencilSimple, X } from "@phosphor-icons/react";
+import { Plus, Trash, CaretDown, CaretRight, Check, PencilSimple, TextItalic, X } from "@phosphor-icons/react";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { DeliverableKindIcon } from "@/components/DeliverableKindIcon";
 import {
@@ -11,6 +11,8 @@ import {
   registerArtifactSave,
 } from "./artifactSaveRegistry";
 import { createDraftSaveDrain } from "@/shared/draftSaveDrain";
+import { WritingWithItalics } from "@/components/WritingWithItalics";
+import { toggleWritingItalics } from "@/shared/writingItalics";
 import {
   createArtifactDraftController,
   hasArtifactDraftConflict,
@@ -674,7 +676,9 @@ export function ArtifactPanel({
                   deliverableContext.deliverableSpec.kind === "text" &&
                   activeArtifact.type === "code"
                 )) && (
-            <Flex justify="center" pt={3} flexShrink={0}>
+            // Nothing to draw (a Quest's work with no flair yet: TRA-720) takes
+            // no room.
+            <Flex justify="center" pt={3} flexShrink={0} _empty={{ display: "none" }}>
               <ArtifactDeliverableButton
                 sessionId={deliverableContext.sessionId}
                 activityId={deliverableContext.activityId}
@@ -1037,6 +1041,41 @@ function ArtifactEditor({
     commitContent(e.target.value);
   };
 
+  // The Italic button and ⌘I wrap (or unwrap) the selection in `*…*` through
+  // the same commit path as typing, then put the selection back on the words.
+  // The selection is applied in a layout effect, in the same commit that
+  // writes the new text, so a fast typist's next key lands in the right place
+  // (an animation frame can run after it, or not at all in a background tab).
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  useLayoutEffect(() => {
+    const pending = pendingSelectionRef.current;
+    const el = textareaRef.current;
+    if (!pending || !el) return;
+    pendingSelectionRef.current = null;
+    el.setSelectionRange(pending.start, pending.end);
+  });
+  const handleItalic = () => {
+    const node = textareaRef.current;
+    const selection = node
+      ? { start: node.selectionStart, end: node.selectionEnd }
+      : (caretRef.current ?? {
+          start: localContentRef.current.length,
+          end: localContentRef.current.length,
+        });
+    const { content: next, selection: after } = toggleWritingItalics(
+      localContentRef.current,
+      selection,
+    );
+    caretRef.current = after;
+    node?.focus();
+    if (next !== localContentRef.current) {
+      pendingSelectionRef.current = after;
+      commitContent(next);
+    } else {
+      node?.setSelectionRange(after.start, after.end);
+    }
+  };
+
   // Dictation flows through the SAME commit path as typing, so the save
   // stamps lastEditedBy="scholar" and the optimistic-concurrency handling is
   // untouched. The spoken text is spliced at the caret; then focus + caret
@@ -1132,34 +1171,93 @@ function ArtifactEditor({
       )}
       {saveError && <Text px={6} py={1} fontSize="xs" color="red.600" role="alert">{saveError}</Text>}
 
-      <Box flex={1} overflow="hidden" px={3}>
-        <Textarea
-          ref={textareaRef}
-          value={localContent}
-          onChange={handleContentChange}
-          onBlur={(e) => {
-            caretRef.current = {
-              start: e.target.selectionStart,
-              end: e.target.selectionEnd,
-            };
-          }}
-          placeholder="Start writing"
-          resize="none"
-          h="100%"
+      {/* The writing scrolls as one block. A styled copy of the text sits
+          under a transparent textarea in the same grid cell, so `*…*` spans
+          show in italics while the textarea keeps the caret, selection and
+          spellcheck. Hanken Grotesk has no italic face, so the browser slants
+          the regular glyphs without changing their widths and the two layers
+          stay aligned character for character. The copy also sizes the cell,
+          so the textarea grows with the writing instead of scrolling on its
+          own. */}
+      <Box flex={1} overflowY="auto" px={3}>
+        <Box
+          display="grid"
+          // minmax(0, …): a long unbroken word wraps instead of widening the
+          // column past the panel.
+          gridTemplateColumns="minmax(0, 1fr)"
+          minH="100%"
           fontFamily="body"
           fontSize="xl"
           lineHeight="1.6"
-          border="none"
-          bg="white"
-          p={3}
-          _focus={{ boxShadow: "none", outline: "none" }}
-        />
+          css={{ "& > *": { gridArea: "1 / 1" } }}
+        >
+          <Box
+            aria-hidden
+            p={3}
+            whiteSpace="pre-wrap"
+            overflowWrap="break-word"
+            color="charcoal.800"
+            pointerEvents="none"
+          >
+            <WritingWithItalics content={localContent} markerColor="charcoal.300" />
+            {/* A trailing newline needs a character after it to take up a line. */}
+            {"\u200b"}
+          </Box>
+          <Textarea
+            ref={textareaRef}
+            value={localContent}
+            onChange={handleContentChange}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "i") {
+                e.preventDefault();
+                handleItalic();
+              }
+            }}
+            onBlur={(e) => {
+              caretRef.current = {
+                start: e.target.selectionStart,
+                end: e.target.selectionEnd,
+              };
+            }}
+            placeholder="Start writing"
+            resize="none"
+            h="100%"
+            minH="0"
+            overflow="hidden"
+            fontFamily="inherit"
+            fontSize="inherit"
+            lineHeight="inherit"
+            letterSpacing="inherit"
+            whiteSpace="pre-wrap"
+            overflowWrap="break-word"
+            color="transparent"
+            css={{ caretColor: "var(--chakra-colors-charcoal-800)" }}
+            _placeholder={{ color: "charcoal.300" }}
+            border="none"
+            bg="transparent"
+            p={3}
+            _focus={{ boxShadow: "none", outline: "none" }}
+          />
+        </Box>
       </Box>
 
       <HStack px={6} py={1} flexShrink={0} justify="space-between" align="center">
         <Text fontSize="xs" fontFamily="heading" color="charcoal.300">
           {wordCount} {wordCount === 1 ? "word" : "words"}
         </Text>
+        <HStack gap={1}>
+        <IconButton
+          size="sm"
+          variant="ghost"
+          color="violet.500"
+          aria-label="Italic"
+          title="Italic (⌘I)"
+          // Keep focus (and the selection) in the textarea.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={handleItalic}
+        >
+          <TextItalic size={18} weight="bold" />
+        </IconButton>
         {showDictation && (
           <DictationMicButton
             size="sm"
@@ -1167,6 +1265,7 @@ function ArtifactEditor({
             onTranscript={handleDictation}
           />
         )}
+        </HStack>
       </HStack>
     </Flex>
   );

@@ -42,7 +42,11 @@ export type ManagedNativeAppKey =
   | "lego-spike"
   | "stop-motion-studio"
   | "mentava-reading"
-  | "google-arts-culture";
+  | "google-arts-culture"
+  | "adobe-lightroom"
+  | "brilliant"
+  | "carnets"
+  | "sage-teacher";
 
 // Deployment configuration — see DEPLOYMENT.md (Managed external apps).
 export const MANAGED_NATIVE_APPS: Record<
@@ -94,6 +98,41 @@ export const MANAGED_NATIVE_APPS: Record<
     // artsandculture.google.com, but the custom scheme fits the existing
     // canOpenURL readiness check; an https link always reports openable.
     nativeUrlScheme: "com.google.stella://",
+  },
+  "adobe-lightroom": {
+    // Adobe Lightroom for iPad (Adobe Inc.; iTunes 804177739), added to the
+    // ASM library 2026-10-30 for Photography. SimpleMDM app 701441.
+    bundleId: "com.adobe.lrmobile",
+    // Read off the Pilot iPad (11.6.21, 2026-10-30) with SPIKE, Sheets, Stop
+    // Motion and Arts & Culture as known-positive controls in the same read.
+    nativeUrlScheme: "adobelightroom://",
+  },
+  brilliant: {
+    // Brilliant: Learn Math & Coding (Brilliant Worldwide, Inc.; iTunes
+    // 913335252), added to the ASM library 2026-11-02 for self-paced math.
+    bundleId: "com.brilliant.Brilliant",
+    // Read off the XVR test iPad (10.6.1, 2026-11-02) with SPIKE and Lightroom
+    // as known-positive controls in the same read.
+    nativeUrlScheme: "brilliant://",
+  },
+  carnets: {
+    // Carnets - Jupyter (Nicolas Holzschuch; iTunes 1450994949), a free,
+    // offline Python/Jupyter notebook app, added to the ASM library 2026-11-09
+    // for an advanced scholar. The base build, not "Carnets - Jupyter (with
+    // scipy)" (AsheKube.CarnetsSci, iTunes 1559497253).
+    bundleId: "AsheKube.Carnets",
+    // Null until read off a device, like Mentava: never guess a scheme. The
+    // tile hands off to the Home Screen meanwhile; set it here (and in the
+    // native mirror + app.json) once a device read confirms one.
+    nativeUrlScheme: null,
+  },
+  "sage-teacher": {
+    // Sage Teacher - Early Learning (Sage Education, Inc; iTunes 6757760731),
+    // a free iPad app added to the ASM library 2026-11-09.
+    bundleId: "ai.sageteacher.app",
+    // Null until read off a device, like Carnets and Mentava: never guess a
+    // scheme. The tile hands off to the Home Screen meanwhile.
+    nativeUrlScheme: null,
   },
 };
 

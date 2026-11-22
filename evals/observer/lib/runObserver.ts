@@ -46,6 +46,9 @@ export interface ObserverRun {
   error?: string;
   latencyMs: number;
   usage: { input: number; output: number };
+  /** Unparsed API responses, including any no-tool-call retry. */
+  responses: Array<Pick<Anthropic.Message, "id" | "model" | "stop_reason" | "usage" | "content">>;
+  maxTokens: number;
 }
 
 const anthropic = new Anthropic();
@@ -79,25 +82,34 @@ export async function runObserver(
   );
 
   const start = Date.now();
+  const request = buildObserverRequest({
+    model,
+    system: OBSERVER_SYSTEM_PROMPT,
+    userContent: userMessage,
+  });
+  const responses: ObserverRun["responses"] = [];
+  const usage = { input: 0, output: 0 };
+  const diagnostics = { responses, usage, maxTokens: request.max_tokens };
   try {
-    const request = buildObserverRequest({
-      model,
-      system: OBSERVER_SYSTEM_PROMPT,
-      userContent: userMessage,
-    });
     // Eval-only effort sweep: OBSERVER_EFFORT_OVERRIDE=low|medium|high.
     const effort = process.env.OBSERVER_EFFORT_OVERRIDE as
       | "low"
       | "medium"
       | "high"
       | undefined;
-    const usage = { input: 0, output: 0 };
     const response = await createObserverMessage(
       () =>
         anthropic.messages.create(
           effort ? { ...request, output_config: { effort } } : request,
         ),
       (r) => {
+        responses.push({
+          id: r.id,
+          model: r.model,
+          stop_reason: r.stop_reason,
+          usage: r.usage,
+          content: r.content,
+        });
         usage.input += r.usage.input_tokens;
         usage.output += r.usage.output_tokens;
       },
@@ -112,7 +124,7 @@ export async function runObserver(
         result: null,
         error: `no tool_use block (stop_reason: ${response.stop_reason})`,
         latencyMs,
-        usage,
+        ...diagnostics,
       };
     }
     if (!result.pulse) {
@@ -125,7 +137,7 @@ export async function runObserver(
         result: null,
         error: "degraded pulse (no usable summary)",
         latencyMs,
-        usage,
+        ...diagnostics,
       };
     }
     return {
@@ -133,7 +145,7 @@ export async function runObserver(
       model,
       result: { ...result, pulse: result.pulse },
       latencyMs,
-      usage,
+      ...diagnostics,
     };
   } catch (e) {
     return {
@@ -142,7 +154,7 @@ export async function runObserver(
       result: null,
       error: e instanceof Error ? e.message : String(e),
       latencyMs: Date.now() - start,
-      usage: { input: 0, output: 0 },
+      ...diagnostics,
     };
   }
 }

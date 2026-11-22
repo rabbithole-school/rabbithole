@@ -2,17 +2,20 @@ import { describe, expect, test } from "vitest";
 import {
   buildNowDigest,
   deriveHomeTabs,
-  filterHomeworkForNow,
   filterArchivedRowsForTab,
   filterRowsForTab,
   focusSectionLabel,
+  pickUpRows,
+  yourListRowsForTab,
   groupHomeRowsByUnit,
   isWithinScheduleWindow,
   matchRowsToFocusOrder,
   pickCurrentBlock,
-  shouldShowHomeworkInNow,
   type ScholarHomeRow,
 } from "./scholarHomeNow";
+
+const NOW = Date.UTC(2026, 10, 9, 20); // Mon Nov 9, 10:00 in Honolulu
+const DAY = 86_400_000;
 
 const assigned = (
   origin: "classFocus" | "homework",
@@ -26,7 +29,7 @@ describe("deriveHomeTabs", () => {
         subjectTabs: ["Math Workshop", "Science"],
         rows: [assigned("classFocus", "math workshop")],
       }).tabs.map((tab) => tab.label),
-    ).toEqual(["Now", "All", "Math", "Scholar’s Prep", "Quests"]);
+    ).toEqual(["Now", "Math", "Scholar’s Prep", "Quests"]);
 
     expect(
       deriveHomeTabs({
@@ -38,7 +41,6 @@ describe("deriveHomeTabs", () => {
       }).tabs,
     ).toEqual([
       { key: "now", label: "Now" },
-      { key: "all", label: "All" },
       { key: "subject:math", label: "Math" },
       { key: "subject:science", label: "Science" },
       { key: "prep", label: "Scholar’s Prep" },
@@ -56,7 +58,6 @@ describe("deriveHomeTabs", () => {
     });
     expect(result.tabs.map((tab) => tab.label)).toEqual([
       "Now",
-      "All",
       "Math",
       "Scholar’s Prep",
       "Quests",
@@ -64,7 +65,7 @@ describe("deriveHomeTabs", () => {
     expect(result.hasOther).toBe(false);
   });
 
-  test("Other requires ≥2 named subjects — lone null-subject work collapses to Now · All", () => {
+  test("Other requires ≥2 named subjects — lone null-subject work collapses to Now", () => {
     // Only 1 named subject: Other not offered even though hasOther is true
     const oneSubject = deriveHomeTabs({
       subjectTabs: ["Math Workshop"],
@@ -76,7 +77,6 @@ describe("deriveHomeTabs", () => {
     expect(oneSubject.hasOther).toBe(true);
     expect(oneSubject.tabs.map((tab) => tab.label)).toEqual([
       "Now",
-      "All",
       "Math",
       "Scholar’s Prep",
       "Quests",
@@ -94,7 +94,6 @@ describe("deriveHomeTabs", () => {
     expect(twoSubjects.hasOther).toBe(true);
     expect(twoSubjects.tabs.map((tab) => tab.label)).toEqual([
       "Now",
-      "All",
       "Math",
       "Science",
       "Other",
@@ -104,7 +103,6 @@ describe("deriveHomeTabs", () => {
 
     expect(deriveHomeTabs({ subjectTabs: [], rows: [] }).tabs).toEqual([
       { key: "now", label: "Now" },
-      { key: "all", label: "All" },
       { key: "subject:math", label: "Math" },
       { key: "prep", label: "Scholar’s Prep" },
       { key: "quests", label: "Quests" },
@@ -120,7 +118,6 @@ describe("deriveHomeTabs", () => {
       deriveHomeTabs({ subjectTabs: [], rows: [], hasApps: true }).tabs,
     ).toEqual([
       { key: "now", label: "Now" },
-      { key: "all", label: "All" },
       { key: "subject:math", label: "Math" },
       { key: "prep", label: "Scholar’s Prep" },
       { key: "apps", label: "Apps" },
@@ -146,8 +143,8 @@ describe("filterRowsForTab", () => {
     );
   });
 
-  test("keeps homework in All and in its matching subject tab", () => {
-    expect(filterRowsForTab(rows, "all").map((row) => row.id)).toContain(
+  test("keeps homework in Now and in its matching subject tab", () => {
+    expect(filterRowsForTab(rows, "now").map((row) => row.id)).toContain(
       "science",
     );
     expect(
@@ -155,11 +152,11 @@ describe("filterRowsForTab", () => {
     ).toContain("science");
   });
 
-  test("keeps assigned work in All and quest work in Quests", () => {
+  test("keeps assigned work in Now and quest work in Quests", () => {
     expect(filterRowsForTab(rows, "other").map((row) => row.id)).toEqual([
       "other",
     ]);
-    expect(filterRowsForTab(rows, "all").map((row) => row.id)).toEqual([
+    expect(filterRowsForTab(rows, "now").map((row) => row.id)).toEqual([
       "math",
       "science",
       "other",
@@ -201,9 +198,8 @@ describe("filterArchivedRowsForTab", () => {
   const ids = (tab: string) =>
     filterArchivedRowsForTab(rows, tab).map((row) => row.id);
 
-  test("Now lists the same archived rows as All", () => {
-    expect(ids("now")).toEqual(ids("all"));
-    expect(ids("all")).toEqual(["focus", "hw"]);
+  test("Now lists every archived assigned row", () => {
+    expect(ids("now")).toEqual(["focus", "hw"]);
   });
 
   test("Scholar's Prep lists archived homework", () => {
@@ -214,6 +210,112 @@ describe("filterArchivedRowsForTab", () => {
     expect(ids("subject:math")).toEqual(["focus"]);
     expect(ids("quests")).toEqual(["quest", "app"]);
     expect(ids("apps")).toEqual(["app"]);
+  });
+});
+
+describe("deriveHomeTabs without All", () => {
+  test("no tab is keyed all, so an old ?tab=all link falls back to Now", () => {
+    const keys = deriveHomeTabs({
+      subjectTabs: ["Math Workshop", "Science"],
+      rows: [
+        assigned("classFocus", "Math Workshop"),
+        assigned("homework", "Science"),
+      ],
+    }).tabs.map((tab) => tab.key);
+    expect(keys).not.toContain("all");
+    expect(keys[0]).toBe("now");
+  });
+
+  test("a subject whose only open work is homework still gets its tab", () => {
+    const keys = deriveHomeTabs({
+      subjectTabs: ["Math Workshop", "Science"],
+      rows: [
+        assigned("classFocus", "Math Workshop"),
+        assigned("homework", "Science"),
+      ],
+    }).tabs.map((tab) => tab.key);
+    expect(keys).toContain("subject:science");
+  });
+});
+
+describe("yourListRowsForTab", () => {
+  const rows = [
+    { id: "mathFocus", ...assigned("classFocus", "Math Workshop") },
+    { id: "mathHw", ...assigned("homework", "Math") },
+    { id: "scienceHw", ...assigned("homework", "Science") },
+    { id: "otherHw", ...assigned("homework", null) },
+    { id: "quest", origin: "is" as const, subject: "Science" },
+  ];
+  const ids = (tab: string) =>
+    yourListRowsForTab(rows, tab, NOW).map((r) => r.id);
+
+  test("a subject tab holds that subject's homework, and only homework", () => {
+    expect(ids("subject:science")).toEqual(["scienceHw"]);
+    expect(ids("subject:math")).toEqual(["mathHw"]);
+    expect(ids("other")).toEqual(["otherHw"]);
+  });
+
+  test("Now holds every homework item; Prep, Apps and Quests hold none", () => {
+    expect(ids("now")).toEqual(["mathHw", "scienceHw", "otherHw"]);
+    expect(ids("prep")).toEqual([]);
+    expect(ids("apps")).toEqual([]);
+    expect(ids("quests")).toEqual([]);
+  });
+
+  test("open-until work is on Your list (and its subject's slice) until its window closes", () => {
+    const openUntil = {
+      id: "openUntil",
+      ...assigned("classFocus", "Science"),
+      openUntil: NOW + 3 * DAY,
+    };
+    const closed = { ...openUntil, id: "closed", openUntil: NOW - 1 };
+    const withOpen = [...rows, openUntil, closed];
+    expect(
+      yourListRowsForTab(withOpen, "subject:science", NOW).map((r) => r.id),
+    ).toEqual(["scienceHw", "openUntil"]);
+    expect(yourListRowsForTab(withOpen, "now", NOW).map((r) => r.id)).toContain(
+      "openUntil",
+    );
+    expect(
+      yourListRowsForTab(withOpen, "now", NOW).map((r) => r.id),
+    ).not.toContain("closed");
+  });
+});
+
+describe("pickUpRows", () => {
+  const started = { id: "started", ...assigned("classFocus", "Science"), lastTouched: 300 };
+  const upNext = { id: "upNext", ...assigned("classFocus", "Math"), lastTouched: 100 };
+  const inClass = { id: "inClass", ...assigned("classFocus", "Math"), lastTouched: 500 };
+  const homework = { id: "hw", ...assigned("homework", "Math"), lastTouched: 900 };
+  const quest = { id: "quest", origin: "is" as const, subject: null, lastTouched: 800 };
+  const rows = [upNext, inClass, homework, quest, started];
+
+  test("lists open class work the class section isn't showing, latest first", () => {
+    expect(pickUpRows(rows, [inClass], NOW).map((r) => r.id)).toEqual([
+      "started",
+      "upNext",
+    ]);
+  });
+
+  test("with no class section it lists all open class work", () => {
+    expect(pickUpRows(rows, [], NOW).map((r) => r.id)).toEqual([
+      "inClass",
+      "started",
+      "upNext",
+    ]);
+  });
+
+  test("open-until work waits on Your list, and joins Pick up once its window closes", () => {
+    const openStarted = {
+      id: "open",
+      ...assigned("classFocus", "Science"),
+      lastTouched: 1000,
+      openUntil: NOW + DAY,
+    };
+    expect(pickUpRows([openStarted], [], NOW).map((r) => r.id)).toEqual([]);
+    expect(
+      pickUpRows([openStarted], [], NOW + 2 * DAY).map((r) => r.id),
+    ).toEqual(["open"]);
   });
 });
 
@@ -271,14 +373,12 @@ describe("buildNowDigest", () => {
       focusEntries: [{ id: "focus", setAt: 9_000, endsAt: 11_000 }],
       plannedToday: [{ id: "planned", startsAt: 12_000 }],
       playlist: { id: "practice" },
-      homework: [{ id: "homework", completedByMe: false }],
       nowMs,
     });
     expect(result.sections.map((section) => section.key)).toEqual([
       "focus",
       "planned",
       "practice",
-      "homework",
     ]);
     expect(result.isQuiet).toBe(false);
   });
@@ -288,7 +388,6 @@ describe("buildNowDigest", () => {
       focusEntries: [{ id: "planned-focus", setAt: null, endsAt: 20_000 }],
       plannedToday: [],
       playlist: null,
-      homework: [],
       nowMs: 10_000,
     });
     expect(result.sections).toEqual([]);
@@ -300,7 +399,6 @@ describe("buildNowDigest", () => {
       focusEntries: [],
       plannedToday: [{ startsAt: 9_999 }],
       playlist: { id: "practice" },
-      homework: [{ completedByMe: true }],
       nowMs: 10_000,
     });
     expect(result.sections.map((section) => section.key)).toEqual(["practice"]);
@@ -318,7 +416,6 @@ describe("buildNowDigest", () => {
       focusEntries: [{ id: "overrun", setAt: 8_000, endsAt: 9_000 }],
       plannedToday: [],
       playlist: null,
-      homework: [],
       nowMs: 10_000,
     });
     expect(result.sections.map((section) => section.key)).toEqual(["focus"]);
@@ -334,7 +431,6 @@ describe("buildNowDigest", () => {
       ],
       plannedToday: [],
       playlist: null,
-      homework: [],
       nowMs: 10_000,
     });
     expect(result.sections).toEqual([]);
@@ -418,80 +514,8 @@ describe("matchRowsToFocusOrder", () => {
 
 describe("focusSectionLabel", () => {
   test("dates a same-day focus after the last bell", () => {
-    expect(focusSectionLabel(true)).toBe("Right now");
-    expect(focusSectionLabel(false)).toBe("From today");
-  });
-});
-
-describe("shouldShowHomeworkInNow", () => {
-  test("shows homework only during Scholar’s Prep or outside school hours", () => {
-    expect(
-      shouldShowHomeworkInNow({
-        currentBlockKind: "class",
-        isWithinSchoolHours: true,
-        isPrepTime: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldShowHomeworkInNow({
-        currentBlockKind: "recess",
-        isWithinSchoolHours: true,
-        isPrepTime: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldShowHomeworkInNow({
-        currentBlockKind: "class",
-        isWithinSchoolHours: true,
-        isPrepTime: true,
-      }),
-    ).toBe(true);
-    expect(
-      shouldShowHomeworkInNow({
-        currentBlockKind: null,
-        isWithinSchoolHours: false,
-        isPrepTime: false,
-      }),
-    ).toBe(true);
-  });
-});
-
-describe("filterHomeworkForNow", () => {
-  const timeZone = "Pacific/Honolulu";
-  const fridayNow = Date.parse("2026-08-21T20:00:00.000Z");
-
-  test("keeps undated, due, overdue, and Friday-to-Monday homework", () => {
-    const homework = [
-      { id: "undated", dueAt: null },
-      { id: "overdue", dueAt: Date.parse("2026-08-20T22:00:00.000Z") },
-      { id: "today", dueAt: Date.parse("2026-08-21T22:00:00.000Z") },
-      { id: "monday", dueAt: Date.parse("2026-08-24T22:00:00.000Z") },
-      { id: "later", dueAt: Date.parse("2026-08-25T22:00:00.000Z") },
-      { id: "done", dueAt: null, completedByMe: true },
-    ];
-
-    expect(
-      filterHomeworkForNow(homework, {
-        nowMs: fridayNow,
-        timeZone,
-        nextOpenSchoolDayKey: "2026-08-24",
-      }).map((entry) => entry.id),
-    ).toEqual(["undated", "overdue", "today", "monday"]);
-  });
-
-  test("uses the supplied next open day so closure skips do not admit later work", () => {
-    const homework = [
-      { id: "next-open", dueAt: Date.parse("2026-08-26T22:00:00.000Z") },
-      { id: "later", dueAt: Date.parse("2026-08-27T22:00:00.000Z") },
-    ];
-
-    expect(
-      filterHomeworkForNow(homework, {
-        nowMs: fridayNow,
-        timeZone,
-        nextOpenSchoolDayKey: "2026-08-26",
-      }).map((entry) => entry.id),
-    ).toEqual(["next-open"]);
+    expect(focusSectionLabel(true)).toBe("In class now");
+    expect(focusSectionLabel(false)).toBe("From class today");
   });
 });
 

@@ -21,6 +21,30 @@ export const HOMEWORK_DONE_CONFIRMED = "Done — your teacher can see it.";
 export const HOMEWORK_DONE_UNDO = "Not yet";
 
 /**
+ * The session header's homework pill and the pop-up it opens (web and native).
+ * The pill only opens the pop-up: asking first says what the tap does, and
+ * once done the pill shows the state while undo lives in the pop-up.
+ */
+export const HOMEWORK_DONE_HEADER = {
+  /** The pill once the homework is marked done. */
+  doneLabel: "Done",
+  ask: {
+    title: "Done with this?",
+    body: "Your teacher will see that you've finished. You can still come back to it.",
+    confirm: "I'm done",
+    cancel: "Keep working",
+  },
+  done: {
+    title: "You're done",
+    body: "Your teacher can see it's finished.",
+    undo: "Not done yet",
+    close: "OK",
+  },
+  saving: "Saving…",
+  failed: "Couldn't save. Try again.",
+} as const;
+
+/**
  * "Homework · due Tuesday · with Mr. Char".
  *
  * `duePhrase` comes from `dueStatus(dueAt, nowMs, timeZone)?.phrase`, so the

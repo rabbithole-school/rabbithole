@@ -11,9 +11,47 @@
 import type { MutationCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
 import { internal } from "../_generated/api";
-import { DEFAULT_BADGE_STYLE, DEFAULT_BADGE_COLORWAY } from "./badgeArt";
+import {
+  DEFAULT_BADGE_STYLE,
+  DEFAULT_BADGE_COLORWAY,
+  type BadgeColorway,
+  type BadgeStyle,
+} from "./badgeArt";
 import { ONBOARDING_UNIT, ONBOARDING_UNIT_SLUG } from "../onboardingData";
 import { effectiveActivityKind } from "../../shared/appSurface";
+import { noteSkyStar, runSkyHook } from "./skyRefresh";
+
+/**
+ * The one writer of a manually awarded badge row: inserts it and schedules
+ * the same generative art the auto path mints. Shared by `awardUnitBadge` and
+ * a Quest's showing (questShowing.ts), so neither can skip the art.
+ */
+export async function insertBadgeAndMintArt(
+  ctx: MutationCtx,
+  args: {
+    scholarId: Id<"users">;
+    unitId?: Id<"units">;
+    badgeSnapshot: { title: string; description?: string; icon?: string };
+    style: BadgeStyle;
+    colorway: BadgeColorway;
+  },
+): Promise<Id<"scholarUnitBadges">> {
+  const badgeId = await ctx.db.insert("scholarUnitBadges", {
+    scholarId: args.scholarId,
+    ...(args.unitId ? { unitId: args.unitId } : {}),
+    earnedAt: Date.now(),
+    badgeSnapshot: args.badgeSnapshot,
+    style: args.style,
+    colorway: args.colorway,
+    artStatus: "generating",
+    rerollsUsed: 0,
+  });
+  // Mint the generative art async, exactly like the auto-award path.
+  await ctx.scheduler.runAfter(0, internal.badgeArtActions.generateBadgeArt, {
+    badgeId,
+  });
+  return badgeId;
+}
 
 export async function maybeAwardUnitBadge(
   ctx: MutationCtx,
@@ -26,6 +64,10 @@ export async function maybeAwardUnitBadge(
   if (!lesson) return;
   const unit = await ctx.db.get(lesson.unitId);
   if (!unit?.badgeOnCompletion) return;
+  // A Quest that came through a proposal or a teacher's offer earns its badge
+  // when a teacher awards it (questShowing.ts awardQuestBadgeAs), never on
+  // completion. Older Quests without `questApproval` keep this path.
+  if (unit.questApproval) return;
 
   // Already earned?
   const existing = await ctx.db
@@ -84,4 +126,8 @@ export async function maybeAwardUnitBadge(
   // Generative art is minted async (Gemini, like the tutor's generate_image)
   // — the emoji snapshot shows until it lands. See convex/badges.ts.
   await ctx.scheduler.runAfter(0, internal.badgeArtActions.generateBadgeArt, { badgeId });
+  // An older Quest of the kid's own, shown: its bright star (TRA-699).
+  if (unit.authorScholarId === scholarId) {
+    await runSkyHook("badgeAward", () => noteSkyStar(ctx, scholarId, { unitId: unit._id }));
+  }
 }

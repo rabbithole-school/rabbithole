@@ -1,9 +1,11 @@
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { convexTest, type TestConvex } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
 import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { internal } from "../_generated/api";
 import schema from "../schema";
+import { readSchedule } from "../lib/scheduleStore";
 import { makeCustomAppTools } from "../lib/customAppTools";
 import type { AideEmit } from "../lib/aideStream";
 import {
@@ -21,6 +23,13 @@ const modules = (
 const APP_HTML = "<!doctype html><html><body>Force explorer</body></html>";
 const BUILD_BRIEF =
   "Let the scholar demonstrate how force and mass change acceleration. Begin with prediction, then let them vary one quantity at a time and explain the pattern before naming F=ma. Let the scholar choose the cart scenario.";
+
+async function sched(
+  t: { run: <R>(fn: (ctx: any) => Promise<R>) => Promise<R> },
+  doc: { _id: Id<"assignments"> } | null | undefined,
+) {
+  return t.run((ctx) => readSchedule(ctx, { _id: doc!._id }));
+}
 
 function actionCtx(t: TestConvex<typeof schema>): ActionCtx {
   const query = t.query as (ref: unknown, args: unknown) => Promise<unknown>;
@@ -139,7 +148,10 @@ describe("make_app_a_coached_activity", () => {
       unitTitle: "Force and Motion Lab",
       lessonTitle: "Cart Experiments",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
+      finish: "inClass",
+      startsNow: true,
     });
 
     const state = await t.run(async (ctx) => {
@@ -180,13 +192,13 @@ describe("make_app_a_coached_activity", () => {
     // No explicit Fable ask → the fleet tutor default, not Fable.
     expect(state.activity?.tutorModel).toBeUndefined();
     expect(state.assignment?.scholarIds).toEqual(fixtures.scholarIds);
-    expect(state.assignment?.activitySchedule).toHaveLength(1);
-    expect(state.assignment?.activitySchedule?.[0]).toMatchObject({
+    expect((await sched(t, state.assignment))).toHaveLength(1);
+    expect((await sched(t, state.assignment))[0]).toMatchObject({
       activityId: state.activity?._id,
       mode: "classFocus",
     });
-    expect(state.assignment?.activitySchedule?.[0].setAt).toBeDefined();
-    expect(reply).toContain("Honu (classFocus)");
+    expect((await sched(t, state.assignment))[0].setAt).toBeDefined();
+    expect(reply).toContain("Honu");
     expect(reply).toContain(app.url);
     expect(reply).toContain(
       `/teacher/curriculum/${state.unit?._id}/edit?lesson=${state.lesson?._id}&activity=${state.activity?._id}`,
@@ -195,7 +207,7 @@ describe("make_app_a_coached_activity", () => {
     expect(emit).toHaveBeenCalledWith({
       toolComplete: {
         name: "make_app_a_coached_activity",
-        result: "Investigate Force and Motion live (classFocus) for 2 scholars",
+        result: "Investigate Force and Motion given to 2 scholars",
       },
     });
   });
@@ -209,7 +221,10 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appName: "Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       scholarNames: ["Malia Test"],
+      finish: "inClass",
+      startsNow: true,
     });
 
     const assignments = await t.run((ctx) =>
@@ -217,12 +232,12 @@ describe("make_app_a_coached_activity", () => {
     );
     expect(assignments).toHaveLength(1);
     expect(assignments[0].scholarIds).toEqual([fixtures.scholarIds[1]]);
-    expect(assignments[0].activitySchedule).toHaveLength(1);
-    expect(assignments[0].activitySchedule?.[0]).toMatchObject({
+    expect((await sched(t, assignments[0]))).toHaveLength(1);
+    expect((await sched(t, assignments[0]))[0]).toMatchObject({
       mode: "classFocus",
     });
-    expect(assignments[0].activitySchedule?.[0].setAt).toBeDefined();
-    expect(reply).toContain("Malia Test (classFocus)");
+    expect((await sched(t, assignments[0]))[0].setAt).toBeDefined();
+    expect(reply).toContain("Malia Test");
   });
 
   test("reuses the unit, lesson, activity, starter-origin app, and assignment", async () => {
@@ -247,8 +262,10 @@ describe("make_app_a_coached_activity", () => {
       unitTitle: "Momentum",
       lessonTitle: "Collisions",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
-      mode: "homework",
+      finish: "2099-01-02",
+      startsNow: true,
       tutorModel: "sonnet",
     };
 
@@ -276,9 +293,9 @@ describe("make_app_a_coached_activity", () => {
     });
     expect(activities[0].tutorModel).toBeUndefined();
     expect(state.assignments).toHaveLength(1);
-    expect(state.assignments[0].activitySchedule).toHaveLength(1);
-    expect(state.assignments[0].activitySchedule?.[0].mode).toBe("homework");
-    expect(state.assignments[0].activitySchedule?.[0].setAt).toBeDefined();
+    expect((await sched(t, state.assignments[0]))).toHaveLength(1);
+    expect((await sched(t, state.assignments[0]))[0].mode).toBe("homework");
+    expect((await sched(t, state.assignments[0]))[0].setAt).toBeDefined();
     expect(secondReply).toContain("Reused coached activity");
   });
 
@@ -330,6 +347,7 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appName: "Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
     });
 
@@ -349,6 +367,7 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appName: "Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
     });
 
@@ -398,6 +417,7 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appName: "Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
     });
 
@@ -433,6 +453,7 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appName: "Shared Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
     });
 
@@ -472,6 +493,7 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appName: "Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
     });
 
@@ -498,6 +520,7 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appName: "Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
 
     const state = await t.run(async (ctx) => ({
@@ -550,6 +573,7 @@ describe("make_app_a_coached_activity", () => {
       appRequest: APP_REQUEST,
       title: "Rocket Shop",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
 
     const state = await t.run(async (ctx) => ({
@@ -611,6 +635,7 @@ describe("make_app_a_coached_activity", () => {
     const reply = await runTool(tool, {
       appRequest: APP_REQUEST,
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       groupName: "Honu",
     });
 
@@ -633,6 +658,7 @@ describe("make_app_a_coached_activity", () => {
       appName: "Force Explorer",
       appRequest: APP_REQUEST,
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
 
     expect(reply).toBe("Give either appName or appRequest, not both.");
@@ -655,6 +681,7 @@ describe("make_app_a_coached_activity", () => {
       appRequest: APP_REQUEST,
       title: "Rocket Shop",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
     const NEW_REQUEST =
       "A rocket shop, but scholars can also name their rocket and save a fleet.";
@@ -662,6 +689,7 @@ describe("make_app_a_coached_activity", () => {
       appRequest: NEW_REQUEST,
       title: "Rocket Shop",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
 
     const activities = await t.run((ctx) =>
@@ -686,6 +714,7 @@ describe("make_app_a_coached_activity", () => {
       unitTitle: "Rocket Unit",
       lessonTitle: "Rocket Lesson",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
 
     const reply = await runTool(await coachedTool(t, fixtures), {
@@ -694,6 +723,7 @@ describe("make_app_a_coached_activity", () => {
       unitTitle: "Rocket Unit",
       lessonTitle: "Rocket Lesson",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
 
     expect(reply).toMatch(/PARTIAL/);
@@ -718,10 +748,11 @@ describe("make_app_a_coached_activity", () => {
       appRequest: APP_REQUEST,
       title: "Rocket Shop",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
     await t.run(async (ctx) => {
       const activity = (await ctx.db.query("activities").collect())[0];
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId: fixtures.teacherId,
         unitId: (await ctx.db.query("units").collect())[0]._id,
         scholarIds: fixtures.scholarIds,
@@ -736,6 +767,7 @@ describe("make_app_a_coached_activity", () => {
       appRequest: "A totally different app.",
       title: "Rocket Shop",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
 
     expect(reply).toMatch(/PARTIAL/);
@@ -768,6 +800,7 @@ describe("make_app_a_coached_activity scholar edit policy", () => {
       appName: "Force Explorer",
       title: "Play Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     });
     expect((await activityTitled(t, "Play Force Explorer"))?.editAccess).toBe(
       "never",
@@ -789,6 +822,7 @@ describe("make_app_a_coached_activity scholar edit policy", () => {
         appName: "Force Explorer",
         title: `Force Explorer ${scholarEdit}`,
         buildBrief: BUILD_BRIEF,
+        subject: "Science",
         scholarEdit,
       });
       expect(
@@ -801,6 +835,7 @@ describe("make_app_a_coached_activity scholar edit policy", () => {
       appRequest: "A gecko that climbs when you spell a long-e word.",
       title: "Gecko climb",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       scholarEdit: "build",
     });
     expect((await activityTitled(t, "Gecko climb"))?.editAccess).toBe("always");
@@ -815,6 +850,7 @@ describe("make_app_a_coached_activity scholar edit policy", () => {
       appName: "Force Explorer",
       title: "Reused explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
     };
 
     await runTool(tool, { ...input, scholarEdit: "build" });
@@ -837,9 +873,113 @@ describe("make_app_a_coached_activity scholar edit policy", () => {
     const reply = await runTool(tool, {
       appName: "Force Explorer",
       buildBrief: BUILD_BRIEF,
+      subject: "Science",
       scholarEdit: "remix",
     });
     expect(reply).toMatch(/^Not created/);
+    expect(
+      await t.run(async (ctx) => (await ctx.db.query("units").collect()).length),
+    ).toBe(0);
+  });
+});
+
+describe("make_app_a_coached_activity unit subject (TRA-723)", () => {
+  test("a new unit without a real subject (missing, blank or a placeholder) asks again and creates nothing", async () => {
+    const t = convexTest(schema, modules);
+    const fixtures = await seedClass(t);
+    await seedInstalledStaticApp(t, fixtures);
+    const tool = await coachedTool(t, fixtures);
+
+    for (const subject of [undefined, "  ", "misc"]) {
+      const reply = await runTool(tool, {
+        appName: "Force Explorer",
+        buildBrief: BUILD_BRIEF,
+        subject,
+      });
+      expect(reply).toContain("call make_app_a_coached_activity again");
+    }
+    const counts = await t.run(async (ctx) => ({
+      units: (await ctx.db.query("units").collect()).length,
+      lessons: (await ctx.db.query("lessons").collect()).length,
+      activities: (await ctx.db.query("activities").collect()).length,
+    }));
+    expect(counts).toEqual({ units: 0, lessons: 0, activities: 0 });
+  });
+
+  test("a new unit takes the subject; reusing that unit needs none", async () => {
+    const t = convexTest(schema, modules);
+    const fixtures = await seedClass(t);
+    await seedInstalledStaticApp(t, fixtures);
+    const tool = await coachedTool(t, fixtures);
+
+    await runTool(tool, {
+      appName: "Force Explorer",
+      buildBrief: BUILD_BRIEF,
+      subject: " Science ",
+    });
+    const units = await t.run((ctx) => ctx.db.query("units").collect());
+    expect(units.map((u) => u.subject)).toEqual(["Science"]);
+
+    const reply = await runTool(tool, {
+      appName: "Force Explorer",
+      buildBrief: BUILD_BRIEF,
+    });
+    expect(reply).not.toContain("needs a subject");
+    const after = await t.run((ctx) => ctx.db.query("units").collect());
+    expect(after.map((u) => u._id)).toEqual([units[0]._id]);
+  });
+});
+
+describe("make_app_a_coached_activity files the unit under a class (TRA-723)", () => {
+  async function withHumanities(t: TestConvex<typeof schema>) {
+    const fixtures = await seedClass(t);
+    const now = Date.now();
+    await t.run(async (ctx) => {
+      const periodId = await ctx.db.insert("reportingPeriods", {
+        institutionId: fixtures.institutionId,
+        label: "This term",
+        startsAt: now - 30 * 86_400_000,
+        endsAt: now + 30 * 86_400_000,
+        status: "open",
+      });
+      await ctx.db.insert("classes", {
+        institutionId: fixtures.institutionId,
+        periodId,
+        groupId: fixtures.groupId,
+        subject: "Humanities",
+        subjectKey: "humanities",
+        meetings: [],
+      });
+    });
+    return fixtures;
+  }
+
+  test("a subject that fits one class is filed under it, and the reply says so", async () => {
+    const t = convexTest(schema, modules);
+    const fixtures = await withHumanities(t);
+    await seedInstalledStaticApp(t, fixtures);
+    const tool = await coachedTool(t, fixtures);
+    const reply = await runTool(tool, {
+      appName: "Force Explorer",
+      buildBrief: BUILD_BRIEF,
+      subject: "Social Studies",
+    });
+    expect(reply).toContain("Filed under Humanities");
+    const units = await t.run((ctx) => ctx.db.query("units").collect());
+    expect(units.map((u) => u.subject)).toEqual(["Humanities"]);
+  });
+
+  test("a subject that is not a class gets the classes back and creates nothing", async () => {
+    const t = convexTest(schema, modules);
+    const fixtures = await withHumanities(t);
+    await seedInstalledStaticApp(t, fixtures);
+    const tool = await coachedTool(t, fixtures);
+    const reply = await runTool(tool, {
+      appName: "Force Explorer",
+      buildBrief: BUILD_BRIEF,
+      subject: "Robotics",
+    });
+    expect(reply).toContain("Pick one of: Humanities");
     expect(
       await t.run(async (ctx) => (await ctx.db.query("units").collect()).length),
     ).toBe(0);

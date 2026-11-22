@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
+import type { Id } from "../../_generated/dataModel";
 import {
+  buildSnapshotBlocks,
   hasAnyActivity,
+  renderBuildSnapshotPost,
   MAX_OVERDUE_QUESTIONS,
   mergeCheckinQuestions,
   OVERDUE_NAME_CAP,
@@ -15,8 +18,11 @@ import {
   renderThreadMessage,
   rankEodSignals,
   sanitizeEodSlackText,
+  threadMessageParts,
+  EOD_THREAD_ANSWER_HINT,
   type EodChannelInput,
 } from "../eodCheckin";
+import { greyLineMessage } from "../slackGreyLine";
 import { sessionSignalMeta } from "../../../shared/learningSignals";
 import {
   SCHOLAR_NAME_PRONOUN_HINT,
@@ -114,9 +120,67 @@ describe("end-of-day message rendering", () => {
   });
 
   test("numbers questions and appends the fixed footer", () => {
+    // Byte-identical to what earlier check-in rows stored: retries post it.
     expect(renderThreadMessage("A good day.", ["First?", "Second?"])).toBe(
       "A good day.\n\n**Questions for you**\n1. First?\n2. Second?\n\n_Answer here in the thread — I'll record it so today's record stays complete._",
     );
+  });
+
+  test("posts the stored reply full size with its answer hint in the grey line", () => {
+    const stored = renderThreadMessage("A good day.", ["First?", "Second?"]);
+    const message = greyLineMessage(threadMessageParts(stored), { markdown: true });
+    expect(message.blocks).toEqual([
+      {
+        type: "markdown",
+        text: "A good day.\n\n**Questions for you**\n1. First?\n2. Second?",
+      },
+      {
+        type: "context",
+        block_id: "rh_grey_0",
+        elements: [{ type: "mrkdwn", text: EOD_THREAD_ANSWER_HINT }],
+      },
+    ]);
+    // Notifications still carry every word, in mrkdwn.
+    expect(message.text).toBe(
+      `A good day.\n\n*Questions for you*\n1. First?\n2. Second?\n\n${EOD_THREAD_ANSWER_HINT}`,
+    );
+  });
+
+  test("a stored reply without the hint posts whole and full size", () => {
+    const legacy = "A good day.\n\n**Questions for you**\n1. First?";
+    expect(threadMessageParts(legacy)).toEqual([legacy]);
+    expect(greyLineMessage(threadMessageParts(legacy), { markdown: true })).toEqual({
+      text: legacy,
+      markdown: true,
+    });
+  });
+
+  test("the mechanical fallback's reply splits the same way", () => {
+    const fallback = renderMechanicalFallback(
+      input({
+        scholars: [
+          {
+            name: "Pip",
+            scholarUrl: "https://example.test/teacher/scholars/pip",
+            pronouns: null,
+            sessions: [{ title: "Fractions", unitTitle: "Number Sense" }],
+            completions: [],
+            deliverables: 0,
+            practiceAttempts: 0,
+            practiceDistinctSkills: 0,
+            observations: [],
+            analysesNotes: [],
+            signals: [],
+          },
+        ],
+      }),
+    );
+    const stored = renderThreadMessage(fallback.wrapUp, fallback.questions);
+    const parts = threadMessageParts(stored);
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toContain("**Questions for you**");
+    expect(parts[0]).not.toContain("Answer here in the thread");
+    expect(parts[1]).toEqual({ grey: EOD_THREAD_ANSWER_HINT });
   });
 
   test("mechanical fallback is non-empty and asks about scheduled gaps", () => {
@@ -561,5 +625,97 @@ describe("past-due homework questions", () => {
         input({ overdueHomework: [overdue("Read-aloud", 5, [["Kai", "a1"]])] }),
       ),
     ).toBe(true);
+  });
+});
+
+describe("build screenshots in the check-in thread", () => {
+  const storageId = "kg2storage" as Id<"_storage">;
+  const ids = {
+    scholarId: "kh7scholar" as Id<"users">,
+    sessionId: "ks1session" as Id<"sessions">,
+  };
+
+  test("the comment names the scholar and links the session; markup in names is stripped", () => {
+    const post = renderBuildSnapshotPost({
+      ...ids,
+      scholarName: "Kai *the* <Builder>",
+      sessionTitle: "Rocket  Builder | v2",
+      sessionUrl: "https://rabbithole.test/scholar/s1",
+      storageId,
+    });
+    expect(post).toEqual({
+      ...ids,
+      storageId,
+      title: "Rocket Builder | v2",
+      caption:
+        "*Kai the &lt;Builder&gt;* · <https://rabbithole.test/scholar/s1|Rocket Builder v2>",
+    });
+  });
+
+  test("an untitled session still gets a readable label", () => {
+    const post = renderBuildSnapshotPost({
+      ...ids,
+      scholarName: "Kai",
+      sessionTitle: "   ",
+      sessionUrl: "https://rabbithole.test/scholar/s1",
+      storageId,
+    });
+    expect(post.title).toBe("Untitled app");
+    expect(post.caption).toContain("|Untitled app>");
+  });
+
+  test("a runaway title is capped so Slack keeps the message", () => {
+    const post = renderBuildSnapshotPost({
+      ...ids,
+      scholarName: "Kai",
+      sessionTitle: "rocket ".repeat(500),
+      sessionUrl: "https://rabbithole.test/scholar/s1",
+      storageId,
+    });
+    expect(Array.from(post.title).length).toBeLessThanOrEqual(120);
+    expect(post.title.endsWith("…")).toBe(true);
+    expect(post.caption.length).toBeLessThan(300);
+  });
+
+  test("each build is its caption above its screenshot, in order", () => {
+    const post = (title: string) =>
+      renderBuildSnapshotPost({
+        ...ids,
+        scholarName: "Kai",
+        sessionTitle: title,
+        sessionUrl: "https://rabbithole.test/scholar/s1",
+        storageId,
+      });
+    expect(
+      buildSnapshotBlocks([
+        { fileId: "F1", post: post("Rocket Builder") },
+        { fileId: "F2", post: post("Garden Planner") },
+      ]),
+    ).toEqual([
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: "*Kai* · <https://rabbithole.test/scholar/s1|Rocket Builder>",
+        },
+      },
+      {
+        type: "image",
+        slack_file: { id: "F1" },
+        alt_text: "Screenshot of Rocket Builder",
+      },
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: "*Kai* · <https://rabbithole.test/scholar/s1|Garden Planner>",
+        },
+      },
+      {
+        type: "image",
+        slack_file: { id: "F2" },
+        alt_text: "Screenshot of Garden Planner",
+      },
+    ]);
   });
 });

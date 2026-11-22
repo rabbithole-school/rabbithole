@@ -30,6 +30,7 @@ import {
   diceCount,
   diceFaces,
   diceSolved,
+  diceSubmittableState,
   diceSumDistribution,
   initialDice,
   parseDicePrediction,
@@ -48,7 +49,8 @@ import {
   mediumImpact,
   type KindProps,
 } from "./kit";
-import { applyKey, padGridKeys, type PadAnswerType } from "@/lib/practicePad";
+import { applyKey, type PadAnswerType } from "@/lib/practicePad";
+import { NumberPad } from "./NumberPad";
 import { fonts, palette, useColors } from "@/theme";
 
 type Tally = Record<number, number>;
@@ -80,7 +82,7 @@ export function DiceNative({
   spec,
   onSolvedChange,
   onStateChange,
-}: KindProps<DiceSpec, DiceState>) {
+}: KindProps<DiceSpec, DiceState | null>) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const trayRef = useRef<DiceTrayHandle>(null);
@@ -124,7 +126,7 @@ export function DiceNative({
     (next: DiceState) => {
       stateRef.current = next;
       setState(next);
-      onStateChange?.(next);
+      onStateChange?.(diceSubmittableState(spec, next));
       onSolvedChange(diceSolved(spec, next));
     },
     [onSolvedChange, onStateChange, spec],
@@ -205,8 +207,15 @@ export function DiceNative({
   const padType: PadAnswerType = isProbability ? "fraction" : "integer";
   const parsedPrediction = parseDicePrediction(input);
   const canCommit = parsedPrediction != null;
-  const predictionPlaceholder = isProbability ? "tap 1 / 2" : "tap a number";
-  const onPredictionKey = (k: string) => setInput((prev) => applyKey(prev, k));
+  const predictionPlaceholder = isProbability ? "Tap 1 / 2" : "Tap a number";
+  const onPredictionKey = (k: string) => {
+    setInput((prev) => applyKey(prev, k));
+    // Editing withdraws the committed prediction (as the web form does), so
+    // Done cannot submit a value the scholar is in the middle of changing.
+    if (stateRef.current.predicted) {
+      commitState({ rollCount: stateRef.current.rollCount, predicted: null });
+    }
+  };
 
   return (
     <View style={styles.wrap}>
@@ -346,11 +355,7 @@ export function DiceNative({
               {input || predictionPlaceholder}
             </Text>
           </View>
-          <PredictionPad
-            padType={padType}
-            styles={styles}
-            onKey={onPredictionKey}
-          />
+          <NumberPad padType={padType} onKey={onPredictionKey} />
           <CommitButton
             label={isProbability ? "Commit fraction" : "Commit prediction"}
             disabled={!canCommit}
@@ -486,46 +491,6 @@ function CommitButton({
     >
       <Text style={styles.commitText}>{label}</Text>
     </Pressable>
-  );
-}
-
-/**
- * The on-screen number pad for the prediction — the native practice pad
- * (`padGridKeys` layout + `applyKey` semantics), so a scholar taps 1, /, 2 for a
- * fraction exactly like every other fraction item. A probability prediction
- * shows the `/` key; a count/total (integer) hides it.
- */
-function PredictionPad({
-  padType,
-  styles,
-  onKey,
-}: {
-  padType: PadAnswerType;
-  styles: ReturnType<typeof makeStyles>;
-  onKey: (k: string) => void;
-}) {
-  const keys = padGridKeys(padType);
-  return (
-    <View style={styles.padGrid}>
-      {keys.map((k, i) => (
-        <Pressable
-          key={i}
-          disabled={k === ""}
-          onPress={() => k && onKey(k)}
-          accessibilityRole="button"
-          accessibilityLabel={
-            k === "" ? undefined : k === "⌫" ? "key backspace" : k === "/" ? "key fraction bar" : `key ${k}`
-          }
-          style={({ pressed }) => [
-            styles.padKey,
-            k === "" && styles.padKeyHidden,
-            pressed && k !== "" && styles.padKeyPressed,
-          ]}
-        >
-          <Text style={styles.padKeyText}>{k}</Text>
-        </Pressable>
-      ))}
-    </View>
   );
 }
 
@@ -872,26 +837,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     },
     predInputText: { fontFamily: fonts.bold, fontSize: 26, color: c.navy },
     predInputPlaceholder: { color: c.charcoalSubtle, fontFamily: fonts.regular, fontSize: 18 },
-    padGrid: {
-      width: "100%",
-      flexDirection: "row",
-      flexWrap: "wrap",
-      justifyContent: "space-between",
-      rowGap: 8,
-    },
-    padKey: {
-      width: "31.5%",
-      height: 54,
-      borderRadius: 12,
-      backgroundColor: c.gray50,
-      borderWidth: 1,
-      borderColor: c.border,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    padKeyHidden: { opacity: 0, borderWidth: 0, backgroundColor: "transparent" },
-    padKeyPressed: { backgroundColor: c.gray200, transform: [{ scale: 0.96 }] },
-    padKeyText: { fontFamily: fonts.semibold, fontSize: 22, color: c.fg },
     commitButton: {
       marginTop: 2,
       paddingHorizontal: 20,

@@ -1,9 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
   DEFAULT_FOCUS_MS,
-  assertBlockingAllowed,
+  assertPushAllowed,
   canTargetBlock,
   comparePushesForPlate,
+  endlessAppPushReason,
   focusEndsAt,
   isPushDueForClear,
   isPushBlocking,
@@ -13,11 +14,15 @@ import {
   pushExpiresAt,
   pushFieldsFromScheduleEntry,
   pushLane,
+  scheduleEntryFromPush,
   type PushDoc,
+  type ScheduleEntry,
   type ScholarAudienceContext,
 } from "../pushes";
 import type { Doc, Id } from "../../_generated/dataModel";
 import { dayKeyForTimezone } from "../../../shared/institutionDay";
+import type { RequestedWindow } from "../../../shared/classMeetings";
+import { storedTiming } from "../../__tests__/pushTimingFixture";
 
 // ─────────────────────────────────────────────────────────────────────────
 // `pushes` replaces assignments.activitySchedule — see
@@ -68,19 +73,23 @@ const LINK_TARGET = {
 };
 
 let seq = 0;
-function push(overrides: Partial<PushDoc> = {}): PushDoc {
+/** A stored push; `timing` is given as the requested window (TRA-580). */
+function push(
+  overrides: Partial<Omit<PushDoc, "timing">> & { timing?: RequestedWindow } = {},
+): PushDoc {
   seq += 1;
+  const { timing = { kind: "focus", endsAt: NOW + 20 * MIN }, ...rest } = overrides;
   return {
     _id: `push${String(seq).padStart(4, "0")}` as Id<"pushes">,
     _creationTime: NOW,
     institutionId: INST,
     target: ACTIVITY_TARGET,
     audience: { kind: "institution" },
-    timing: { kind: "focus", endsAt: NOW + 20 * MIN },
+    ...storedTiming(timing),
     blocking: false,
     setAt: NOW - MIN,
     pushedBy: "teacher1" as Id<"users">,
-    ...overrides,
+    ...rest,
   } as PushDoc;
 }
 
@@ -93,23 +102,23 @@ const scholar: ScholarAudienceContext = {
 
 describe("timing union", () => {
   test("a focus closes; homework does not expire", () => {
-    expect(pushExpiresAt({ kind: "focus", endsAt: 123 })).toBe(123);
+    expect(pushExpiresAt(storedTiming({ kind: "focus", endsAt: 123 }))).toBe(123);
     // Overdue homework must STAY on the plate — being overdue is the signal.
-    expect(pushExpiresAt({ kind: "homework", dueAt: 123 })).toBeNull();
+    expect(pushExpiresAt(storedTiming({ kind: "homework", dueAt: 123 }))).toBeNull();
   });
 
   test("an untilCleared push has no clock at all", () => {
     // A dispatch is released by finishing it, not by a timer. Giving it an
     // expiry would delete a scholar's in-progress work out from under them.
-    expect(pushExpiresAt({ kind: "untilCleared" })).toBeNull();
+    expect(pushExpiresAt(storedTiming({ kind: "untilCleared" }))).toBeNull();
   });
 
   test("lane is derived from timing, not a stored mode", () => {
-    expect(pushLane({ kind: "focus", endsAt: 1 })).toBe("classFocus");
-    expect(pushLane({ kind: "homework", dueAt: 1 })).toBe("homework");
+    expect(pushLane(storedTiming({ kind: "focus", endsAt: 1 }))).toBe("classFocus");
+    expect(pushLane(storedTiming({ kind: "homework", dueAt: 1 }))).toBe("homework");
     // Everything that isn't homework shares the focus lane, so a new timing
     // kind can never silently land in the homework list.
-    expect(pushLane({ kind: "untilCleared" })).toBe("classFocus");
+    expect(pushLane(storedTiming({ kind: "untilCleared" }))).toBe("classFocus");
   });
 });
 
@@ -360,13 +369,106 @@ describe("blocking is intent, gated by release mechanism", () => {
     expect(canTargetBlock(LINK_TARGET)).toBe(false);
   });
 
-  test("a non-blocking push of any target is always allowed", () => {
-    expect(() => assertBlockingAllowed(APP_TARGET, false)).not.toThrow();
-    expect(() => assertBlockingAllowed(LINK_TARGET, false)).not.toThrow();
+  const FOCUS = { kind: "focus" as const };
+
+  test("a non-blocking timed push of any target is allowed", () => {
+    for (const target of [ACTIVITY_TARGET, APP_TARGET, LINK_TARGET]) {
+      expect(() =>
+        assertPushAllowed({ target, timing: FOCUS, blocking: false, endsAt: NOW + MIN }),
+      ).not.toThrow();
+    }
   });
 
   test("a blocking non-activity push is refused, not silently downgraded", () => {
-    expect(() => assertBlockingAllowed(APP_TARGET, true)).toThrow(/cannot block/);
+    expect(() =>
+      assertPushAllowed({ target: APP_TARGET, timing: FOCUS, blocking: true, endsAt: NOW + MIN }),
+    ).toThrow(/cannot block/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// TRA-336: an app give must end. Homework or untilCleared timing on an app
+// target would unlock the tile, launch gates, credential autofill and the MDM
+// allowlist with no end: a standing grant in disguise.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("an app give must end (write boundary)", () => {
+  test("an app give as homework or until-cleared is refused", () => {
+    for (const kind of ["homework", "untilCleared"] as const) {
+      expect(() =>
+        assertPushAllowed({
+          target: APP_TARGET,
+          timing: { kind },
+          blocking: false,
+          endsAt: NOW + MIN,
+        }),
+      ).toThrow(/needs an end time/);
+    }
+  });
+
+  test("an app focus without a finite end is refused", () => {
+    for (const endsAt of [undefined, Number.POSITIVE_INFINITY, Number.NaN]) {
+      expect(() =>
+        assertPushAllowed({ target: APP_TARGET, timing: { kind: "focus" }, blocking: false, endsAt }),
+      ).toThrow(/needs an end time/);
+    }
+  });
+
+  test("activity, link and resource gives keep every timing", () => {
+    const RESOURCE_TARGET = {
+      kind: "resource" as const,
+      resourceId: "res1" as Id<"activityResources">,
+    };
+    for (const target of [ACTIVITY_TARGET, LINK_TARGET, RESOURCE_TARGET]) {
+      for (const kind of ["focus", "homework", "untilCleared"] as const) {
+        expect(() =>
+          assertPushAllowed({ target, timing: { kind }, blocking: false }),
+        ).not.toThrow();
+      }
+    }
+  });
+});
+
+describe("an app give must end (read boundary)", () => {
+  const clock = clockAt(NOW);
+
+  test("a timed, fading app focus shows exactly as before", () => {
+    expect(isPushShowing(push({ target: APP_TARGET }), clock)).toBe(true);
+    expect(endlessAppPushReason(push({ target: APP_TARGET }))).toBeNull();
+  });
+
+  test("an app give as homework grants nothing, dated or not", () => {
+    for (const dueAt of [NOW + 60 * MIN, undefined]) {
+      const row = push({ target: APP_TARGET, timing: { kind: "homework", dueAt } });
+      expect(isPushShowing(row, clock)).toBe(false);
+      expect(endlessAppPushReason(row)).toBe("homework");
+    }
+  });
+
+  test("an until-cleared app give grants nothing, even on its own day", () => {
+    const row = push({ target: APP_TARGET, timing: { kind: "untilCleared" } });
+    expect(isPushShowing(row, clock)).toBe(false);
+    expect(endlessAppPushReason(row)).toBe("untilCleared");
+  });
+
+  test("an app focus that goes late, or has no end, grants nothing", () => {
+    const late = push({ target: APP_TARGET, afterEnd: "late" });
+    expect(isPushShowing(late, clock)).toBe(false);
+    expect(endlessAppPushReason(late)).toBe("lateFocus");
+
+    const noEnd = push({ target: APP_TARGET, endsAt: undefined });
+    expect(isPushShowing(noEnd, clock)).toBe(false);
+    expect(endlessAppPushReason(noEnd)).toBe("noEnd");
+  });
+
+  test("activity and link gives are unchanged: homework still never expires", () => {
+    for (const target of [ACTIVITY_TARGET, LINK_TARGET]) {
+      const hw = push({ target, timing: { kind: "homework", dueAt: NOW - 60 * MIN } });
+      expect(isPushShowing(hw, clock)).toBe(true);
+      expect(endlessAppPushReason(hw)).toBeNull();
+      const untimed = push({ target, timing: { kind: "untilCleared" } });
+      expect(isPushShowing(untimed, clock)).toBe(true);
+    }
   });
 });
 
@@ -406,7 +508,10 @@ describe("pushFieldsFromScheduleEntry", () => {
       mode: "classFocus",
       endsAt: NOW + 30 * MIN,
     });
-    expect(f.timing).toEqual({ kind: "focus", endsAt: NOW + 30 * MIN });
+    // The kind alone; the window goes to the one end field (TRA-580 step 5).
+    expect(f.timing).toEqual({ kind: "focus" });
+    expect(f.endsAt).toBe(NOW + 30 * MIN);
+    expect(f.afterEnd).toBe("fade");
     expect(f.blocking).toBe(true);
     expect(f.target).toEqual({ kind: "activity", activityId: ACT });
   });
@@ -419,6 +524,10 @@ describe("pushFieldsFromScheduleEntry", () => {
       mode: "classFocus",
     });
     expect(f.timing).toEqual({ kind: "untilCleared" });
+    // No end key at all: its end-of-day needs the school's time zone, which
+    // the store adds; a pure undefined here would wipe it on update.
+    expect("endsAt" in f).toBe(false);
+    expect(f.afterEnd).toBe("fade");
     expect(f.blocking).toBe(true);
   });
 
@@ -428,7 +537,9 @@ describe("pushFieldsFromScheduleEntry", () => {
       mode: "homework",
       dueAt: NOW + 24 * 60 * MIN,
     });
-    expect(f.timing).toEqual({ kind: "homework", dueAt: NOW + 24 * 60 * MIN });
+    expect(f.timing).toEqual({ kind: "homework" });
+    expect(f.endsAt).toBe(NOW + 24 * 60 * MIN);
+    expect(f.afterEnd).toBe("late");
     expect(f.blocking).toBe(false);
   });
 
@@ -437,7 +548,9 @@ describe("pushFieldsFromScheduleEntry", () => {
       activityId: ACT,
       mode: "homework",
     });
-    expect(f.timing).toEqual({ kind: "homework", dueAt: undefined });
+    expect(f.timing).toEqual({ kind: "homework" });
+    expect("endsAt" in f && f.endsAt === undefined).toBe(true);
+    expect(f.afterEnd).toBe("late");
   });
 
   test("named scholars address exactly those scholars", () => {
@@ -459,15 +572,67 @@ describe("pushFieldsFromScheduleEntry", () => {
     expect(f.audience).toEqual({ kind: "assignment", assignmentId: ASG_ID });
   });
 
-  test("an empty scholarIds array is cohort-wide, not nobody", () => {
-    // The old shape uses `undefined` for cohort-wide, but a prune can
-    // leave `[]` behind; treating that as "nobody" would silently drop
-    // the entry off every plate.
-    const f = pushFieldsFromScheduleEntry(A, {
+  test("an empty scholarIds array is kept as written, and reads back as []", () => {
+    // A prune can leave `[]` behind. Entry-shaped readers treat it as
+    // cohort-wide, but one (programScheduleOverview) counts it as 0
+    // recipients, so the mirror keeps [] exactly rather than widening it to
+    // the assignment (TRA-572 review). A schedule mirror is never served to
+    // genuine-push readers, so an empty `scholars` audience on a mirror
+    // cannot drop anyone; the write switch (L4) must carry [] as cohort-wide.
+    const entry = {
       activityId: ACT,
-      mode: "homework",
+      mode: "homework" as const,
       scholarIds: [],
-    });
-    expect(f.audience).toEqual({ kind: "assignment", assignmentId: ASG_ID });
+    };
+    const f = pushFieldsFromScheduleEntry(A, entry);
+    expect(f.audience).toEqual({ kind: "scholars", scholarIds: [] });
+  });
+});
+
+describe("schedule entry <-> push round trip (kind-only timing)", () => {
+  const A = { _id: "asg1" as Id<"assignments"> } as Doc<"assignments">;
+  const ACT = "act1" as Id<"activities">;
+  const asRow = (entry: ScheduleEntry): PushDoc => {
+    return {
+      ...push(),
+      endsAt: undefined,
+      ...pushFieldsFromScheduleEntry(A, entry),
+      setAt: entry.setAt,
+      startsAt: entry.startsAt,
+      scheduledFnId: entry.scheduledFnId,
+    };
+  };
+  const ENTRIES: Array<[string, ScheduleEntry]> = [
+    // A timed focus carries the teacher's finish both ways (TRA-726).
+    ["timed focus", {
+      activityId: ACT, mode: "classFocus", setAt: NOW, endsAt: NOW + 30 * MIN, openUntilKind: false,
+    }],
+    ["planned timed focus", {
+      activityId: ACT, mode: "classFocus", startsAt: NOW + 60 * MIN, endsAt: NOW + 90 * MIN,
+      openUntilKind: false,
+    }],
+    ["open-until focus", {
+      activityId: ACT, mode: "classFocus", setAt: NOW, endsAt: NOW + 3 * 24 * 60 * MIN,
+      openUntilKind: true,
+    }],
+    ["untimed focus", { activityId: ACT, mode: "classFocus", setAt: NOW }],
+    ["dated homework", { activityId: ACT, mode: "homework", setAt: NOW, dueAt: NOW + 24 * 60 * MIN }],
+    ["undated homework, named scholars", {
+      activityId: ACT, mode: "homework", setAt: NOW, scholarIds: ["s1" as Id<"users">],
+    }],
+  ];
+  test.each(ENTRIES)("%s reads back as the same entry", (_label, entry) => {
+    const row = asRow(entry);
+    expect(row.timing).toEqual({ kind: row.timing.kind });
+    expect(scheduleEntryFromPush(row)).toEqual(entry);
+  });
+
+  // An entry that doesn't say (a seed, an older client) is decided by the
+  // schedule store; this pure mapping writes it as `focus`, which reads back
+  // as "in that class". Reading always says, so a copied entry keeps its
+  // finish (TRA-726).
+  test("a timed focus that doesn't give its finish reads back as in that class", () => {
+    const entry: ScheduleEntry = { activityId: ACT, mode: "classFocus", setAt: NOW, endsAt: NOW + 30 * MIN };
+    expect(scheduleEntryFromPush(asRow(entry))).toEqual({ ...entry, openUntilKind: false });
   });
 });

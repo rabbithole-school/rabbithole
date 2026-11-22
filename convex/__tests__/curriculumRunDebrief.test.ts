@@ -87,17 +87,13 @@ async function seed(t: T) {
   const teacher = await asUser(t, home.teacher.id);
 
   // Her run (a1, a2) and a teacher's run of the SAME activity (b1, b2).
-  const mine = await runner.mutation(api.assignments.assignWork, {
+  const mine = await runner.mutation(api.assignments.create, {
     unitId: unit,
     scholarIds: [a1.id, a2.id],
-    startsAt: Date.now(),
-    target: { kind: "unit" },
   });
-  const theirs = await teacher.mutation(api.assignments.assignWork, {
+  const theirs = await teacher.mutation(api.assignments.create, {
     unitId: unit,
     scholarIds: [b1.id, b2.id],
-    startsAt: Date.now(),
-    target: { kind: "unit" },
   });
   const mySession = await makeSession(t, a1, {
     assignmentId: mine,
@@ -351,7 +347,7 @@ describe("curriculum:run Debrief", () => {
     });
     expect(hersAgain.activities[activityKey].activeCount).toBe(1);
 
-    // Maturity: her "assigned" lamp and active-run count read only her runs.
+    // Maturity: her per-activity "assigned" lamps read only her runs.
     await t.run((ctx) => ctx.db.patch(s.mine, { archivedAt: Date.now() }));
     await t.run(async (ctx) => {
       const own = await ctx.db
@@ -366,13 +362,11 @@ describe("curriculum:run Debrief", () => {
       unitId,
     });
     expect(statuses.activitiesAssigned[activityKey]).toBe(false);
-    expect(statuses.unitAssigned).toBe(false);
     const teacherStatuses = await s.teacher.query(
       api.unitMaturity.getNodeStatuses,
       { unitId },
     );
     expect(teacherStatuses.activitiesAssigned[activityKey]).toBe(true);
-    expect(teacherStatuses.unitAssigned).toBe(true);
   });
 
   test("grounding and judge validation stay closed to her", async () => {

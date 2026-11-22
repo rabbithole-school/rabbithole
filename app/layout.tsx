@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { DevActivityBeacon } from "@/components/dev/DevActivityBeacon";
-import { Providers } from "./providers";
+import { APP_TITLE_TEMPLATE } from "@/components/routing/TitleOnlyLayout";
+import { RootProviders } from "./RootProviders";
 import { hankenGrotesk } from "./fonts/hankenGrotesk";
 import "./globals.css";
 import "katex/dist/katex.min.css";
@@ -13,7 +14,12 @@ export const metadata: Metadata = {
   // Without this Next resolves the og:image against localhost/VERCEL_URL
   // instead of the canonical origin, so scrapers get a relative-ish URL.
   metadataBase: new URL(appBaseUrl),
-  title: "Rabbithole",
+  // Every route names itself first, so a row of tabs reads "Screen time ·
+  // Rabbithole", "Schedule · Rabbithole" rather than six identical
+  // "Rabbithole"s. Client pages set theirs from a sibling title-only layout
+  // (components/routing/TitleOnlyLayout.tsx). A title that already carries a
+  // brand passes `{ absolute }` to skip the suffix.
+  title: { default: "Rabbithole", template: APP_TITLE_TEMPLATE },
   description: "AI that makes you think harder.",
   openGraph: {
     title: "Rabbithole",
@@ -79,7 +85,7 @@ export default function RootLayout({
       </head>
       <body>
         {process.env.NODE_ENV === "development" ? <DevActivityBeacon /> : null}
-        <Providers>{children}</Providers>
+        <RootProviders>{children}</RootProviders>
       </body>
     </html>
   );

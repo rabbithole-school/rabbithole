@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
-  useAudioRecorder,
-  useAudioRecorderState,
 } from "expo-audio";
 
+import { useMeteredRecorder } from "@/hooks/useMeteredRecorder";
 import { appStatusBus } from "@/lib/appStatusBus";
 
 export const BUG_REPORT_MAX_RECORDING_MS = 60_000;
@@ -14,11 +12,11 @@ export const BUG_REPORT_MAX_RECORDING_MS = 60_000;
 export type BugReportMicPermission = "checking" | "granted" | "denied";
 
 export function useBugReportRecorder() {
-  const recorder = useAudioRecorder({
-    ...RecordingPresets.HIGH_QUALITY,
-    isMeteringEnabled: true,
-  });
-  const recorderState = useAudioRecorderState(recorder, 80);
+  const {
+    recorder,
+    state: recorderState,
+    level,
+  } = useMeteredRecorder();
   const [permission, setPermission] =
     useState<BugReportMicPermission>("checking");
   const [isRecording, setIsRecording] = useState(false);
@@ -187,8 +185,6 @@ export function useBugReportRecorder() {
     setIsRecording(false);
   }, [clearCapTimer, recorder]);
 
-  const db = recorderState.metering ?? -60;
-  const level = Math.max(0, Math.min(1, (db + 60) / 60));
   const durationMs =
     frozenDurationMs ?? Math.min(
       recorderState.durationMillis ?? 0,

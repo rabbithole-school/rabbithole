@@ -3,9 +3,13 @@ import {
   classifyCompletion,
   scoreCompletion,
   MIN_REAL_TURNS,
+  splitTrailingCompletionNote,
   type CompletionObservation,
 } from "../lib/completionScore";
-import { completionClosingPool } from "../../../convex/lib/tutorClosingGuidance";
+import {
+  completionClosingPool,
+  selectCompletionClosing,
+} from "../../../convex/lib/tutorClosingGuidance";
 
 /**
  * The pure timing classifier is the deterministic core of the
@@ -130,6 +134,28 @@ describe("classifyCompletion", () => {
         }),
       ),
     ).toBe("kept-going");
+  });
+
+  const note = completionClosingPool("5")[0];
+  it.each([
+    [`You're right: 40 doubled is 80, and I made that mistake.\n\n${note}`, "on-time"],
+    [`Box jellyfish are among the most venomous animals in the sea.\n\n${note}`, "on-time"],
+    [`You built a model and explained the pattern.\n\n${note}`, "kept-going"],
+    [`Good point. What else could change the result?\n\n${note}`, "kept-going"],
+    [`You're right, 40 doubled is 80.`, "kept-going"],
+  ])("tool-first reply then note (TRA-703): %j → %s", (completionTurnText, verdict) => {
+    expect(
+      classifyCompletion(
+        obs({
+          completedAtScholarTurn: 4,
+          arcCompleteAtScholarTurn: 4,
+          totalScholarTurns: 4,
+          completionTurnText,
+          completionToolWasFirst: true,
+          completionHadPostToolText: !completionTurnText.startsWith(note),
+        }),
+      ),
+    ).toBe(verdict);
   });
 
   it("kept-going: completion emitted no closing text", () => {
@@ -335,5 +361,24 @@ describe("scoreCompletion — pass/fail against expectation", () => {
     );
     expect(s.verdict).toBe("too-soon");
     expect(s.pass).toBe(false);
+  });
+});
+
+describe("splitTrailingCompletionNote", () => {
+  it("separates the tutor's reply from the app's note", () => {
+    const note = selectCompletionClosing("5", "k");
+    expect(
+      splitTrailingCompletionNote(`You're right, 40 doubled is 80.\n\n${note}`),
+    ).toEqual({ reply: "You're right, 40 doubled is 80.", note });
+    expect(splitTrailingCompletionNote(note)).toEqual({ reply: "", note });
+    expect(splitTrailingCompletionNote("Just a reply.")).toEqual({
+      reply: "Just a reply.",
+      note: null,
+    });
+  });
+
+  it("does not take a reply's last sentence for a short legacy line", () => {
+    const text = "So the first puzzle? That one is finished.";
+    expect(splitTrailingCompletionNote(text)).toEqual({ reply: text, note: null });
   });
 });

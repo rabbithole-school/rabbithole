@@ -466,7 +466,6 @@ export function CurriculumDocumentView({
         lessonId,
         title: preset === "handout" ? "New handout" : "New activity",
         kind: "offline",
-        defaultMode: preset === "handout" ? "homework" : undefined,
       });
       setPendingScrollKey(`activity:${activityId}`);
       return activityId;

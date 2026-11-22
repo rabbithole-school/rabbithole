@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   appAssetRef,
+  appAssetScriptUrl,
   appAssetSources,
+  inlineAppAssetScripts,
   requestedAppAssetIds,
   resolveAppAssetRefs,
   rewriteAppAssetRefs,
@@ -64,5 +66,33 @@ describe("app asset references", () => {
     );
     expect(rewritten).toContain(`src="${appAssetRef("copy")}"`);
     expect(rewritten).toContain('href="/elsewhere/source"');
+  });
+});
+
+describe("script app assets (charm models)", () => {
+  const script = 'window.charmModels = { crate: function () {} }; // </script> inside';
+  const urls = new Map([
+    ["model", appAssetScriptUrl(script)],
+    ["photo", "https://example.convex.cloud/api/storage/photo"],
+  ]);
+
+  it("inlines a script asset and leaves image assets to URL rewriting", () => {
+    const html =
+      '<script src="/app-assets/model"></script><img src="/app-assets/photo">';
+    const inlined = inlineAppAssetScripts(html, (id) => urls.get(id));
+    expect(inlined).toBe(
+      `<script>${script.replace("</script", "<\\/script")}</script><img src="/app-assets/photo">`,
+    );
+  });
+
+  it("does not inline an image asset named in a script tag", () => {
+    const html = '<script src="/app-assets/photo"></script>';
+    expect(inlineAppAssetScripts(html, (id) => urls.get(id))).toBe(html);
+  });
+
+  it("adds no CSP origin for an inline script asset", () => {
+    expect(appAssetSources(urls.values())).toEqual([
+      "https://example.convex.cloud/api/storage/",
+    ]);
   });
 });

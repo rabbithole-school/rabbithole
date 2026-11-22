@@ -12,11 +12,13 @@
 // quests" all agree afterwards. They also pin the deliberate boundary that an
 // activity completion does not create a daily map-movement receipt.
 
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { convexTest } from "convex-test";
 import type { TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
+import { suggestedQuestsForScholar } from "../lib/scholarReads";
 import type { Doc, Id } from "../_generated/dataModel";
 
 const modules = (
@@ -122,7 +124,7 @@ async function makeQuest(
       teacherId,
     });
     const assignmentId = shape.assigned
-      ? await ctx.db.insert("assignments", {
+      ? await insertAssignmentWithSchedule(ctx, {
           teacherId,
           unitId,
           scholarIds: [scholarId],
@@ -220,7 +222,7 @@ async function expectAllLedgersAgree(
   expect(await seedStatus(t, seedId)).toBe("completed");
 
   // 4. Scholar home never re-suggests a finished quest.
-  const suggested = await asScholar.query(api.seeds.suggestedQuestsForSelf, {});
+  const suggested = await t.run((ctx) => suggestedQuestsForScholar(ctx, scholarId));
   expect(suggested.some((q) => String(q.unitId) === String(unitId))).toBe(false);
 
   // 5. Teacher quest card agrees: fully done (online denominator) + badged.
@@ -325,7 +327,7 @@ describe("one completion, one truth — completion surfaces agree", () => {
 // ── Never re-suggest a completed quest — even if the status flip lagged ──
 
 describe("a completed quest is never re-suggested", () => {
-  test("suggestedQuestsForSelf drops a completed unit even if its seed is still 'active'", async () => {
+  test("suggestedQuestsForScholar drops a completed unit even if its seed is still 'active'", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
     const scholarId = await seedUser(t, "scholar");
@@ -348,8 +350,7 @@ describe("a completed quest is never re-suggested", () => {
 
     // The unit IS complete (canonical ledger), so it must NOT be re-suggested —
     // the defensive unit-complete projection catches the drift.
-    const asScholar = await withUser(t, scholarId);
-    const suggested = await asScholar.query(api.seeds.suggestedQuestsForSelf, {});
+    const suggested = await t.run((ctx) => suggestedQuestsForScholar(ctx, scholarId));
     expect(suggested.some((s) => String(s.unitId) === String(q.unitId))).toBe(
       false,
     );
@@ -361,8 +362,7 @@ describe("a completed quest is never re-suggested", () => {
     const scholarId = await seedUser(t, "scholar");
     const q = await makeQuest(t, teacherId, scholarId, { advanceRubric: true });
 
-    const asScholar = await withUser(t, scholarId);
-    const suggested = await asScholar.query(api.seeds.suggestedQuestsForSelf, {});
+    const suggested = await t.run((ctx) => suggestedQuestsForScholar(ctx, scholarId));
     expect(suggested.some((s) => String(s.unitId) === String(q.unitId))).toBe(
       true,
     );
@@ -413,8 +413,7 @@ describe("teacher pin/hide overlays are preserved", () => {
     expect(await seedStatus(t, c.seedId)).toBe("dismissed");
 
     // Suggested list shows the pinned B, hides the dismissed C and completed A.
-    const asScholar = await withUser(t, scholarId);
-    const suggested = await asScholar.query(api.seeds.suggestedQuestsForSelf, {});
+    const suggested = await t.run((ctx) => suggestedQuestsForScholar(ctx, scholarId));
     const suggestedUnitIds = new Set(suggested.map((s) => String(s.unitId)));
     expect(suggestedUnitIds.has(String(b.unitId))).toBe(true);
     expect(suggestedUnitIds.has(String(c.unitId))).toBe(false);

@@ -81,9 +81,11 @@ export const DEVICE_ACTIVITY_HEARTBEAT_INTERVAL_MS = 60_000;
  * long passage or thinking without touching the screen is wrongly marked
  * absent — precisely the "walked away" false-positive the heartbeat was
  * designed to avoid. Too LONG and an unattended device keeps certifying a
- * human who is not there, which is the defect this gate closes. Twelve minutes
- * sits above any realistic no-touch reading/thinking stretch yet is far below
- * the ~50–62 minute unattended runs an automated overnight relaunch produces.
+ * human who is not there, which is the defect this gate closes. Ten minutes
+ * sits above most no-touch reading/thinking stretches, matches the 10 minutes
+ * a BunnyPad in Rabbithole Lock stays awake after a touch (ASAM_AWAKE_WINDOW_MS)
+ * and is the same rule the own-app tracker uses (APP_PLAY_ACTIVE_IDLE_MS in
+ * shared/appPlaySession.ts), so the two never disagree about one minute.
  *
  * When the timeout DOES misfire on a genuinely-present-but-still scholar, the
  * cost is bounded and honest: the missing heartbeats let the server's
@@ -92,7 +94,7 @@ export const DEVICE_ACTIVITY_HEARTBEAT_INTERVAL_MS = 60_000;
  * `measured` foreground total. Under-counting into an explicitly-unattributed
  * bucket is the safe direction to err.
  */
-export const PRESENCE_IDLE_TIMEOUT_MS = 12 * 60 * 1000;
+export const PRESENCE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 // A module-level bridge so any interaction witness — the root view's
 // capture-phase touch responder, the key-capture seam — can feed the mounted
@@ -354,6 +356,22 @@ export function recordExternalAppLaunch(externalAppId?: string): void {
   }
 }
 
+type AsamTransitionObserver = (
+  kind: "asam_enter" | "asam_exit",
+  reason: AsamTransitionReason,
+  ok: boolean,
+  at: number,
+) => void;
+
+let asamTransitionObserver: AsamTransitionObserver | null = null;
+
+/** The app-health journal keeps the last lock change for unclean_exit reports. */
+export function setAsamTransitionObserver(
+  observer: AsamTransitionObserver | null,
+): void {
+  asamTransitionObserver = observer;
+}
+
 /**
  * Called by the lock controller right after it asks iOS to enter or exit
  * Single App Mode (TRA-331). Synchronous and non-throwing, like the launch hook.
@@ -363,8 +381,10 @@ export function recordAsamTransition(
   reason: AsamTransitionReason,
   ok: boolean,
 ): void {
+  const clientAt = Date.now();
   try {
-    deviceActivityQueue.enqueue({ kind, reason, ok, clientAt: Date.now() });
+    deviceActivityQueue.enqueue({ kind, reason, ok, clientAt });
+    asamTransitionObserver?.(kind, reason, ok, clientAt);
   } catch {
     // Telemetry must never break the lock controller.
   }

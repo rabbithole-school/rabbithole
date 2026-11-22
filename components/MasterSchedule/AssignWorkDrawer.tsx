@@ -7,14 +7,15 @@
  * single narrow column. The component keeps its historical name; every host
  * imports it by that name. The surface supplies the default target:
  *
- *   • Schedule (Now / Day / Week) → a GROUP in a block. Writes a
- *     `schedulePlacements` row via `masterSchedule.placeClass` (optionally
- *     linking a curriculum activity). "Assign this to Group A in Block B."
+ *   • Schedule (Now / Day / Week) → a GROUP in a block. Writes a class
+ *     `schedulePlacements` row via `masterSchedule.placeClass` (a subject and
+ *     teacher; work for it is given, never placed). "Group A has Fraction
+ *     Sense in Block B."
  *   • Scholars (roster row / multi-select, or an empty target picked here) → a
  *     LEARNER, right now or queued. One "What to assign" selector, three kinds,
  *     all under the one verb:
  *       – Curriculum → assign an EXISTING activity from a unit via
- *         `assignments.assignWork` (+ `pushActivity` when starting now). This is
+ *         `assignments.assignWork` (live now or planned, one write). This is
  *         the teacher pulling something from the Curriculum library onto one
  *         scholar on the spot — no re-authoring.
  *       – New activity → improvise a one-scholar activity on the spot via
@@ -31,7 +32,7 @@
  *
  * Both flows converge on the same confirmation shape — target · work · timing ·
  * mode — so Assign and "Dispatch" are one concept, not competing products. The
- * bot (dispatch_activity / place_class tools) is the text/voice twin of this
+ * bot (give / place_class tools) is the text/voice twin of this
  * GUI and remains the accessibility path; it has its own door (the aide dock),
  * so this modal no longer carries an "Ask the bot instead" button.
  */
@@ -53,8 +54,18 @@ import {
 import { CaretLeft, CaretRight, X } from "@phosphor-icons/react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import {
+  GiveWindowFields,
+  giveButtonLabel,
+  showsUpAt,
+  useGiveChoices,
+  useMinuteNow,
+  type GiveFinish,
+  type ShowsUp,
+} from "@/components/GiveWindowFields";
 import type { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import { ScholarPicker } from "@/components/ScholarPicker";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { useScholarRoster } from "@/hooks/useScholarRoster";
@@ -74,7 +85,7 @@ export type AssignTarget =
       periodId: Id<"reportingPeriods">;
       groupId: Id<"scholarGroups">;
       groupLabel: string;
-      /** When present, the placement lands in this block/day; otherwise shelf. */
+      /** When present, the class lands in this block/day; otherwise it has no day yet. */
       blockId?: Id<"scheduleBlocks">;
       weekday?: number;
       slotLabel?: string;
@@ -166,7 +177,7 @@ export function AssignWorkDrawer({
 
 function targetKey(t: AssignTarget): string {
   return t.kind === "group"
-    ? `group:${t.groupId}:${t.blockId ?? "shelf"}:${t.weekday ?? "-"}`
+    ? `group:${t.groupId}:${t.blockId ?? "-"}:${t.weekday ?? "-"}`
     : `learner:${t.scholars.map((s) => s.id).join(",")}:${t.intent ?? "custom"}`;
 }
 
@@ -181,7 +192,6 @@ function AssignWorkForm({
   const dispatchActivity = useMutation(api.assignments.dispatchActivity);
   const offerQuest = useMutation(api.units.createAndOfferQuestForScholar);
   const assignWork = useMutation(api.assignments.assignWork);
-  const pushActivity = useMutation(api.assignments.pushActivity);
   const { scholars: roster } = useScholarRoster();
 
   const intent: LearnerIntent = target.kind === "learner" ? target.intent ?? "custom" : "custom";
@@ -189,8 +199,11 @@ function AssignWorkForm({
 
   const [title, setTitle] = useState("");
   const [guidance, setGuidance] = useState("");
-  const [mode, setMode] = useState<AssignMode>("classFocus");
-  const [timing, setTiming] = useState<"now" | "queue">("now");
+  // Giving work asks when it shows up and when it's finished (TRA-571).
+  const nowMs = useMinuteNow();
+  const [showsUp, setShowsUp] = useState<ShowsUp>({ kind: "now" });
+  const [finish, setFinish] = useState<GiveFinish | null>(null);
+  const timing: "now" | "later" = showsUp.kind === "now" ? "now" : "later";
   const [kind, setKind] = useState<WorkKind>(
     target.kind === "learner" ? target.defaultKind ?? "curriculum" : "curriculum",
   );
@@ -238,17 +251,31 @@ function AssignWorkForm({
     if (target.kind === "group") {
       return target.slotLabel
         ? `${target.groupLabel} · ${target.slotLabel}`
-        : `${target.groupLabel} · shelf (schedule later)`;
+        : `${target.groupLabel} · no day yet`;
     }
     if (scholars.length === 0) return "Choose a scholar";
     return scholars.length === 1 ? scholars[0].name : `${scholars.length} scholars`;
   }, [target, scholars]);
+
+  const giveChoices = useGiveChoices(
+    isLearner && !isQuest && scholars.length > 0
+      ? {
+          scholarIds: scholars.map((s) => s.id),
+          ...(isCurriculum && curSel
+            ? { unitId: curSel.unitId, activityId: curSel.activityId }
+            : {}),
+          startsAt: showsUpAt(showsUp, nowMs),
+        }
+      : "skip",
+    nowMs,
+  );
 
   const canSubmit =
     !saving &&
     (target.kind === "group"
       ? title.trim().length > 0
       : scholars.length > 0 &&
+        (isQuest || finish !== null) &&
         (isCurriculum ? curSel !== null : title.trim().length > 0));
 
   async function submit() {
@@ -260,7 +287,6 @@ function AssignWorkForm({
           periodId: target.periodId,
           groupId: target.groupId,
           subject: title.trim(),
-          mode,
           ...(target.defaultTeacherId ? { teacherId: target.defaultTeacherId } : {}),
           ...(target.weekday != null ? { weekday: target.weekday } : {}),
           ...(target.blockId ? { blockId: target.blockId } : {}),
@@ -272,35 +298,22 @@ function AssignWorkForm({
         });
       } else if (isCurriculum && curSel) {
         // Assign an EXISTING curriculum activity to each scholar. assignWork
-        // find-or-creates the assignment and PLANS the activity; when starting
-        // now we follow with pushActivity to make it live immediately.
-        const now = Date.now();
+        // find-or-creates the assignment and gives the activity: live now for
+        // "Now", planned for a later time (one write, TRA-571).
+        if (!finish) return;
+        const startsAt = showsUpAt(showsUp, Date.now());
         for (const s of scholars) {
-          const assignmentId = await assignWork({
+          await assignWork({
             unitId: curSel.unitId,
             scholarIds: [s.id],
-            startsAt: now,
-            target: {
-              kind: "activity",
-              activityId: curSel.activityId,
-              mode,
-            },
+            startsAt,
+            target: { kind: "activity", activityId: curSel.activityId },
+            finish,
           });
-          if (timing === "now") {
-            await pushActivity({
-              assignmentId,
-              activityId: curSel.activityId,
-              mode,
-            });
-          }
         }
         toaster.create({
-          title: timing === "now" ? "Assigned now" : "Added to queue",
-          description: `${curSel.activityTitle} · ${contextLine}${
-            timing === "now" && mode === "classFocus"
-              ? " · Live now · fades after today"
-              : ""
-          }`,
+          title: timing === "now" ? "Given now" : "Planned",
+          description: `${curSel.activityTitle} · ${contextLine}`,
           type: "success",
         });
       } else if (isQuest) {
@@ -320,28 +333,26 @@ function AssignWorkForm({
         });
       } else {
         // Ad-hoc dispatch — improvise a new one-scholar activity on the spot.
+        if (!finish) return;
         for (const s of scholars) {
           await dispatchActivity({
             scholarId: s.id,
             title: title.trim(),
             ...(guidance.trim() ? { systemPrompt: guidance.trim() } : {}),
-            mode,
+            finish,
             live: timing === "now",
+            ...(showsUp.kind === "at" ? { startsAt: showsUp.at } : {}),
           });
         }
         toaster.create({
-          title: timing === "now" ? "Dispatched now" : "Added to queue",
-          description: `${title.trim()} · ${contextLine}${
-            timing === "now" && mode === "classFocus"
-              ? " · Live now · fades after today"
-              : ""
-          }`,
+          title: timing === "now" ? "Dispatched now" : "Planned",
+          description: `${title.trim()} · ${contextLine}`,
           type: "success",
         });
       }
       onClose();
     } catch (err) {
-      toaster.create({ title: "Couldn't assign", description: String(err), type: "error" });
+      toaster.create({ title: "Couldn't assign", description: serverErrorMessage(err, "Check your connection and try again."), type: "error" });
     } finally {
       setSaving(false);
     }
@@ -539,48 +550,22 @@ function AssignWorkForm({
           </Field>
         )}
 
-        {!isQuest && (
-          <SimpleGrid columns={isLearner ? 2 : 1} gap={5}>
-            <Field label="Mode">
-              <Segmented
-                options={[
-                  { value: "classFocus", label: "Class focus" },
-                  { value: "homework", label: "Homework" },
-                ]}
-                value={mode}
-                onChange={(v) => setMode(v as AssignMode)}
-              />
-              <Text fontSize="2xs" color="charcoal.300" mt={1.5}>
-                {mode === "homework"
-                  ? "Shows on the scholar's homework rail, done on their own time."
-                  : "In-class work the scholar sees during the block."}
-              </Text>
-            </Field>
-
-            {isLearner && (
-              <Field label="Timing">
-                <Segmented
-                  options={[
-                    { value: "now", label: "Start now" },
-                    { value: "queue", label: "Add to queue" },
-                  ]}
-                  value={timing}
-                  onChange={(v) => setTiming(v as "now" | "queue")}
-                />
-                <Text fontSize="2xs" color="charcoal.300" mt={1.5}>
-                  {timing === "now"
-                    ? "Goes live for this scholar immediately."
-                    : "Staged for you to start later. This scholar cannot see it yet."}
-                </Text>
-              </Field>
-            )}
-          </SimpleGrid>
+        {isLearner && !isQuest && (
+          <GiveWindowFields
+            choices={giveChoices}
+            nowMs={nowMs}
+            showsUp={showsUp}
+            onShowsUpChange={setShowsUp}
+            finish={finish}
+            onFinishChange={setFinish}
+            allowEndOfUnit={isCurriculum}
+          />
         )}
 
         {target.kind === "group" && !target.slotLabel && (
           <Text fontSize="2xs" color="charcoal.300">
-            No block selected — this lands on the shelf as tentative. Drag it onto a
-            day/block to schedule it.
+            No block selected: this class has no day yet. Give it a day on School ›
+            Classes & times.
           </Text>
         )}
         </Flex>
@@ -606,11 +591,14 @@ function AssignWorkForm({
             ? "Add to schedule"
             : isQuest
               ? "Offer quest"
-              : timing === "now"
-                ? isCurriculum
-                  ? "Assign now"
-                  : "Dispatch now"
-                : "Add to queue"}
+              : giveButtonLabel(
+                  finish,
+                  timing === "now"
+                    ? isCurriculum
+                      ? "Give now"
+                      : "Dispatch now"
+                    : "Plan it",
+                )}
         </Button>
       </Flex>
     </>

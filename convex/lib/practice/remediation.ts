@@ -19,7 +19,7 @@
  */
 
 import { retention, FLUENT_REPS, type GraphEdge, type SkillState } from "./scheduler";
-import { openErrorPatterns } from "./errorFlags";
+import { practiceFlagsFromEvents, type NodeErrorEvent } from "./errorFlags";
 
 /**
  * A prerequisite is a remediation candidate only while it is NOT yet solid.
@@ -31,11 +31,7 @@ import { openErrorPatterns } from "./errorFlags";
 export const REMEDIATION_RETENTION_BAR = 0.9;
 
 /** One error event (a classified miss) tagged with the node it happened on. */
-export type NodeErrorEvent = {
-  nodeKey: string;
-  pattern: string;
-  createdAt: number;
-};
+export type { NodeErrorEvent } from "./errorFlags";
 
 /**
  * The single node currently driving remediation: among all nodes with an OPEN
@@ -44,29 +40,7 @@ export type NodeErrorEvent = {
  * `nodeKey` for determinism. Returns null when nothing is flagged.
  */
 export function pickFlaggedNode(events: NodeErrorEvent[], now: number): string | null {
-  const byNode = new Map<string, NodeErrorEvent[]>();
-  for (const e of events) {
-    const list = byNode.get(e.nodeKey);
-    if (list) list.push(e);
-    else byNode.set(e.nodeKey, [e]);
-  }
-
-  let best: { nodeKey: string; lastAt: number } | null = null;
-  for (const [nodeKey, nodeEvents] of byNode) {
-    const open = openErrorPatterns(nodeEvents, now);
-    if (open.length === 0) continue;
-    // openErrorPatterns returns most-recent-first, so [0].lastAt is this node's
-    // freshest qualifying event.
-    const lastAt = open[0].lastAt;
-    if (
-      best === null ||
-      lastAt > best.lastAt ||
-      (lastAt === best.lastAt && nodeKey < best.nodeKey)
-    ) {
-      best = { nodeKey, lastAt };
-    }
-  }
-  return best?.nodeKey ?? null;
+  return practiceFlagsFromEvents(events, now)[0]?.nodeKey ?? null;
 }
 
 /**

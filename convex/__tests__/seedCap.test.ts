@@ -4,9 +4,13 @@ import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
+  ACTIVE_SEED_READ_LIMIT,
   OBSERVER_SEED_CAP,
   SKY_FULL_LIVE_POOL,
   buildScholarSky,
+  isObserverPoolSeed,
+  isPinnedSeed,
+  liveSeedsForScholar,
   type SeedOrigin,
   type SeedStatus,
 } from "../lib/seeds";
@@ -167,9 +171,13 @@ describe("observer seed cap", () => {
       origin: "teacher",
       status: "pending",
     });
+    // A teacher's pin stamps the teacher (seeds.setStatus), which takes an
+    // observer idea out of the observer's pool.
+    const pinner = await seedTeacher(t);
     const pinned = await directSeed(t, scholarId, {
       topic: "pinned-ai",
       status: "active",
+      teacherId: pinner,
     });
     const completed = await directSeed(t, scholarId, {
       topic: "completed-old",
@@ -199,12 +207,179 @@ describe("observer seed cap", () => {
       expect(byTopic.has(`old-${String(i).padStart(2, "0")}`)).toBe(true);
     }
 
-    const pendingAi = rows.filter(
-      (seed) => seed.origin === "ai" && seed.status === "pending",
+    // The observer's pool: the fresh idea (written live) and the older
+    // pending ones, with the visited one preserved past the cap.
+    expect(byTopic.get("fresh")?.status).toBe("active");
+    const pool = rows.filter(isObserverPoolSeed);
+    const unvisitedPool = pool.filter((seed) => seed._id !== visited);
+    expect(unvisitedPool).toHaveLength(OBSERVER_SEED_CAP);
+    expect(pool).toHaveLength(OBSERVER_SEED_CAP + 1);
+  });
+
+  test("the cap and dedupe act on live observer ideas only, never on other seeds (TRA-679)", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const teacherId = await seedTeacher(t);
+    // Older seeds the observer's rules must never touch, all live.
+    const teacherPin = await directSeed(t, scholarId, {
+      topic: "teacher-pin",
+      origin: "teacher",
+      status: "active",
+      teacherId,
+    });
+    const story = await directSeed(t, scholarId, {
+      topic: "story-keepsake",
+      origin: "story",
+      status: "active",
+    });
+    const trail = await directSeed(t, scholarId, {
+      topic: "badge-trail",
+      origin: "badge_follow",
+      status: "active",
+    });
+    const pinnedIdea = await directSeed(t, scholarId, {
+      topic: "pinned-idea",
+      status: "active",
+      teacherId,
+    });
+
+    for (let i = 0; i < OBSERVER_SEED_CAP + 6; i++) {
+      await recordObserverSeed(t, scholarId, {
+        topic: `idea-${String(i).padStart(2, "0")}`,
+      });
+    }
+    // An exact-topic re-emit of a live idea merges into it.
+    const reemit = await recordObserverSeed(t, scholarId, {
+      topic: `idea-${OBSERVER_SEED_CAP + 5}`,
+      rationale: "refreshed",
+    });
+
+    const rows = await seedsFor(t, scholarId);
+    const ideas = rows.filter((seed) => seed.topic.startsWith("idea-"));
+    // Written live, capped at the newest OBSERVER_SEED_CAP, the oldest pruned.
+    expect(ideas).toHaveLength(OBSERVER_SEED_CAP);
+    expect(ideas.every((seed) => seed.status === "active")).toBe(true);
+    expect(ideas.map((seed) => seed.topic)).not.toContain("idea-00");
+    const merged = ideas.find((seed) => seed._id === reemit);
+    expect(merged?.rationale).toBe("refreshed");
+    expect(
+      ideas.filter((seed) => seed.topic === `idea-${OBSERVER_SEED_CAP + 5}`),
+    ).toHaveLength(1);
+    // Nothing else was pruned, merged or counted.
+    for (const id of [teacherPin, story, trail, pinnedIdea]) {
+      expect(rows.some((seed) => seed._id === id)).toBe(true);
+    }
+    expect(rows.find((seed) => seed._id === teacherPin)?.topic).toBe("teacher-pin");
+  });
+
+  test("pinned on the map: active, except a live observer idea (TRA-679)", () => {
+    const teacherId = "teacher" as Id<"users">;
+    expect(isPinnedSeed({ origin: "ai", status: "active", teacherId: undefined })).toBe(false);
+    expect(isPinnedSeed({ origin: "ai", status: "active", teacherId })).toBe(true);
+    expect(isPinnedSeed({ origin: "ai", status: "pending", teacherId: undefined })).toBe(false);
+    expect(isPinnedSeed({ origin: "teacher", status: "active", teacherId })).toBe(true);
+    expect(isPinnedSeed({ origin: "story", status: "active", teacherId: undefined })).toBe(true);
+    expect(isPinnedSeed({ origin: "badge_follow", status: "active", teacherId: undefined })).toBe(true);
+    expect(isPinnedSeed({ origin: "teacher", status: "pending", teacherId })).toBe(false);
+  });
+
+  test("the Sky draws a live observer idea unpinned and keeps it out of the anchored stars (TRA-679)", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const teacherId = await seedTeacher(t);
+    await directSeed(t, scholarId, { topic: "live-idea", status: "active" });
+    await directSeed(t, scholarId, {
+      topic: "pinned-idea",
+      status: "active",
+      teacherId,
+    });
+
+    const sky = await t.run(async (ctx) => buildScholarSky(ctx, scholarId));
+    const byTopic = new Map(sky.map((s) => [s.topic, s]));
+    expect(byTopic.get("live-idea")?.pinned).toBe(false);
+    expect(byTopic.get("pinned-idea")?.pinned).toBe(true);
+  });
+
+  test("visited ideas never take an unvisited idea's place under the cap (TRA-679)", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    // One older unvisited live idea, then 23 newer live ideas the kid has
+    // opened a chat from.
+    const unvisited = await directSeed(t, scholarId, {
+      topic: "older-unvisited",
+      status: "active",
+    });
+    for (let i = 0; i < OBSERVER_SEED_CAP - 1; i++) {
+      const visited = await directSeed(t, scholarId, {
+        topic: `visited-${String(i).padStart(2, "0")}`,
+        status: "active",
+      });
+      await sessionFor(t, scholarId, visited);
+    }
+
+    await recordObserverSeed(t, scholarId, { topic: "fresh" });
+
+    const rows = await seedsFor(t, scholarId);
+    // Two prunable ideas (the older unvisited one and the fresh one) are well
+    // under the cap: nothing is deleted.
+    expect(rows.some((seed) => seed._id === unvisited)).toBe(true);
+    expect(rows.filter((seed) => seed.topic.startsWith("visited-"))).toHaveLength(
+      OBSERVER_SEED_CAP - 1,
     );
-    const unvisitedPendingAi = pendingAi.filter((seed) => seed._id !== visited);
-    expect(unvisitedPendingAi).toHaveLength(OBSERVER_SEED_CAP);
-    expect(pendingAi).toHaveLength(OBSERVER_SEED_CAP + 1);
+    expect(rows.some((seed) => seed.topic === "fresh")).toBe(true);
+  });
+
+  test("a long completed and dismissed history doesn't stop a new idea, and isn't touched (TRA-679)", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 400; i++) {
+        await ctx.db.insert("seeds", {
+          scholarId,
+          origin: "ai",
+          status: i % 2 === 0 ? "completed" : "dismissed",
+          topic: `history-${i}`,
+          domain: "Physics",
+          suggestionType: "frontier",
+          rationale: "history",
+          ...(i % 2 === 0 ? { completedAt: 1 } : {}),
+        });
+      }
+    });
+
+    const fresh = await recordObserverSeed(t, scholarId, { topic: "fresh" });
+
+    const rows = await seedsFor(t, scholarId);
+    expect(rows.find((seed) => seed._id === fresh)?.status).toBe("active");
+    expect(rows.filter((seed) => seed.topic.startsWith("history-"))).toHaveLength(400);
+  });
+
+  test("120 pins plus a fresh idea: every pin stays in the live read (TRA-679)", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const teacherId = await seedTeacher(t);
+    const pins: Id<"seeds">[] = [];
+    for (let i = 0; i < ACTIVE_SEED_READ_LIMIT; i++) {
+      pins.push(
+        await directSeed(t, scholarId, {
+          topic: `pin-${String(i).padStart(3, "0")}`,
+          origin: "teacher",
+          status: "active",
+          teacherId,
+        }),
+      );
+    }
+    const fresh = await recordObserverSeed(t, scholarId, { topic: "fresh" });
+
+    const live = await t.run(async (ctx) => liveSeedsForScholar(ctx, scholarId));
+    const liveIds = new Set(live.map((seed) => String(seed._id)));
+    expect(pins.every((pin) => liveIds.has(String(pin)))).toBe(true);
+    expect(liveIds.has(String(fresh))).toBe(true);
+    // The Sky's full-pool read keeps them all too.
+    const sky = await t.run(async (ctx) =>
+      buildScholarSky(ctx, scholarId, { liveCap: SKY_FULL_LIVE_POOL }),
+    );
+    expect(sky.filter((star) => star.pinned)).toHaveLength(ACTIVE_SEED_READ_LIMIT);
   });
 
   test("markCompleted flips status and stamps completedAt", async () => {
@@ -265,6 +440,7 @@ describe("observer seed cap", () => {
     // An older SAVED keepsake and an older VISITED (started-quest) star.
     const saved = await directSeed(t, scholarId, {
       topic: "saved-active",
+      origin: "story",
       status: "active",
     });
     const visited = await directSeed(t, scholarId, {
@@ -310,6 +486,9 @@ describe("observer seed cap", () => {
         // Distinct domains, so the diversity ranker never has to reject a
         // candidate — the only thing bounding the result is the cap itself.
         domain: `domain-${i}`,
+        // A keepsake (a Story): anchored. A live observer idea is active too,
+        // but it is not anchored (isPinnedSeed).
+        origin: "story",
         status: "active",
       });
     }
@@ -385,6 +564,9 @@ describe("observer seed cap", () => {
       await directSeed(t, scholarId, {
         topic: `anchor-${String(i).padStart(3, "0")}`,
         domain: `domain-${i % 7}`,
+        // A keepsake: an `ai` seed active with no teacher is a live observer
+        // idea, read in its own smaller budget (TRA-679).
+        origin: "story",
         status: "active",
       });
     }

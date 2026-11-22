@@ -2,7 +2,7 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import type { Doc, Id } from "../_generated/dataModel";
-import { SESSION_SURFACE } from "../lib/sessionSurface";
+import { conversationSurface } from "../lib/sessionSurface";
 import {
   readScholarSessions,
   readSessionTranscript,
@@ -219,7 +219,11 @@ describe("readSessionTranscript", () => {
 
     const result = await t.run((ctx) => readSessionTranscript(ctx, scholar, {}));
     expect(result!.sessionMode).toBe("conversation");
-    expect(result!.whatTheScholarSees).toBe(SESSION_SURFACE.conversation);
+    // An activity-less chat may not build a new app, but this one has an app
+    // to edit.
+    expect(result!.whatTheScholarSees).toBe(
+      conversationSurface({ appCreationAllowed: false, hasApp: true, pythonBench: { offered: true, open: false, otherApp: true } }),
+    );
     const bySurface = Object.fromEntries(
       result!.documents.map((d) => [d.surface, d]),
     );
@@ -284,5 +288,75 @@ describe("readScholarSessions origin tagging", () => {
     const byTitle = Object.fromEntries(rows.map((r) => [r.title, r.origin]));
     expect(byTitle["self quest"]).toBe("selfInitiated");
     expect(byTitle["assigned work"]).toBe("assigned");
+  });
+
+  // The descriptor must match the gate that hands the tutor create_code
+  // (lib/mission.ts mayCreateAppInSession). A descriptor that claimed apps
+  // "in any activity" once led the staff aide to call a correct tutor wrong
+  // about a scholar's self-initiated quest.
+  async function seedActivity(
+    t: ReturnType<typeof convexTest>,
+    unitFields: Partial<Doc<"units">>,
+    kind: Doc<"activities">["kind"] = "online",
+  ) {
+    return await t.run(async (ctx) => {
+      const teacherId = await ctx.db.insert("users", {
+        name: "Test teacher",
+        role: "teacher" as Doc<"users">["role"],
+      });
+      const unitId = await ctx.db.insert("units", {
+        teacherId,
+        title: "Unit",
+        isActive: true,
+        ...unitFields,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Lesson",
+        order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Activity",
+        kind,
+        order: 0,
+      });
+      return { unitId, activityId };
+    });
+  }
+
+  test("a self-initiated quest's screen does not claim create_code", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t, "oliver");
+    const { unitId, activityId } = await seedActivity(t, {
+      authorScholarId: scholar,
+    });
+    // The Quest's planning chat (no activity) and one of its steps.
+    for (const fields of [{ unitId }, { unitId, activityId }]) {
+      const s = await seedSession(t, scholar, fields);
+      const result = await t.run((ctx) =>
+        readSessionTranscript(ctx, scholar, { sessionId: s }),
+      );
+      expect(result!.origin).toBe("selfInitiated");
+      expect(result!.whatTheScholarSees).toBe(
+        conversationSurface({ appCreationAllowed: false, hasApp: false, pythonBench: { offered: true, open: false } }),
+      );
+      expect(result!.whatTheScholarSees).toMatch(/could NOT build a new app/);
+      expect(result!.whatTheScholarSees).not.toMatch(/could build a LIVE APP/);
+    }
+  });
+
+  test("a teacher's activity's screen says the tutor could build an app", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t, "oliver");
+    const { unitId, activityId } = await seedActivity(t, {});
+    const s = await seedSession(t, scholar, { unitId, activityId });
+    const result = await t.run((ctx) =>
+      readSessionTranscript(ctx, scholar, { sessionId: s }),
+    );
+    expect(result!.whatTheScholarSees).toBe(
+      conversationSurface({ appCreationAllowed: true, hasApp: false, pythonBench: { offered: true, open: false } }),
+    );
+    expect(result!.whatTheScholarSees).toMatch(/could build a LIVE APP/);
   });
 });

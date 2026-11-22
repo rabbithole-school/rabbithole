@@ -1,7 +1,7 @@
 /**
  * Stepper (native) — the RN port of the web `Stepper.web.tsx`: a minus / label /
  * plus control for the manipulatives that adjust an integer count (Partition
- * parts, Balance unit weights, Riemann bars, the FunctionMachine guess). The
+ * parts, Balance unit weights, Riemann bars). The
  * two buttons keep a >= 44pt touch target (HIG minimum) and a subtle
  * `selectionAsync` haptic fires on every accepted tick, matching the kit's
  * snap-crossing feel for drags.

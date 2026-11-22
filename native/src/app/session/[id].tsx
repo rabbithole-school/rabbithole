@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { homeworkDueStatus } from "../../../vendor/shared/homeworkWeek";
 import { useMutation, useQuery } from "convex/react";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
@@ -32,15 +33,19 @@ import { VibecodeScreen } from "@/components/vibecode/VibecodeScreen";
 import { RecordingBar } from "@/components/RecordingBar";
 import { GlassBar } from "@/components/Glass";
 import { WhereAmIPanel } from "@/components/WhereAmIPanel";
-import {
-  QuestBuildUnlockOffer,
-  SavedForLaterBlock,
-} from "@/components/MissionDoneBlocks";
+import { SavedForLaterBlock } from "@/components/MissionDoneBlocks";
 import { appStatusBus } from "@/lib/appStatusBus";
+import { useVoiceKeyTarget } from "@/lib/voiceKey";
 import {
-  compassHeaderRight,
+  compassHeaderItems,
+  compassHeaderItemsWith,
   setCompassHandler,
 } from "@/components/HeaderCompassButton";
+import {
+  HeaderPillButton,
+  TEACHER_HANDOFF_ICON,
+} from "@/components/HeaderPillButton";
+import { TeacherHandoffSheet } from "@/components/TeacherHandoffSheet";
 import {
   ActivityNavPlaceholder,
   SessionActivityNav,
@@ -79,6 +84,8 @@ import {
   type ChatPracticePayload,
 } from "@/components/practice/ChatPracticeItem";
 import { InstructionChatCard, type InstructionChatPayload, type InstructionHandbackStart } from "@/components/practice/InstructionChatCard";
+import { QuestShowingProvider, useQuestReadyPill } from "@/components/QuestShowing";
+import { QuestProposalCard, type QuestProposalCardPayload } from "@/components/QuestProposalCard";
 import { ManipulativeScrollContext } from "@/components/manipulatives/kit";
 import { useStreamingDictation } from "@/hooks/useStreamingDictation";
 import { usePreReaderVoice } from "@/hooks/usePreReaderVoice";
@@ -94,8 +101,8 @@ import { RestOverlay } from "@/components/RestOverlay";
 import { buildStageMap } from "@/lib/graphemeStageMap";
 import { getNativeTTS } from "@/lib/nativeTTS";
 import { voiceMark } from "@/lib/voicePerf";
+import { isWorkSurfaceArtifact } from "@/lib/deliverableArtifactSelection";
 import { api, convexSiteUrl, type Id } from "@/lib/convex";
-import { isTextArtifact } from "../../../vendor/shared/textArtifacts";
 import { serverRefusal } from "../../../vendor/shared/serverErrorMessage";
 import { isTeacherArchived } from "../../../vendor/shared/teacherArchive";
 import { TeacherArchivedSession } from "@/components/TeacherArchivedSession";
@@ -104,6 +111,7 @@ import { uploadImageDataUrl } from "@/lib/uploadImage";
 import { shouldSkipLearnerQueries } from "@/lib/sessionLearnerQueries";
 import { CHAT_COMPOSER_INPUT, CHAT_MESSAGE_TEXT, chatTextAt } from "@/lib/chatType";
 import { chatBubbleStyles, OPENER_SENTINEL } from "@/lib/chatBubbles";
+import { wonderFirstTurn } from "@/lib/wonderChat";
 import { composerPayloadKey, createSendLock } from "@/lib/sendLock";
 import { friendlyToolName } from "@/lib/toolLabels";
 import { isTutorBusyError } from "@/lib/tutorStreamError";
@@ -131,7 +139,7 @@ import { FlairMark } from "@/components/FlairChips";
 import { FLAIR_MOTION, flairNoticeDelayMs } from "../../../vendor/shared/flairMotion";
 import { useFlairArrivals } from "../../../vendor/shared/useFlairArrivals";
 import type { GraphemeSpan } from "../../../vendor/shared/graphemeSegments";
-import { pickLockingFocus } from "../../../vendor/shared/focusLock";
+import { pickLiveFocus } from "../../../vendor/shared/classFocus";
 import { useQuestBakeHold } from "../../../vendor/shared/questBakeHold";
 import {
   focusMismatchBannerText,
@@ -146,11 +154,10 @@ import {
   hasToolRowDisplay,
   toolRowDisplay,
 } from "../../../vendor/shared/toolActivity";
-import { dueStatus } from "../../../vendor/shared/institutionDay";
 import {
   HOMEWORK_DONE_CONFIRMED,
+  HOMEWORK_DONE_HEADER,
   HOMEWORK_DONE_LABEL,
-  HOMEWORK_DONE_UNDO,
   homeworkEyebrow,
 } from "../../../vendor/shared/homeworkFraming";
 import { useNow } from "@/hooks/useNow";
@@ -163,6 +170,7 @@ import { useNow } from "@/hooks/useNow";
 const SESSION_HEADER_BASE = {
   headerLeft: undefined,
   headerTitle: undefined,
+  unstable_headerRightItems: undefined,
   headerShown: true,
   gestureEnabled: true,
 };
@@ -271,6 +279,9 @@ type Bubble = {
   completion?: boolean;
   chatPractice?: ChatPracticePayload;
   instruction?: InstructionChatPayload;
+  // The tutor's proposal card (TRA-690): the scholar's words, a mission they
+  // can change, the kind, and Propose (components/QuestProposalCard).
+  questProposalCard?: QuestProposalCardPayload;
   flairAwards?: FlairAward[];
   // Reading-ramp grapheme spans (young-learners-plan.html §10). Present (post-
   // stream) only for a pre-reader scholar's tutor replies — the annotator writes
@@ -290,7 +301,7 @@ function SessionScreen() {
   // `title` is passed from the home card so the nav bar shows the real title
   // INSTANTLY (no "Session" placeholder) even while messages load.
   const router = useRouter();
-  const { id, title, view, app, navPos, navTotal } = useLocalSearchParams<{
+  const { id, title, view, app, navPos, navTotal, wonder, wonderBy } = useLocalSearchParams<{
     id: string;
     title?: string;
     view?: string;
@@ -299,7 +310,15 @@ function SessionScreen() {
     /** "Activity N of M" from the ← / → tap that opened this session. */
     navPos?: string;
     navTotal?: string;
+    /** The kid's words from the "I wonder…" box (WonderBox): sent as this
+     *  brand-new chat's first turn in place of the hidden opener. */
+    wonder?: string;
+    /** How those words came in: "spoken" when dictated, else typed. */
+    wonderBy?: string;
   }>();
+  const wonderTurn = wonderFirstTurn(wonder, wonderBy);
+  const wonderText = wonderTurn?.text ?? null;
+  const wonderModality = wonderTurn?.inputModality ?? "typed";
   const sessionId = id as Id<"sessions">;
   // `?view=builder` opens the full-screen app builder for THIS session (the
   // app card's Open, TRA-519). A builder-primary session always shows it.
@@ -321,13 +340,18 @@ function SessionScreen() {
   const sendMessage = useMutation(api.sessions.sendMessage);
   const startAppUpdateTurn = useMutation(api.sessions.startAppUpdateTurn);
   // The SAME completion toggle the Big picture drawer (WhereAmIPanel) uses —
-  // surfaced on the composer so a child can actually find it. Not a second
+  // surfaced in the header so a child can actually find it. Not a second
   // completion mechanism.
   const markActivityComplete = useMutation(api.activityCompletions.markComplete);
   const unmarkActivityComplete = useMutation(
     api.activityCompletions.unmarkComplete,
   );
-  const [homeworkDoneSaving, setHomeworkDoneSaving] = useState(false);
+  // Which pop-up the header's homework pill opened, fixed at open time and
+  // kept through the close fade, so the sheet never swaps its copy on screen.
+  const [homeworkSheetOpen, setHomeworkSheetOpen] = useState(false);
+  const [homeworkSheet, setHomeworkSheet] = useState<"ask" | "done">("ask");
+  // A Quest's "I'm ready to show", in the same header place (TRA-720).
+  const questPill = useQuestReadyPill();
   const requestStopMut = useMutation(api.sessions.requestStop);
   const generateUploadUrl = useMutation(api.files.generateUploadUrl);
   const retryAssistantTurn = useMutation(api.sessions.retryAssistantTurn);
@@ -670,11 +694,11 @@ function SessionScreen() {
   const headerTitle = data?.session?.title ?? title ?? "Session";
   const sessionActivityId = data?.session?.activityId as Id<"activities"> | undefined;
   const sessionUnitId = data?.session?.unitId as Id<"units"> | undefined;
-  // The tutor can create a document in ANY session, so a session with no
-  // activity still needs the work surface once it holds one (TRA-463). Same
-  // subscription the panel/card make, so Convex dedupes it.
+  // The tutor can create a document or a slide deck in ANY session, so a
+  // session with no activity still needs the work surface once it holds one
+  // (TRA-463). Same subscription the panel/card make, so Convex dedupes it.
   const sessionArtifacts = useQuery(api.artifacts.getBySession, { sessionId });
-  const hasTextArtifacts = (sessionArtifacts ?? []).some(isTextArtifact);
+  const hasWorkArtifacts = (sessionArtifacts ?? []).some(isWorkSurfaceArtifact);
   const hasMapArtifact = (sessionArtifacts ?? []).some(isMapArtifact);
   const activityCompletedAt = data?.session?.activityCompletedAt ?? null;
   const activityCompletionMessageId =
@@ -685,8 +709,8 @@ function SessionScreen() {
     assignmentId: data?.session?.assignmentId,
     enabled: loadLearnerContext && !!sessionUnitId,
   });
-  const firstFocus = pickLockingFocus(currentFocus);
-  const focusLock = firstFocus
+  const firstFocus = pickLiveFocus(currentFocus);
+  const liveFocus = firstFocus
     ? {
         unitId: firstFocus.unitId ? String(firstFocus.unitId) : null,
         lessonId: firstFocus.lessonId ? String(firstFocus.lessonId) : null,
@@ -728,40 +752,43 @@ function SessionScreen() {
   const homeworkNowMs = useNow(60_000);
   const homeworkEyebrowText = homeworkForThisSession
     ? homeworkEyebrow(
-        dueStatus(
+        homeworkDueStatus(
           homeworkForThisSession.dueAt,
           homeworkNowMs,
           homeworkForThisSession.timeZone,
+          // The "this week" rule: `?? undefined` keeps an older backend's
+          // row (no closures) on the plain date.
+          homeworkForThisSession.dueWeekClosures ?? undefined,
         )?.phrase,
         homeworkForThisSession.teacherName,
       )
     : null;
   // The class is on a different unit/lesson than this session. INFORMATIONAL
-  // ONLY since the hard focus gate was removed (vendor/shared/focusLock.ts):
+  // ONLY since the hard focus gate was removed (vendor/shared/classFocus.ts):
   // it drives a soft "right now your class is with X" banner and nothing else.
-  const isFocusMismatch = !isHomeworkSession && focusLock?.unitId != null && (
-    String(data?.session?.unitId ?? "") !== focusLock.unitId ||
-    (focusLock.lessonId != null &&
-      String(data?.session?.lessonId ?? "") !== focusLock.lessonId)
+  const isFocusMismatch = !isHomeworkSession && liveFocus?.unitId != null && (
+    String(data?.session?.unitId ?? "") !== liveFocus.unitId ||
+    (liveFocus.lessonId != null &&
+      String(data?.session?.lessonId ?? "") !== liveFocus.lessonId)
   );
   // "The turn, not the bell": the scholar is INSIDE the live class-focus
   // session itself — the exact inverse of the mismatch above. Gets the
   // winding-down cue (item 2) and the at-the-turn choice (item 3); like the
   // mismatch banner it never disables the composer or the session.
-  const isFocusMatch = !isHomeworkSession && focusLock?.unitId != null && !isFocusMismatch;
+  const isFocusMatch = !isHomeworkSession && liveFocus?.unitId != null && !isFocusMismatch;
   // A lifetime ("through Friday") is not the room's clock: no "your class is
   // elsewhere" banner and no turn memory for it — only the plate line below.
-  const focusHasRoomClock = focusLock?.lifetimeEndsAt == null;
-  const roomPhase = useRoomTurnPhase(focusLock?.endsAt ?? null);
+  const focusHasRoomClock = liveFocus?.lifetimeEndsAt == null;
+  const roomPhase = useRoomTurnPhase(liveFocus?.endsAt ?? null);
   const { showTurnBanner } = useRoomTurnAwareness(
     isFocusMatch && focusHasRoomClock,
     roomPhase,
-    focusLock?.label ?? null,
-    focusLock?.endsAt ?? null,
+    liveFocus?.label ?? null,
+    liveFocus?.endsAt ?? null,
   );
   const focusTimeLabel =
-    focusLock?.endsAt != null && focusLock.timeZone
-      ? formatRoomTurnTime(focusLock.endsAt, focusLock.timeZone)
+    liveFocus?.endsAt != null && liveFocus.timeZone
+      ? formatRoomTurnTime(liveFocus.endsAt, liveFocus.timeZone)
       : null;
 
   // Room cues are learner-only; a teacher-owned manual rehearsal routes through
@@ -783,6 +810,7 @@ function SessionScreen() {
             !!m.resourceShare ||
             !!m.chatPractice ||
             !!m.instruction ||
+            !!m.questProposalCard ||
             // A tool row's illustration and its receipt label are independent;
             // `generate_image` writes both onto one row. See toolRowDisplay.
             hasToolRowDisplay(m))),
@@ -824,6 +852,16 @@ function SessionScreen() {
             createdAt: m.createdAt,
             messageId: m.id as Id<"messages">,
             instruction: m.instruction,
+          };
+        }
+        if (m.questProposalCard) {
+          return {
+            key: m.id,
+            role: "assistant" as const,
+            content: "",
+            createdAt: m.createdAt,
+            messageId: m.id as Id<"messages">,
+            questProposalCard: m.questProposalCard,
           };
         }
         const display = toolRowDisplay<Id<"_storage">>(m);
@@ -1004,7 +1042,14 @@ function SessionScreen() {
               "Content-Type": "application/json",
               ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
             },
-            body: JSON.stringify({ ...body, platform: "native" }),
+            // supportsQuestProposalCard: this build draws the tutor's
+            // proposal card (QuestProposalCard), so the tutor may offer one.
+            body: JSON.stringify({
+              ...body,
+              platform: "native",
+              supportsAppScripts: true,
+              supportsQuestProposalCard: true,
+            }),
           });
 
           // Busy refusal: 429 + a one-line SSE error body + Retry-After. Read it
@@ -1367,14 +1412,21 @@ function SessionScreen() {
       }
       // The message is now persisted — only NOW is it safe to clear the
       // composer. Clearing optimistically (before the await) would silently
-      // discard the scholar's text + image if the mutation rejected. Only the
-      // typed path clears the input box; the voice path never wrote to it, so
-      // clearing there could wipe text the scholar had already typed.
+      // discard the scholar's text + image if the mutation rejected.
       if (!usingOverride && !isAppRequest) {
         setInput("");
         // Synchronous, unlike setInput — this is what closes the frame-wide
         // window between the clear and its commit.
         sentComposerRef.current = composerSnapshot;
+      } else if (inputModality === "spoken" && input) {
+        // A voice turn replaces the draft it was sent over, so typed text
+        // never has to hold the mic back (Andy, 2026-11-14). Only that draft:
+        // anything typed while the turn was saving stays.
+        const replaced = input;
+        setInput((current) => (current === replaced ? "" : current));
+        // Synchronous, like the typed path: until the clear commits, the
+        // rendered Return handler still holds the replaced draft.
+        sentComposerRef.current = composerPayloadKey(replaced.trim(), imageId);
       }
       if (!isAppRequest) image.clear();
       // This text is now spoken for — stamped above and on its way out of the
@@ -1793,8 +1845,16 @@ function SessionScreen() {
     // could be cleared by a re-render in the same tick, and the ref guard
     // would then block the re-run from ever rescheduling the opener.
     welcomeSentRef.current = sessionId;
-    queueMicrotask(() => void onSend(OPENER_SENTINEL));
+    // A wonder chat opens on the kid's own words, sent like any other turn
+    // (convex/wonders.ts header); every other chat keeps the hidden opener.
+    queueMicrotask(() =>
+      void (wonderText !== null
+        ? onSend(wonderText, wonderModality)
+        : onSend(OPENER_SENTINEL)),
+    );
   }, [
+    wonderText,
+    wonderModality,
     data,
     streaming,
     activeKickoffPlaceholder,
@@ -1834,6 +1894,41 @@ function SessionScreen() {
     voice.cancel();
   }, [voice]);
 
+  // The voice key (src/lib/voiceKey.ts) is this screen's mic button, under
+  // the button's own gates, so it does nothing where the button isn't offered.
+  // Over typed text both talk, and the take replaces the text once it is
+  // saved (onSend). ⌘/ focuses the composer.
+  // Registers only when the render below reaches the composer: not while
+  // loading, archived or offline, and not for builder and workbench sessions,
+  // which hand off to screens with their own composer.
+  const ownsComposer =
+    data !== undefined &&
+    !isTeacherArchived(data.session) &&
+    !data.session?.isOffline &&
+    data.session?.sessionMode !== "vibecode" &&
+    data.session?.sessionMode !== "workbench" &&
+    !builderViewRequested;
+  useVoiceKeyTarget(
+    {
+      state: voice.isConnecting
+        ? "connecting"
+        : voice.isRecording
+          ? "recording"
+          : voice.isTranscribing ||
+              visiblyStreaming ||
+              composerBusy ||
+              image.imageId
+            ? "busy"
+            : "idle",
+      start: () => void onMicStart(),
+      confirm: onMicStop,
+      cancel: onMicCancel,
+      // ⌘/: the chat is always on screen here, so the composer itself.
+      compose: () => inputRef.current?.focus(),
+    },
+    ownsComposer,
+  );
+
   // Attach: iOS action sheet → camera or photo library.
   const onAttach = useCallback(() => image.chooseAndAttach(), [image]);
 
@@ -1846,7 +1941,9 @@ function SessionScreen() {
             title: headerTitle,
             // Arriving from ← / →: the compass is already in the header (the
             // route's options draw the same stand-in), so keep it there.
-            ...(arrivingNav ? { headerRight: compassHeaderRight } : null),
+            ...(arrivingNav
+              ? { unstable_headerRightItems: compassHeaderItems }
+              : null),
           }}
         />
         {arrivingNav ? <ActivityNavPlaceholder {...arrivingNav} /> : null}
@@ -1916,22 +2013,22 @@ function SessionScreen() {
   // ledger, which would leave the button saying "I'm done with this" straight
   // after a tap.
   const homeworkDone = progress.currentActivityCompleted || completed;
-  const toggleHomeworkDone = async () => {
-    if (!activityId || homeworkDoneSaving) return;
-    setHomeworkDoneSaving(true);
+  // Run from the header pill's pop-up, which shows the failure (offline, a
+  // lesson-less activity) in the child's words when this throws.
+  const setHomeworkDone = async (done: boolean) => {
+    if (!activityId) return;
     try {
-      if (homeworkDone) {
-        await unmarkActivityComplete({ activityId, sessionId });
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      } else {
+      if (done) {
         await markActivityComplete({ activityId, sessionId });
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else {
+        await unmarkActivityComplete({ activityId, sessionId });
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       }
     } catch (error) {
       console.warn("[session] homework completion change failed", error);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    } finally {
-      setHomeworkDoneSaving(false);
+      throw error;
     }
   };
   const nextIncomplete = completed ? progress.nextIncompleteOnlineActivity : null;
@@ -2000,9 +2097,10 @@ function SessionScreen() {
   // Landscape layout: chat left + DeliverablePanel right (iPad in landscape).
   // Portrait: stacked layout with DeliverableCard inline in the chat header.
   // Mounted for any activity (the panel/card render nothing when it has no
-  // deliverable and no documents) and for any session holding a document.
+  // deliverable and no documents) and for any session holding a document or
+  // a slide deck.
   const isLandscape = width > height;
-  const mountsWorkSurface = !!activityId || hasTextArtifacts;
+  const mountsWorkSurface = !!activityId || hasWorkArtifacts;
   // A map the tutor opened also earns the panel in landscape: inline in the
   // inverted chat list it rendered as the list header, i.e. pinned directly
   // above the composer at full height, squeezing the tutor's latest text.
@@ -2027,7 +2125,7 @@ function SessionScreen() {
     (input.trim().length > 0 || !!image.imageId) &&
     !composerBusy &&
     !image.uploading;
-  const focusName = focusLock?.label ?? null;
+  const focusName = liveFocus?.label ?? null;
 
   // The chat pane — used in both portrait and landscape. In landscape the
   // DeliverableCard is hidden (it moves into the panel).
@@ -2041,6 +2139,9 @@ function SessionScreen() {
           keyExtractor={(b) => b.key}
           contentContainerStyle={styles.list}
           keyboardDismissMode="interactive"
+          // A tap on a card's button (Propose) works with the keyboard up,
+          // instead of only putting the keyboard away.
+          keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
             /* The bake runs into the minutes. A silent empty chat for that long
                reads as broken, and the scholar has no way to know anything is
@@ -2134,10 +2235,9 @@ function SessionScreen() {
                     loading={navigatingNext}
                     onUpNext={nextIncomplete ? openNextIncomplete : undefined}
                     onBackToHome={() =>
-                      router.canDismiss() ? router.dismissAll() : router.replace("/")
+                      router.dismissTo("/")
                     }
                   />
-                  {unitId ? <QuestBuildUnlockOffer unitId={unitId} /> : null}
                   {showSavedForLater ? (
                     <SavedForLaterBlock
                       sessionId={sessionId}
@@ -2165,6 +2265,16 @@ function SessionScreen() {
                   scholarId={data.session!.userId}
                   instruction={item.instruction}
                   onHandback={runInstructionHandback}
+                />
+              );
+            }
+            if (item.questProposalCard) {
+              return (
+                <QuestProposalCard
+                  messageId={item.messageId as Id<"messages">}
+                  sessionId={sessionId}
+                  card={item.questProposalCard}
+                  canPropose={isSessionOwner && !data.session?.isTestDrive}
                 />
               );
             }
@@ -2422,47 +2532,14 @@ function SessionScreen() {
           bar keeps symmetric top/bottom padding around the input; the
           home-indicator clearance is the collapsing spacer at the bottom. */}
       <GlassBar edge="top" style={styles.composer}>
-        {/* S3 — "I'm done with this". The same `activityCompletions` toggle
-            the Big picture drawer offers, given a place a child can see, so
-            they can close the loop instead of leaving homework open (reads as
-            delinquent) or chatting on to make something happen. */}
-        {canShowHomeworkDone && (
+        {/* S3 — the receipt for "I'm done with this". The control itself is
+            the header pill (its pop-up holds the undo); this line says what
+            the tap did, where the scholar is looking. */}
+        {canShowHomeworkDone && homeworkDone && (
           <View style={styles.homeworkDoneRow}>
-            {homeworkDone ? (
-              <>
-                <Text style={styles.homeworkDoneConfirmedText}>
-                  {HOMEWORK_DONE_CONFIRMED}
-                </Text>
-                <Pressable
-                  onPress={toggleHomeworkDone}
-                  disabled={homeworkDoneSaving}
-                  hitSlop={10}
-                  accessibilityRole="button"
-                  accessibilityLabel={HOMEWORK_DONE_UNDO}
-                >
-                  <Text style={styles.homeworkDoneUndoText}>
-                    {HOMEWORK_DONE_UNDO}
-                  </Text>
-                </Pressable>
-              </>
-            ) : (
-              <Pressable
-                onPress={toggleHomeworkDone}
-                disabled={homeworkDoneSaving}
-                style={styles.homeworkDoneBtn}
-                accessibilityRole="button"
-                accessibilityLabel={HOMEWORK_DONE_LABEL}
-              >
-                <SymbolView
-                  name="checkmark.circle"
-                  size={16}
-                  tintColor={colors.navy}
-                />
-                <Text style={styles.homeworkDoneBtnText}>
-                  {HOMEWORK_DONE_LABEL}
-                </Text>
-              </Pressable>
-            )}
+            <Text style={styles.homeworkDoneConfirmedText}>
+              {HOMEWORK_DONE_CONFIRMED}
+            </Text>
           </View>
         )}
         {/* Pre-reader voice mode on a muted / nearly-muted iPad (web's "Turn up
@@ -2620,7 +2697,9 @@ function SessionScreen() {
               )}
               {/* Mic when there's nothing to send yet; send button otherwise.
                   Both are big filled violet circles so an empty composer clearly
-                  reads "tap the mic to talk" — tap it, then tap ✓ to send. While
+                  reads "tap the mic to talk" — tap it, then tap ✓ to send. Over
+                  typed text the mic stays, as a lighter circle beside Send, and
+                  its take replaces the text once saved (onSend). While
                   the tutor is replying the control becomes Stop (finalizes the
                   partial server-side); the composer stays editable so Return can
                   steer (stop + send the new turn). */}
@@ -2660,20 +2739,42 @@ function SessionScreen() {
                   <SymbolView name="mic.fill" size={glyph} tintColor={colors.white} />
                 </Pressable>
               ) : (
-                <Pressable
-                  onPress={() => onSend()}
-                  disabled={!canSend}
-                  hitSlop={8}
-                  style={[
-                    styles.circleBtn,
-                    circle,
-                    { backgroundColor: canSend ? colors.violet : colors.gray300 },
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Send message"
-                >
-                  <SymbolView name="arrow.up" size={glyph} tintColor={colors.white} />
-                </Pressable>
+                <>
+                  {!image.imageId && (
+                    <Pressable
+                      onPress={() => void onMicStart()}
+                      hitSlop={8}
+                      style={[
+                        styles.circleBtn,
+                        circle,
+                        { backgroundColor: composerBusy ? colors.gray300 : colors.violetMuted },
+                      ]}
+                      disabled={composerBusy}
+                      accessibilityRole="button"
+                      accessibilityLabel="Start recording — replaces what you typed"
+                    >
+                      <SymbolView
+                        name="mic.fill"
+                        size={glyph}
+                        tintColor={composerBusy ? colors.white : colors.violet}
+                      />
+                    </Pressable>
+                  )}
+                  <Pressable
+                    onPress={() => onSend()}
+                    disabled={!canSend}
+                    hitSlop={8}
+                    style={[
+                      styles.circleBtn,
+                      circle,
+                      { backgroundColor: canSend ? colors.violet : colors.gray300 },
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Send message"
+                  >
+                    <SymbolView name="arrow.up" size={glyph} tintColor={colors.white} />
+                  </Pressable>
+                </>
               )}
           </View>
         )}
@@ -2706,7 +2807,35 @@ function SessionScreen() {
                 ),
               }
             : null),
-          headerRight: activityId || unitId ? compassHeaderRight : undefined,
+          // "I'm done with this" sits in the header beside the compass: the
+          // same pill, glyph and pop-up as the app builder's Send to teacher.
+          // Once done the pill shows the state; undo is in the pop-up. A
+          // Quest's session has "I'm ready to show" in the same place, first
+          // when the Quest is also homework (TRA-720).
+          unstable_headerRightItems: canShowHomeworkDone
+            ? compassHeaderItemsWith(
+                ...(questPill ? [questPill] : []),
+                <HeaderPillButton
+                  icon={homeworkDone ? "checkmark.circle.fill" : TEACHER_HANDOFF_ICON}
+                  label={
+                    homeworkDone
+                      ? HOMEWORK_DONE_HEADER.doneLabel
+                      : HOMEWORK_DONE_LABEL
+                  }
+                  accessibilityLabel={
+                    homeworkDone ? HOMEWORK_DONE_CONFIRMED : HOMEWORK_DONE_LABEL
+                  }
+                  onPress={() => {
+                    setHomeworkSheet(homeworkDone ? "done" : "ask");
+                    setHomeworkSheetOpen(true);
+                  }}
+                />,
+              )
+            : questPill
+              ? compassHeaderItemsWith(questPill)
+              : activityId || unitId
+                ? compassHeaderItems
+                : undefined,
         }}
       />
       <SessionActivityNav
@@ -2743,7 +2872,7 @@ function SessionScreen() {
         <View style={styles.roomTurnBannerAmbient}>
           <SymbolView name="clock" size={14} tintColor={colors.violet} />
           <Text style={styles.roomTurnBannerAmbientText}>
-            {liveFocusLine(roomPhase, focusLock ?? {})}
+            {liveFocusLine(roomPhase, liveFocus ?? {})}
           </Text>
         </View>
       ) : null}
@@ -2760,7 +2889,7 @@ function SessionScreen() {
           <SymbolView name="clock" size={16} tintColor={colors.violet} />
           <Text style={styles.roomTurnBannerText}>{TURNED_BANNER_TEXT}</Text>
           <Pressable
-            onPress={() => router.push("/")}
+            onPress={() => router.dismissTo("/")}
             hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Done here, back to home"
@@ -2810,6 +2939,34 @@ function SessionScreen() {
         title={headerTitle}
         skipLearnerQueries={skipLearnerQueries}
       />
+      {canShowHomeworkDone ? (
+        <TeacherHandoffSheet
+          open={homeworkSheetOpen}
+          onClose={() => setHomeworkSheetOpen(false)}
+          {...(homeworkSheet === "done"
+            ? {
+                title: HOMEWORK_DONE_HEADER.done.title,
+                body: HOMEWORK_DONE_HEADER.done.body,
+                secondary: {
+                  label: HOMEWORK_DONE_HEADER.done.undo,
+                  busyLabel: HOMEWORK_DONE_HEADER.saving,
+                  onPress: () => setHomeworkDone(false),
+                },
+                primary: { label: HOMEWORK_DONE_HEADER.done.close },
+              }
+            : {
+                title: HOMEWORK_DONE_HEADER.ask.title,
+                body: HOMEWORK_DONE_HEADER.ask.body,
+                secondary: { label: HOMEWORK_DONE_HEADER.ask.cancel },
+                primary: {
+                  label: HOMEWORK_DONE_HEADER.ask.confirm,
+                  busyLabel: HOMEWORK_DONE_HEADER.saving,
+                  onPress: () => setHomeworkDone(true),
+                },
+              })}
+          failedText={HOMEWORK_DONE_HEADER.failed}
+        />
+      ) : null}
     </>
   );
 }
@@ -3346,31 +3503,10 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     gap: 10,
     paddingBottom: 8,
   },
-  homeworkDoneBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    borderWidth: 1,
-    borderColor: c.border,
-    borderRadius: 999,
-    paddingVertical: 7,
-    paddingHorizontal: 14,
-  },
-  homeworkDoneBtnText: {
-    fontSize: 14,
-    fontFamily: fonts.semibold,
-    color: c.navy,
-  },
   homeworkDoneConfirmedText: {
     fontSize: 13,
     fontFamily: fonts.medium,
     color: c.fgMuted,
-  },
-  homeworkDoneUndoText: {
-    fontSize: 13,
-    fontFamily: fonts.semibold,
-    color: c.fgMuted,
-    textDecorationLine: "underline",
   },
   inputWrap: {
     flex: 1,
@@ -3474,5 +3610,21 @@ function makeStyles(c: ReturnType<typeof useColors>) {
  */
 export default function SessionRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  return <SessionScreen key={id} />;
+  return <SessionWithShowing key={id} sessionId={id as Id<"sessions">} />;
+}
+
+/** The session, knowing once whether it is an approved Quest's (TRA-684,
+ *  TRA-720): every maker screen (chat, builder, bench) then puts "I'm ready
+ *  to show" in its header and offers no other hand-in. */
+function SessionWithShowing({ sessionId }: { sessionId: Id<"sessions"> }) {
+  const session = useQuery(api.sessions.get, { id: sessionId });
+  return (
+    <QuestShowingProvider
+      sessionId={sessionId}
+      unitId={session === undefined ? undefined : (session?.unitId ?? null)}
+      activityId={session?.activityId}
+    >
+      <SessionScreen />
+    </QuestShowingProvider>
+  );
 }

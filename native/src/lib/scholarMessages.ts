@@ -8,13 +8,14 @@
 import type { FunctionReturnType } from "convex/server";
 
 import type { api, Id } from "@/lib/convex";
+import { aboutLabel, aboutLine } from "../../vendor/shared/messageAbout";
 
 // Derived from the typed API (convex/scholarMessages.ts is the source of
 // truth) so native never hand-copies a server shape.
 export type ScholarThreadSummary = FunctionReturnType<
   typeof api.scholarMessages.listThreads
 >["threads"][number];
-export type ScholarThreadKind = ScholarThreadSummary["kind"];
+export type ScholarThreadFlavor = ScholarThreadSummary["flavor"];
 export type ScholarThreadDetail = NonNullable<
   FunctionReturnType<typeof api.scholarMessages.getThread>
 >;
@@ -24,8 +25,9 @@ export type ScholarThreadAttachment = FunctionReturnType<
 >[number];
 
 /** Section eyebrows — identical to the web Messages list. */
-export const MENTORS_EYEBROW = "Mentors";
+export const PEOPLE_EYEBROW = "People";
 export const WORKSHOP_EYEBROW = "Workshop";
+export { MESSAGE_ABOUT_COPY } from "../../vendor/shared/messageAbout";
 
 /** The reply composer's placeholder — the web scholar thread's string
  *  (components/messaging/MessageThread.tsx, scholar viewer), for every kind. */
@@ -35,13 +37,16 @@ export const REPLY_PLACEHOLDER = "Write a reply…";
  *  (web parity). */
 export const REPLIES_CLOSED = "Replies are closed for this conversation.";
 
-/** The thread header's subtitle. Mentor: just "Mentor" (no invented role
- *  label). Workshop: the idea it's about, when there is one. */
+/** The thread header's subtitle. General: none (the title already names who
+ *  it's with). Workshop: the idea it's about, when there is one. */
 export function threadSubtitle(detail: {
-  kind: ScholarThreadKind;
+  flavor: ScholarThreadFlavor;
   suggestion: { title: string } | null;
+  about?: { type: "wonder" | "quest" };
+  aboutTitle?: string;
 }): string | null {
-  if (detail.kind === "mentor") return "Mentor";
+  if (detail.flavor === "general") return null;
+  if (detail.flavor === "about") return aboutLine(detail.about, detail.aboutTitle);
   return detail.suggestion?.title ?? null;
 }
 
@@ -70,29 +75,47 @@ export function ideaPreview(
 
 /** The list's kind filter (`?kind=` — the Workshop's way in is
  *  `kind=workshop`). Web parity: components/ScholarMessages.tsx. */
-export type KindFilter = "all" | "mentor" | "workshop";
+export type KindFilter = "all" | "people" | "workshop";
 
 export function kindFilterFrom(value: string | null | undefined): KindFilter {
-  return value === "mentor" || value === "workshop" ? value : "all";
+  // "mentor" is the old name of the People filter, kept for older links.
+  if (value === "people" || value === "mentor") return "people";
+  return value === "workshop" ? "workshop" : "all";
 }
 
-/** Mentor threads first (they're about the kid's own work), then Workshop.
- *  Each section keeps the server's newest-first order. */
+/** Conversations with people first (they're about the kid's own work), then
+ *  Workshop. Each section keeps the server's newest-first order. */
 export function splitThreadSections(threads: readonly ScholarThreadSummary[]): {
-  mentors: ScholarThreadSummary[];
+  people: ScholarThreadSummary[];
   workshop: ScholarThreadSummary[];
+  about: ScholarThreadSummary[];
 } {
   return {
-    mentors: threads.filter((t) => t.kind === "mentor"),
-    workshop: threads.filter((t) => t.kind === "workshop"),
+    people: threads.filter((t) => t.flavor === "general"),
+    workshop: threads.filter((t) => t.flavor === "workshop"),
+    about: threads.filter((t) => t.flavor === "about"),
   };
 }
 
-/** The list row's headline. Mentor: the counterpart. Workshop: the idea, or
+/** The list row's headline. General: the counterpart. Workshop: the idea, or
  *  (team-started) the opening topic, else the counterpart. */
 export function threadHeadline(thread: ScholarThreadSummary): string {
-  if (thread.kind === "mentor") return thread.title;
+  if (thread.flavor === "general") return thread.title;
+  if (thread.flavor === "about") return thread.aboutTitle ?? thread.title;
   return thread.suggestionTitle ?? thread.topic ?? thread.title;
+}
+
+/** An about row's small label ("About your wonder"); null for other kinds. */
+export function threadAboutLabel(thread: ScholarThreadSummary): string | null {
+  return thread.flavor === "about" ? aboutLabel(thread.about) : null;
+}
+
+/** Plain threads and about threads as one list, newest first, the order each
+ *  list already has. */
+export function mergeThreadLists(
+  ...lists: readonly (readonly ScholarThreadSummary[])[]
+): ScholarThreadSummary[] {
+  return lists.flat().sort((a, b) => b.lastMessageAt - a.lastMessageAt);
 }
 
 /** Team-started Workshop threads (no idea behind them) — the Workshop board's
@@ -101,7 +124,7 @@ export function teamStartedWorkshopThreads(
   threads: readonly ScholarThreadSummary[] | undefined,
 ): ScholarThreadSummary[] {
   return (threads ?? []).filter(
-    (t) => t.kind === "workshop" && t.startedByStaff && !t.suggestionId,
+    (t) => t.flavor === "workshop" && t.startedByStaff && !t.suggestionId,
   );
 }
 

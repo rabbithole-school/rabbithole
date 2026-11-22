@@ -52,6 +52,7 @@ const REGISTERED = [
   "integers-coordinates",
   "early-algebra",
   "algebra-1",
+  "algebra-2",
 ];
 
 const NON_PRIORITY = [
@@ -61,6 +62,7 @@ const NON_PRIORITY = [
   "integers-coordinates",
   "early-algebra",
   "algebra-1",
+  "algebra-2",
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -375,6 +377,7 @@ describe("practiceSkills — mixed check-in per-sitting probe budget", () => {
         "ratio-proportion-percent",
         "integers-coordinates",
       ],
+      "algebra-2": ["algebra-1", "early-algebra", "geometry-measurement"],
     };
     for (const [domain, sources] of Object.entries(prerequisites)) {
       const target = idx(domain);

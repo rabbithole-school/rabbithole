@@ -1,0 +1,13 @@
+// Giving work asks two questions (TRA-571): when does it show up, and when
+// should they finish it. This file holds the two pieces of wording every
+// surface shares — the refusal a mutation throws when the finish is missing,
+// and the aide's prompt paragraph on giving work — so the in-app aide, the
+// Slack bot and the unit-page Curriculum Bot say the same thing. The tool
+// layer imports it without pulling in convex/assignments.ts.
+
+export const MISSING_FINISH_QUESTION =
+  "When should they finish it: in that class, by a date, or open until a date?";
+
+/** The staff aide's standing instruction on giving work. */
+export const GIVING_WORK_PROMPT =
+  "**Giving work asks two questions.** Every give (`give`, make_app_a_coached_activity with a roster, or a class cell with an activity) needs the teacher's answer to: when does it show up (now, a time, or a bell block), and when should they finish it (in that class, by a date, or open until a date). In `give` those are `startsNow` or `startsAtMs`, and `finish`. Teachers usually say both in their own words. \"Due Saturday\" or \"by Saturday\" is a date: it stays on their list until they finish and goes late after. \"Open until Saturday\" or \"available until Saturday\" is open-until: available until the end of that day, then it disappears from their list whether or not they finished, never late. \"Keep it live until Saturday\" or \"until Wednesday\" could be either, so don't pick: ask one question, like \"Due Saturday (it stays on their list and goes late), or open until Saturday (then it disappears)?\" \"Next week's homework\" (\"assign it for next week's homework\") answers both: pass `nextWeekHomework:true` instead of `startsAtMs` and `finish`; it is due at the end of next school week's last school day (a holiday Friday makes it Thursday). In `give`, \"due this week\" is `finish:'thisWeek'`, the last school day of the week it shows up in; never guess Friday's date. Homework due on a week's last school day is that week's homework: call it \"due this week\" or \"due next week\" when you tell the teacher, and name the day too. When both answers are there, just do it. When one is missing, ask only for that one, in one short message, offering the choices the tool returns, including the group's bell block (\"Tomorrow · Humanities (9:45)\"). Never choose \"in that class\" yourself, and never read \"push\" or \"now\" as an answer about finishing. Afterwards, say in one line when it shows up and when it leaves their screens or is due. For a date, add that it stays on their list until they finish, so anyone not done by then sees it as late. For open-until, say it disappears after that day and that the Run page will show who didn't finish.";

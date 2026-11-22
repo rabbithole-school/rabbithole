@@ -178,7 +178,7 @@ describe("applyAdvanceRubricScoreFromTool", () => {
     const prompt = buildTutorSystemPrompt(context!);
     expect(prompt).toContain("before any scholar-facing text in that turn");
     expect(prompt).toContain(
-      "The app writes the scholar-facing completion close after the tool succeeds",
+      "The app adds a short note after your reply saying the activity is done",
     );
     expect(prompt).toContain("Completion does not close the chat");
   });

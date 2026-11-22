@@ -60,11 +60,13 @@ import {
 } from "@/shared/practiceLoop";
 import {
   breakerEasyItemMatchesCommand,
+  gradeResultFromSubmitResponse,
   isDurableCommand,
   practiceReduce,
   type PracticeCommand,
   type PracticeEvent,
   type PracticeState,
+  type SubmitAnswerResponse,
   breakerFreshItemOnScreen,
 } from "@/shared/practiceMachine";
 
@@ -371,65 +373,17 @@ export function usePracticeMachine(
             submit: submitOutboxEntry,
           });
           if (outcome.status === "submitted") {
-            const res = outcome.result as {
-              correct: boolean;
-              backOff?: {
-                missStreak: number;
-              };
-              breakerRecovery?: {
-                triggerAttemptId: string;
-                triggerNodeKey: string;
-                domain: string;
-                initialRepair?: {
-                  rung: null | {
-                    kind: "completion" | "reveal";
-                    stepIndex: number;
-                  };
-                  hasMore: boolean;
-                };
-              };
-              breakerRecoveryVerified?: boolean;
-              dispatchCompleted?: unknown;
-            };
+            const res = outcome.result as SubmitAnswerResponse;
             host.onGrade(res, command.entry);
             host.onDispatchCompleted(res.dispatchCompleted);
-            const recovery = res.breakerRecovery;
-            const initialRepair = recovery?.initialRepair;
+            const initialRepair = res.breakerRecovery?.initialRepair;
             if (initialRepair?.rung) {
               host.onHintRung(initialRepair, "breaker");
             }
             dispatch({
               type: "server:submitSucceeded",
               id: command.id,
-              result: {
-                correct: res.correct,
-                ...(res.backOff
-                  ? {
-                      backOff: {
-                        triggerAttemptId:
-                          recovery?.triggerAttemptId ??
-                          `legacy:${command.entry.itemId}`,
-                        triggerNodeKey: recovery?.triggerNodeKey ?? "",
-                        domain: recovery?.domain ?? "",
-                        missStreak: res.backOff.missStreak,
-                        recoveryAvailable: recovery !== undefined,
-                        initialRepairStatus:
-                          initialRepair === undefined
-                            ? "opening"
-                            : initialRepair.rung === null
-                              ? "unavailable"
-                              : initialRepair.rung.kind === "reveal"
-                                ? "done"
-                                : "open",
-                        repairStepIndex:
-                          initialRepair?.rung?.stepIndex ?? null,
-                      },
-                    }
-                  : {}),
-                ...(res.breakerRecoveryVerified !== undefined
-                  ? { breakerRecoveryVerified: res.breakerRecoveryVerified }
-                  : {}),
-              },
+              result: gradeResultFromSubmitResponse(res, command.entry.itemId),
             });
           } else if (outcome.status === "queued") {
             host.onQueuedCount(outcome.count);

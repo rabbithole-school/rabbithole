@@ -10,7 +10,8 @@
  * tutor-visible prompt constants that ship in `convex/prompts.ts`, built with
  * FIXED synthetic inputs so nothing per-session leaks in:
  *   - buildBasePrompt — with the runtime date/time line normalized out (see
- *     below). Its `<start>` bullet is turn-invariant since TRA-234.
+ *     below), in the Socratic and the ANSWER FIRST stance (TRA-661). Its
+ *     `<start>` bullet is turn-invariant since TRA-234.
  *   - buildOpeningTurnSection (both the first-ever FIRST MESSAGE directive and
  *     the returning-scholar fresh-start guards) — the turn-1-only directives
  *     that used to be branches inside buildBasePrompt / SESSION CONTEXT.
@@ -25,6 +26,8 @@
  *     a Quest build unlock.
  *   - buildOpenExplorationWrapUpSection() — the static "how an open
  *     exploration ends" note (rendered only for activity-less sessions).
+ *   - PRIOR_UNIT_WORK_HEADER — the static instructions over a scholar's prior
+ *     work in the unit (the work itself is per-session and excluded).
  *   - TUTOR_PROMPT_SECTION_ORDER + TUTOR_TURN_SYSTEM_SECTIONS +
  *     TUTOR_TURN_CONTEXT_SECTIONS + the cache-breakpoint keys — the section LAYOUT of the assembled prompt.
  *     Reordering sections is model-visible (what the tutor reads first changes)
@@ -68,9 +71,11 @@ import {
   buildOpenExplorationWrapUpSection,
   buildToolsSection,
   buildSideAppSection,
+  buildPythonBenchSection,
   buildTutorMissionSteering,
   FIRST_DOCUMENT_TUTOR_SECTION,
   FIRST_DYNAMIC_TUTOR_SECTION,
+  PRIOR_UNIT_WORK_HEADER,
   TUTOR_PROMPT_SECTION_ORDER,
   TUTOR_TURN_CONTEXT_SECTIONS,
   TUTOR_TURN_SYSTEM_SECTIONS,
@@ -84,6 +89,11 @@ import {
   CHAT_PRACTICE_NO_MATCH_REASON,
   SERVE_PRACTICE_PROBLEM_TOOL,
 } from "./practice/chatPractice";
+import {
+  QUEST_PROPOSAL_CARD_NOT_HERE,
+  QUEST_PROPOSAL_CARD_SHOWN,
+  QUEST_PROPOSAL_CARD_TOOL,
+} from "./questProposalCard";
 import {
   buildTeachBackSection,
   FINISH_TEACH_BACK_TOOL,
@@ -138,6 +148,14 @@ export function buildVersionMaterial(): string {
   const teachBackOn = teachBackEnabled();
   const parts: (string | null)[] = [
     normalizeBasePrompt(buildBasePrompt(REF_SCHOLAR_NAME)),
+    // The ANSWER FIRST stance (TRA-661), with a word budget and with the
+    // whole scale (no talk level set).
+    normalizeBasePrompt(
+      buildBasePrompt(REF_SCHOLAR_NAME, undefined, { wordBudget: 70 }),
+    ),
+    normalizeBasePrompt(
+      buildBasePrompt(REF_SCHOLAR_NAME, undefined, { wordBudget: null }),
+    ),
     // Fixed synthetic timestamps (non-zero: a falsy lastSessionAt means "no
     // prior session" and yields null): 2h gap vs. same-sitting, so all three
     // opening-turn variants are covered without any wall-clock input.
@@ -151,6 +169,18 @@ export function buildVersionMaterial(): string {
     buildToolsSection({ builderFeatures: false }),
     buildToolsSection({ builderFeatures: true }),
     buildToolsSection({ builderFeatures: false, appActions: true }),
+    // NO NEW APPS HERE (lib/mission.ts mayCreateAppInSession), with and
+    // without an app to edit.
+    buildToolsSection({ builderFeatures: false, canCreateApp: false }),
+    buildToolsSection({ builderFeatures: true, canCreateApp: false }),
+    // PROPOSING A QUEST (TRA-690): the card's prompt and its tool.
+    buildToolsSection({
+      builderFeatures: false,
+      canCreateApp: false,
+      offersQuestProposal: true,
+    }),
+    JSON.stringify(QUEST_PROPOSAL_CARD_TOOL),
+    [QUEST_PROPOSAL_CARD_SHOWN, QUEST_PROPOSAL_CARD_NOT_HERE].join("\n"),
     buildSideAppSection("text"),
     buildSideAppSection(null),
     buildSideAppSection("text", { hasMission: true }),
@@ -166,7 +196,14 @@ export function buildVersionMaterial(): string {
       buildStepOpen: true,
     }),
     buildSideAppSection("text", { openBuild: "Reference build step" }),
+    // PYTHON BENCH (lib/pythonBench.ts): offered and open, per chat kind.
+    ...(["open", "quest", "teacherActivity"] as const).flatMap((kind) => [
+      buildPythonBenchSection({ offered: true, open: false, otherApp: false, kind }),
+      buildPythonBenchSection({ offered: true, open: true, otherApp: false, kind }),
+      buildPythonBenchSection({ offered: true, open: false, otherApp: true, kind }),
+    ]),
     buildOpenExplorationWrapUpSection(),
+    PRIOR_UNIT_WORK_HEADER,
     // Section layout + where the prompt-cache breakpoint falls.
     `layout: ${TUTOR_PROMPT_SECTION_ORDER.join(",")} | turn-system: ${TUTOR_TURN_SYSTEM_SECTIONS.join(",")} | turn-context: ${TUTOR_TURN_CONTEXT_SECTIONS.join(",")} | breakpoint: ${FIRST_DYNAMIC_TUTOR_SECTION} | documents: ${FIRST_DOCUMENT_TUTOR_SECTION}`,
     chatPracticeOn

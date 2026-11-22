@@ -33,20 +33,23 @@ import {
  */
 
 describe("gradeRank / GRADE_ORDER", () => {
-  it("ranks K..9 in order, 0-based", () => {
-    expect(GRADE_ORDER).toEqual(["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+  it("ranks K..11 in order, 0-based", () => {
+    expect(GRADE_ORDER).toEqual(["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]);
     expect(gradeRank("K")).toBe(0);
     expect(gradeRank("1")).toBe(1);
     expect(gradeRank("4")).toBe(4);
     expect(gradeRank("8")).toBe(8);
     expect(gradeRank("9")).toBe(9);
+    // Two-digit grades rank numerically, never as strings ("10" < "9" lexically).
+    expect(gradeRank("10")).toBe(10);
+    expect(gradeRank("11")).toBe(11);
   });
 
   it("returns -1 for missing or unrecognized grades (no anchor)", () => {
     expect(gradeRank(undefined)).toBe(-1);
     expect(gradeRank(null)).toBe(-1);
     expect(gradeRank("")).toBe(-1);
-    expect(gradeRank("10")).toBe(-1);
+    expect(gradeRank("12")).toBe(-1);
     expect(gradeRank("kindergarten")).toBe(-1);
   });
 });

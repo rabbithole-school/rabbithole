@@ -1611,6 +1611,21 @@ describe("workshopOpeningFor", () => {
       teacherEditOverride: false,
     });
   });
+
+  test("a scholar's coached session opens in Play on the starter, Edit without one", () => {
+    const scholar = {
+      isTestDrive: false,
+      callerRole: "scholar",
+      editAccess: "always",
+      hasAppRequest: true,
+    } as const;
+    expect(
+      workshopOpeningFor({ ...scholar, openedOnStarter: true }).defaultMode,
+    ).toBe("play");
+    expect(
+      workshopOpeningFor({ ...scholar, openedOnStarter: false }).defaultMode,
+    ).toBe("edit");
+  });
 });
 
 describe("api.sessions.getWithMessages workshop opening (TRA-477)", () => {

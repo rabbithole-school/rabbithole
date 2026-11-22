@@ -382,3 +382,83 @@ describe("sessions.startActivityKickoff", () => {
     expect(await sessionMessages(t, sessionId)).toHaveLength(1);
   });
 });
+
+// A play-only app with a brief and no appRequest: the teacher's rehearsal IS
+// the build (lib/appActivity.ts rehearsalBuildRequest).
+describe("play-only app rehearsal builds from the brief", () => {
+  test("a rehearsal builds until a starter exists, then only the one that built it; kids-build apps and scholars are unchanged", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher", "lehua_torres");
+    const scholarId = await seedUser(t, "scholar", "kai_kahale");
+    const { activityId } = await seedUnitWithActivity(t, teacherId, {
+      kind: "vibecode",
+    });
+    await t.run((ctx) => ctx.db.patch(activityId, { editAccess: "never" }));
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+    const open = async (
+      as: typeof asTeacher,
+      userId: Id<"users">,
+      overrides: Partial<Doc<"sessions">>,
+    ) =>
+      (
+        await as.query(api.sessions.getWithMessages, {
+          id: await seedSession(t, userId, { activityId, ...overrides }),
+        })
+      ).session;
+
+    const building = await open(asTeacher, teacherId, { isTestDrive: true });
+    expect(building.teacherBuildKickoff).toBe(true);
+    expect(building.defaultWorkshopMode).toBe("edit");
+    expect(building.appRequest).toBe("Invite the scholar to investigate balance.");
+
+    // Its first autosave writes a starter sourced from this rehearsal's own
+    // app: the same rehearsal is still the build.
+    const buildingId = await seedSession(t, teacherId, { activityId, isTestDrive: true });
+    const starterFrom = async (sessionId: Id<"sessions">) =>
+      await t.run(async (ctx) => {
+        const artifactId = await ctx.db.insert("artifacts", {
+          sessionId,
+          title: "Balance game",
+          content: "<p>v1</p>",
+          lastEditedBy: "ai",
+          revision: 0,
+          type: "code",
+          language: "html",
+        });
+        const starterAppId = await ctx.db.insert("customApps", {
+          token: `starter-${sessionId}`,
+          name: "Balance game",
+          kind: "static",
+          status: "live",
+          html: "<p>v1</p>",
+          origin: "starter",
+          sourceArtifactId: artifactId,
+          createdBy: teacherId,
+          updatedAt: Date.now(),
+        });
+        await ctx.db.patch(activityId, { starterAppId });
+      });
+    await starterFrom(buildingId);
+    const stillBuilding = (
+      await asTeacher.query(api.sessions.getWithMessages, { id: buildingId })
+    ).session;
+    expect(stillBuilding.teacherBuildKickoff).toBe(true);
+
+    // Any other rehearsal (say on Blank slate) leaves that starter alone.
+    const other = await open(asTeacher, teacherId, { isTestDrive: true });
+    expect(other.teacherBuildKickoff).toBe(false);
+    expect(other.appRequest).toBeNull();
+    await t.run((ctx) => ctx.db.patch(activityId, { starterAppId: undefined }));
+
+    const scholarView = await open(asScholar, scholarId, {});
+    expect(scholarView.hasAppRequest).toBe(false);
+    expect(JSON.stringify(scholarView)).not.toContain("investigate balance");
+
+    await t.run((ctx) => ctx.db.patch(activityId, { editAccess: "always" }));
+    const kidsBuild = await open(asTeacher, teacherId, { isTestDrive: true });
+    expect(kidsBuild.teacherBuildKickoff).toBe(false);
+    expect(kidsBuild.appRequest).toBeNull();
+  });
+});
+

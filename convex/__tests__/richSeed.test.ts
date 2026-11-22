@@ -12,6 +12,10 @@ import {
   levelEvidenceSessions,
 } from "../seed/rich/levelEvidence";
 import { readAloudText, tallyReadAloud } from "../lib/levelEvidence";
+import {
+  assertSeedRostersSingleSchool,
+  findCrossSchoolRosters,
+} from "../seed/rosterTenancy";
 
 // Why this file: the rich-cohort inserter (convex/seedRichCohort.ts) is run
 // through the LIVE schema validators here — convexTest validates every inserted
@@ -255,6 +259,61 @@ describe("rich cohort seed — schema drift + invariants", () => {
     expect(seen.size).toBe(scholarIds.size);
   });
 
+  // TRA-615: a roster can't span two schools. The seed once put two Friends
+  // scholars on a Moli assignment, so the teacher failed the tenancy check on
+  // her own class and anything reusing it made a second one.
+  test("every seeded group and assignment roster stays inside one school", async () => {
+    const t = convexTest(schema, modules);
+    await t.run((ctx) => ctx.runMutation(internal.seedRichCohort.seedAll, {}));
+
+    const result = await t.run(async (ctx) => {
+      const scholars = await ctx.db
+        .query("users")
+        .withIndex("by_role", (q) => q.eq("role", "scholar"))
+        .collect();
+      const institutions = await ctx.db.query("institutions").collect();
+      return {
+        violations: await findCrossSchoolRosters(ctx),
+        scholarSchool: Object.fromEntries(
+          scholars.map((s) => [
+            s.username,
+            institutions.find((i) => i._id === s.institutionId)?.slug,
+          ]),
+        ),
+      };
+    });
+    expect(result.violations).toEqual([]);
+    // The two Honu scholars who used to sit in Friends are Moli scholars now.
+    expect(result.scholarSchool.makoa_texeira).toBe("moli");
+    expect(result.scholarSchool.anela_cruz).toBe("moli");
+  });
+
+  test("the roster tenancy check throws on a cross-school roster", async () => {
+    const t = convexTest(schema, modules);
+    await t.run((ctx) => ctx.runMutation(internal.seedRichCohort.seedAll, {}));
+
+    await t.run(async (ctx) => {
+      const friends = await ctx.db
+        .query("institutions")
+        .withIndex("by_slug", (q) => q.eq("slug", "guests"))
+        .unique();
+      const makoa = await ctx.db
+        .query("users")
+        .withIndex("by_username", (q) => q.eq("username", "makoa_texeira"))
+        .unique();
+      await ctx.db.patch(makoa!._id, { institutionId: friends!._id });
+    });
+
+    const violations = await t.run((ctx) => findCrossSchoolRosters(ctx));
+    // Honu, plus every assignment Makoa is on.
+    expect(violations.some((v) => v.includes('scholar group "Honu"'))).toBe(true);
+    expect(violations.some((v) => v.startsWith("assignment"))).toBe(true);
+    expect(violations.every((v) => v.includes("makoa_texeira @ guests"))).toBe(true);
+    await expect(
+      t.run((ctx) => assertSeedRostersSingleSchool(ctx)),
+    ).rejects.toThrow(/Seed tenancy invariant broken/);
+  });
+
   test("dev Sloane owns Robotics with scoped capabilities, not teacher access", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
@@ -451,7 +510,6 @@ describe("rich cohort seed — schema drift + invariants", () => {
     );
     expect(tabs).toEqual([
       "Now",
-      "All",
       "Humanities",
       "Language Arts",
       "Math",
@@ -869,5 +927,56 @@ describe("rich seed — Talk / Read / Write evidence fixture (TRA-515)", () => {
     expect(
       readAloudText(tallyReadAloud(attempts.map((a) => ({ ...a, at: a._creationTime })))),
     ).toContain("often misses sh");
+  });
+});
+
+describe("rich seed — family portfolio", () => {
+  test("parent_park's portfolio groups class work by subject", async () => {
+    const { t } = await seeded();
+    const { parent, child } = await t.run(async (ctx) => ({
+      parent: await ctx.db
+        .query("users")
+        .withIndex("by_username", (q) => q.eq("username", "parent_park"))
+        .unique(),
+      child: await ctx.db
+        .query("users")
+        .withIndex("by_username", (q) => q.eq("username", "leilani_park"))
+        .unique(),
+    }));
+    const asParent = await withUser(t, parent!._id);
+    const summary = await asParent.query(api.portfolio.coursesForGuardian, {
+      scholarId: child!._id,
+    });
+    expect(
+      summary.subjects.map(({ name, workCount }) => ({ name, workCount })),
+    ).toEqual(
+      expect.arrayContaining([
+        { name: "Math Workshop", workCount: 1 },
+        { name: "Humanities", workCount: 1 },
+        { name: "Science", workCount: 1 },
+      ]),
+    );
+    expect(summary.subjects).toHaveLength(3);
+    // The unfiled sketchbook page is the only Other work.
+    expect(summary.otherWorkCount).toBe(1);
+
+    // Class work is ordinary scans: no Robotics capture row.
+    const filed = await t.run(async (ctx) => {
+      const items = (await ctx.db.query("portfolioItems").collect()).filter(
+        (item) => item.source === "google_drive" && item.activityId,
+      );
+      return await Promise.all(
+        items.map(async (item) => ({
+          capture: await ctx.db
+            .query("captureStationCaptures")
+            .withIndex("by_portfolio_item", (q) =>
+              q.eq("portfolioItemId", item._id),
+            )
+            .unique(),
+        })),
+      );
+    });
+    expect(filed).toHaveLength(3);
+    for (const row of filed) expect(row.capture).toBeNull();
   });
 });

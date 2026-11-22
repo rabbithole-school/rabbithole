@@ -1,6 +1,6 @@
 /**
  * ScholarHomeTabs — the pill row for the scholar Home:
- * Now · All · <subjects> · Other · Scholar’s Prep · Quests.
+ * Now · <subjects> · Other · Scholar’s Prep · Quests.
  * Native RN version (no Chakra/DOM). Scrollable horizontally for wide subject lists.
  * Invariant: no text below fontSize 14; even borders, no accent stripes.
  */

@@ -1,5 +1,6 @@
 "use client";
 
+import { WritingWithItalics } from "@/components/WritingWithItalics";
 import { useEffect, useState } from "react";
 import {
   Box,
@@ -48,6 +49,9 @@ export interface ParentPortfolioItem {
   hasTutorTranscription?: boolean;
   /** The scholarGroup this work's course belongs to; null when unfiled. */
   courseId?: string | null;
+  /** The subject work outside any course was given in ("Art"); null when it
+   *  belongs to a course or nobody recorded a subject. */
+  subject?: string | null;
   /** Poster still for a capture-station video. */
   videoThumbUrl?: string | null;
   videoDurationMs?: number | null;
@@ -194,7 +198,7 @@ export function ParentPortfolioViewer({
                       lineHeight="1.75"
                       whiteSpace="pre-wrap"
                     >
-                      {item.content}
+                      <WritingWithItalics content={item.content} />
                     </Text>
                   </Box>
                 ) : fileUrl === undefined ? (

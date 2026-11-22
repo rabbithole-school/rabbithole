@@ -29,6 +29,7 @@
 // Convex Auth identity. The role gate here picks WHICH tools; the resolver
 // (and, for restricted callers, allowedScholarIds upstream) picks WHOSE data.
 
+import { ConvexError } from "convex/values";
 import type { ActionCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -47,6 +48,7 @@ import {
   type WriteMode,
 } from "./readingLevels";
 import { withBase, scholarPath } from "./channels";
+import { legacySectionNotes, reportBody, REPORT_SECTION_KEY, reportTitle } from "./parentReport";
 
 /** Where the conversation lives — gates the sensitive/destructive tools. */
 export type WriteSurface = "private" | "channel";
@@ -93,6 +95,8 @@ export async function makeScholarWriteTools(
     hasSchoolOperationsAccess?: boolean;
     /** The grant-derived scholar set; every name lookup stays inside it. */
     allowedScholarIds?: Set<Id<"users">>;
+    /** The turn's institution lens (in-app `?inst=`); new accounts land there. */
+    institutionScope?: string;
   },
 ) {
   const {
@@ -103,6 +107,7 @@ export async function makeScholarWriteTools(
     linkBase = "",
     hasSchoolOperationsAccess = false,
     allowedScholarIds,
+    institutionScope,
   } = opts;
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
@@ -207,7 +212,7 @@ export async function makeScholarWriteTools(
         name: "add_scholar_observation",
         description:
           "Record a teacher observation about a scholar — praise, concern, suggestion, intervention, or a neutral note. This is also the one tool for brief Whole Child inputs: tag `category` when the take is about executive function, social-emotional growth, collaboration & character, or passions & quests; use type `note` when it has no praise/concern valence. The observation lands on the scholar's record and category-tagged observations also pool into the team's Whole Child meeting. " +
-          "Routine attendance states (present, absent, tardy, or appointment) and attendance corrections are administrative attendance, NOT observations or concerns; use set_attendance instead. " +
+          "Routine attendance states (present, absent, tardy, appointment, or early release) and attendance corrections are administrative attendance, NOT observations or concerns; use set_attendance instead. " +
           "This logs the TEACHER's observation, in their voice and judgment — you are a SCRIBE, not the author. Only record what the teacher tells you to (or explicitly approves); NEVER compose, infer, editorialize, or volunteer an observation of your own. Your own read of a scholar is not a teacher observation and must never land in this human-authored record (the AI's assessments live in the separate observer channel). " +
           "Set `weight` to 'major' ONLY when the teacher's language signals it matters for the child's profile (\"this is a big one\", \"for his record\", a milestone, or an incident with follow-up actions); otherwise leave it 'minor' (the default). ALWAYS state which weight you chose in your reply so a mislabel is caught in the moment. " +
           "Confirm the scholar + note with the teacher before logging unless their message already states both unambiguously.",
@@ -373,20 +378,10 @@ export async function makeScholarWriteTools(
       }),
     );
 
-    // ── Narrative REPORT tools (read/write a scholar's course report) ─────
-    // The teacher drives report-writing in natural language from the bot panel
-    // — the AI reads the evidence + writes/edits sections at the teacher's
-    // direction (replacing the old baked-in AI draft/check). Teacher is still
-    // the author; the composer shows the same sections live.
-    const REPORT_SECTIONS: Record<string, string> = {
-      context: "context",
-      progress: "progress",
-      core: "dim_core",
-      connections: "dim_connections",
-      practice: "dim_practice",
-      identity: "dim_identity",
-      goals: "goals",
-    };
+    // ── Parent REPORT tools (read/write a scholar's report for a class) ──
+    // A report is one parent-facing prose body per class (or "SEL"), the
+    // same text the Reports composer edits (lib/parentReport.ts). The teacher
+    // directs the writing from the bot panel; Reports can also draft it.
     const currentPeriod = async (scholarId: string) =>
       ctx.runQuery(internal.reportingPeriods.currentInternal, {
         scholarId: scholarId as Id<"users">,
@@ -396,12 +391,12 @@ export async function makeScholarWriteTools(
       betaTool({
         name: "get_scholar_report",
         description:
-          "Read a scholar's course narrative report for the current reporting period — its sections (context, progress, core, connections, practice, identity, goals), the 1–7 PCM ratings, and status. Use this to see what's written before you help the teacher write more. Pair it with the get_scholar_* evidence tools to ground the writing.",
+          "Read a scholar's parent report(s) for the current reporting period: one prose report per class plus one for SEL, with its status. Bracketed text like [a moment from class] is a placeholder the teacher still has to fill. Use this to see what's written before you help the teacher revise it. Pair it with the get_scholar_* evidence tools to ground the writing.",
         inputSchema: {
           type: "object" as const,
           properties: {
             scholarName: scholarNameProp,
-            subject: { type: "string" as const, description: "Course subject (e.g. Science). Omit to list all this scholar's reports this period." },
+            subject: { type: "string" as const, description: "Class name (e.g. Science), or SEL. Omit to list all this scholar's reports this period." },
           },
           required: ["scholarName"] as const,
         },
@@ -416,15 +411,13 @@ export async function makeScholarWriteTools(
             subject: input.subject,
           });
           if (reports.length === 0)
-            return `No report started yet for ${scholar.name}${input.subject ? ` in ${input.subject}` : ""} this period. Use write_report_section to begin one.`;
+            return `No report started yet for ${scholar.name}${input.subject ? ` in ${input.subject}` : ""} this period. Use write_report to begin one.`;
           const parts = reports.map((r) => {
-            const secs = r.sections
-              .map((s) => `  • ${s.title}: ${s.body.trim() ? s.body.trim() : "(empty)"}`)
+            const body = reportBody(r.sections).trim();
+            const notes = legacySectionNotes(r.sections)
+              .map((s) => `  • ${s.title}: ${s.body}`)
               .join("\n");
-            const ratings = r.pcmRatings
-              ? `  ratings — core ${r.pcmRatings.core ?? "–"}, connections ${r.pcmRatings.connections ?? "–"}, practice ${r.pcmRatings.practice ?? "–"}, identity ${r.pcmRatings.identity ?? "–"}; overall ${r.courseRating ?? "–"}`
-              : "  ratings — none yet";
-            return `### ${r.subject} (${r.status})\n${secs}\n${ratings}`;
+            return `### ${reportTitle(r.subject)} (${r.status})\n${body || "(no report text yet)"}${notes ? `\n\nEarlier teacher notes:\n${notes}` : ""}`;
           });
           return parts.join("\n\n");
         },
@@ -433,81 +426,45 @@ export async function makeScholarWriteTools(
 
     tools.push(
       betaTool({
-        name: "write_report_section",
+        name: "write_report",
         description:
-          "Write (replace) one section of a scholar's course narrative report. Sections: context, progress, core, connections, practice, identity, goals. Only write what the TEACHER asked for or approved — you are helping them author their report, in their voice, grounded in the evidence tools; do not invent claims the evidence doesn't support. The teacher can edit anything you write in the composer.",
+          "Write (replace) a scholar's parent report for one class, or for SEL. It is ONE prose report for parents, about 180 to 240 words in two paragraphs: growth this term with specific skills and examples, then next steps; connect it to any goals the family shared. Only write what the TEACHER asked for or approved, in their voice, grounded in the evidence tools. Never invent a detail: where the evidence is missing, write a bracketed placeholder such as [a moment from class] for the teacher to fill. The teacher edits and publishes it in Reports.",
         inputSchema: {
           type: "object" as const,
           properties: {
             scholarName: scholarNameProp,
-            subject: { type: "string" as const, description: "Course subject (e.g. Science)." },
-            section: {
-              type: "string" as const,
-              enum: ["context", "progress", "core", "connections", "practice", "identity", "goals"] as const,
-              description: "Which section to write.",
-            },
-            text: { type: "string" as const, description: "The section prose, in the teacher's voice." },
+            subject: { type: "string" as const, description: "Class name (e.g. Science), or SEL." },
+            text: { type: "string" as const, description: "The full report prose, in the teacher's voice." },
           },
-          required: ["scholarName", "subject", "section", "text"] as const,
+          required: ["scholarName", "subject", "text"] as const,
         },
         run: async (input) => {
           const scholar = await resolve(input.scholarName);
           if (!scholar) return `No scholar found matching "${input.scholarName}".`;
           const period = await currentPeriod(scholar.id);
           if (!period) return "There's no open reporting period right now.";
-          const narrativeId = await ctx.runMutation(internal.courseNarratives.openInternal, {
-            scholarId: scholar.id as Id<"users">,
-            teacherId: callerUserId,
-            periodId: period._id,
-            subject: input.subject,
-          });
-          await ctx.runMutation(internal.courseNarratives.setSectionInternal, {
+          let narrativeId: Id<"courseNarratives">;
+          try {
+            narrativeId = await ctx.runMutation(internal.courseNarratives.openInternal, {
+              scholarId: scholar.id as Id<"users">,
+              teacherId: callerUserId,
+              periodId: period._id,
+              subject: input.subject,
+            });
+          } catch (e) {
+            // A class with no report of its own is refused in plain words.
+            if (e instanceof ConvexError && typeof e.data === "string") return e.data;
+            throw e;
+          }
+          const res = await ctx.runMutation(internal.courseNarratives.setSectionInternal, {
             narrativeId,
-            key: REPORT_SECTIONS[input.section] ?? input.section,
+            key: REPORT_SECTION_KEY,
             body: input.text,
           });
-          emit({ toolComplete: { name: "write_report_section", result: `Wrote ${input.section} for ${scholar.name}` } });
-          return `Updated the **${input.section}** section of ${scholar.name}'s ${input.subject} report. The teacher can review + edit it in Reports. ${scholarLink(scholar.id)}`;
-        },
-      }),
-    );
-
-    tools.push(
-      betaTool({
-        name: "set_report_rating",
-        description:
-          "Set a 1–7 PCM rating on a scholar's course report (core / connections / practice / identity, or 'overall' for the Course Performance Rating). Only set a rating the teacher has decided — offer your read if asked, but the rating is the teacher's judgment.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            scholarName: scholarNameProp,
-            subject: { type: "string" as const, description: "Course subject (e.g. Science)." },
-            dimension: {
-              type: "string" as const,
-              enum: ["core", "connections", "practice", "identity", "overall"] as const,
-            },
-            rating: { type: "integer" as const, description: "1–7" },
-          },
-          required: ["scholarName", "subject", "dimension", "rating"] as const,
-        },
-        run: async (input) => {
-          const scholar = await resolve(input.scholarName);
-          if (!scholar) return `No scholar found matching "${input.scholarName}".`;
-          const period = await currentPeriod(scholar.id);
-          if (!period) return "There's no open reporting period right now.";
-          const narrativeId = await ctx.runMutation(internal.courseNarratives.openInternal, {
-            scholarId: scholar.id as Id<"users">,
-            teacherId: callerUserId,
-            periodId: period._id,
-            subject: input.subject,
-          });
-          await ctx.runMutation(internal.courseNarratives.setRatingInternal, {
-            narrativeId,
-            dimension: input.dimension,
-            value: input.rating,
-          });
-          emit({ toolComplete: { name: "set_report_rating", result: `Set ${input.dimension}=${input.rating} for ${scholar.name}` } });
-          return `Set ${input.dimension} = ${input.rating} on ${scholar.name}'s ${input.subject} report. ${scholarLink(scholar.id)}`;
+          if (!res.written)
+            return `I left ${scholar.name}'s ${input.subject} report unchanged. ${res.reason} ${scholarLink(scholar.id)}`;
+          emit({ toolComplete: { name: "write_report", result: `Wrote the ${input.subject} report for ${scholar.name}` } });
+          return `Updated ${scholar.name}'s ${input.subject} report. The teacher can review, fill any placeholders, and publish it in Reports. ${scholarLink(scholar.id)}`;
         },
       }),
     );
@@ -892,6 +849,159 @@ export async function makeScholarWriteTools(
     );
   }
 
+  // ── create_scholar_account — scholar-admin, PRIVATE only ──────────────
+  // The directory's Add scholar button, for an agent: a new child's account
+  // (a discovery visit, a new enrolment). Same core (users.createScholarAs).
+  if (isScholarAdmin && isPrivate) {
+    tools.push(
+      betaTool({
+        name: "create_scholar_account",
+        description:
+          "Create a new SCHOLAR account at your school — the same as Add scholar in the school directory. Use it when a child who isn't in Rabbithole yet needs an account (a discovery visit, a new enrolment). The account starts in no group, on no assignment and with no iPad: follow up with update_group_membership, add_assignment_scholars and reassign_managed_device as asked. Before calling, tell the person the exact name and username you will use and get a yes. It refuses when a scholar with that name already exists unless createAnyway is true. The scholar signs in on a managed iPad through the iPad's claim, so no password is needed; reset_scholar_password issues a PIN link if one is.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            name: {
+              type: "string" as const,
+              description: "The child's display name, e.g. 'Hoku Makani'.",
+            },
+            username: {
+              type: "string" as const,
+              description:
+                "Optional sign-in username (letters, numbers, dot, dash, underscore). Omit to create the account without one.",
+            },
+            createAnyway: {
+              type: "boolean" as const,
+              description:
+                "Set true only after the person confirmed this is a different child from an existing scholar with the same name.",
+            },
+          },
+          required: ["name"] as const,
+        },
+        run: async (input) => {
+          const name = input.name.trim();
+          if (!name) return "Give the child's name.";
+          if (!input.createAnyway) {
+            const { scholars } = await ctx.runQuery(
+              internal.curriculumAssistant.listScholarsInternal,
+              {
+                includeProgramGuests: true,
+                ...(allowedScholarIds
+                  ? { allowedScholarIds: [...allowedScholarIds] }
+                  : {}),
+              },
+            );
+            // Exact (case/space-insensitive) name only: a partial match
+            // ("Ana" in "Hana") would refuse most new children.
+            const key = name.toLowerCase().replace(/\s+/g, " ");
+            const existing = scholars.filter(
+              (c) =>
+                (!allowedScholarIds || allowedScholarIds.has(c.id as Id<"users">)) &&
+                c.name.trim().toLowerCase().replace(/\s+/g, " ") === key,
+            );
+            if (existing.length > 0) {
+              return `A scholar named "${existing[0].name}" already exists. Nothing was created. If this is a different child, confirm with the person and call again with createAnyway: true.`;
+            }
+          }
+          let created: { scholarId: string; name: string; username: string | null };
+          try {
+            created = await ctx.runMutation(
+              internal.teacherAide.createScholarAsCaller,
+              {
+                callerUserId,
+                name,
+                username: input.username,
+                scope: institutionScope,
+              },
+            );
+          } catch (e) {
+            return `${(e instanceof Error ? e.message : String(e)).replace(/\.?$/, ".")} Nothing was created.`;
+          }
+          // Later tools in this same turn (group, assignment, iPad) look the
+          // child up by name inside this turn's visible set; the account was
+          // just made at the caller's own school, so admit it.
+          allowedScholarIds?.add(created.scholarId as Id<"users">);
+          emit({
+            toolComplete: {
+              name: "create_scholar_account",
+              result: `Created ${created.name}`,
+            },
+          });
+          return `Created scholar account "${created.name}"${
+            created.username ? ` (username "${created.username}")` : " (no username)"
+          }. ${scholarLink(created.scholarId)}\nNot yet in any group, on any assignment, or on an iPad.`;
+        },
+      }),
+    );
+  }
+
+  // ── update_group_membership — scholar-admin, any surface ──────────────
+  // The group page's add/remove member, for an agent. Same cores
+  // (scholarGroups.addScholarToGroupAs / removeScholarFromGroupAs).
+  // Offered in channels too, like add_assignment_scholars: a channel message
+  // can steer the bot into a roster change, but only within the speaker's own
+  // rights (re-checked in teacherAide.setGroupMembershipAsCaller), and the
+  // change is one click to undo. It does move app grants on iPads.
+  if (isScholarAdmin) {
+    tools.push(
+      betaTool({
+        name: "update_group_membership",
+        description:
+          "Add a scholar to a named scholar group (e.g. 'Seals', 'Geckos') or remove them from it — the same as editing the group's members on its page. Adding grants the scholar the apps that group gets on their iPad; removing takes them away. A group is not an assignment: to put the scholar on a cohort's work, also use add_assignment_scholars. Confirm the scholar and group with the person first unless the ask names both exactly.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            scholarName: scholarNameProp,
+            groupName: {
+              type: "string" as const,
+              description: "The group's name, e.g. 'Seals' (case-insensitive).",
+            },
+            action: {
+              type: "string" as const,
+              enum: ["add", "remove"] as const,
+              description: "add or remove",
+            },
+          },
+          required: ["scholarName", "groupName", "action"] as const,
+        },
+        run: async (input) => {
+          const scholar = await resolveStrict(input.scholarName);
+          if (typeof scholar === "string") return scholar;
+          const action = input.action === "remove" ? "remove" : "add";
+          let r;
+          try {
+            r = await ctx.runMutation(
+              internal.teacherAide.setGroupMembershipAsCaller,
+              {
+                callerUserId,
+                groupName: input.groupName,
+                scholarId: scholar.id as Id<"users">,
+                action,
+              },
+            );
+          } catch (e) {
+            return `${(e instanceof Error ? e.message : String(e)).replace(/\.?$/, ".")} Nothing was changed.`;
+          }
+          if (!r.ok) return r.message;
+          const verb = action === "add" ? "Added" : "Removed";
+          const prep = action === "add" ? "to" : "from";
+          emit({
+            toolComplete: {
+              name: "update_group_membership",
+              result: `${verb} ${scholar.name} ${prep} ${r.groupName}`,
+            },
+          });
+          if (!r.changed) {
+            return action === "add"
+              ? `${scholar.name} was already in ${r.groupName}; nothing changed.`
+              : `${scholar.name} wasn't in ${r.groupName}; nothing changed.`;
+          }
+          return `${verb} ${scholar.name} ${prep} ${r.groupName}.`;
+        },
+      }),
+    );
+  }
+
   // ── delete_scholar — ADMIN only, PRIVATE only, IRREVERSIBLE ────────────
   if (isAdmin && isPrivate) {
     tools.push(
@@ -922,6 +1032,58 @@ export async function makeScholarWriteTools(
           } catch (e) {
             return e instanceof Error ? e.message : String(e);
           }
+        },
+      }),
+    );
+  }
+
+  // ── move_scholar_to_institution — ADMIN only, PRIVATE only ────────────
+  // The profile's Institution picker (institutions.setScholarInstitution),
+  // e.g. a discovery-visit guest moving to the guest school afterwards. Same
+  // core (institutions.moveScholarToInstitution). Admin-only because a move
+  // decides which staff can see the child.
+  if (isAdmin && isPrivate) {
+    tools.push(
+      betaTool({
+        name: "move_scholar_to_institution",
+        description:
+          "Move a scholar's account to another school (institution) — the same as the Institution picker on their profile. Staff at the old school stop seeing them; they leave every group at the old school (the result lists which); their sessions move with them. It does NOT change assignment rosters or iPads: any assignment roster that lists them keeps them until it is edited (remove_assignment_scholars takes them off one of your own assignments, before or after the move), and an iPad stays theirs until reassign_managed_device gives it to another scholar. The school must be named exactly (its name or slug); a name that isn't exact changes nothing, and the reply lists every school's exact name to confirm with the person. Before calling, tell the person the scholar's full name and the exact destination school and get an explicit yes.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            scholarName: scholarNameProp,
+            institutionName: {
+              type: "string" as const,
+              description: "The destination school's name or slug, e.g. 'Friends'.",
+            },
+          },
+          required: ["scholarName", "institutionName"] as const,
+        },
+        run: async (input) => {
+          const scholar = await resolveStrict(input.scholarName);
+          if (typeof scholar === "string") return scholar;
+          let r;
+          try {
+            r = await ctx.runMutation(internal.institutions.moveScholarAsCaller, {
+              callerUserId,
+              scholarId: scholar.id as Id<"users">,
+              institutionName: input.institutionName,
+            });
+          } catch (e) {
+            return `${(e instanceof Error ? e.message : String(e)).replace(/\.?$/, ".")} Nothing was changed.`;
+          }
+          if (!r.ok) return r.message;
+          emit({
+            toolComplete: {
+              name: "move_scholar_to_institution",
+              result: `Moved ${scholar.name} to ${r.to}`,
+            },
+          });
+          const left =
+            r.leftGroups.length > 0
+              ? ` They left these groups: ${r.leftGroups.join(", ")}.`
+              : "";
+          return `Moved ${scholar.name} from ${r.from ?? "no school"} to ${r.to}.${left} Assignment rosters and iPads were not changed.`;
         },
       }),
     );

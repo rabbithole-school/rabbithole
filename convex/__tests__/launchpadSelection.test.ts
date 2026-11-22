@@ -123,16 +123,16 @@ async function launchpadFor(
   s: ReturnType<ReturnType<typeof convexTest>["withIdentity"]>,
   scholarId: Id<"users">,
   platform?: "web" | "native",
-  /** false = an older installed iPad build (no `questionFraming` flag). */
-  questionFraming = true,
 ) {
+  // Both run clients send `questionFraming: true`; the server accepts it and
+  // no longer branches on it (TRA-475).
   const res = await s.query(api.practiceSkills.practiceSession, {
     scholarId,
     domain: DOMAIN,
     size: 6,
     seed: 1,
     ...(platform ? { platform } : {}),
-    ...(questionFraming ? { questionFraming: true } : {}),
+    questionFraming: true,
   });
   return {
     launchpad: (res as { launchpad?: { at: number; entry: WireEntry } }).launchpad ?? null,
@@ -312,37 +312,6 @@ describe("The framed item on a served run", () => {
     expect((await launchpadFor(s, scholarId)).launchpad).toBeNull();
   });
 
-  test("an older iPad build (no questionFraming) is never served an item_steps frame, and its writes can't suppress the node", async () => {
-    const t = convexTest(schema, modules);
-    await seedGraphAndContent(t);
-    const scholarId = await seedScholar(t);
-    const s = await asScholar(t, scholarId);
-
-    // The new client frames the regroup item with its own teaching step…
-    expect((await launchpadFor(s, scholarId, "native")).launchpad?.entry.move).toBe("item_steps");
-    // …the old build's card could only render atoms, so it gets no frame.
-    expect((await launchpadFor(s, scholarId, "native", false)).launchpad).toBeNull();
-
-    // A stale old-build "Show me" on that content-less key is refused, so the
-    // node stays framable for the new build.
-    expect(
-      await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: stepsNodeKey }),
-    ).toEqual({ claimed: false, reason: "suppressed" });
-    expect(
-      await s.mutation(api.instruction.recordInstructionChoice, { scholarId, key: stepsNodeKey, choice: "show" }),
-    ).toBeNull();
-    expect(await s.mutation(api.instruction.recordInstructionViewed, { scholarId, key: stepsNodeKey })).toBeNull();
-    expect((await launchpadFor(s, scholarId, "native")).launchpad?.entry.key).toBe(stepsNodeKey);
-
-    // The new client's framed writes on the same key do land.
-    await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: stepsNodeKey, framing: "question" });
-    expect(
-      await s.mutation(api.instruction.recordInstructionChoice, {
-        scholarId, key: stepsNodeKey, choice: "show", framing: "question",
-      }),
-    ).not.toBeNull();
-  });
-
   test("a teacher reading a scholar never mints a frame", async () => {
     const t = convexTest(schema, modules);
     await seedGraphAndContent(t);
@@ -479,7 +448,7 @@ describe("Node content as the move", () => {
     expect((await launchpadFor(s, scholarId)).launchpad).toBeNull();
   });
 
-  test("an older iPad build still gets a node_content frame it can render, under the ≤1/day cap", async () => {
+  test("another key shown today does not hold the frame (no cross-key day cap)", async () => {
     const t = convexTest(schema, modules);
     await seedNodeDoorwayGraph(t);
     await seedStrandContent(t);
@@ -488,14 +457,7 @@ describe("Node content as the move", () => {
     await seedFluent(t, scholarId, COUNT_KEY, COUNTING);
     await seedFluent(t, scholarId, ADD_EASY_KEY, ADD_SUB);
 
-    const legacy = (await launchpadFor(s, scholarId, "native", false)).launchpad;
-    expect(legacy?.entry.move).toBe("node_content");
-    expect(legacy?.entry.atoms.length).toBeGreaterThan(0);
-
-    // Another key already shown today by the old card: the old build is held
-    // by the daily cap; the question-framing client is not.
-    await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addSubKey });
-    expect((await launchpadFor(s, scholarId, "native", false)).launchpad).toBeNull();
+    await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addSubKey, framing: "question" });
     expect((await launchpadFor(s, scholarId, "native")).launchpad?.entry.key).toBe(addHardNodeKey);
   });
 
@@ -526,23 +488,18 @@ describe("Node content as the move", () => {
     expect((await launchpadFor(s, scholarId)).launchpad).toBeNull();
   });
 
-  test("the standalone card's ≤1/day governor is shared across key kinds", async () => {
+  test("a repeat claim of the same key the same day is idempotent", async () => {
     const t = convexTest(schema, modules);
     await seedNodeDoorwayGraph(t);
     await seedStrandContent(t);
     const scholarId = await seedScholar(t);
     const s = await asScholar(t, scholarId);
 
-    await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addHardNodeKey });
-    // A second call the same day is idempotent — still claimed (no self-retraction).
-    expect(await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addHardNodeKey })).toEqual({
-      claimed: true,
-    });
-    // A strand key with content, shown the SAME day by the old card, is held.
-    expect(await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addSubKey })).toEqual({
-      claimed: false,
-      reason: "daily_cap",
-    });
+    await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addHardNodeKey, framing: "question" });
+    // A second call the same day is still claimed (no self-retraction).
+    expect(
+      await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addHardNodeKey, framing: "question" }),
+    ).toEqual({ claimed: true });
   });
 
   test("a teacher reading a scholar never mints a node frame either", async () => {
@@ -615,18 +572,13 @@ describe("The never-attempted trigger", () => {
     expect(launchpad?.entry.key).not.toBe(stepsNodeKey);
   });
 
-  test("the question framing's claim is exempt from the ≤1/day cap; the old card's claim is not", async () => {
+  test("a second key's claim on the same day lands (no cross-key day cap)", async () => {
     const t = convexTest(schema, modules);
     await seedGraphAndContent(t);
     const scholarId = await seedScholar(t);
     const s = await asScholar(t, scholarId);
 
     await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: countingKey, framing: "question" });
-    // A standalone-card claim (an older iPad build) for another key is still held.
-    expect(await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addSubKey })).toEqual({
-      claimed: false,
-      reason: "daily_cap",
-    });
     expect(
       await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: addSubKey, framing: "question" }),
     ).toEqual({ claimed: true });

@@ -19,6 +19,7 @@ import {
   writeJournal,
 } from "@/lib/appHealthStore";
 import { appStatusBus } from "@/lib/appStatusBus";
+import { setAsamTransitionObserver } from "@/lib/deviceActivityQueue";
 import { nativeClientBuildInfo } from "@/lib/nativeClientBuildInfo";
 
 // The side-effecting half of appHealth.ts: keeps the launch journal current,
@@ -120,6 +121,38 @@ function persistFatal(error: unknown, componentStack?: string): Promise<void> {
 }
 
 /**
+ * Reloads the app on purpose. The journal is marked first, so the next launch
+ * doesn't file the reload as an unexpected quit. If `reload` throws, the mark
+ * comes off again before the error is rethrown: left on, it would hide a real
+ * crash later in this launch.
+ */
+export async function reloadDeliberately(
+  reload: () => Promise<void>,
+): Promise<void> {
+  const writeBounded = (next: LaunchJournal) =>
+    Promise.race([
+      writeJournal(next).catch(() => undefined),
+      new Promise<void>((resolve) =>
+        setTimeout(resolve, FATAL_PERSIST_TIMEOUT_MS),
+      ),
+    ]);
+  if (journal) {
+    journal = { ...journal, reloadedAt: Date.now() };
+    await writeBounded(journal);
+  }
+  try {
+    await reload();
+  } catch (error) {
+    if (journal) {
+      const { reloadedAt: _dropped, ...rest } = journal;
+      journal = rest;
+      await writeBounded(journal);
+    }
+    throw error;
+  }
+}
+
+/**
  * Called by the root error boundary. React Native sends render errors straight
  * to its native fatal path, around the global handler, so the boundary files
  * the crash (with the component stack) and then re-raises it as a fatal.
@@ -147,6 +180,14 @@ function installFatalHook() {
   });
 }
 
+/**
+ * A touch reached the React root view. In memory only; the next journal tick
+ * (at most JOURNAL_TICK_MS later) writes it.
+ */
+export function noteAppHealthTouch(): void {
+  if (journal) journal = { ...journal, lastTouchAt: Date.now() };
+}
+
 export function startAppHealthMonitor(): void {
   if (started || !reportingEnabled()) return;
   started = true;
@@ -169,6 +210,11 @@ export function startAppHealthMonitor(): void {
   };
 
   installFatalHook();
+  setAsamTransitionObserver((kind, reason, ok, at) => {
+    if (journal) {
+      journal = { ...journal, lastLockChange: { kind, reason, ok, at } };
+    }
+  });
 
   // Read the previous launch's journal BEFORE anything overwrites it; the
   // store serializes, so every later write queues behind this read.

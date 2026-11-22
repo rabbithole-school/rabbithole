@@ -31,6 +31,8 @@ import {
 import { Printer } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { ParentPortfolioItemGrid } from "@/components/parent/ParentPortfolioCard";
+import type { ParentPortfolioItem } from "@/components/parent/ParentPortfolioViewer";
 
 type NarrativeSection = { key: string; title: string; body: string };
 type SharedNarrative = {
@@ -39,6 +41,8 @@ type SharedNarrative = {
   sharedAt: number;
   sections: NarrativeSection[];
   goals: string[];
+  /** Portfolio pieces the report describes; only course reports carry them. */
+  pieces?: ParentPortfolioItem[];
 };
 
 export default function SharedNarratives({
@@ -64,11 +68,10 @@ export default function SharedNarratives({
       <Flex align="center" justify="space-between" gap={3} flexWrap="wrap">
         <Stack gap={0.5}>
           <Heading size="sm" fontFamily="heading" color="navy.500">
-            Shared narratives
+            Reports
           </Heading>
           <Text fontFamily="body" fontSize="xs" color="charcoal.400">
-            Your child&apos;s teacher-written progress notes, shared at the end
-            of each reporting period.
+            Your child&apos;s end-of-term reports from their teachers.
           </Text>
         </Stack>
         {!isEmpty && (
@@ -152,15 +155,18 @@ function NarrativeCard({
       <Stack gap={4}>
         {narrative.sections.map((s) => (
           <Box key={s.key}>
-            <Text
-              fontFamily="heading"
-              fontWeight="600"
-              fontSize="sm"
-              color="charcoal.600"
-              mb={1}
-            >
-              {s.title}
-            </Text>
+            {/* A prose report is one untitled body; legacy rubric sections keep their titles. */}
+            {s.key !== "report" && (
+              <Text
+                fontFamily="heading"
+                fontWeight="600"
+                fontSize="sm"
+                color="charcoal.600"
+                mb={1}
+              >
+                {s.title}
+              </Text>
+            )}
             <Text
               fontFamily="body"
               fontSize="sm"
@@ -172,6 +178,23 @@ function NarrativeCard({
             </Text>
           </Box>
         ))}
+
+        {narrative.pieces && narrative.pieces.length > 0 && (
+          <Box borderTopWidth="1px" borderColor="gray.100" pt={3}>
+            <Text
+              fontFamily="heading"
+              fontWeight="600"
+              fontSize="xs"
+              textTransform="uppercase"
+              letterSpacing="wide"
+              color="charcoal.400"
+              mb={2}
+            >
+              Work in this report
+            </Text>
+            <ParentPortfolioItemGrid items={narrative.pieces} />
+          </Box>
+        )}
 
         {narrative.goals.length > 0 && (
           <Box borderTopWidth="1px" borderColor="gray.100" pt={3}>

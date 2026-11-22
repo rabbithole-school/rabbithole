@@ -94,7 +94,13 @@ function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
   const [issued, setIssued] = useState<{
     token: string;
     kind: "teacher" | "staff";
+    readOnly: boolean;
   } | null>(null);
+  // New tokens are read-only unless the admin unticks it (the server default
+  // matches): a shared channel is a read surface.
+  const [issueReadOnly, setIssueReadOnly] = useState<
+    Record<"teacher" | "staff", boolean>
+  >({ teacher: true, staff: true });
   const [tokenCopied, setTokenCopied] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<{
     id: Id<"mcpServiceTokens">;
@@ -105,8 +111,12 @@ function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
   const handleIssue = async (kind: "teacher" | "staff") => {
     setIssuing(kind);
     try {
-      const result = await issueToken({ scope, kind });
-      setIssued({ token: result.token, kind });
+      const result = await issueToken({
+        scope,
+        kind,
+        readOnly: issueReadOnly[kind],
+      });
+      setIssued({ token: result.token, kind, readOnly: result.readOnly });
       setTokenCopied(false);
     } catch (e) {
       toaster.error({
@@ -195,9 +205,17 @@ function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
                         wrap="wrap"
                       >
                         <VStack align="start" gap={0} minW={0}>
-                          <Text fontFamily="mono" fontSize="sm" color="charcoal.500">
-                            …{token.tokenHint}
-                          </Text>
+                          <HStack gap={2}>
+                            <Text fontFamily="mono" fontSize="sm" color="charcoal.500">
+                              …{token.tokenHint}
+                            </Text>
+                            <Badge
+                              size="sm"
+                              colorPalette={token.readOnly ? "gray" : "orange"}
+                            >
+                              {token.readOnly ? "Read-only" : "Can make changes"}
+                            </Badge>
+                          </HStack>
                           <Text fontFamily="body" fontSize="xs" color="charcoal.400">
                             Created {formatRelative(token.createdAt)} by{" "}
                             {token.createdByName} ·{" "}
@@ -224,7 +242,25 @@ function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
                       </HStack>
                     ))
                   )}
-                  <HStack>
+                  <HStack gap={4} wrap="wrap">
+                    <Checkbox.Root
+                      checked={issueReadOnly[row.kind]}
+                      onCheckedChange={(details) =>
+                        setIssueReadOnly((prev) => ({
+                          ...prev,
+                          [row.kind]: details.checked === true,
+                        }))
+                      }
+                      disabled={issuing === row.kind}
+                      colorPalette="violet"
+                      size="sm"
+                    >
+                      <Checkbox.HiddenInput />
+                      <Checkbox.Control />
+                      <Checkbox.Label fontFamily="heading" fontSize="sm">
+                        Read-only
+                      </Checkbox.Label>
+                    </Checkbox.Root>
                     <Button
                       type="button"
                       size="sm"
@@ -245,6 +281,12 @@ function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
               The staff service account holds school operations access: scholar
               accounts, devices and scanner filing, no learning records.
             </Text>
+            <Text fontFamily="body" fontSize="xs" color="charcoal.400">
+              A read-only token can look things up but can never change
+              anything, whichever connector URL it is used with. Untick
+              Read-only only if the channel needs to act, such as giving
+              activities or editing rosters.
+            </Text>
           </VStack>
         )}
       </VStack>
@@ -261,7 +303,8 @@ function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
             <StyledDialogContent maxW="lg">
               <Dialog.Header px={6} pt={6} pb={2}>
                 <Dialog.Title fontFamily="heading" color="charcoal.600">
-                  {issued ? SERVICE_KIND_LABEL[issued.kind] : ""} token
+                  {issued ? SERVICE_KIND_LABEL[issued.kind] : ""}{" "}
+                  {issued?.readOnly ? "read-only token" : "token"}
                 </Dialog.Title>
               </Dialog.Header>
               <Dialog.Body px={6} pb={2}>

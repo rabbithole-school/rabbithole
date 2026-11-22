@@ -30,7 +30,6 @@ describe.each([
     expect(builderSource).toMatch(
       /renderActions=\{\s*builderDone \? doneIdeaActions\.renderActions : undefined\s*\}/,
     );
-    expect(builderSource).toMatch(/builderDone \? doneIdeaActions\.dialog : null/);
   });
 
   it("the hook draws Build it now and Make it a Quest from the shared copy", () => {

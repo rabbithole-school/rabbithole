@@ -1,4 +1,4 @@
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 
 /**
@@ -35,4 +35,14 @@ export async function primaryInstitutionId(
 ): Promise<Id<"institutions"> | null> {
   const all = await ctx.db.query("institutions").collect();
   return all.find((institution) => institution.isPrimary)?._id ?? null;
+}
+
+/** The live primary institution, or null (none yet, or suspended). */
+export async function livePrimaryInstitution(
+  ctx: InstitutionLookupCtx,
+): Promise<Doc<"institutions"> | null> {
+  const primary = (await ctx.db.query("institutions").collect()).find(
+    (institution) => institution.isPrimary,
+  );
+  return primary && primary.disabledAt === undefined ? primary : null;
 }

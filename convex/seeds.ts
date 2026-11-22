@@ -14,18 +14,21 @@ import {
   buildScholarSkyView,
   markSeedCompleted,
   pruneObserverSeeds,
-  recentPendingObserverSeedCandidates,
+  recentObserverSeedCandidates,
   seedListForScholar,
-  selectDuplicatePendingObserverSeed,
+  selectDuplicateObserverSeed,
+  isObserverPoolSeed,
+  isPrunableObserverSeed,
   visitedSeedIdsForScholar,
+  withoutWonders,
+  isWonderSeed,
+  SCHOLAR_DISMISSED_REASON,
   type SeedOrigin,
 } from "./lib/seeds";
 import { requireActiveScholarAccess } from "./lib/access";
-import {
-  standingStoryInvitationsForScholar,
-  suggestedQuestsForScholar,
-  unlockedStoriesForScholar,
-} from "./lib/scholarReads";
+import { ROLES } from "./lib/roles";
+import { unlockedStoriesForScholar } from "./lib/scholarReads";
+import { seedScholarText } from "./lib/seedLabel";
 
 /** Dev-only guard — never let a demo fixture reshape a real scholar's record. */
 function isProdDeployment(): boolean {
@@ -35,12 +38,15 @@ function isProdDeployment(): boolean {
 }
 
 /**
- * Record a seed from the AI observer (status: "pending", default-on).
- * Dedup is two-layer: the observer itself declares a semantic duplicate via
- * refreshesSeedId (it sees the pending list in its context), and an
- * exact-topic identity check backstops it (completed seeds are terminal and
- * never re-matched). Then prunes the unvisited observer firehose back to the
- * bounded live sky cache.
+ * Record a seed from the AI observer. Since TRA-679 it is written live
+ * (`status: "active"`): a kid sees it in "Things to wonder about" with no
+ * teacher's review, and a teacher can hide it (review/quests-rebuilt-
+ * proposal.html, "Starters"). Dedup is two-layer: the observer itself
+ * declares a semantic duplicate via refreshesSeedId (it sees its pool in its
+ * context), and an exact-topic identity check backstops it (completed seeds
+ * are terminal and never re-matched). Then prunes the unvisited observer
+ * firehose back to the bounded live sky cache. All three act on the
+ * observer's pool only (lib/seeds.ts isObserverPoolSeed).
  */
 export const record = internalMutation({
   args: {
@@ -59,15 +65,20 @@ export const record = internalMutation({
   },
   handler: async (ctx, args) => {
     const visitedSeedIds = await visitedSeedIdsForScholar(ctx, args.scholarId);
-    const candidates = await recentPendingObserverSeedCandidates(
+    const candidates = await recentObserverSeedCandidates(
       ctx,
       args.scholarId,
+      visitedSeedIds,
     );
 
     // Observer-declared refresh target (the LLM's own dedup judgment — the
     // supersession pattern applied to seeds). Validated hard: the id must
-    // normalize, belong to this scholar, be an ai-origin pending seed, and not
-    // already visited. Anything else falls through to the exact-topic backstop.
+    // normalize, belong to this scholar, and be an idea the observer's rules
+    // may still act on (isPrunableObserverSeed: in its pool, not visited, not
+    // touched by a teacher). A protected target is never overwritten: a
+    // teacher's pin or edit, or a chat the kid opened from it, stays as it is,
+    // and the observer's new wording falls through to the exact-topic backstop
+    // and, failing that, becomes a new idea, as any rejected id always has.
     let declared: Doc<"seeds"> | null = null;
     if (args.refreshesSeedId) {
       const id = ctx.db.normalizeId("seeds", args.refreshesSeedId);
@@ -75,16 +86,14 @@ export const record = internalMutation({
       if (
         doc &&
         doc.scholarId === args.scholarId &&
-        doc.origin === "ai" &&
-        doc.status === "pending" &&
-        !visitedSeedIds.has(String(doc._id))
+        isPrunableObserverSeed(doc, visitedSeedIds)
       ) {
         declared = doc;
       }
     }
     const existing =
       declared ??
-      selectDuplicatePendingObserverSeed(
+      selectDuplicateObserverSeed(
         candidates,
         { topic: args.topic },
         { visitedSeedIds },
@@ -113,7 +122,7 @@ export const record = internalMutation({
     const seedId = await insertSeed(ctx, {
       scholarId: args.scholarId,
       origin: "ai",
-      status: "pending",
+      status: "active",
       topic: args.topic,
       domain: args.domain,
       suggestionType: normalizeSuggestionType(args.suggestionType),
@@ -140,62 +149,37 @@ export const markCompleted = internalMutation({
 });
 
 /**
- * Get active seeds for a scholar (used by observer for context).
+ * Get active seeds for a scholar (used by observer for context). A scholar's
+ * own wonders are left out: the observer must not read them as suggestions.
+ * So are the observer's own live ideas (isObserverPoolSeed): it reads those
+ * once, as its dedupe targets (pendingObserverByScholar), exactly as when
+ * they were written `pending`.
  */
 export const activeByScholar = internalQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
-    return await ctx.db
-      .query("seeds")
-      .withIndex("by_scholar_status", (q) =>
-        q.eq("scholarId", args.scholarId).eq("status", "active")
-      )
-      .collect();
+    return withoutWonders(
+      await ctx.db
+        .query("seeds")
+        .withIndex("by_scholar_status", (q) =>
+          q.eq("scholarId", args.scholarId).eq("status", "active")
+        )
+        .collect(),
+    ).filter((seed) => !isObserverPoolSeed(seed));
   },
 });
 
-/** Pending observer seeds (dedup targets) — fed into the observer's context. */
+/** The observer's own pool (dedup targets, isObserverPoolSeed), fed into its
+ *  context. The name predates TRA-679, when the pool was all `pending`. */
 export const pendingObserverByScholar = internalQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) =>
-    await recentPendingObserverSeedCandidates(ctx, args.scholarId),
+    await recentObserverSeedCandidates(ctx, args.scholarId),
 });
 
 /**
- * Teacher reviews a pending AI seed: accept or dismiss.
- */
-export const review = teacherMutation({
-  args: {
-    id: v.id("seeds"),
-    action: v.union(v.literal("accept"), v.literal("dismiss")),
-    dismissedReason: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    const seed = await ctx.db.get(args.id);
-    if (!seed) throw new Error("Seed not found");
-    await requireActiveScholarAccess(ctx, ctx.user, seed.scholarId);
-    if (seed?.status === "completed") {
-      throw new Error("Completed seeds are terminal");
-    }
-    if (args.action === "accept") {
-      await ctx.db.patch(args.id, {
-        status: "active",
-        teacherId: ctx.user._id,
-      });
-    } else {
-      await ctx.db.patch(args.id, {
-        status: "dismissed",
-        dismissedReason: args.dismissedReason,
-        teacherId: ctx.user._id,
-      });
-    }
-  },
-});
-
-/**
- * Teacher overlay on a star, straight from the map drawer (the curation twin
- * of `review`, but as a single status target so the map can promote / unpin /
- * remove without an action vocabulary):
+ * Teacher overlay on a star, straight from the map drawer (a single status target so the map can promote / unpin /
+ * remove, and the Seeds tab can hide):
  *   - "active"    = PROMOTE to a teacher-suggested star (pins it → 📌). Origin
  *                   is preserved (so "AI-suggested, teacher-pinned" stays
  *                   honest); the pin IS the teacher endorsement.
@@ -226,6 +210,42 @@ export const setStatus = teacherMutation({
       teacherId: ctx.user._id,
       dismissedReason:
         args.status === "dismissed" ? args.dismissedReason : undefined,
+    });
+  },
+});
+
+/**
+ * The scholar dismisses a row on Scholar's Prep: one of their own wonders
+ * ("Today's wonders" / "Earlier") or a teacher's suggested quest in "Keep
+ * going". The seed goes to "dismissed", so `wonders.todayForSelf` /
+ * `recentForSelf` and `suggestedQuestsForScholar` stop returning it. Teachers
+ * still see it: the teacher wonder reads (`dayWonders`) ignore status, and the
+ * seed lists show the status and SCHOLAR_DISMISSED_REASON. A wonder's chat is
+ * untouched.
+ *
+ * Self-only and scholar-only, and only these two origins: question rows in
+ * "Keep going" are dismissed through the moment ledger instead
+ * (`practiceMoments.recordMomentOutcome` "dismissed"), which ends the
+ * question without taking a story star out of the sky. Idempotent on a seed
+ * already dismissed; a completed seed is left as it is.
+ */
+export const dismissForSelf = authedMutation({
+  args: { seedId: v.id("seeds") },
+  handler: async (ctx, args) => {
+    if (ctx.user.role !== ROLES.SCHOLAR) {
+      throw new Error("Only a scholar can dismiss their own row");
+    }
+    const seed = await ctx.db.get(args.seedId);
+    if (!seed || seed.scholarId !== ctx.user._id) {
+      throw new Error("Seed not found");
+    }
+    if (seed.origin !== "wonder" && seed.origin !== "teacher") {
+      throw new Error("This row can't be dismissed here");
+    }
+    if (seed.status === "dismissed" || seed.status === "completed") return;
+    await ctx.db.patch(args.seedId, {
+      status: "dismissed",
+      dismissedReason: SCHOLAR_DISMISSED_REASON,
     });
   },
 });
@@ -382,11 +402,15 @@ export const getBakeLaunchInfo = authedQuery({
     if (!seed || seed.scholarId !== ctx.user._id) return null;
     if (seed.status === "completed") return null;
     return {
-      isTopicSeed: !seed.unitId && seed.origin !== "story",
+      // A wonder opens its own chat directly (createFromSeed lands on it).
+      isTopicSeed:
+        !seed.unitId && seed.origin !== "story" && !isWonderSeed(seed),
       topic: seed.topic,
       domain: seed.domain ?? null,
-      // Scholar-facing only — prefer the invitation, never the teacher rationale.
-      rationale: seed.scholarInvitation ?? seed.rationale ?? null,
+      // Scholar-facing only (seedScholarText owns the rule): never a
+      // teacher-private rationale. A seed with no scholar text sends null
+      // (the field name is kept for older clients).
+      rationale: seedScholarText(seed),
       readingLevel: describeLevelsForPrompt(ctx.user),
     };
   },
@@ -410,46 +434,13 @@ export const skyForScholar = authedQuery({
 });
 
 /**
- * Scholar-facing: the teacher's STRUCTURED pushes — "Suggested by your teacher".
- *
- * A "suggested quest" is the stronger sibling of a plain seed: the teacher
- * pushed a SPECIFIC built unit at this scholar (origin "teacher" + a unitId),
- * not just a topic spark. We promote those out of the star map into their own
- * home section, above the peer trails (see review/pr-258 SUGGESTED-QUEST). Only
- * the not-yet-started ones (a started quest spawns a session stamped with the
- * seed's id, and then lives in the in-progress plate instead). Newest first.
- */
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const suggestedQuestsForSelf = authedQuery({
-  args: {},
-  handler: async (ctx) => {
-    // The scholar-parameterized core lives in lib/scholarReads so the teacher
-    // Home mirror (scholarPlate.homeForScholar) renders the identical set. Map
-    // to this query's existing public shape (the teacher-only `isAuthored` flag
-    // the scholar client never uses is omitted).
-    const quests = await suggestedQuestsForScholar(ctx, ctx.user._id);
-    return quests.map((q) => ({
-      seedId: q.seedId,
-      unitId: q.unitId,
-      title: q.title,
-      emoji: q.emoji,
-      activityCount: q.activityCount,
-      rationale: q.rationale,
-      description: q.description,
-      teacherName: q.teacherName,
-      teacherImage: q.teacherImage,
-    }));
-  },
-});
-
-/**
  * Scholar-facing: "Unlocked by your new skills" — the world-connection stories
  * this scholar earned by turning skills fluent, each cited back to the skill
  * that unlocked it.
  *
- * The sibling of `suggestedQuestsForSelf` above, and the reason story moments
- * stopped being a one-shot: a story is offered exactly once, on the practice
- * done screen, and any non-action there is terminal. So
+ * This is the reason story moments stopped being a one-shot: a story is
+ * offered exactly once, on the practice done screen, and any non-action there
+ * is terminal. So
  * `practiceMoments.recordMomentOffered` keeps every offered story as a seed
  * automatically, and this read gives those souvenirs a home on Home. Core in
  * lib/scholarReads so a teacher-facing mirror can reuse it without drifting.
@@ -460,27 +451,13 @@ export const unlockedStoriesForSelf = authedQuery({
 });
 
 /**
- * Scholar-facing standing invitations still waiting to be followed or
- * dismissed: world-connection story threads AND cross-domain seed moments, both
- * carded on the practice done screen. Offered stories remain durable Sky seeds
- * after this card retires.
- */
-// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
-export const standingStoryInvitationsForSelf = authedQuery({
-  args: {},
-  handler: async (ctx) =>
-    standingStoryInvitationsForScholar(ctx, ctx.user._id),
-});
-
-/**
  * Teacher-facing: all seeds for a scholar. A teacher/admin gets the full rows
  * (incl. the diagnostic `rationale` / `approachHint` / dismiss reasons). A
  * scholar viewing their OWN seeds is redacted — those teacher-only fields must
  * not reach the kid's client (the same redaction boundary `buildScholarSky`
- * enforces). `rationale` is replaced with the scholar invitation (falling back
- * to the rationale only for legacy seeds that have no invitation yet, matching
- * the sky's `blurb`); the teacher-directed `approachHint` / `dismissedReason`
- * are dropped.
+ * enforces). `rationale` is replaced with `seedScholarText` (the same text as
+ * the sky's `blurb`), or an empty string when there is none; the
+ * teacher-directed `approachHint` / `dismissedReason` are dropped.
  */
 export const listByScholar = authedQuery({
   args: { scholarId: v.id("users") },
@@ -497,7 +474,9 @@ export const listByScholar = authedQuery({
 
     return boundedRows.map((s) => ({
       ...s,
-      rationale: s.scholarInvitation ?? s.rationale,
+      // seedScholarText owns the rule. Empty, not absent: the field stays a
+      // string so older clients keep the same shape.
+      rationale: seedScholarText(s) ?? "",
       approachHint: undefined,
       dismissedReason: undefined,
     }));

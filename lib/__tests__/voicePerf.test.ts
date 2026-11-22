@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { voiceMark } from "../voicePerf";
+import { voiceMark, voiceStartMark } from "../voicePerf";
 
 // voicePerf reads the flag from localStorage and reports via console.info.
 const store = new Map<string, string>();
@@ -70,5 +70,27 @@ describe("voiceMark", () => {
     voiceMark("firstText");
     voiceMark("firstAudio");
     expect(info).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("voiceStartMark", () => {
+  test("reports offsets from micOpen once listening and the session are both up", () => {
+    enable();
+    vi.spyOn(performance, "now")
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(1640)
+      .mockReturnValueOnce(1700)
+      .mockReturnValueOnce(1180);
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    voiceStartMark("micOpen");
+    voiceStartMark("transport");
+    voiceStartMark("sessionReady");
+    expect(info).not.toHaveBeenCalled();
+    voiceStartMark("listening");
+
+    expect(info).toHaveBeenCalledWith(
+      "[voice-start] listening +180ms | transport +640ms | sessionReady +700ms",
+    );
   });
 });

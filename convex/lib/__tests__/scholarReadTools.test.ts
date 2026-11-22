@@ -72,7 +72,7 @@ describe("makeScholarReadTools role gating", () => {
 });
 
 // matchScholarByName is the shared strict name matcher used for scholars AND
-// scholar groups (assign_unit's groupName path). The exact-preferred /
+// scholar groups (give's groupName path). The exact-preferred /
 // ambiguity-refusing discipline is what stops a partial name from silently
 // targeting the wrong person or cohort.
 describe("matchScholarByName", () => {

@@ -12,7 +12,8 @@
  */
 
 import { OBSERVER_EFFORT, OBSERVER_MODEL } from "./models";
-import { OBSERVER_ORIGIN_LABELS } from "./observerOrigin";
+import { withoutAppStateDefaults } from "../../shared/appStateDefaults";
+import { OBSERVER_ORIGIN_LABELS, type ObserverOrigin } from "./observerOrigin";
 import type { AppAiContextTurn } from "./appUpdateTools";
 import type { ImageContentPart } from "./imageBytes";
 import { isTypedScholarText, type InputModality } from "./inputModality";
@@ -32,7 +33,7 @@ export const OBSERVER_TOOL = {
     // talkLevel is required (TRA-515): as an optional field the model skipped it
     // on ~40% of sessions in the spot eval, including fluent ones. Thin samples
     // are discarded downstream by the 100-word floor (`validTalkJudgment`).
-    required: ["pulse", "observations", "sessionSignals", "interests", "crossDomainConnections", "seeds", "talkLevel"],
+    required: ["pulse", "observations", "sessionSignals", "interests", "crossDomainConnections", "seeds", "talkLevel", "spottedFlair"],
     properties: {
       inferredReadingLevel: {
         type: "string" as const,
@@ -263,6 +264,35 @@ export const OBSERVER_TOOL = {
             type: "string" as const,
             description:
               "Short verbatim excerpt of the SCHOLAR's own words asking to stop. No genuine quote → omit the whole signal.",
+          },
+        },
+      },
+      spottedFlair: {
+        type: "object" as const,
+        description:
+          "REQUIRED decision (section 5b). Name the one SCHOLAR line that comes closest to a spotted flair and decide. \"award\" only when it passes the whole 5b bar; otherwise \"none\". Always \"none\" when the Spotted flair line says closed. label and note are required for \"award\" and omitted for \"none\".",
+        required: ["decision", "reason"],
+        properties: {
+          decision: { type: "string" as const, enum: ["award", "none"] },
+          sourceMessageId: {
+            type: "string" as const,
+            description:
+              "The bracketed id on the closest SCHOLAR line. Never a tutor line. For \"award\", the same line must carry a student-initiated connection or direct-demonstration observation you are recording in this pass. Omit when no line comes close.",
+          },
+          reason: {
+            type: "string" as const,
+            description:
+              "One sentence for staff: which part of the 5b bar that line passes or fails. Never shown to the scholar.",
+          },
+          label: {
+            type: "string" as const,
+            description:
+              "For \"award\": the flair's name, 2-5 words, about the IDEA, not the scholar (\"Leaves are solar panels\"). No praise adjectives, no ranking words.",
+          },
+          note: {
+            type: "string" as const,
+            description:
+              "For \"award\": one sentence the scholar reads, second person, naming what they did with the idea (\"You noticed a leaf is flat and tilted toward the light for the same reason a solar panel is.\"). No praise adjectives, no comparison to experts.",
           },
         },
       },
@@ -752,12 +782,15 @@ export function parseObserverResponse(
     socialRelianceAlert: parsed.socialRelianceAlert ?? undefined,
     stuckAlert: parsed.stuckAlert ?? undefined,
     overwhelmAlert: parsed.overwhelmAlert ?? undefined,
+    // Only an "award" with its scholar-facing text becomes a proposal; the
+    // "none" decision and its reason are logged by the observer and dropped.
+    ...parseSpottedFlairDecision(
+      (parsed as { spottedFlair?: unknown }).spottedFlair,
+    ),
     pulse,
-    // The tool input is not schema-enforced (see buildObserverRequest), and
-    // Sonnet 5.5 occasionally leaves `confidenceScore` off an observation
-    // (3 of 90 eval runs). Both scores are required by
-    // masteryObservations.record, so one such row would throw and abort every
-    // write after it; drop it here instead.
+    // Non-strict tool input sometimes calls confidenceScore "confidence".
+    // Normalize that observed alias; still drop genuinely unscored rows so
+    // they cannot abort the mastery write and everything after it.
     observations: Array.isArray(parsed.observations)
       ? scoredObservations(parsed.observations)
       : [],
@@ -772,11 +805,51 @@ export function parseObserverResponse(
   };
 }
 
-/** Observations carrying both scores the mastery write requires; logs drops. */
+/** The observer's spotted-flair decision, reduced to what the code acts on. */
+function parseSpottedFlairDecision(
+  raw: unknown,
+): Pick<ObserverResult, "spottedFlair" | "spottedFlairReason"> {
+  if (!raw || typeof raw !== "object") return {};
+  const field = (key: string) => {
+    const value = (raw as Record<string, unknown>)[key];
+    return typeof value === "string" ? value : undefined;
+  };
+  const sourceMessageId = field("sourceMessageId");
+  const label = field("label");
+  const note = field("note");
+  return {
+    ...(field("decision") === "award" && sourceMessageId && label && note
+      ? { spottedFlair: { sourceMessageId, label, note } }
+      : {}),
+    ...(field("reason") ? { spottedFlairReason: field("reason") } : {}),
+  };
+}
+
+/** Observations carrying both scores the mastery write requires; logs repairs and drops. */
 function scoredObservations(
-  observations: ObserverResult["observations"],
+  observations: Array<ObserverResult["observations"][number] & { confidence?: unknown }>,
 ): ObserverResult["observations"] {
-  const kept = observations.filter(
+  let repaired = 0;
+  const normalized = observations.map((o) => {
+    if (
+      o?.confidenceScore !== undefined ||
+      !Number.isFinite(o?.masteryLevel) ||
+      typeof o?.confidence !== "number" ||
+      !Number.isFinite(o.confidence) ||
+      o.confidence < 0 ||
+      o.confidence > 1
+    ) return o;
+
+    repaired++;
+    const { confidence, ...observation } = o;
+    return { ...observation, confidenceScore: confidence };
+  });
+  if (repaired > 0) {
+    console.warn(
+      `[Observer] normalized confidence to confidenceScore on ${repaired} observation(s)`,
+    );
+  }
+  const kept = normalized.filter(
     (o) =>
       Number.isFinite(o?.masteryLevel) && Number.isFinite(o?.confidenceScore),
   );
@@ -835,10 +908,8 @@ export interface ObserverContext {
   scholarId: string;
   title: string;
   unitContext: { title: string } | null;
-  origin: {
-    kind: "assigned" | "seed" | "scholarStarted" | "onboarding";
-    label: string;
-  };
+  /** resolveObserverOrigin's result (lib/observerOrigin), the one definition. */
+  origin: ObserverOrigin;
   /** The unit's keyed EQ/EU list — attribution targets. */
   granules?: { key: string; kind: "eq" | "eu"; text: string }[] | null;
   appStateContext?: {
@@ -858,6 +929,13 @@ export interface ObserverContext {
   } | null;
   /** An app with judges but no character: its rulings. */
   appJudgeContext?: { turns: readonly AppAiContextTurn[] } | null;
+  /**
+   * The goals this session already pays flair for (rubric or mission lines,
+   * rendered for a grader). Spotted flair must go beyond them.
+   */
+  listedGoals?: string | null;
+  /** False once the session or weekly spotted-flair cap is spent. */
+  spottedFlairOpen?: boolean;
 }
 
 type ObserverMessageContext = Omit<ObserverContext, "origin"> & {
@@ -870,12 +948,13 @@ export function buildObserverAppStateSection(
   appState: ObserverContext["appStateContext"],
 ): string {
   if (!appState) return "";
+  const visibleDoc = withoutAppStateDefaults(appState.doc);
   const hasDoc =
-    appState.doc !== null &&
-    appState.doc !== undefined &&
-    (typeof appState.doc !== "object" ||
-      Array.isArray(appState.doc) ||
-      Object.keys(appState.doc).length > 0);
+    visibleDoc !== null &&
+    visibleDoc !== undefined &&
+    (typeof visibleDoc !== "object" ||
+      Array.isArray(visibleDoc) ||
+      Object.keys(visibleDoc).length > 0);
   if (!hasDoc && appState.log.length === 0) return "";
 
   const suffixBytes = crypto.getRandomValues(new Uint8Array(4));
@@ -893,7 +972,7 @@ export function buildObserverAppStateSection(
   if (hasDoc) {
     try {
       prettyDoc = neutralizeDelimiter(
-        JSON.stringify(appState.doc, null, 2) ?? "",
+        JSON.stringify(visibleDoc, null, 2) ?? "",
       );
     } catch {
       prettyDoc = "";
@@ -1010,6 +1089,20 @@ function buildObserverHeader(
     context.appStateContext,
   );
   if (appStateSection) parts.push(appStateSection);
+
+  // Spotted flair (section 5b): what is already listed, and whether the cap
+  // leaves room. Callers that predate the field get "closed", so a fixture
+  // or eval can never mint one by accident.
+  if (context.spottedFlairOpen === true) {
+    parts.push(`\n## Spotted flair: open`);
+    parts.push(
+      context.listedGoals?.trim()
+        ? `Already-listed goals (flair for these is paid elsewhere; never spot one of them):\n${context.listedGoals.trim()}`
+        : `Already-listed goals: none.`,
+    );
+  } else {
+    parts.push(`\n## Spotted flair: closed — omit spottedFlair.`);
+  }
 
   return parts.join("\n");
 }
@@ -1143,6 +1236,17 @@ export interface ObserverResult {
     summary: string;
     excerpt?: string;
   };
+  /**
+   * Flair for an idea beyond every listed goal (convex/lib/spottedFlair.ts).
+   * Absent in most sessions; gated in code before anything is written.
+   */
+  spottedFlair?: {
+    sourceMessageId: string;
+    label: string;
+    note: string;
+  };
+  /** The observer's one-sentence reason for its spotted-flair decision. */
+  spottedFlairReason?: string;
   pulse: {
     engagementScore: number;
     complexityLevel: number;

@@ -1,7 +1,7 @@
 /**
  * The scholar's parked ideas (sessions.parkingLot) as a list of chips — ONE
  * rendering shared by every surface that shows the lot (T1/T12):
- *   • the Workshop strip (components/vibecode/ParkingLot.tsx),
+ *   • the builder chat drawer's Saved tab (components/vibecode/VibecodeScreen.tsx),
  *   • the "Saved for later" block on the done screen (session/[id].tsx).
  * The caller owns the heading and any buttons; this only draws the ideas.
  * `renderActions`, when given, puts per-idea buttons inside each chip.

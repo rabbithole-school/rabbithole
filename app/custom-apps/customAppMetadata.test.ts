@@ -61,7 +61,7 @@ describe("buildCustomAppMetadata", () => {
     const metadata = buildCustomAppMetadata(app, "secret-token");
 
     expect(metadata).toMatchObject({
-      title: GENERIC_SITE_TITLE,
+      title: { absolute: GENERIC_SITE_TITLE },
       description: GENERIC_SITE_DESCRIPTION,
       openGraph: {
         title: GENERIC_SITE_TITLE,

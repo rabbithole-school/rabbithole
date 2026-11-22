@@ -2243,7 +2243,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "Patterns in the Living World",
       emoji: "🦎",
       subject: "Science",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Living things are shaped by — and in turn shape — their environments through adaptation, interdependence, and change over time.",
       essentialQuestions: [
         "How do organisms survive in their environments?",
@@ -2302,7 +2302,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "The Writer's Workshop",
       emoji: "✏️",
       subject: "English Language Arts",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Powerful writing starts with keen observation, develops through authentic voice, and strengthens through revision.",
       essentialQuestions: [
         "What makes writing compelling to read?",
@@ -2361,7 +2361,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "Numbers, Patterns & Logic",
       emoji: "🔢",
       subject: "Mathematics",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Mathematics is the science of patterns, and the most interesting discoveries happen at the edges where patterns break.",
       essentialQuestions: [
         "Why do patterns matter in mathematics?",
@@ -2420,7 +2420,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "Citizens & Community",
       emoji: "⚖️",
       subject: "Social Studies",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Democratic societies depend on citizens who think fairly, argue precisely, and act on principle.",
       essentialQuestions: [
         "What makes a rule or decision fair?",
@@ -2479,7 +2479,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "Design & Build",
       emoji: "🔧",
       subject: "Engineering & Design",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Good design starts with empathy, proceeds through iteration, and produces solutions that serve real people.",
       essentialQuestions: [
         "How do you solve a problem you've never encountered before?",
@@ -2538,7 +2538,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "The Universe at Every Scale",
       emoji: "🔭",
       subject: "Interdisciplinary Science",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Every scale of the universe — from atoms to galaxies — is connected by the same fundamental principles, and what you can see depends on how closely you look.",
       essentialQuestions: [
         "How does the universe look different at different scales?",
@@ -2597,7 +2597,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "Big Questions",
       emoji: "💭",
       subject: "Philosophy & Inquiry",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "The most important questions are often those without clear answers, and the quality of our thinking matters more than our conclusions.",
       essentialQuestions: [
         "How do you know what you think you know?",
@@ -2649,7 +2649,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "The Wild Robot",
       emoji: "🤖",
       subject: "English Language Arts",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Stories help us explore questions about identity, belonging, and what it means to be alive — questions that don't have easy answers.",
       essentialQuestions: [
         "Can something built become something alive?",
@@ -2701,7 +2701,7 @@ export const migrateUnitsToPCM = internalMutation({
       title: "Hawai'i — Our Place",
       emoji: "🏝️",
       subject: "Place-Based Studies",
-      gradeLevel: "3rd–5th",
+      gradeLevel: "3-5",
       bigIdea: "Understanding a place requires seeing it through multiple lenses — geological, ecological, cultural, historical — and recognizing that every landscape carries layers of meaning.",
       essentialQuestions: [
         "What can a single place teach us about the relationship between people and land?",

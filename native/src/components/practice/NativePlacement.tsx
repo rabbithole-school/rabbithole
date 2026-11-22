@@ -50,6 +50,8 @@ import {
 } from "@/lib/practicePad";
 import { hasUnitToken, rawAnswersEqual } from "../../../vendor/practice/answers";
 import { hasPracticeMath } from "../../../vendor/shared/fractions";
+import { formNudgeOf, type AnswerPalette } from "../../../vendor/shared/practiceAnswerForm";
+import { AnswerMath, isTypesetAnswer } from "./AnswerMath";
 import { practiceQuestionVoice } from "../../../vendor/shared/beginnerReading";
 import { practiceDomainLabel } from "../../../vendor/shared/practiceDomainLabels";
 import type { PracticePromptVisual } from "../../../vendor/shared/practicePromptVisual";
@@ -95,6 +97,9 @@ type Probe = {
    *  server threads it onto the placement wire so a pre-test fraction probe
    *  gets the SAME builder web + the practice session use. */
   answerShape?: "twoD";
+  /** Algebra pad palette / requested answer form (mirrors the drill). */
+  answerPalette?: AnswerPalette;
+  answerForm?: string;
   choices?: string[];
   promptVisual?: PracticePromptVisual;
   /** Present only for a MANIPULATIVE probe (U-3): the JSON-serialized
@@ -225,6 +230,9 @@ export function NativePlacement({
   // The probe whose Check was refused for a missing unit — cleared on the next
   // input change. Keyed by itemId (not a bare flag) so it can't outlive its probe.
   const [unitNudgeItemId, setUnitNudgeItemId] = useState<string | null>(null);
+  // The grader's form nudge for the current probe, and how many it has had.
+  const [formNudge, setFormNudge] = useState<{ itemId: string; message: string } | null>(null);
+  const formNudgesRef = useRef<{ itemId: string; count: number }>({ itemId: "", count: 0 });
   const [phase, setPhase] = useState<Phase>("boot");
   const gradeInFlightRef = useRef(false);
   // J3: the single-domain result is SKILL-anchored — the scholar's leading
@@ -322,12 +330,13 @@ export function NativePlacement({
   // Unified submit — one call shape dispatched to the single- or multi-domain
   // server loop, normalized to a common result the phase machine reads.
   const submit = useCallback(
-    async (extra: { itemId?: string; answer?: string; dontKnow?: boolean }) => {
+    async (extra: { itemId?: string; answer?: string; dontKnow?: boolean; formNudgesUsed?: number }) => {
       const common = { scholarId, seed: seedFor(), ...extra };
       const res = multiDomain
         ? await submitMixed(common)
         : await submitSingle({ ...common, ...(domain ? { domain } : {}) });
       return {
+        formNudge: formNudgeOf(res) ?? formNudgeOf((res as { graded?: unknown }).graded),
         done: res.done,
         paused: "paused" in res ? res.paused : false,
         graded: (res.graded ?? null) as Feedback | null,
@@ -473,6 +482,7 @@ export function NativePlacement({
   // append) — any input change retires the nudge.
   const onInput = useCallback((next: string) => {
     setUnitNudgeItemId(null);
+    setFormNudge((prev) => (prev ? null : prev));
     setInput(next);
   }, []);
 
@@ -484,7 +494,20 @@ export function NativePlacement({
       gradeInFlightRef.current = true;
       setPhase("submitting");
       void (async () => {
-        const res = await submit({ itemId: current.itemId, answer, ...(dontKnow ? { dontKnow: true } : {}) });
+        const used = formNudgesRef.current.itemId === current.itemId ? formNudgesRef.current.count : 0;
+        const res = await submit({
+          itemId: current.itemId,
+          answer,
+          ...(dontKnow ? { dontKnow: true } : { formNudgesUsed: used }),
+        });
+        // Right value, not yet in the form asked: nothing was measured. Keep
+        // the answer for an edit and stay on this probe.
+        if (res.formNudge) {
+          formNudgesRef.current = { itemId: current.itemId, count: used + 1 };
+          setFormNudge({ itemId: current.itemId, message: res.formNudge });
+          setPhase("quiz");
+          return;
+        }
         setInput("");
         // Staleness guard: a stale/duplicate submit (itemId no longer the served
         // probe) grades NOTHING — the server returns `graded: null` and re-serves
@@ -1100,8 +1123,10 @@ export function NativePlacement({
                 style={({ pressed }) => [styles.choice, pressed && styles.choicePressed]}
                 accessibilityRole="button"
               >
-                {hasPracticeMath(choice) ? (
-                  <FractionText value={choice} inline fontSize={18} align="center" />
+                {isTypesetAnswer(choice) ? (
+                  <AnswerMath value={choice} fontSize={20} align="left" />
+                ) : hasPracticeMath(choice) ? (
+                  <FractionText value={choice} inline fontSize={18} align="left" />
                 ) : (
                   <Text style={styles.choiceText}>{choice}</Text>
                 )}
@@ -1113,6 +1138,9 @@ export function NativePlacement({
             <PracticePadAnswer
               answerType={padType}
               answerShape={current?.answerShape}
+              answerPalette={current?.answerPalette}
+              answerForm={current?.answerForm}
+              formNudge={formNudge && current && formNudge.itemId === current.itemId ? formNudge.message : null}
               answerUnit={unitAnswerRequired ? current?.answerUnit : undefined}
               unitNudge={unitNudge}
               value={input}

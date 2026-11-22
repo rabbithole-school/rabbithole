@@ -6,11 +6,25 @@
 // lives with the tutor prompt (see convex/prompts.ts buildVibecodeSection +
 // sessionHelpers/sessionStreamHelpers). See qb/vibecode-spec.md.
 
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 
-import { internalMutation } from "./_generated/server";
-import { authedMutation } from "./lib/customFunctions";
+import type { Doc, Id } from "./_generated/dataModel";
+import { internalMutation, type MutationCtx } from "./_generated/server";
+import { authedMutation, authedQuery } from "./lib/customFunctions";
+import { scholarAppAccess } from "./lib/deviceAppProjection";
+import { timeZoneForInstitution } from "./lib/institutionTime";
+import {
+  CUSTOM_APP_DEFAULT_STATE_KEY,
+  customAppUserPartition,
+  isTileSession,
+  tileSessionAppForExternalApp,
+  tileSessionLastOpenedAt,
+  tileSessionTitle,
+  userOpensTileSessions,
+  type TileSessionApp,
+} from "./lib/tileSessions";
 import { isAppActivity } from "../shared/appSurface";
+import { SCHOLAR_LED_APP_BUILDING } from "../shared/missionCopy";
 import { defaultAppDeliverable } from "./lib/appActivity";
 import {
   requireActiveLearnerInstitution,
@@ -54,6 +68,11 @@ export const createSession = authedMutation({
     title: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // No activity-less app sessions while SCHOLAR_LED_APP_BUILDING is off:
+    // new apps come from a teacher's activity (shared/missionCopy.ts).
+    if (!SCHOLAR_LED_APP_BUILDING) {
+      throw new ConvexError("Apps are built in activities your teacher assigns.");
+    }
     const institutionId = await requireActiveLearnerInstitution(
       ctx,
       ctx.user._id,
@@ -209,5 +228,212 @@ export const prepareVibecodeAssignmentSmoke = internalMutation({
     });
 
     return { sessionId, activityId: activity._id };
+  },
+});
+
+// ── Tile sessions (lib/tileSessions.ts) ──────────────────────────────────
+// A first-party launcher tile (v1: the Python bench) opens an ordinary
+// session in the Workshop, in Play. These three are the whole backend: find
+// or create, "＋ New", and the switcher's read. Archive and rename use the
+// ordinary sessions.archive / unarchive / update mutations.
+
+/** Shown when a tile cannot open a session; the client keeps the bare host. */
+const TILE_NOT_ELIGIBLE = "This app doesn't open in a session.";
+
+/**
+ * The gates both tile mutations share. The scholar comes from auth (the
+ * wrapper already refused impersonation and read-only accounts); the tile
+ * must be one they can open right now through the same rule as their tile
+ * (`scholarAppAccess`: a direct add, a grant or a live push), never mere
+ * possession of the token; and its custom app must be eligible.
+ */
+async function requireTileSessionApp(
+  ctx: MutationCtx & { user: Doc<"users"> },
+  externalAppId: Id<"externalApps">,
+): Promise<{ app: TileSessionApp; institutionId: Id<"institutions"> | undefined }> {
+  if (!userOpensTileSessions(ctx.user)) {
+    throw new ConvexError("Only a scholar's own tile opens a session.");
+  }
+  const institutionId = await requireActiveLearnerInstitution(ctx, ctx.user._id);
+  const access = await scholarAppAccess(ctx, ctx.user, externalAppId);
+  if (!access.allowed) {
+    throw new ConvexError("This app isn't on your launcher.");
+  }
+  const app = await tileSessionAppForExternalApp(ctx, externalAppId);
+  if (!app) throw new ConvexError(TILE_NOT_ELIGIBLE);
+  return { app, institutionId };
+}
+
+/**
+ * Create one tile session: a vibecode row with NO unit, activity or
+ * assignment (so it never becomes a Quest or assigned work), titled with the
+ * app and the day, holding one `code` artifact copied from the custom app the
+ * way an activity starter is (lib/sessionActivitySetup.ts). The copy carries
+ * `fixedApp`, so every AI write path refuses it.
+ *
+ * The scholar's FIRST tile session of this app also takes over the work they
+ * saved in the bare tile host before tile sessions existed (customApp-scope
+ * state, `user:<id>` / "default"), copied once into the new session's own
+ * state, which is what the tutor reads. The custom-app row is left in place.
+ */
+async function createTileSession(
+  ctx: MutationCtx & { user: Doc<"users"> },
+  args: {
+    app: TileSessionApp;
+    externalAppId: Id<"externalApps">;
+    institutionId: Id<"institutions"> | undefined;
+  },
+): Promise<Id<"sessions">> {
+  const userId = ctx.user._id;
+  const isFirst =
+    (await ctx.db
+      .query("sessions")
+      .withIndex("by_user_sourceCustomApp", (q) =>
+        q.eq("userId", userId).eq("sourceCustomAppId", args.app._id),
+      )
+      .first()) === null;
+  const now = Date.now();
+  const timeZone = await timeZoneForInstitution(ctx, args.institutionId);
+  const sessionId = await ctx.db.insert("sessions", {
+    userId,
+    institutionId: args.institutionId,
+    sessionMode: "vibecode",
+    title: tileSessionTitle(args.app.name, now, timeZone),
+    isArchived: false,
+    sourceCustomAppId: args.app._id,
+    sourceExternalAppId: args.externalAppId,
+    // Opened on an app the scholar did not build (TRA-477's starter flag), so
+    // the Workshop treats it as a playable app, not a blank build.
+    vibecodeStarterUsedAt: args.app.updatedAt ?? args.app._creationTime,
+  });
+  const artifactId = await ctx.db.insert("artifacts", {
+    sessionId,
+    title: args.app.name,
+    content: args.app.html,
+    lastEditedBy: "ai",
+    revision: 0,
+    type: "code",
+    language: "html",
+    appAssetIds: args.app.appAssetIds,
+    appAi: args.app.appAi,
+    fixedApp: args.app.fixedApp,
+  });
+  if (isFirst) {
+    const tileState = await ctx.db
+      .query("appStates")
+      .withIndex("by_scope_scopeId_userId_key", (q) =>
+        q
+          .eq("scope", "customApp")
+          .eq("scopeId", String(args.app._id))
+          .eq("userId", customAppUserPartition(userId))
+          .eq("key", CUSTOM_APP_DEFAULT_STATE_KEY),
+      )
+      .unique();
+    const doc = tileState?.doc ?? tileState?.state;
+    if (tileState && doc !== undefined) {
+      await ctx.db.insert("appStates", {
+        scope: "session",
+        scopeId: String(sessionId),
+        userId: String(userId),
+        key: String(artifactId),
+        doc,
+        log: tileState.log ?? [],
+        version: 1,
+        updatedAt: now,
+      });
+    }
+  }
+  return sessionId;
+}
+
+/**
+ * A tile tap: reopen the scholar's most recently used non-archived session of
+ * this app, or create their first one. Returns the session to navigate to.
+ */
+export const openTileForSelf = authedMutation({
+  args: { externalAppId: v.id("externalApps") },
+  handler: async (ctx, args): Promise<{ sessionId: Id<"sessions"> }> => {
+    const { app, institutionId } = await requireTileSessionApp(ctx, args.externalAppId);
+    const candidates = (
+      await ctx.db
+        .query("sessions")
+        .withIndex("by_user_sourceCustomApp", (q) =>
+          q.eq("userId", ctx.user._id).eq("sourceCustomAppId", app._id),
+        )
+        .collect()
+    ).filter(
+      (session) =>
+        !session.isArchived &&
+        session.teacherArchivedAt == null &&
+        (!institutionId || session.institutionId === institutionId),
+    );
+    let newest: { id: Id<"sessions">; at: number } | null = null;
+    for (const session of candidates) {
+      const at = await tileSessionLastOpenedAt(ctx, session);
+      if (!newest || at > newest.at) newest = { id: session._id, at };
+    }
+    if (newest) return { sessionId: newest.id };
+    return {
+      sessionId: await createTileSession(ctx, {
+        app,
+        externalAppId: args.externalAppId,
+        institutionId,
+      }),
+    };
+  },
+});
+
+/** "＋ New": always a fresh session of this app; the others are untouched. */
+export const newTileSessionForSelf = authedMutation({
+  args: { externalAppId: v.id("externalApps") },
+  handler: async (ctx, args): Promise<{ sessionId: Id<"sessions"> }> => {
+    const { app, institutionId } = await requireTileSessionApp(ctx, args.externalAppId);
+    return {
+      sessionId: await createTileSession(ctx, {
+        app,
+        externalAppId: args.externalAppId,
+        institutionId,
+      }),
+    };
+  },
+});
+
+/**
+ * The switcher's read: the caller's own sessions of this tile's app, active
+ * ones newest first by when they were last opened, archived ones apart.
+ * Null when the tile opens no session (the client keeps the bare host). A
+ * teacher-archived session is left out of both lists: only a teacher can
+ * restore it (sessions.restoreApp).
+ */
+export const tileSessionsForSelf = authedQuery({
+  args: { externalAppId: v.id("externalApps") },
+  handler: async (ctx, args) => {
+    if (!userOpensTileSessions(ctx.user)) return null;
+    const app = await tileSessionAppForExternalApp(ctx, args.externalAppId);
+    if (!app) return null;
+    const rows = await ctx.db
+      .query("sessions")
+      .withIndex("by_user_sourceCustomApp", (q) =>
+        q.eq("userId", ctx.user._id).eq("sourceCustomAppId", app._id),
+      )
+      .collect();
+    type Row = { sessionId: Id<"sessions">; title: string; lastOpenedAt: number };
+    const active: Row[] = [];
+    const archived: Row[] = [];
+    for (const session of rows) {
+      if (!isTileSession(session) || session.teacherArchivedAt != null) continue;
+      const row: Row = {
+        sessionId: session._id,
+        title: session.title,
+        lastOpenedAt: await tileSessionLastOpenedAt(ctx, session),
+      };
+      (session.isArchived ? archived : active).push(row);
+    }
+    const newestFirst = (a: Row, b: Row) => b.lastOpenedAt - a.lastOpenedAt;
+    return {
+      appName: app.name,
+      active: active.sort(newestFirst),
+      archived: archived.sort(newestFirst),
+    };
   },
 });

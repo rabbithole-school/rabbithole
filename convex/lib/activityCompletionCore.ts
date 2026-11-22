@@ -14,6 +14,7 @@
  */
 import type { MutationCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
+import type { ScheduleEntry } from "./pushes";
 import {
   maybeMarkCompletedSeedsForActivity,
   maybeMarkCompletedSeedsForSession,
@@ -49,12 +50,14 @@ export function isScholarHomeworkMark(
 export function teacherCanMarkCompleteForGroup(
   assignment: Doc<"assignments">,
   activity: Doc<"activities">,
+  // The assignment's schedule, from lib/scheduleStore.readSchedule.
+  schedule: ReadonlyArray<ScheduleEntry>,
 ): boolean {
   if (activity.lessonId) return true;
   return (
     assignment.kind === "adHocDispatch" &&
     (activity.kind === "offline" || activity.kind === "web") &&
-    (assignment.activitySchedule ?? []).some(
+    schedule.some(
       (entry) =>
         String(entry.activityId) === String(activity._id) &&
         entry.mode === "homework",

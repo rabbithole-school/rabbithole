@@ -224,3 +224,42 @@ describe("#900 submitAnswer scaffold-forces a post-reveal correct attempt (templ
     expect(await masterySource(t, scholarId)).toBe(afterDontKnow);
   });
 });
+
+describe("teachingStep carries the item's answer form", () => {
+  test("a simplest-form item hands its form to the step's client check", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t);
+    const asScholar = await withUser(t, scholarId);
+    const itemId = makeItemId("probability_as_fraction", SEED);
+
+    const before = await asScholar.query(api.practiceSkills.teachingStep, { scholarId, itemId });
+    expect(before.answerForm).toBeNull();
+
+    await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId,
+      itemId,
+      answer: "",
+      record: true,
+      dontKnow: true,
+    });
+    const res = await asScholar.query(api.practiceSkills.teachingStep, { scholarId, itemId });
+
+    expect(res.steps).not.toBeNull();
+    expect(res.answerForm).toBe("lowestTerms");
+  });
+
+  test("an item with no declared form leaves the check value-only", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t);
+    const asScholar = await withUser(t, scholarId);
+    await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId,
+      itemId: ITEM_ID,
+      answer: "",
+      record: true,
+      dontKnow: true,
+    });
+    const res = await asScholar.query(api.practiceSkills.teachingStep, { scholarId, itemId: ITEM_ID });
+    expect(res.answerForm).toBeNull();
+  });
+});

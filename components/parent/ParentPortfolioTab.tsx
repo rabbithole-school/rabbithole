@@ -20,6 +20,11 @@ import {
   courseTileMeta,
   mediaReleaseNoticeCopy,
 } from "@/components/parent/parentCoursePortfolio";
+import {
+  itemInPortfolioSubject,
+  itemIsOtherWork,
+  portfolioSubjectSegment,
+} from "@/shared/portfolioSubject";
 
 /** The consent state the family portal reads for photos and videos. The
  *  portal never interprets it further — the backend decides what is shared. */
@@ -90,11 +95,19 @@ export function ParentMediaReleaseNotice({
   );
 }
 
+export interface ParentSubjectTile {
+  slug: string;
+  name: string;
+  latestWorkAt: number;
+  workCount: number;
+}
+
 /**
- * The Portfolio tab. A child who is part of programs leads with one tile per
- * course — all of a course's work lives behind its tile — and everything
- * unfiled sits behind an "Other work" tile. A child with no courses keeps the
- * plain grid of everything their family can see.
+ * The Portfolio tab. One tile per course the child is part of — all of a
+ * course's work lives behind its tile — then one per subject the rest of their
+ * work was given in ("Art", "Math"), and only work with no known subject sits
+ * behind an "Other work" tile. A child with neither courses nor subjects keeps
+ * the plain grid of everything their family can see.
  */
 export function ParentPortfolioTab({
   scholarId,
@@ -112,6 +125,7 @@ export function ParentPortfolioTab({
   }
 
   const tiles: ParentCourseTile[] = courses.courses;
+  const subjects: ParentSubjectTile[] = courses.subjects;
 
   return (
     <VStack align="stretch" gap={5}>
@@ -119,7 +133,7 @@ export function ParentPortfolioTab({
         mediaRelease={courses.mediaRelease}
         preview={preview}
       />
-      {tiles.length === 0 ? (
+      {tiles.length === 0 && subjects.length === 0 ? (
         <ParentPortfolioFlatGrid scholarId={scholarId} />
       ) : (
         <Grid templateColumns={{ base: "1fr", md: "repeat(2, 1fr)" }} gap={4}>
@@ -131,6 +145,16 @@ export function ParentPortfolioTab({
               name={course.name}
               meta={courseTileMeta(course.workCount, course.sessionCount)}
               latestWorkAt={course.latestWorkAt}
+            />
+          ))}
+          {subjects.map((subject) => (
+            <CourseTile
+              key={subject.slug}
+              href={`/parent/portfolio/${portfolioSubjectSegment(subject.name)}${hrefQuery}`}
+              emoji={null}
+              name={subject.name}
+              meta={courseTileMeta(subject.workCount, 0)}
+              latestWorkAt={subject.latestWorkAt}
             />
           ))}
           {courses.otherWorkCount > 0 && (
@@ -204,26 +228,35 @@ function CourseTile({
   );
 }
 
+/** Which slice of the portfolio a flat grid shows. */
+export type ParentPortfolioScope =
+  | { kind: "all" }
+  | { kind: "other" }
+  | { kind: "subject"; slug: string };
+
 /**
  * Every family-visible piece of work in one grid — the portfolio a child
- * without courses sees, and (filtered to unfiled work) the "Other work"
- * course view.
+ * without courses or subjects sees, and (filtered) one subject's page or the
+ * "Other work" page.
  */
 export function ParentPortfolioFlatGrid({
   scholarId,
-  unfiledOnly = false,
+  scope = { kind: "all" },
 }: {
   scholarId: Id<"users">;
-  unfiledOnly?: boolean;
+  scope?: ParentPortfolioScope;
 }) {
   const allItems = useQuery(api.portfolio.listForGuardian, { scholarId });
 
   if (allItems === undefined) {
     return <Spinner size="sm" color="violet.400" />;
   }
-  const items: ParentPortfolioItem[] = unfiledOnly
-    ? allItems.filter((item) => item.courseId === null)
-    : allItems;
+  const items: ParentPortfolioItem[] =
+    scope.kind === "other"
+      ? allItems.filter(itemIsOtherWork)
+      : scope.kind === "subject"
+        ? allItems.filter((item) => itemInPortfolioSubject(item, scope.slug))
+        : allItems;
   if (items.length === 0) {
     return (
       <ParentPortfolioQuietLine>

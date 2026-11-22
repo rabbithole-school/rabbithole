@@ -15,7 +15,7 @@ import { v } from "convex/values";
 import { internalQuery, internalMutation } from "./_generated/server";
 import { authedMutation } from "./lib/customFunctions";
 import { internal } from "./_generated/api";
-import { insertSeed, normalizeSuggestionType } from "./lib/seeds";
+import { insertSeed, normalizeSuggestionType, withoutWonders } from "./lib/seeds";
 
 /** Gather the raw interest signals the generator reasons over. */
 export const gatherInterests = internalQuery({
@@ -81,7 +81,8 @@ export const gatherInterests = internalQuery({
         .filter((m) => !m.isSuperseded)
         .map((m) => ({ label: m.conceptLabel, domain: m.domain })),
       statedInterests,
-      existingTopics: existing.map((s) => s.topic),
+      // Suggestions already made TO the scholar; their own wonders are not.
+      existingTopics: withoutWonders(existing).map((s) => s.topic),
     };
   },
 });

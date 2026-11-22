@@ -13,17 +13,23 @@
 // (not internalQuery) lets queries call them directly without
 // ctx.runQuery sub-transactions or api-inference cycles.
 
+import { withoutUnstartedTileSessions } from "./tileSessions";
 import { v } from "convex/values";
 import { describeLevelsForPrompt } from "./readingLevels";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { internalQuery } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
+import { readSchedule } from "./scheduleStore";
 import { ROLES, isTeacherRole, type Role } from "./roles";
 import { liveSeedsForScholar } from "./seeds";
+import { seedScholarText } from "./seedLabel";
 import { normalizeName } from "./scholarMatch";
 import { classifySessionOrigin } from "./sessionOrigin";
-import { SESSION_SURFACE } from "./sessionSurface";
-import { isEnrolledScholar } from "./enrollmentStanding";
+import { mayCreateAppInSession } from "./mission";
+import { sessionSurfaceFor } from "./sessionSurface";
+import { PYTHON_BENCH_FIXED_APP, mayOpenPythonBench } from "./pythonBench";
+import { isEnrolledScholar, isWithdrawn } from "./enrollmentStanding";
+import { isFocusShowing } from "../../shared/focusShowing";
 import { extendedEducationTag } from "./scholarParticipationTooling";
 import {
   computeFrontier,
@@ -35,7 +41,6 @@ import {
   type SkillState,
 } from "./practice/scheduler";
 import { eligibleStoryApplication } from "./practice/applicationEligibility";
-import { seedCardCopy } from "./practice/crossDomainSeeds";
 import {
   domainMayServe,
   type DomainMapStatus,
@@ -46,10 +51,17 @@ import { parseItemId } from "./practice/session";
 import { loadScholarMapSummaryWithNodes } from "../practiceSkills";
 import { timeZoneForInstitution } from "./institutionTime";
 import { scholarInstitutionId } from "./scholarEnrollment";
+import { sessionAnchorsAgree } from "./questStructure";
 import type { StoryKind } from "./practice/storyRegistry";
 import { ageOnDayKey } from "../../shared/birthday";
 import { practiceDomainLabel } from "../../shared/practiceDomainLabels";
 import { CHECK_IN_SITTING_PROBE_BUDGET } from "../../shared/practiceLoop";
+import {
+  APP_PLAY_STALE_GAP_MS,
+  appPlayActiveMs,
+  appPlayDurationMs,
+  isUntouchedAppPlay,
+} from "../../shared/appPlaySession";
 import {
   DEFAULT_TIMEZONE,
   dayKeyForTimezone,
@@ -64,7 +76,12 @@ import {
   PARENT_INTERESTS_LEGEND,
   renderInterestsForPrompt,
 } from "./interests";
-import { isAppActivity, effectiveActivityKind } from "../../shared/appSurface";
+import {
+  appRoleFor,
+  effectiveActivityKind,
+  isAppActivity,
+  sessionAppContextFor,
+} from "../../shared/appSurface";
 
 type OrderedOnlineActivity = {
   activity: Doc<"activities">;
@@ -121,25 +138,32 @@ async function orderedActivitiesForUnit(
   if (!assignment || assignment.archivedAt) return [];
   if (String(assignment.unitId) !== String(unitId)) return [];
   if (assignment.selfPaced) return ordered;
-  const schedule = assignment?.activitySchedule ?? [];
+  const schedule = await readSchedule(ctx, assignment);
   if (schedule.length === 0) return [];
   const now = Date.now();
   const scholarKey = scholarId ? String(scholarId) : null;
+  const timeZone = await timeZoneForInstitution(
+    ctx,
+    (await ctx.db.get(unitId))?.institutionId,
+  );
+  const todayDayKey = dayKeyForTimezone(now, timeZone);
   const liveActivityIds = new Set(
     schedule
       .filter(
         (entry) =>
           entry.setAt != null &&
           // A class focus counts while it is SHOWING, not merely while its
-          // window is open — mirroring `isEntryShowing` in ../assignments.ts.
-          // A teacher running long has not wrapped the focus, so it is still
+          // window is open (`isEntryShowing` in ../assignments.ts). A
+          // teacher running long has not wrapped the focus, so it is still
           // what the room is on; narrowing the ladder on `endsAt` emptied it,
-          // which then hid the activity from the plate entirely. Homework
-          // keeps the window test: there `endsAt` means WITHDRAWN, not
-          // "window closed".
-          (entry.endsAt == null ||
-            entry.endsAt > now ||
-            entry.mode === "classFocus") &&
+          // which then hid the activity from the plate entirely. A focus
+          // from an earlier day whose end has passed (open-until work after
+          // its close, which keeps its entry) is not showing. Homework keeps
+          // the window test: there `endsAt` means WITHDRAWN, not "window
+          // closed".
+          (entry.mode === "classFocus"
+            ? isFocusShowing(entry, now, todayDayKey, timeZone)
+            : entry.endsAt == null || entry.endsAt > now) &&
           // Per-scholar targeting: an entry with a non-empty `scholarIds`
           // is live only for those scholars. Absent/empty = cohort-wide.
           // Without a scholarId we can't narrow, so keep cohort-wide only.
@@ -177,6 +201,17 @@ export async function orderedSessionActivitiesForUnit(
   );
 }
 
+/** The activity kinds the LAUNCHABLE progress ladder counts (below). */
+export const LAUNCHABLE_LADDER_KINDS = [
+  // Web/game launch through dedicated shells. Simulator/vibecode create a
+  // normal scoped session whose renderer is selected by sessionMode.
+  "online",
+  "web",
+  "game",
+  "simulator",
+  "vibecode",
+] as const;
+
 export async function orderedLaunchableActivitiesForUnit(
   ctx: ActivityProgressCtx,
   unitId: Id<"units">,
@@ -187,9 +222,7 @@ export async function orderedLaunchableActivitiesForUnit(
     ctx,
     unitId,
     assignmentId,
-    // Web/game launch through dedicated shells. Simulator/vibecode create a
-    // normal scoped session whose renderer is selected by sessionMode.
-    ["online", "web", "game", "simulator", "vibecode"],
+    [...LAUNCHABLE_LADDER_KINDS],
     scholarId,
   );
 }
@@ -522,7 +555,7 @@ export async function unitLaunchableProgressForScholar(
 /**
  * Is a whole UNIT complete for a scholar? The canonical "unit finished" rule,
  * shared by the seed/quest completion writer (lib/seeds) and the quest-card
- * projections (units.listScholarAuthored, seeds.suggestedQuestsForSelf) so
+ * projections (units.listScholarAuthored, suggestedQuestsForScholar) so
  * "one completion, one truth": a unit is complete when it has at least one
  * online activity and EVERY online activity is in the scholar's
  * activityCompletions (the canonical ledger). Delegates to
@@ -554,8 +587,9 @@ export interface SuggestedQuestForScholar {
   title: string;
   emoji: string;
   activityCount: number;
-  /** SCHOLAR-facing invitation (scholarInvitation ?? rationale). */
-  rationale: string;
+  /** SCHOLAR-facing offer copy (`seedScholarText`), or null when the seed has
+   *  none. Named `rationale` for older callers. */
+  rationale: string | null;
   /** The unit's scholar-facing blurb (scholarDescription ?? description). */
   description: string | null;
   teacherName: string;
@@ -565,11 +599,24 @@ export interface SuggestedQuestForScholar {
   isAuthored: boolean;
 }
 
+/** The teacher of the scholar's group: who a seed offer with no `teacherId`
+ *  is attributed to (suggestedQuestsForScholar, and the starters' detail). */
+export async function groupTeacherForScholar(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+): Promise<Doc<"users"> | null> {
+  const groups = await ctx.db.query("scholarGroups").collect();
+  const myGroup = groups.find((g) =>
+    g.scholarIds.some((id) => String(id) === String(scholarId)),
+  );
+  return myGroup?.teacherId ? await ctx.db.get(myGroup.teacherId) : null;
+}
+
 /**
- * The scholar-parameterized CORE of `seeds.suggestedQuestsForSelf` — the ONE
- * derivation of the "Suggested by your teacher" cards, shared so the scholar's
- * own home (`seeds.suggestedQuestsForSelf`) and the teacher's Home mirror
- * (`scholarPlate.homeForScholar`) render the identical set and can't drift.
+ * The ONE derivation of the "Suggested by your teacher" cards, shared so the
+ * scholar's Quests list (`lib/questionQueue`, its `teacher` rows) and the
+ * teacher's Home mirror (`scholarPlate.homeForScholar`) render the identical
+ * set and can't drift.
  *
  * A card is an ACTIVE `teacher`-origin seed pointing at an ACTIVE unit the
  * scholar hasn't STARTED (no session stamped with that `seedId`) and hasn't
@@ -606,13 +653,7 @@ export async function suggestedQuestsForScholar(
   // Fallback attribution: if a seed didn't record WHO offered it
   // (`teacherId` unset), use the scholar's group teacher so the card shows a
   // real name/avatar instead of the generic "Your teacher".
-  const groups = await ctx.db.query("scholarGroups").collect();
-  const myGroup = groups.find((g) =>
-    g.scholarIds.some((id) => String(id) === String(scholarId)),
-  );
-  const fallbackTeacher = myGroup?.teacherId
-    ? await ctx.db.get(myGroup.teacherId)
-    : null;
+  const fallbackTeacher = await groupTeacherForScholar(ctx, scholarId);
 
   const out: SuggestedQuestForScholar[] = [];
   for (const s of candidates) {
@@ -644,9 +685,10 @@ export async function suggestedQuestsForScholar(
       title: unit.title,
       emoji: unit.emoji ?? "⚡",
       activityCount,
-      // Scholar-facing card — prefer the kid's invitation over the teacher
-      // diagnostic when one was authored.
-      rationale: s.scholarInvitation ?? s.rationale,
+      // Scholar-facing card copy; seedScholarText owns the rule (an offer's
+      // `scholarInvitation` only, never its teacher rationale). With none,
+      // the card shows the unit's scholar description, or just its title.
+      rationale: seedScholarText(s),
       // Scholar copy only — a teacher-authored unit `description` is design
       // intent and never falls back onto a kid's card (title-only is correct).
       description: unit.scholarDescription ?? null,
@@ -662,10 +704,6 @@ export async function suggestedQuestsForScholar(
  *  not the whole accrued pile. Older story stars are never dropped; they keep
  *  living in the Sky (they are `seeds` rows like any other star). */
 export const UNLOCKED_STORY_SECTION_CAP = 3;
-export const STANDING_STORY_INVITATION_CAP = 2;
-
-const STANDING_STORY_OUTCOMES: ReadonlySet<Doc<"momentEvents">["outcome"]> =
-  new Set(["offered", "opened", "probed"]);
 
 export const STORY_KIND_LABELS: Record<StoryKind, string> = {
   instantiates: "instantiates",
@@ -699,49 +737,6 @@ export interface UnlockedStoryForScholar {
   hasApplication: boolean;
 }
 
-/** Fields every standing invitation carries, regardless of `kind`. The
- *  discriminated variants below add the kind-specific payload. */
-interface StandingStoryInvitationShared {
-  seedId: Id<"seeds">;
-  eventId: Id<"momentEvents">;
-  /** The one-line headline the card led with (story hook / seed card title). */
-  hook: string;
-  offeredAt: number;
-}
-
-/** A world-connection STORY thread, unlocked by a fluency transition. */
-export interface StandingStoryInvitation extends StandingStoryInvitationShared {
-  kind: "story";
-  fromKey: string;
-  toKey: string;
-  skillLabel: string;
-  teaser?: string;
-  visualEmoji?: string;
-  artUrl?: string;
-  kindLabel: string;
-  hasApplication: boolean;
-}
-
-/** A cross-domain SEED moment (Sky constellation preview). Seeds have no
- *  unlocking skill, no story art, and no application — so the seed variant
- *  carries none of those fields. Card copy resolves through `seedCardCopy`,
- *  identical to `storyMomentForScholar`. */
-export interface StandingSeedInvitation extends StandingStoryInvitationShared {
-  kind: "seed";
-  /** The seed card teaser (registry copy by topic; the row's invitation, then
-   *  rationale, for seeds the registry doesn't carry). */
-  teaser: string;
-  /** The registry's hero emoji; absent for seeds the registry doesn't carry. */
-  visualEmoji?: string;
-}
-
-/** One standing "New quests" invitation — a story thread or a cross-domain
- *  seed the scholar was shown on the practice done screen but has not yet
- *  followed or let go. */
-export type StandingStoryInvitationForScholar =
-  | StandingStoryInvitation
-  | StandingSeedInvitation;
-
 /** Resolve only ready, scholar-safe story art to its public serving URL. Raw
  * storage ids and attachment bookkeeping never cross the scholar boundary. */
 export async function storyArtUrlForNode(
@@ -754,199 +749,6 @@ export async function storyArtUrlForNode(
     .unique();
   if (node?.artStatus !== "ready" || !node.artStorageId) return undefined;
   return (await ctx.storage.getUrl(node.artStorageId)) ?? undefined;
-}
-
-/**
- * Standing "New quests" invitations for a scholar: world-connection STORY
- * threads AND cross-domain SEED moments that were carded on the practice done
- * screen but not yet followed or let go. A candidate's latest ledger event is
- * still non-terminal (offered/opened/probed) and no session has started from
- * its seed. Stories and seeds merge into ONE list, newest offer first, sharing
- * the two-card cap. The public query uses that cap; the offer governor reads
- * the full set through the same core so eligibility cannot drift.
- */
-export async function standingStoryInvitationsForScholar(
-  ctx: QueryCtx | MutationCtx,
-  scholarId: Id<"users">,
-  limit = STANDING_STORY_INVITATION_CAP,
-): Promise<StandingStoryInvitationForScholar[]> {
-  if (limit <= 0) return [];
-
-  const activeSeeds = await ctx.db
-    .query("seeds")
-    .withIndex("by_scholar_status", (q) =>
-      q.eq("scholarId", scholarId).eq("status", "active"),
-    )
-    .collect();
-  const storySeeds = activeSeeds.filter(
-    (seed) => seed.origin === "story" && seed.storyFromKey && seed.storyToKey,
-  );
-  const crossDomainSeeds = activeSeeds.filter(
-    // Same rule the done-screen card uses (isEligibleCrossDomainSeedMoment),
-    // so anything that can be carded can be followed from here.
-    (seed) => seed.suggestionType === "cross_domain",
-  );
-  if (storySeeds.length === 0 && crossDomainSeeds.length === 0) return [];
-
-  const [sessions, events] = await Promise.all([
-    ctx.db
-      .query("sessions")
-      .withIndex("by_user", (q) => q.eq("userId", scholarId))
-      .collect(),
-    ctx.db
-      .query("momentEvents")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-      .collect(),
-  ]);
-  const startedSeedIds = new Set(
-    sessions.filter((session) => session.seedId).map((session) => String(session.seedId)),
-  );
-
-  const newestEvents = [...events].sort(
-    (a, b) =>
-      b.offeredAt - a.offeredAt || b._creationTime - a._creationTime,
-  );
-  // One scan of the ledger feeds both kinds: the newest STORY event per edge,
-  // and the newest SEED event per seedId.
-  const latestEventByEdge = new Map<string, Doc<"momentEvents">>();
-  const latestEventBySeedId = new Map<string, Doc<"momentEvents">>();
-  for (const event of newestEvents) {
-    if (event.kind === "story") {
-      const edgeKey = `${event.fromKey}\u0000${event.toKey}`;
-      if (!latestEventByEdge.has(edgeKey)) {
-        latestEventByEdge.set(edgeKey, event);
-      }
-    } else if (event.kind === "seed" && event.seedId) {
-      const seedKey = String(event.seedId);
-      if (!latestEventBySeedId.has(seedKey)) {
-        latestEventBySeedId.set(seedKey, event);
-      }
-    }
-  }
-
-  type StoryCandidate = {
-    kind: "story";
-    seed: Doc<"seeds">;
-    fromKey: string;
-    toKey: string;
-    edgeKey: string;
-    event: Doc<"momentEvents">;
-  };
-  type SeedCandidate = {
-    kind: "seed";
-    seed: Doc<"seeds">;
-    event: Doc<"momentEvents">;
-  };
-
-  const storyCandidates = storySeeds
-    .filter((seed) => !startedSeedIds.has(String(seed._id)))
-    .map((seed) => {
-      const fromKey = seed.storyFromKey!;
-      const toKey = seed.storyToKey!;
-      return {
-        kind: "story" as const,
-        seed,
-        fromKey,
-        toKey,
-        edgeKey: `${fromKey}\u0000${toKey}`,
-        event: latestEventByEdge.get(`${fromKey}\u0000${toKey}`),
-      };
-    })
-    .filter(
-      (candidate): candidate is StoryCandidate =>
-        candidate.event !== undefined &&
-        STANDING_STORY_OUTCOMES.has(candidate.event.outcome),
-    );
-
-  const seedCandidates = crossDomainSeeds
-    .filter((seed) => !startedSeedIds.has(String(seed._id)))
-    .map((seed) => ({
-      kind: "seed" as const,
-      seed,
-      event: latestEventBySeedId.get(String(seed._id)),
-    }))
-    .filter(
-      (candidate): candidate is SeedCandidate =>
-        candidate.event !== undefined &&
-        STANDING_STORY_OUTCOMES.has(candidate.event.outcome),
-    );
-
-  const candidates: (StoryCandidate | SeedCandidate)[] = [
-    ...storyCandidates,
-    ...seedCandidates,
-  ].sort(
-    (a, b) =>
-      b.event.offeredAt - a.event.offeredAt ||
-      b.event._creationTime - a.event._creationTime ||
-      b.seed._creationTime - a.seed._creationTime,
-  );
-
-  const invitations: StandingStoryInvitationForScholar[] = [];
-  const seenEdges = new Set<string>();
-  for (const candidate of candidates) {
-    if (candidate.kind === "seed") {
-      // Same read-time resolution as storyMomentForScholar, so the Quests row
-      // matches the card the scholar was shown.
-      const card = seedCardCopy(candidate.seed);
-      invitations.push({
-        kind: "seed",
-        seedId: candidate.seed._id,
-        eventId: candidate.event._id,
-        hook: card.title,
-        teaser: card.teaser,
-        ...(card.visualEmoji === undefined
-          ? {}
-          : { visualEmoji: card.visualEmoji }),
-        offeredAt: candidate.event.offeredAt,
-      });
-      if (invitations.length >= limit) break;
-      continue;
-    }
-
-    if (seenEdges.has(candidate.edgeKey)) continue;
-    seenEdges.add(candidate.edgeKey);
-
-    const story = (
-      await ctx.db
-        .query("knowledgeNodeEdges")
-        .withIndex("by_from_to", (q) =>
-          q.eq("fromKey", candidate.fromKey).eq("toKey", candidate.toKey),
-        )
-        .collect()
-    ).find(
-      (edge) => edge.toKey === candidate.toKey && edge.story !== undefined,
-    )?.story;
-    if (!story) continue;
-
-    const [hasApplication, artUrl] = await Promise.all([
-      eligibleStoryApplication(
-        ctx,
-        scholarId,
-        candidate.fromKey,
-        candidate.toKey,
-      ).then((application) => application !== null),
-      storyArtUrlForNode(ctx, candidate.toKey),
-    ]);
-    invitations.push({
-      kind: "story",
-      seedId: candidate.seed._id,
-      eventId: candidate.event._id,
-      fromKey: candidate.fromKey,
-      toKey: candidate.toKey,
-      skillLabel: candidate.seed.connectionTo ?? candidate.fromKey,
-      hook: story.hook,
-      ...(story.teaser === undefined ? {} : { teaser: story.teaser }),
-      ...(story.visualEmoji === undefined
-        ? {}
-        : { visualEmoji: story.visualEmoji }),
-      ...(artUrl === undefined ? {} : { artUrl }),
-      kindLabel: STORY_KIND_LABELS[story.kind],
-      hasApplication,
-      offeredAt: candidate.event.offeredAt,
-    });
-    if (invitations.length >= limit) break;
-  }
-  return invitations;
 }
 
 /**
@@ -1158,7 +960,7 @@ export function reopenLiveChecker(
 export async function readScholarRoster(
   ctx: QueryCtx,
   allowedScholarIds: ReadonlySet<Id<"users">> | null = null,
-  opts: { includeProgramGuests?: boolean } = {},
+  opts: { includeProgramGuests?: boolean; includeWithdrawn?: boolean } = {},
 ) {
   const includeProgramGuests = opts.includeProgramGuests ?? false;
   let scholars: Doc<"users">[];
@@ -1176,6 +978,11 @@ export async function readScholarRoster(
   }
   // Filter BEFORE the per-scholar loop below — omitted guests must not pay
   // for sessions/observations/chronology reads they'll never appear in.
+  // The roster lists current scholars. Name-keyed lookups pass
+  // includeWithdrawn so a scholar who has left can still be found by name.
+  if (!opts.includeWithdrawn) {
+    scholars = scholars.filter((scholar) => !isWithdrawn(scholar));
+  }
   let extendedEducationOmitted = 0;
   if (!includeProgramGuests) {
     const enrolled = scholars.filter(isEnrolledScholar);
@@ -1420,19 +1227,31 @@ export async function readScholarSignals(
   return byType;
 }
 
-/** Active + pending exploration seeds. */
+/**
+ * Active + pending exploration seeds.
+ *
+ * `rationale` is teacher-private (a teacher's own note, or an observer
+ * diagnosis that may name the scholar, the gap, the misconception). Teacher
+ * and admin callers get it; every other caller (parent, scholar,
+ * lifelong_learner, or no role at all) gets `seedScholarText` in its place,
+ * the same line the scholar's own Sky shows, or "" when there is none. The
+ * key stays a string so older clients keep the same shape. Same caller-tier
+ * check as readScholarMastery's misconception strip.
+ */
 export async function readScholarSeeds(
   ctx: QueryCtx,
   scholarId: Id<"users">,
+  role: Role | undefined | null,
 ) {
   // Same bounded live read the human seed list uses, so an agent never sees a
   // live seed a person can't.
   const seeds = await liveSeedsForScholar(ctx, scholarId);
+  const forTeacher = isTeacherRole(role);
 
   return seeds.map((s) => ({
     topic: s.topic,
     domain: s.domain ?? null,
-    rationale: s.rationale,
+    rationale: forTeacher ? s.rationale : (seedScholarText(s) ?? ""),
     status: s.status,
   }));
 }
@@ -1546,7 +1365,7 @@ async function resolveAssignmentContext(
   }
   let assignmentMode: "classFocus" | "homework" | null = null;
   if (session.activityId) {
-    const entry = (assignment.activitySchedule ?? []).find(
+    const entry = (await readSchedule(ctx, assignment)).find(
       (e) => String(e.activityId) === String(session.activityId),
     );
     assignmentMode = entry?.mode ?? null;
@@ -1573,9 +1392,11 @@ export async function readScholarSessions(
     )
     .order("desc")
     .take(50);
+  // An unused tile session is not a session yet (lib/tileSessions.ts).
+  const listed = await withoutUnstartedTileSessions(ctx, sessions);
 
   return await Promise.all(
-    sessions.map(async (p) => {
+    listed.map(async (p) => {
       const { activity, lesson, unit } = await resolveSessionContext(ctx, p);
       const { origin, originLabel, isIndependentStudyUnit, fromSeed } =
         classifySessionOrigin(p, unit);
@@ -1693,8 +1514,11 @@ export async function readSessionTranscript(
         : a.type === undefined || a.type === "text"
           ? "writing box"
           : a.type;
-    const cap =
-      surface === "writing box"
+    // The Python bench's source is the fixed app, not the scholar's work:
+    // their program lives in its app state, so no content is shown.
+    const cap = a.fixedApp
+      ? 0
+      : surface === "writing box"
         ? TRANSCRIPT_WRITING_CHARS
         : surface === "live app"
           ? TRANSCRIPT_APP_CHARS
@@ -1712,6 +1536,13 @@ export async function readSessionTranscript(
     };
   });
   const sessionMode = session.sessionMode ?? "conversation";
+  // The same session app facts the tutor stream reads (getSessionContext).
+  const appContext = sessionAppContextFor({
+    sessionMode: session.sessionMode ?? null,
+    role: appRoleFor(activity),
+    // As in getSessionContext: the Python bench is not a buildable app.
+    hasApp: artifacts.some((a) => a.type === "code" && !a.fixedApp),
+  });
   const conversational = allMessages.filter(
     (m) => m.role === "user" || m.role === "assistant",
   );
@@ -1742,7 +1573,31 @@ export async function readSessionTranscript(
       ? { appEditAccess: activity.editAccess ?? null }
       : {}),
     sessionMode,
-    whatTheScholarSees: SESSION_SURFACE[sessionMode],
+    // Conditioned on the same gate that hands the tutor create_code
+    // (sessionHelpers.getSessionContext → appCreationAllowed), so the aide
+    // reads what THIS session's screen could do.
+    whatTheScholarSees: sessionSurfaceFor(sessionMode, {
+      appCreationAllowed: mayCreateAppInSession({
+        isTestDrive: session.isTestDrive,
+        builderPrimary: appContext.builderPrimary,
+        activity,
+        unit,
+        anchorsAgree: await sessionAnchorsAgree(ctx, session, activity),
+        sessionUserId: session.userId,
+      }),
+      hasApp: appContext.hasApp,
+      // The same gate that hands the tutor open_python_bench.
+      pythonBench: {
+        offered: mayOpenPythonBench({
+          sessionMode: session.sessionMode ?? null,
+          builderPrimary: appContext.builderPrimary,
+          freePlay: session.freePlay === true,
+          activity,
+        }),
+        open: artifacts.some((a) => a.fixedApp === PYTHON_BENCH_FIXED_APP),
+        otherApp: appContext.hasApp,
+      },
+    }),
     documents,
     deliverablePrompt: activity?.deliverable?.prompt ?? null,
     deliverableCriteria: criteria,
@@ -1806,12 +1661,18 @@ export async function readScholarWebActivity(
     .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
     .order("desc")
     .take(limit);
+  const appNames = new Map<string, string>();
+  for (const s of sessions) {
+    if (s.appId && !appNames.has(String(s.appId))) {
+      appNames.set(String(s.appId), (await ctx.db.get(s.appId))?.name ?? "An app");
+    }
+  }
   return {
     currentTimeLocal: localFormatter.format(new Date(now)),
     timeZone,
     todayDayKey,
     interpretation:
-      "Use dayRelation and the local timestamps for date/time claims. activeNow requires a fresh capture heartbeat; stale_unfinalized is not active. webviewOpenMinutes is only the wall-clock span that the embedded site stayed open, not proof of continuous attention or practice. Use XP, completed tasks, task summaries, or the recap as evidence of work.",
+      "Each session is either a practice site or web assignment (kind practice) or an app the scholar opened from their Apps launcher (kind app — a classmate's published app, a teacher-made tile, or an outside app), named in site. Use dayRelation and the local timestamps for date/time claims. activeNow requires a fresh capture heartbeat; stale_unfinalized is not active. webviewOpenMinutes is only the wall-clock span that the embedded site stayed open, not proof of continuous attention or practice. Use XP, completed tasks, task summaries, or the recap as evidence of work. loadError is the last page that failed to open in that session (the scholar saw \"Couldn't open this activity\"): its address, the site's HTTP status when it sent one, and the message shown. A status of 500 or above is the site's own server failing.",
     sessions: sessions.map((s) => {
       const lastObservedAt = s.endedAt ?? s.lastHeartbeatAt ?? s.startedAt;
       const sessionDayKey = dayKeyForTimezone(s.startedAt, timeZone);
@@ -1841,7 +1702,10 @@ export async function readScholarWebActivity(
         typeof e?.tasksCompletedToday === "number" ||
         (e?.taskSummaries?.length ?? 0) > 0;
       return {
-        site: "External practice",
+        kind: s.appId ? ("app" as const) : ("practice" as const),
+        site: s.appId
+          ? (appNames.get(String(s.appId)) ?? "An app")
+          : "External practice",
         course: e?.courseName ?? null,
         localDay: sessionDayKey,
         dayRelation,
@@ -1868,8 +1732,163 @@ export async function readScholarWebActivity(
         tasksCompletedToday: e?.tasksCompletedToday ?? null,
         taskSummaries: e?.taskSummaries ?? null,
         summary: s.summary ?? null,
+        loadError: s.loadError
+          ? {
+              url: s.loadError.url,
+              status: s.loadError.status ?? null,
+              message: s.loadError.message,
+              atLocal: localFormatter.format(new Date(s.loadError.at)),
+            }
+          : null,
       };
     }),
+  };
+}
+
+/** What the agents are told about appPlay. Exported for the tests that pin
+ *  the wording the bot must not drift from. */
+export const APP_PLAY_INTERPRETATION =
+  "Each entry is one stretch with an app from the scholar's own sessions in the foreground (one they built, or a teacher's starter app copied into an assignment), recorded by Rabbithole whether or not the app saves anything. Apps opened from the Apps launcher (a classmate's published app, a teacher-made tile) are in get_scholar_web_activity instead. " +
+  "LEAD WITH activeMinutes: minutes with a touch, key press or scroll in the app within the previous 10 minutes (the same rule as the BunnyPad screen-time total) — the measure of actual use. onScreenMinutes is secondary: the app was in the foreground, which includes idle time. A BunnyPad locked into Rabbithole reports the app as open on its own (as the screen locks, and at its early-morning wake), so on-screen time alone never shows that the BunnyPad was awake, that the scholar was up, or that anyone was using it — do not draw those conclusions from it. " +
+  "measurement 'interaction' entries recorded touches; a stretch ends 10 minutes after the last touch, and lastTouchLocal is the last touch. measurement 'on_screen_only' entries come from older app builds that recorded no interaction: activeMinutes is null, and their on-screen time is unverified — it can include hours with the folio closed, so report it as 'the app was left open', never as use. untouchedStretchesOmitted counts stretches where the app came to the foreground and nobody touched it; they are not use and are left out. " +
+  "days totals the returned entries by the local day each started: activeMinutes and onScreenMinutes from interaction entries, onScreenOnlyMinutes (unverified) from older builds — never add the two kinds together. Recording began with this feature, so an empty list for older days means no data, not no play. Use dayRelation and the *Local fields; never convert timestamps yourself. activeNow requires a check-in within the last few minutes; stale_unfinalized ended at lastCheckInLocal.";
+
+/**
+ * When a scholar had an app from their own sessions on screen
+ * (appPlaySessions.ts): one entry per continuous on-screen interval, newest
+ * first, with active time (interaction-tracked rows) ahead of on-screen time.
+ * Same agent-facing time contract as readScholarWebActivity — local times and
+ * dayRelation are resolved here, and an interval that was never closed is
+ * reported as stale rather than live.
+ */
+export async function readScholarAppPlay(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+  limit = 20,
+  now = Date.now(),
+) {
+  const scholar = await ctx.db.get(scholarId);
+  const timeZone = await timeZoneForInstitution(ctx, scholar?.institutionId);
+  const todayDayKey = dayKeyForTimezone(now, timeZone);
+  const yesterdayDayKey = shiftDayKey(todayDayKey, -1);
+  const localFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+  // An interaction-tracked stretch nobody touched (closed, or gone stale) is
+  // the app coming to the foreground on its own — a locked BunnyPad does
+  // this — not a sitting. An open, live one stays: it may be touched yet.
+  // Those are skipped, not counted against `limit`, so a night of them
+  // cannot push real play out of the read (scan capped at 5× `limit`).
+  const kept: Doc<"appPlaySessions">[] = [];
+  let untouchedOmitted = 0;
+  let scanned = 0;
+  for await (const row of ctx.db
+    .query("appPlaySessions")
+    .withIndex("by_user_startedAt", (q) => q.eq("userId", scholarId))
+    .order("desc")) {
+    if (isUntouchedAppPlay(row, now)) untouchedOmitted++;
+    else kept.push(row);
+    if (kept.length >= limit || ++scanned >= limit * 5) break;
+  }
+  const titles = new Map<string, string>();
+  const titleOf = async (artifactId: Id<"artifacts">) => {
+    const key = String(artifactId);
+    if (!titles.has(key)) {
+      titles.set(key, (await ctx.db.get(artifactId))?.title ?? "Untitled app");
+    }
+    return titles.get(key)!;
+  };
+  const intervals = await Promise.all(
+    kept.map(async (row) => {
+      const lastObservedAt = row.endedAt ?? row.lastActiveAt;
+      const activeNow =
+        row.endedAt === undefined &&
+        now - row.lastActiveAt <= APP_PLAY_STALE_GAP_MS;
+      const dayKey = dayKeyForTimezone(row.startedAt, timeZone);
+      const tracked = row.interactionTracked === true;
+      return {
+        app: await titleOf(row.artifactId),
+        sessionId: row.sessionId,
+        surface: row.surface === "native" ? "iPad app" : "web",
+        localDay: dayKey,
+        dayRelation:
+          dayKey === todayDayKey
+            ? ("today" as const)
+            : dayKey === yesterdayDayKey
+              ? ("yesterday" as const)
+              : ("earlier" as const),
+        measurement: tracked
+          ? ("interaction" as const)
+          : ("on_screen_only" as const),
+        activeMinutes: tracked
+          ? Math.round(appPlayActiveMs(row) / 60_000)
+          : null,
+        onScreenMinutes: Math.round(appPlayDurationMs(row) / 60_000),
+        startedAtLocal: localFormatter.format(new Date(row.startedAt)),
+        lastCheckInLocal: localFormatter.format(new Date(lastObservedAt)),
+        lastTouchLocal:
+          tracked && row.lastInteractionAt !== undefined
+            ? localFormatter.format(new Date(row.lastInteractionAt))
+            : null,
+        status:
+          row.endedAt !== undefined
+            ? ("ended" as const)
+            : activeNow
+              ? ("active" as const)
+              : ("stale_unfinalized" as const),
+        activeNow,
+      };
+    }),
+  );
+  // Summed in ms and rounded once per day: rounding each stretch first
+  // turns many short stretches into 0 (or nearly doubles 31-second ones).
+  const days = new Map<
+    string,
+    {
+      localDay: string;
+      dayRelation: (typeof intervals)[number]["dayRelation"];
+      activeMs: number;
+      onScreenMs: number;
+      onScreenOnlyMs: number;
+    }
+  >();
+  intervals.forEach((interval, index) => {
+    const row = kept[index];
+    const day = days.get(interval.localDay) ?? {
+      localDay: interval.localDay,
+      dayRelation: interval.dayRelation,
+      activeMs: 0,
+      onScreenMs: 0,
+      onScreenOnlyMs: 0,
+    };
+    if (row.interactionTracked === true) {
+      day.activeMs += appPlayActiveMs(row);
+      day.onScreenMs += appPlayDurationMs(row);
+    } else {
+      day.onScreenOnlyMs += appPlayDurationMs(row);
+    }
+    days.set(interval.localDay, day);
+  });
+  const toMinutes = (ms: number) => Math.round(ms / 60_000);
+  return {
+    currentTimeLocal: localFormatter.format(new Date(now)),
+    timeZone,
+    interpretation: APP_PLAY_INTERPRETATION,
+    days: [...days.values()].map((day) => ({
+      localDay: day.localDay,
+      dayRelation: day.dayRelation,
+      activeMinutes: toMinutes(day.activeMs),
+      onScreenMinutes: toMinutes(day.onScreenMs),
+      onScreenOnlyMinutes: toMinutes(day.onScreenOnlyMs),
+    })),
+    untouchedStretchesOmitted: untouchedOmitted,
+    intervals,
   };
 }
 
@@ -2593,8 +2612,8 @@ export async function readScholarMathCheckIn(
  * Returns per-strand placement (strandPlacement), the frontier (ready-to-
  * practice skills with all prerequisites met), skills due for spaced-rep
  * review (dueForReview), skills that recently crossed the fluency threshold
- * (recentlyCrossed, last 14 days), open observer-flagged misconceptions, and
- * summary counts.
+ * (recentlyCrossed: green now, `becameFluentAt` in the last 14 days, newest
+ * first), open observer-flagged misconceptions, and summary counts.
  *
  * REDACTION: `observerFlaggedMisconceptions` includes sensitive observer
  * fields (observationId, evidenceSummary, transcriptExcerpt). The TOOL layer
@@ -2720,14 +2739,25 @@ export async function readScholarPractice(
           domain,
         });
       }
-      // recentlyCrossed: became GREEN (demonstrated + retained + fast, not an
-      // inferred credit) in the last 14 days.
-      if (isFluent(r, fluencyCtx) && r.updatedAt >= now - RECENTLY_MS) {
+      // recentlyCrossed: GREEN now (demonstrated + retained + fast, not an
+      // inferred credit) AND first crossed the demonstrated-fluency bar in the
+      // last 14 days. The crossing time is `becameFluentAt`, the once-only
+      // stamp recordAttemptCore writes when that gate flips. Never `updatedAt`:
+      // every practice touch bumps it, so a spaced review of a skill fluent for
+      // months read as a fresh crossing (TRA-618). A fluent row with no stamp
+      // predates the instrumentation; frontierGrade.ts counts it as baseline
+      // (fluent at every cutoff), so it is not a recent crossing here either.
+      const crossedAt = r.becameFluentAt;
+      if (
+        crossedAt !== undefined &&
+        crossedAt >= now - RECENTLY_MS &&
+        isFluent(r, fluencyCtx)
+      ) {
         recentlyCrossed.push({
           nodeKey: r.skillKey,
           label: labelOf.get(r.skillKey) ?? r.skillKey,
           domain,
-          crossedAt: r.updatedAt,
+          crossedAt,
         });
       }
     }
@@ -2757,6 +2787,10 @@ export async function readScholarPractice(
     }
   }
 
+  // Newest crossing first. The loop above groups by domain, which put stale-
+  // looking items at the top of the list a model reads first.
+  recentlyCrossed.sort((a, b) => b.crossedAt - a.crossedAt);
+
   return {
     checkIn,
     strandPlacement: [...strandMap.values()],
@@ -2778,6 +2812,8 @@ export async function readScholarPractice(
 
 type SkillItem = { nodeKey: string; label: string; domain: string };
 
+/** `crossedAt` is the row's `becameFluentAt`: when it first went fluent, not
+ *  when it was last practiced. */
 type RecentlyCrossedItem = SkillItem & { crossedAt: number };
 
 type StrandPlacement = {

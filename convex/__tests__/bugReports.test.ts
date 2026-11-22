@@ -756,47 +756,6 @@ describe("scholar-filed reports on the Workshop board", () => {
     expect(board.map((row) => row.bugReportId)).toEqual([own.reportId]);
   });
 
-  test("a card never counts toward the open-ideas cap", async () => {
-    const t = convexTest(schema, modules);
-    const institutionId = await seedTestInstitution(t, { slug: "cap-school" });
-    const scholar = await seedScholarInInstitution(t, {
-      institutionId,
-      username: "lani",
-    });
-    const asScholar = await withUser(t, scholar);
-    for (let i = 0; i < 4; i++) {
-      await asScholar.mutation(api.scholarSuggestions.createMine, {
-        text: `Idea ${i}`,
-      });
-    }
-    const report = await asScholar.mutation(api.bugReports.submit, {
-      surface: "web",
-      url: "/scholar",
-      description: "Slides went blank",
-    });
-    if (!report.ok) throw new Error("submit failed");
-
-    // Four ideas + one bug card: the fifth idea still fits, the sixth does not.
-    await asScholar.mutation(api.scholarSuggestions.createMine, {
-      text: "Idea 5",
-    });
-    await expect(
-      asScholar.mutation(api.scholarSuggestions.createMine, { text: "Idea 6" }),
-    ).rejects.toThrow(/5 ideas open/);
-
-    // Archive + restore of the card is never blocked by the idea cap.
-    const card = await cardFor(t, report.reportId);
-    await asScholar.mutation(api.scholarSuggestions.setArchivedMine, {
-      suggestionId: card!._id,
-      archived: true,
-    });
-    await asScholar.mutation(api.scholarSuggestions.setArchivedMine, {
-      suggestionId: card!._id,
-      archived: false,
-    });
-
-  });
-
   test("a voice-only report's card picks up the transcript", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await seedTestInstitution(t, { slug: "voice-school" });
@@ -902,7 +861,7 @@ describe("scholar-filed reports on the Workshop board", () => {
       internal.scholarSuggestions.workshopDeliveryContext,
       { suggestionId: card!._id },
     );
-    expect(delivery?.text).toMatch(/^🐛 .*reported a bug/);
+    expect(delivery?.parts[0]).toMatch(/^🐛 .*reported a bug/);
 
     const reply = await t.mutation(
       internal.scholarSuggestions.respondFromSlackThread,
@@ -964,6 +923,110 @@ describe("automatic iPad reports (crash / quit / freeze)", () => {
     expect(rootText).toContain("quit unexpectedly on an iPad");
     expect(rootText).toContain("iPad (A16)");
     expect(rootText).not.toContain("New Rabbithole bug report");
+    // The capture details sit in the grey line under the description.
+    const { blocks } = JSON.parse(rootText) as {
+      blocks: Array<{ type: string; text?: string; elements?: Array<{ text: string }> }>;
+    };
+    expect(blocks.map((block) => block.type)).toEqual(["markdown", "context"]);
+    expect(blocks[0].text).toContain("**Signed in:**");
+    expect(blocks[0].text).toContain("**What went wrong**\n> Rabbithole quit unexpectedly");
+    expect(blocks[0].text).not.toMatch(/Surface:|Captured:|Where:|Device:/);
+    expect(blocks[1].elements?.[0].text).toMatch(
+      /^\*Surface:\* native\n\*Captured:\* \S+\n\*Device:\* iPad \(A16\), iPadOS 26\.1\n\*Where:\* `\/session\/abc`$/,
+    );
+  });
+
+  describe("reboot right after a staff restart", () => {
+    const hungLine = "JS last ran about 12 min before the iPad booted again.";
+    const stuckInactiveLine =
+      'The app had been in iOS\'s "inactive" state for 40s with JS still running.';
+    const rebootText = (frozenLine?: string) =>
+      [
+        "The iPad restarted (or lost power) while Rabbithole was on screen.",
+        ...(frozenLine ? [frozenLine] : []),
+      ].join("\n");
+
+    async function setup() {
+      const t = convexTest(schema, modules);
+      const admin = await seedUser(t, "platform_admin", "avery");
+      await bindChannel(t, admin);
+      const institutionId = await seedTestInstitution(t, { slug: "auto-school" });
+      const scholar = await seedScholarInInstitution(t, {
+        institutionId,
+        username: "hoku",
+      });
+      const recordRestart = (target: Id<"users">, action = "device.restart.requested") =>
+        t.run((ctx) =>
+          ctx.db.insert("auditLog", {
+            actorUserId: admin,
+            action,
+            targetUserId: target,
+            at: Date.now(),
+          }),
+        );
+      const submitReboot = async (frozenLine?: string, id = "launch-1:unclean_exit") => {
+        const result = await (await withUser(t, scholar)).mutation(
+          api.bugReports.submit,
+          {
+            surface: "native",
+            trigger: "unclean_exit",
+            url: "/",
+            clientReportId: id,
+            description: rebootText(frozenLine),
+          },
+        );
+        if (!result.ok) throw new Error(result.error);
+        return t.run((ctx) => ctx.db.get(result.reportId));
+      };
+      return { t, scholar, recordRestart, submitReboot };
+    }
+
+    test("a healthy app stays out of the channel", async () => {
+      const { scholar, recordRestart, submitReboot } = await setup();
+      await recordRestart(scholar);
+      const report = await submitReboot();
+      expect(report?.status).toBe("resolved");
+      expect(report?.resolvedAt).toBeTypeOf("number");
+    });
+
+    test("a retried planned report stays silent", async () => {
+      const { t, scholar, recordRestart, submitReboot } = await setup();
+      await recordRestart(scholar);
+      await submitReboot();
+      const report = await submitReboot();
+      expect(report?.status).toBe("resolved");
+      const cards = await t.run((ctx) =>
+        ctx.db.query("scholarSuggestions").collect(),
+      );
+      expect(cards).toEqual([]);
+    });
+
+    test.each([
+      ["hung JS", hungLine],
+      ["stuck inactive", stuckInactiveLine],
+    ])("a frozen app still posts, labeled: %s", async (_name, frozenLine) => {
+      const { scholar, recordRestart, submitReboot } = await setup();
+      await recordRestart(scholar);
+      const report = await submitReboot(frozenLine);
+      expect(report?.status).toBe("received");
+      expect(report?.description).toMatch(/^Staff requested an MDM restart/);
+    });
+
+    test("no matching restart posts as before", async () => {
+      const { scholar, recordRestart, submitReboot } = await setup();
+      await recordRestart(scholar, "device.lost_mode.requested");
+      const report = await submitReboot();
+      expect(report?.status).toBe("received");
+      expect(report?.description).toBe(rebootText());
+    });
+
+    test("a planned restart does not swallow a real report after it", async () => {
+      const { scholar, recordRestart, submitReboot } = await setup();
+      await recordRestart(scholar);
+      await submitReboot(undefined, "launch-1:unclean_exit");
+      const report = await submitReboot(hungLine, "launch-2:unclean_exit");
+      expect(report?.status).toBe("received");
+    });
   });
 
   test("one automatic report per trigger per window; other triggers still file", async () => {

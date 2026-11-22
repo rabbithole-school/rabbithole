@@ -46,7 +46,6 @@ export function assembleTutorPrompt(
   };
   // Positional call — order mirrors convex/sessionHelpers.ts:1343.
   return buildSystemPrompt(
-    null, // teacherWhisper
     profile.readingLevel, // readingLevel
     profile.name, // scholarName
     null, // unitContext

@@ -153,6 +153,14 @@ export function AssignmentsListDetail({
                               count={r.classFocusCount}
                             />
                           )}
+                          {/* `?? 0`: a backend without openUntilCount yet. */}
+                          {(r.openUntilCount ?? 0) > 0 && (
+                            <ActivityModeBadge
+                              mode="classFocus"
+                              variant="soft"
+                              label={`${r.openUntilCount} open until`}
+                            />
+                          )}
                           {r.homeworkCount > 0 && (
                             <ActivityModeBadge
                               mode="homework"

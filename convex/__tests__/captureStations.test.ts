@@ -1033,6 +1033,8 @@ describe("capture stations", () => {
       }),
     ).rejects.toThrow(/scholars? in this group/i);
 
+    // A wrong size means the client is naming a blob it did not upload: the
+    // reservation is cancelled without binding the id, so cleanup keeps it.
     const reservation = await t.mutation(
       api.captureStations.generateUploadUrl,
       {
@@ -1057,13 +1059,345 @@ describe("capture stations", () => {
         sizeBytes: metadata.size + 1,
       }),
     ).resolves.toEqual({ accepted: false });
+    const cancelled = await t.run((ctx) => ctx.db.get(reservation.reservationId));
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.storageId).toBeUndefined();
     await t.mutation(internal.captureStations.cleanupUploadReservation, {
       reservationId: reservation.reservationId,
     });
     expect(
       await t.run((ctx) => ctx.db.system.get("_storage", mismatchedStorageId)),
+    ).not.toBeNull();
+  });
+
+  test("a report failing type validation with the right size is swept", async () => {
+    const { t, session } = await setup();
+    const reservation = await t.mutation(api.captureStations.generateUploadUrl, {
+      sessionToken: session.sessionToken,
+      deviceId: "capture-ipad-01",
+    });
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(new Blob(["not a photo"], { type: "application/pdf" })),
+    );
+    const metadata = await t.run((ctx) => ctx.db.system.get("_storage", storageId));
+    if (!metadata) throw new Error("Missing test storage metadata");
+    await expect(
+      t.mutation(api.captureStations.recordUploadedBlob, {
+        sessionToken: session.sessionToken,
+        deviceId: "capture-ipad-01",
+        reservationId: reservation.reservationId,
+        storageId,
+        mimeType: "application/pdf",
+        sizeBytes: metadata.size,
+      }),
+    ).resolves.toEqual({ accepted: false });
+    await t.mutation(internal.captureStations.cleanupUploadReservation, {
+      reservationId: reservation.reservationId,
+    });
+    expect(
+      await t.run((ctx) => ctx.db.system.get("_storage", storageId)),
     ).toBeNull();
   });
+
+  // TRA-456: the creation-time proof cannot tell a capture upload from another
+  // feature's blob created after the reservation, so a capture must neither
+  // adopt nor delete a blob some other owner holds.
+  async function insertForeignPortfolioItem(
+    t: Awaited<ReturnType<typeof setup>>["t"],
+    institutionId: Id<"institutions">,
+    scholarId: Id<"users">,
+    storageId: Id<"_storage">,
+  ) {
+    return await t.run((ctx) =>
+      ctx.db.insert("portfolioItems", {
+        scholarId,
+        institutionId,
+        title: "Portfolio scan",
+        source: "manual",
+        fileStorageId: storageId,
+        fileMimeType: "image/jpeg",
+        matchStatus: "confirmed",
+        assignmentStatus: "none",
+        processingStatus: "ready",
+        familyVisibility: "staff_only",
+      }),
+    );
+  }
+
+  test("refuses to adopt a foreign portfolio blob, valid report or not", async () => {
+    const { t, session, institutionId, scholarA } = await setup();
+    const storageIdFor = async () => {
+      const reservation = await t.mutation(api.captureStations.generateUploadUrl, {
+        sessionToken: session.sessionToken,
+        deviceId: "capture-ipad-01",
+      });
+      const storageId = await t.run((ctx) =>
+        ctx.storage.store(new Blob(["a scholar's portfolio scan"], { type: "image/jpeg" })),
+      );
+      const itemId = await insertForeignPortfolioItem(t, institutionId, scholarA, storageId);
+      const metadata = await t.run((ctx) => ctx.db.system.get("_storage", storageId));
+      if (!metadata) throw new Error("Missing test storage metadata");
+      return { reservationId: reservation.reservationId, storageId, itemId, size: metadata.size };
+    };
+    for (const mimeType of ["image/jpeg", "application/pdf"]) {
+      const foreign = await storageIdFor();
+      await expect(
+        t.mutation(api.captureStations.recordUploadedBlob, {
+          sessionToken: session.sessionToken,
+          deviceId: "capture-ipad-01",
+          reservationId: foreign.reservationId,
+          storageId: foreign.storageId,
+          mimeType,
+          sizeBytes: foreign.size,
+        }),
+      ).rejects.toThrow(/does not belong/i);
+      const untouched = await t.run((ctx) => ctx.db.get(foreign.reservationId));
+      expect(untouched?.status).toBe("issued");
+      expect(untouched?.storageId).toBeUndefined();
+      expect(
+        await t.run((ctx) => ctx.db.system.get("_storage", foreign.storageId)),
+      ).not.toBeNull();
+      expect(
+        await t.run((ctx) => ctx.db.get(foreign.itemId)),
+      ).toMatchObject({ fileStorageId: foreign.storageId });
+    }
+  });
+
+  test("a blob another owner claims after it was reported survives expiry", async () => {
+    const { t, session, institutionId, scholarA } = await setup();
+    const upload = await reserveUploadedBlob(t, session.sessionToken);
+    await insertForeignPortfolioItem(t, institutionId, scholarA, upload.storageId);
+    await t.run((ctx) =>
+      ctx.db.patch(upload.reservationId, { expiresAt: Date.now() - 1 }),
+    );
+    await t.mutation(internal.captureStations.cleanupUploadReservation, {
+      reservationId: upload.reservationId,
+    });
+    expect(await t.run((ctx) => ctx.db.get(upload.reservationId))).toBeNull();
+    expect(
+      await t.run((ctx) => ctx.db.system.get("_storage", upload.storageId)),
+    ).not.toBeNull();
+  });
+
+  test("a scholar-document blob reported through capture survives expiry", async () => {
+    const { t, session, scholarA, guardianId } = await setup();
+    const upload = await reserveUploadedBlob(t, session.sessionToken, "evaluation scan");
+    await t.run((ctx) =>
+      ctx.db.insert("scholarDocuments", {
+        scholarId: scholarA,
+        kind: "other",
+        title: "Uploaded document",
+        fileStorageId: upload.storageId,
+        uploadedBy: guardianId,
+        processingStatus: "ready",
+      }),
+    );
+    await t.run((ctx) =>
+      ctx.db.patch(upload.reservationId, { expiresAt: Date.now() - 1 }),
+    );
+    await t.mutation(internal.captureStations.cleanupUploadReservation, {
+      reservationId: upload.reservationId,
+    });
+    expect(
+      await t.run((ctx) => ctx.db.system.get("_storage", upload.storageId)),
+    ).not.toBeNull();
+  });
+
+  // TRA-456 review: the guard once checked only some owners, so a blob held
+  // solely by a portfolio item's thumbnail or magic render, or by a
+  // deliverable, still looked unowned. Each holder is tried before the report
+  // (adoption refused), after a valid report (expiry), and after an invalid
+  // report (cancelled-reservation cleanup).
+  type Holder = "thumbnail" | "magic" | "magicThumb" | "deliverable";
+  async function attachHolder(
+    t: Awaited<ReturnType<typeof setup>>["t"],
+    institutionId: Id<"institutions">,
+    scholarId: Id<"users">,
+    storageId: Id<"_storage">,
+    holder: Holder,
+  ) {
+    if (holder === "deliverable") {
+      await t.run(async (ctx) => {
+        const activityId = await ctx.db.insert("activities", {
+          title: "Curated activity",
+          kind: "online",
+          order: 0,
+        });
+        const sessionId = await ctx.db.insert("sessions", {
+          userId: scholarId,
+          title: "Real work",
+          isArchived: false,
+          activityId,
+        });
+        await ctx.db.insert("deliverables", {
+          activityId,
+          scholarId,
+          sessionId,
+          fileStorageId: storageId,
+          submittedAt: Date.now(),
+        });
+      });
+      return;
+    }
+    const field = {
+      thumbnail: "thumbStorageId",
+      magic: "magicStorageId",
+      magicThumb: "magicThumbStorageId",
+    }[holder];
+    await t.run(async (ctx) => {
+      const itemId = await ctx.db.insert("portfolioItems", {
+        scholarId,
+        institutionId,
+        title: "Another feature's item",
+        source: "manual",
+        matchStatus: "confirmed",
+        assignmentStatus: "none",
+        processingStatus: "ready",
+        familyVisibility: "staff_only",
+      });
+      await ctx.db.patch(itemId, { [field]: storageId });
+    });
+  }
+
+  const HOLDERS: Holder[] = ["thumbnail", "magic", "magicThumb", "deliverable"];
+  for (const holder of HOLDERS) {
+    test(`refuses to adopt a blob a ${holder} holds, valid report or not`, async () => {
+      const { t, session, institutionId, scholarA } = await setup();
+      for (const mimeType of ["image/jpeg", "application/pdf"]) {
+        const reservation = await t.mutation(
+          api.captureStations.generateUploadUrl,
+          { sessionToken: session.sessionToken, deviceId: "capture-ipad-01" },
+        );
+        const storageId = await t.run((ctx) =>
+          ctx.storage.store(new Blob(["another feature's file"], { type: mimeType })),
+        );
+        await attachHolder(t, institutionId, scholarA, storageId, holder);
+        const metadata = await t.run((ctx) => ctx.db.system.get("_storage", storageId));
+        if (!metadata) throw new Error("Missing test storage metadata");
+        await expect(
+          t.mutation(api.captureStations.recordUploadedBlob, {
+            sessionToken: session.sessionToken,
+            deviceId: "capture-ipad-01",
+            reservationId: reservation.reservationId,
+            storageId,
+            mimeType,
+            sizeBytes: metadata.size,
+          }),
+        ).rejects.toThrow(/does not belong/i);
+        expect(
+          (await t.run((ctx) => ctx.db.get(reservation.reservationId)))?.storageId,
+        ).toBeUndefined();
+        expect(
+          await t.run((ctx) => ctx.db.system.get("_storage", storageId)),
+        ).not.toBeNull();
+      }
+    });
+
+    test(`a blob a ${holder} claims after a valid report survives expiry`, async () => {
+      const { t, session, institutionId, scholarA } = await setup();
+      const upload = await reserveUploadedBlob(t, session.sessionToken);
+      await attachHolder(t, institutionId, scholarA, upload.storageId, holder);
+      await t.run((ctx) =>
+        ctx.db.patch(upload.reservationId, { expiresAt: Date.now() - 1 }),
+      );
+      await t.mutation(internal.captureStations.cleanupUploadReservation, {
+        reservationId: upload.reservationId,
+      });
+      expect(await t.run((ctx) => ctx.db.get(upload.reservationId))).toBeNull();
+      expect(
+        await t.run((ctx) => ctx.db.system.get("_storage", upload.storageId)),
+      ).not.toBeNull();
+    });
+
+    test(`a blob a ${holder} claims after an invalid report survives cleanup`, async () => {
+      const { t, session, institutionId, scholarA } = await setup();
+      const reservation = await t.mutation(api.captureStations.generateUploadUrl, {
+        sessionToken: session.sessionToken,
+        deviceId: "capture-ipad-01",
+      });
+      const storageId = await t.run((ctx) =>
+        ctx.storage.store(new Blob(["not a photo"], { type: "application/pdf" })),
+      );
+      const metadata = await t.run((ctx) => ctx.db.system.get("_storage", storageId));
+      if (!metadata) throw new Error("Missing test storage metadata");
+      await expect(
+        t.mutation(api.captureStations.recordUploadedBlob, {
+          sessionToken: session.sessionToken,
+          deviceId: "capture-ipad-01",
+          reservationId: reservation.reservationId,
+          storageId,
+          mimeType: "application/pdf",
+          sizeBytes: metadata.size,
+        }),
+      ).resolves.toEqual({ accepted: false });
+      // The other feature's row lands after the report, before cleanup runs.
+      await attachHolder(t, institutionId, scholarA, storageId, holder);
+      await t.mutation(internal.captureStations.cleanupUploadReservation, {
+        reservationId: reservation.reservationId,
+      });
+      expect(
+        await t.run((ctx) => ctx.db.system.get("_storage", storageId)),
+      ).not.toBeNull();
+    });
+  }
+
+  test("a family-message attachment blob reported through capture survives expiry", async () => {
+    const { t, session, guardianId } = await setup();
+    const upload = await reserveUploadedBlob(t, session.sessionToken, "family photo");
+    // A guardian's staged attachment holding the same blob.
+    await t.run((ctx) =>
+      ctx.db.insert("parentMessageAttachments", {
+        storageId: upload.storageId,
+        uploaderId: guardianId,
+        fileName: "family.jpg",
+        source: "upload",
+        mimeType: "image/jpeg",
+        sizeBytes: upload.metadata.size,
+        uploadReservedAt: upload.metadata._creationTime - 1,
+      }),
+    );
+    await t.run((ctx) =>
+      ctx.db.patch(upload.reservationId, { expiresAt: Date.now() - 1 }),
+    );
+    await t.mutation(internal.captureStations.cleanupUploadReservation, {
+      reservationId: upload.reservationId,
+    });
+    expect(
+      await t.run((ctx) => ctx.db.system.get("_storage", upload.storageId)),
+    ).not.toBeNull();
+  });
+
+  for (const removal of ["undoCapture", "deleteCapture"] as const) {
+    test(`${removal} keeps a blob another owner claimed after adoption`, async () => {
+      const { t, session, institutionId, scholarA } = await setup();
+      const upload = await reserveUploadedBlob(t, session.sessionToken);
+      const capture = await t.mutation(api.captureStations.registerCapture, {
+        sessionToken: session.sessionToken,
+        deviceId: "capture-ipad-01",
+        reservationId: upload.reservationId,
+        scholarIds: [scholarA],
+      });
+      // Race: the foreign owner row lands after the capture adopted the blob.
+      const foreignItemId = await insertForeignPortfolioItem(
+        t,
+        institutionId,
+        scholarA,
+        upload.storageId,
+      );
+      await t.mutation(api.captureStations[removal], {
+        sessionToken: session.sessionToken,
+        deviceId: "capture-ipad-01",
+        captureId: capture.captureId,
+      });
+      expect(await t.run((ctx) => ctx.db.get(capture.portfolioItemId))).toBeNull();
+      expect(
+        await t.run((ctx) => ctx.db.system.get("_storage", upload.storageId)),
+      ).not.toBeNull();
+      expect(
+        await t.run((ctx) => ctx.db.get(foreignItemId)),
+      ).toMatchObject({ fileStorageId: upload.storageId });
+    });
+  }
 
   test("rejects an existing unowned blob without deleting it", async () => {
     const { t, session } = await setup();
@@ -1928,6 +2262,10 @@ describe("capture stations", () => {
 
     const item = await t.run((ctx) => ctx.db.get(capture.portfolioItemId));
     expect(item).toBeNull();
+    // Its own blob, held only by its own capture/item/reservation, is deleted.
+    expect(
+      await t.run((ctx) => ctx.db.system.get("_storage", upload.storageId)),
+    ).toBeNull();
   });
 
   test("deleteCapture rejects a capture whose item has been curated", async () => {

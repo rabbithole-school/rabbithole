@@ -4,6 +4,7 @@
 // one), and one test per §6 chokepoint: the scholar is refused, a teacher
 // still reads where reading is allowed, and writes are refused for everyone.
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
@@ -423,8 +424,8 @@ describe("relaunch resolves to the archived session", () => {
 });
 
 async function scopeToAssignment(t: T, w: World) {
-  return await t.run(async (ctx) => {
-    const assignmentId = await ctx.db.insert("assignments", {
+  const __mirrored = await t.run(async (ctx) => {
+    const assignmentId = await insertAssignmentWithSchedule(ctx, {
       teacherId: w.teacherId,
       unitId: w.unitId,
       scholarIds: [w.scholarId],
@@ -441,6 +442,7 @@ async function scopeToAssignment(t: T, w: World) {
     await ctx.db.patch(w.sessionId, { assignmentId });
     return assignmentId;
   });
+  return __mirrored;
 }
 
 describe("relaunch of an assignment-scoped archived app", () => {

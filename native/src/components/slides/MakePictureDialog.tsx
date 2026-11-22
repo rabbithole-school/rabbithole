@@ -1,6 +1,6 @@
 /**
  * MakePictureDialog — the scholar types a short description and Rabbithole draws
- * an illustration for the current slide. Modelled on `CreateQuestDialog` so a kid
+ * an illustration for the current slide. Modelled on the other short-text sheets so a kid
  * meets the SAME short-text-in-a-sheet idiom the rest of the native app uses
  * (centred card, `AppTextInput`, one primary button), rather than a debug form.
  *

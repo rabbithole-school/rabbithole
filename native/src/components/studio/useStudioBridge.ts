@@ -163,7 +163,7 @@ export function useStudioBridge(options: UseStudioBridgeOptions): UseStudioBridg
     if (!readyRef.current || !webViewRef.current || !nonceRef.current) return;
     const type = initializedRef.current ? "update" : "init";
     webViewRef.current.injectJavaScript(
-      appStateHostInjectionScript(type, docRef.current, nonceRef.current, undefined, actionRequest),
+      appStateHostInjectionScript(type, docRef.current, nonceRef.current, actionRequest),
     );
     initializedRef.current = true;
   }, []);

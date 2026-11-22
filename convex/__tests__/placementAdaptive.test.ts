@@ -36,6 +36,7 @@ import {
 } from "../seed/integersCoordinatesGraph";
 import { EARLY_ALGEBRA_SKILLS, EARLY_ALGEBRA_EDGES } from "../seed/earlyAlgebraGraph";
 import { ALGEBRA_1_SKILLS, ALGEBRA_1_EDGES } from "../seed/algebra1Graph";
+import { ALGEBRA_2_SKILLS, ALGEBRA_2_EDGES } from "../seed/algebra2Graph";
 
 // Pure-logic tests for the placement-v2 additions to convex/lib/practice/
 // placement.ts: the ternary outcome mapping, the affect-safe first-probe anchor,
@@ -279,7 +280,7 @@ describe("placement v2 — grade ring holds on the REAL seeded graphs", () => {
   // never-strand relaxation, which only fires when the window holds NO probeable
   // in-ring node at all.
   const RING_WIDTH = 2;
-  const ALL_GRADES = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+  const ALL_GRADES = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
   const REAL_DOMAINS: { label: string; skills: readonly SeedSkill[]; edges: readonly SeedEdge[] }[] = [
     { label: "whole-number-arithmetic", skills: WHOLE_NUMBER_ARITHMETIC_SKILLS, edges: WHOLE_NUMBER_ARITHMETIC_EDGES },
     { label: "fraction-arithmetic", skills: FRACTION_ARITHMETIC_SKILLS, edges: FRACTION_ARITHMETIC_EDGES },
@@ -289,6 +290,7 @@ describe("placement v2 — grade ring holds on the REAL seeded graphs", () => {
     { label: "integers-coordinates", skills: INTEGERS_COORDINATES_SKILLS, edges: INTEGERS_COORDINATES_EDGES },
     { label: "early-algebra", skills: EARLY_ALGEBRA_SKILLS, edges: EARLY_ALGEBRA_EDGES },
     { label: "algebra-1", skills: ALGEBRA_1_SKILLS, edges: ALGEBRA_1_EDGES },
+    { label: "algebra-2", skills: ALGEBRA_2_SKILLS, edges: ALGEBRA_2_EDGES },
   ];
 
   // Mirror loadPlacementContext: strand orders from the seed nodes (order = seed

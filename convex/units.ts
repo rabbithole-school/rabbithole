@@ -2,7 +2,8 @@ import { v, type ObjectType } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { stream } from "convex-helpers/server/stream";
 import schema from "./schema";
-import { subjectMatches, uniqueSubjects } from "../lib/subjects";
+import { unitFitsSubjectFilter, unitSubjectFilterOptions } from "../lib/subjects";
+import { unitFitsGradeFilter, unitGradeFilterOptions } from "../shared/unitGrade";
 import {
   authedMutation,
   authedQuery,
@@ -15,14 +16,15 @@ import {
   internalMutation,
   type MutationCtx,
 } from "./_generated/server";
-import { internal } from "./_generated/api";
 import { chosenPathValidator } from "./bakeUnitFromSeed";
 import {
+  requireAgentUnitEditAccess,
   requireUnitEditAccess,
   requireUnitEditAccessForUser,
 } from "./lib/auth";
 import {
   assertInstitutionActive,
+  canAccessScholar,
   requireActiveScholarAccess,
   requireScholarsAccessible,
 } from "./lib/access";
@@ -40,9 +42,17 @@ import {
 } from "./lib/unitAccess";
 import { deleteSessionInner } from "./devPurge";
 import { deleteActivityCascade } from "./lib/activityCascade";
-import { isTeacherRole } from "./lib/roles";
+import {
+  schoolSubjectOptions,
+  syncClassesForPlacements,
+  unitSubjectOptions,
+} from "./lib/classLink";
+import { ROLES, isPlatformAdminRole, isTeacherRole } from "./lib/roles";
 import { isProgramGuest } from "./lib/enrollmentStanding";
-import { assignedProgramUnitIdsForScholar } from "./lib/programGuestWork";
+import {
+  assignedProgramUnitIdsForScholar,
+  isOwnQuestUnit,
+} from "./lib/programGuestWork";
 import {
   curriculumAccessInstitutionIds,
   hasCurriculumAccess,
@@ -58,13 +68,19 @@ import {
   isSessionActivityComplete,
   unitSessionProgressForScholar,
 } from "./lib/scholarReads";
-import { plantTeacherSeed } from "./lib/seeds";
-import { canUnlockQuestBuild, questBuildLocksFor } from "./lib/questBuildLock";
+import { SCHOLAR_DISMISSED_REASON, plantTeacherSeed } from "./lib/seeds";
+import { questBuildLocksFor } from "./lib/questBuildLock";
 import {
   homeTitleForIndependentStudyUnit,
   mintIndependentStudyUnit,
 } from "./lib/independentStudy";
 import { mergeKeyedGranules, toKeyedGranules } from "./lib/granules";
+import { resolveUnitGradeEdit, unitGradeUnreadableError } from "./lib/unitGrade";
+import {
+  resolveUnitSubject,
+  resolveUnitSubjectEdit,
+  unitSubjectNotAClassError,
+} from "./lib/unitSubject";
 import {
   duplicateActivitiesIntoLesson,
   duplicateLessonDesign,
@@ -73,6 +89,11 @@ import {
   type CopiedActivity,
 } from "./lib/curriculumDuplication";
 import { isStalledQuest, questsForScholar } from "./lib/questLifecycle";
+import {
+  isUnansweredOrDeclinedProposal,
+  withoutQuestApproval,
+} from "./lib/questApproval";
+import { assertProposalTakesNoStructure } from "./lib/questStructure";
 import {
   isUnitPublished,
   scholarHoldsAssignmentForUnit,
@@ -132,7 +153,10 @@ export async function curriculumUnitLensPredicate(
   ) {
     visible = () => true;
   } else {
-    const allowedScholarIds = await scholarIdsInLens(ctx, lens);
+    // A withdrawn scholar's authored units stay visible as history.
+    const allowedScholarIds = await scholarIdsInLens(ctx, lens, {
+      includeWithdrawn: true,
+    });
     visible = (unit) =>
       unit.authorScholarId
         ? allowedScholarIds.has(unit.authorScholarId)
@@ -156,7 +180,7 @@ export async function curriculumUnitLensPredicate(
     institution: null,
     isAdmin: false,
     allowedInstitutionIds: curriculumInstitutionIds,
-  });
+  }, { includeWithdrawn: true });
   return (unit) => {
     if (!visible(unit)) return false;
     if (unit.authorScholarId) {
@@ -243,6 +267,10 @@ export const list = authedQuery({
       curriculumInstitutionIds.size > 0
     );
 
+    // The learner path below gets the scholar view of each unit (no
+    // teacher-facing description); the curriculum and program paths are staff.
+    const learnerView = !args.programGroupId && !canManageCurriculum;
+
     let unitList;
     if (args.programGroupId) {
       const group = await requireProgramPublishAccess(
@@ -288,7 +316,10 @@ export const list = authedQuery({
       const inLens = all.filter(
         (u) =>
           u.authorScholarId
-            ? u.authorScholarId === ctx.user._id
+            ? // Their own Quests, but not a proposal still waiting or
+              // declined: it has no activity to start (TRA-685).
+              u.authorScholarId === ctx.user._id &&
+              !isUnansweredOrDeclinedProposal(u)
             : u.institutionId
               ? u.institutionId === scholarInstitutionId
               : primaryId
@@ -311,7 +342,11 @@ export const list = authedQuery({
           ctx,
           ctx.user._id,
         );
-        unitList = unitList.filter((unit) => assignedUnitIds.has(unit._id));
+        unitList = unitList.filter(
+          (unit) =>
+            assignedUnitIds.has(unit._id) ||
+            isOwnQuestUnit(unit, ctx.user._id),
+        );
       }
     }
 
@@ -328,7 +363,7 @@ export const list = authedQuery({
           .withIndex("by_unit", (q) => q.eq("unitId", u._id))
           .collect();
         return {
-          ...u,
+          ...(learnerView ? scholarUnitView(u) : withoutQuestApproval(u)),
           id: u._id,
           teacherName: teacher?.name ?? null,
           personaTitle: persona?.title ?? null,
@@ -352,6 +387,95 @@ async function canBrowseCurriculum(ctx: QueryCtx, user: Doc<"users">) {
   return ids === "all" || ids.size > 0;
 }
 
+/**
+ * The unit fields a reader outside curriculum design may receive (TRA-671):
+ * exactly what scholar screens read from `units.get` / `units.list`, on web
+ * and on every installed BunnyPad build. Everything else on a unit stays
+ * with staff: the tutor's `systemPrompt`, the `rubric`, the design fields
+ * (big idea, essential questions, Bloom target, building blocks, grade,
+ * duration, video transcript), publication and review state, and the badge
+ * config. Add a field here only when a scholar or parent screen reads it.
+ *
+ * - `_id`, `_creationTime`, `teacherId`, `title`, `isActive`: the unit
+ *   type's required keys, so every caller keeps one row type. None carries
+ *   teacher-written text (list rows already name the teacher).
+ * - `emoji`, `subject`: the web unit picker; `emoji` also the Quest header on
+ *   web and iPad.
+ * - `slug`: the web session page resolves `?unit=` by slug.
+ * - `youtubeUrl`: the unit video in the web session.
+ * - `authorScholarId`: "is this my Quest" on web and iPad.
+ * - `mission`: the scholar's own Quest mission on the iPad (their words).
+ */
+const SCHOLAR_UNIT_FIELDS = [
+  "_id",
+  "_creationTime",
+  "teacherId",
+  "title",
+  "isActive",
+  "emoji",
+  "subject",
+  "slug",
+  "youtubeUrl",
+  "authorScholarId",
+  "mission",
+] as const satisfies readonly (keyof Doc<"units">)[];
+
+/**
+ * A unit as a reader outside curriculum design sees it (a scholar, a parent,
+ * an adult on the learner surface): only `SCHOLAR_UNIT_FIELDS`, plus
+ * `description`. `description` is teacher-facing design intent, and on a
+ * Quest a teacher offered one scholar it is the teacher's notes about that
+ * child, so it becomes the scholar-facing `scholarDescription`, or "" when
+ * there is none (the key stays a string so the shape holds). A scholar's own
+ * Quest keeps their words: every scholar-authored path
+ * (`mintIndependentStudyUnit`) writes both fields.
+ */
+function scholarUnitView(unit: Doc<"units">): Doc<"units"> {
+  // Every required key is in the allowlist and always set on a row, so the
+  // undefined filter only drops absent optional fields.
+  const allowed = Object.fromEntries(
+    SCHOLAR_UNIT_FIELDS.filter((key) => unit[key] !== undefined).map((key) => [
+      key,
+      unit[key],
+    ]),
+  ) as Pick<Doc<"units">, (typeof SCHOLAR_UNIT_FIELDS)[number]>;
+  return { ...allowed, description: unit.scholarDescription ?? "" };
+}
+
+/**
+ * Whether `units.get` hands this caller the whole unit, teacher-facing
+ * `description` included. Curriculum staff only; and for a scholar's Quest
+ * (`authorScholarId`, the one per-scholar marker on a unit) only when they
+ * reach that scholar AS STAFF: a platform admin, or a non-parent membership
+ * that passes `canAccessScholar`. `requireUnitAccessForUser` also admits the
+ * Quest's author and any guardian; reaching it that way gets the scholar
+ * view, whatever else the account can do elsewhere (a teacher who is a parent
+ * at another school, curriculum:edit-only staff who are a parent here, an
+ * adult reading their own learner Quest). `units.list` gets the same result
+ * from `asLearner` plus the institution lens.
+ */
+async function readsFullUnit(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  unit: Doc<"units">,
+): Promise<boolean> {
+  if (!(await canBrowseCurriculum(ctx, user))) return false;
+  const scholarId = unit.authorScholarId;
+  if (!scholarId) return true;
+  if (scholarId === user._id) return false;
+  if (isPlatformAdminRole(user.role)) return true;
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", user._id))
+    .collect();
+  for (const membership of memberships) {
+    // A parent membership reaches its guardianships, never as staff.
+    if (membership.role === ROLES.PARENT) continue;
+    if (await canAccessScholar(ctx, membership, scholarId)) return true;
+  }
+  return false;
+}
+
 /** Guard against a filter that excludes almost everything making one page
  *  read the whole table; a short page just reports `CanLoadMore` and the
  *  browser asks again. */
@@ -362,19 +486,29 @@ const BROWSER_MAX_ROWS_READ_PER_PAGE = 1000;
  *
  * Same unit set as `units.list`'s curriculum path — the identical tenancy
  * predicate (`curriculumUnitLensPredicate`) — but the browser's Author /
- * Subject / Archived filters run here, BEFORE the page is cut, so a page is
- * never mostly empty after client filtering. Newest first, so a just-created
- * unit lands at the top of page one.
+ * Subject / Grade / Archived / scholar-quest filters run here, BEFORE the page is cut,
+ * so a page is never mostly empty after client filtering. Newest first, so a
+ * just-created unit lands at the top of page one.
+ *
+ * Scholar Quests (`authorScholarId` set) are left out when
+ * `showScholarQuests` is false, which the browser sends by default: their
+ * home is the Quests tab (`listScholarAuthored`), and mixed into this list
+ * they buried the reusable teacher units. Omitted keeps them, so a tab still
+ * running the client from before the toggle existed loses nothing it can't
+ * get back.
  *
  * Index choice: an author filter reads `by_teacher` (one teacher's units are
  * few); the default hides archived units through `by_active`; only "all
- * authors + show archived" walks the whole table. The tenancy lens and the
- * case-folded subject match are not index ranges (an Independent Study unit's
- * tenant is its author scholar's institution, not a field on the row), so they
- * run as a convex-helpers stream `filterWith` — applied before pagination,
+ * authors + show archived" walks the whole table. The tenancy lens, the
+ * subject match by meaning (`unitFitsSubjectFilter`) and the grade match by
+ * span (`unitFitsGradeFilter`, a "3-5" unit fits grade 4) are not index ranges (an
+ * Independent Study unit's tenant is its author scholar's institution, not a
+ * field on the row), so they run as a convex-helpers stream `filterWith` —
+ * applied before pagination,
  * unlike a post-filter that would hand back short or empty pages.
  *
- * Rows are slim: only what `CurriculumUnitsBrowser` renders. `lessonCount` is
+ * Rows are slim: only what `CurriculumUnitsBrowser` renders, subject and grade
+ * included so two versions of a topic can be told apart. `lessonCount` is
  * a `by_unit` read per row, bounded by the page size.
  */
 export const listForBrowser = authedQuery({
@@ -382,7 +516,12 @@ export const listForBrowser = authedQuery({
     scope: v.optional(v.string()),
     authorId: v.optional(v.id("users")),
     subject: v.optional(v.string()),
+    // One grade ("K", "4"); a unit fits when its span covers it.
+    grade: v.optional(v.string()),
     showArchived: v.boolean(),
+    // Optional, and omitted means shown: a tab loaded before this arg existed
+    // has no toggle to bring Quests back.
+    showScholarQuests: v.optional(v.boolean()),
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
@@ -401,11 +540,14 @@ export const listForBrowser = authedQuery({
             .withIndex("by_active", (q) => q.eq("isActive", true))
             .order("desc");
     const subject = args.subject?.trim() || null;
+    const grade = args.grade?.trim() || null;
     const result = await ordered
       .filterWith(
         async (unit) =>
           (args.showArchived || unit.isActive) &&
-          (!subject || subjectMatches(unit.subject, subject)) &&
+          (args.showScholarQuests !== false || !unit.authorScholarId) &&
+          (!subject || unitFitsSubjectFilter(unit.subject, subject)) &&
+          (!grade || unitFitsGradeFilter(unit.gradeLevel, grade)) &&
           inLens(unit),
       )
       .paginate({
@@ -428,6 +570,8 @@ export const listForBrowser = authedQuery({
           unpublished: unit.unpublished === true,
           teacherId: unit.teacherId,
           teacherName: teacher?.name ?? null,
+          subject: unit.subject?.trim() || null,
+          gradeLevel: unit.gradeLevel?.trim() || null,
           lessonCount: lessons.length,
         };
       }),
@@ -437,23 +581,43 @@ export const listForBrowser = authedQuery({
 });
 
 /**
- * The Units browser's filter options — Author and Subject menus plus the
- * "Show archived (N)" count — without shipping every unit's row. Same lens
- * and same semantics the browser used to derive client-side: authors span
- * every unit in the lens (archived too), subjects only units visible under the
- * current archived toggle (and NOT narrowed by the author filter).
+ * The Units browser's filter options — Author, Subject and Grade menus plus the
+ * "Show archived (N)" and "Show scholar quests (N)" counts — without shipping
+ * every unit's row. Same lens and same semantics the browser used to derive
+ * client-side: authors span every unit in the lens (archived too), subjects
+ * and grades only units visible under the current archived toggle (and NOT narrowed by
+ * the author filter). Both follow the scholar-quest toggle, so a scholar
+ * (a Quest's `teacherId`) is offered as an author only while their Quests
+ * are shown. Each count is what its toggle would reveal given the other's
+ * current state; `hasArchived` / `hasScholarQuests` say whether a toggle has
+ * anything behind it at all, so archived Quests stay reachable when both
+ * counts are zero. `showScholarQuests` omitted means shown, as in
+ * `listForBrowser`.
  */
 export const browserFilterOptions = authedQuery({
   args: {
     scope: v.optional(v.string()),
     showArchived: v.boolean(),
+    showScholarQuests: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     if (!(await canBrowseCurriculum(ctx, ctx.user))) {
-      return { authors: [], subjects: [], archivedCount: 0 };
+      return {
+        authors: [],
+        subjects: [],
+        grades: [],
+        archivedCount: 0,
+        scholarQuestCount: 0,
+        hasArchived: false,
+        hasScholarQuests: false,
+      };
     }
     const all = await ctx.db.query("units").order("desc").collect();
-    const units = await curriculumUnitsInLens(ctx, all, args.scope);
+    const inLens = await curriculumUnitsInLens(ctx, all, args.scope);
+    const showScholarQuests = args.showScholarQuests !== false;
+    const units = inLens.filter(
+      (unit) => showScholarQuests || !unit.authorScholarId,
+    );
 
     const authorIds: Id<"users">[] = [];
     const seen = new Set<Id<"users">>();
@@ -469,12 +633,18 @@ export const browserFilterOptions = authedQuery({
         name: (await ctx.db.get(id))?.name ?? "Unknown",
       })),
     );
+    const shown = units.filter((unit) => args.showArchived || unit.isActive);
     return {
       authors,
-      subjects: uniqueSubjects(
-        units.filter((unit) => args.showArchived || unit.isActive),
-      ),
+      subjects: unitSubjectFilterOptions(shown),
+      grades: unitGradeFilterOptions(shown),
       archivedCount: units.filter((unit) => !unit.isActive).length,
+      scholarQuestCount: inLens.filter(
+        (unit) =>
+          !!unit.authorScholarId && (args.showArchived || unit.isActive),
+      ).length,
+      hasArchived: inLens.some((unit) => !unit.isActive),
+      hasScholarQuests: inLens.some((unit) => !!unit.authorScholarId),
     };
   },
 });
@@ -707,11 +877,18 @@ export const get = authedQuery({
       unit,
       scholarId: ctx.user._id,
     });
-    const canUnlockBuild = await canUnlockQuestBuild(ctx, {
-      unit,
-      scholarId: ctx.user._id,
-    });
-    return { ...unit, questLocks, canUnlockBuild };
+    // The learn-first lock is retired: `questLocks` is always empty and
+    // `canUnlockBuild` always false, so older BunnyPads show no lock and no
+    // "Unlock: build a simulation" offer. The fields stay for them.
+    const canUnlockBuild = false;
+    // Curriculum staff reaching the unit as staff get the whole unit; a
+    // scholar or parent gets the scholar view (see readsFullUnit).
+    // A proposal's words and thread reach people only through the dedicated
+    // proposal read, never a generic unit read (TRA-685).
+    const view = (await readsFullUnit(ctx, ctx.user, unit))
+      ? withoutQuestApproval(unit)
+      : scholarUnitView(unit);
+    return { ...view, questLocks, canUnlockBuild };
   },
 });
 
@@ -792,6 +969,31 @@ export const subjects = authedQuery({
 });
 
 /**
+ * The subjects a unit can be filed under (TRA-723): the class names on the
+ * UNIT's school's timetable in the term covering `at` (`unitSubjectOptions`,
+ * the same rule the aide's writes check), whoever is viewing. The unit
+ * designer's subject picker; empty (keep free text) when that school has no
+ * classes this term, for a scholar's own unit, or when the caller may not
+ * edit the unit. `at` comes from the client, rounded, so this query never
+ * reads the clock.
+ */
+export const subjectOptions = authedQuery({
+  args: { unitId: v.id("units"), at: v.number() },
+  returns: v.array(v.string()),
+  handler: async (ctx, args) => {
+    let unit: Doc<"units">;
+    try {
+      ({ unit } = await requireUnitEditAccessForUser(ctx, ctx.user, {
+        unitId: args.unitId,
+      }));
+    } catch {
+      return [];
+    }
+    return await unitSubjectOptions(ctx, unit, args.at);
+  },
+});
+
+/**
  * Scholar's own Independent Study units (where they're the
  * authorScholarId). Returned newest first. Includes a tiny progress
  * snapshot for the home-page card: completed vs. total session-backed
@@ -815,12 +1017,18 @@ export async function independentStudyUnitsForScholar(
       q.eq("authorScholarId", scholarId),
     )
     .collect();
-  const active = units.filter((u) => u.isActive);
+  // A proposal waiting for a teacher, or one declined, is not a Quest yet:
+  // no activity, so no "Start" card for it (TRA-685, lib/questApproval.ts).
+  const active = units.filter(
+    (u) => u.isActive && !isUnansweredOrDeclinedProposal(u),
+  );
   active.sort((a, b) => b._creationTime - a._creationTime);
 
   // Units OFFERED to this scholar (a star on their map points at them —
   // a teacher/bot offer) belong on the star map as a destination, NOT in
   // this not-started-cards list. Drop them so they aren't double-surfaced.
+  // An offer the scholar dismissed from Prep (seeds.dismissForSelf) stays
+  // dropped: dismissing it must not turn it into a "not started" card.
   const myOfferStars = await ctx.db
     .query("seeds")
     .withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId))
@@ -828,7 +1036,12 @@ export async function independentStudyUnitsForScholar(
   const offeredUnitIds = new Set(
     myOfferStars
       .filter(
-        (s) => s.unitId && (s.status === "active" || s.status === "pending"),
+        (s) =>
+          s.unitId &&
+          (s.status === "active" ||
+            s.status === "pending" ||
+            (s.status === "dismissed" &&
+              s.dismissedReason === SCHOLAR_DISMISSED_REASON)),
       )
       .map((s) => String(s.unitId)),
   );
@@ -964,10 +1177,26 @@ export const create = curriculumMutation({
     gradeLevel: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // One grade or a span within K–8 in one form (lib/unitGrade.ts).
+    const grade = resolveUnitGradeEdit({}, args.gradeLevel ?? null);
+    if (grade.kind === "unreadable") throw unitGradeUnreadableError(grade.given);
     const institutionId = await institutionIdForUnitAuthor(
       ctx,
       ctx.user._id,
     );
+    // A subject names one of the school's classes (TRA-723): a class name or
+    // a clear fit is stored as the class's spelling, anything else refused.
+    let subject = args.subject?.trim() || undefined;
+    if (subject) {
+      const resolved = resolveUnitSubject(
+        subject,
+        await schoolSubjectOptions(ctx, institutionId, Date.now()),
+      );
+      if (resolved.kind === "ask") {
+        throw unitSubjectNotAClassError(resolved.given, resolved.options);
+      }
+      if (resolved.kind === "ok") subject = resolved.subject;
+    }
     return await ctx.db.insert("units", {
       teacherId: ctx.user._id,
       institutionId,
@@ -989,8 +1218,8 @@ export const create = curriculumMutation({
       enduringUnderstandings: args.enduringUnderstandings
         ? toKeyedGranules(args.enduringUnderstandings, undefined, "eu")
         : undefined,
-      subject: args.subject?.trim() || undefined,
-      gradeLevel: args.gradeLevel?.trim() || undefined,
+      subject,
+      gradeLevel: grade.gradeLevel,
       isActive: true,
       // Teachers only until published or assigned (TRA-490).
       unpublished: true,
@@ -1007,13 +1236,18 @@ export const duplicate = curriculumMutation({
       ctx.user._id,
     );
 
-    const copyId = await ctx.db.insert(
-      "units",
-      {
-        ...duplicateUnitDesign(source, ctx.user._id),
-        institutionId,
-      },
-    );
+    const design = duplicateUnitDesign(source, ctx.user._id);
+    // A copy is filed under the class its subject fits (TRA-723), so an old
+    // off-list subject ("Mathematics") doesn't spread to the copy. A subject
+    // that fits no single class is copied as it is.
+    if (design.subject?.trim()) {
+      const resolved = resolveUnitSubject(
+        design.subject,
+        await schoolSubjectOptions(ctx, institutionId, Date.now()),
+      );
+      if (resolved.kind === "ok") design.subject = resolved.subject;
+    }
+    const copyId = await ctx.db.insert("units", { ...design, institutionId });
     const lessons = await ctx.db
       .query("lessons")
       .withIndex("by_unit", (q) => q.eq("unitId", source._id))
@@ -1096,14 +1330,14 @@ export const createQuest = authedMutation({
 });
 
 /**
- * Kick off the background "bake" for a Custom Quest: fill the scholar's
- * (empty) independent-study unit with a real lesson + activities via the
- * Curriculum Bot, then upgrade the live session in place when it lands (except
- * for "Endless chat" — see below). Called
- * by the client right after it creates the unit + its session, so the scholar
- * is already chatting (ad-lib) while this runs. Owner-gated; idempotent (the
- * bake skips a unit that already has activities). See
- * review/seed-to-unit-bake-plan.md.
+ * A scholar's own Custom Quest is a plain open chat: the server no longer
+ * "bakes" a lesson and activities into it (TRA-660). Old clients still call
+ * this right after creating the unit + session, so the function stays: it
+ * checks that the caller owns both and does nothing else. No bake is
+ * scheduled and `questBakeStatus` is never set, so no screen waits on one.
+ * Teacher-designed units keep the Curriculum Bot's bake (`bakeUnitFromSeed.ts`
+ * is unchanged); a scholar's Quest becomes structured only when a teacher
+ * approves it.
  */
 const scheduleCustomQuestBakeArgs = {
   unitId: v.id("units"),
@@ -1117,47 +1351,15 @@ export async function scheduleCustomQuestBakeAs(
   ctx: MutationCtx & { user: Doc<"users"> },
   args: ObjectType<typeof scheduleCustomQuestBakeArgs>,
 ) {
-    const unit = await ctx.db.get(args.unitId);
-    if (!unit) throw new Error("Unit not found");
-    // Only the scholar who owns this independent-study unit may bake it.
-    if (unit.authorScholarId !== ctx.user._id) throw new Error("Forbidden");
-    const session = await ctx.db.get(args.sessionId);
-    if (!session || session.userId !== ctx.user._id) throw new Error("Forbidden");
-    // Mark the session as waiting BEFORE scheduling, so the client holds its
-    // opening turn instead of ad-libbing a topic the bake is about to replace
-    // (shared/questBakeHold.ts). Skipped once an activity exists — a re-bake of
-    // an already-structured session has nothing to wait for.
-    //
-    // NOT for "Endless chat". Both Custom Quest dialogs run the path picker to
-    // completion and omit `bakePath` for exactly one choice — the endless-chat
-    // card, whose entire promise to the scholar is "No plan — just start
-    // talking". It still bakes in the background so the unit becomes a
-    // structured quest with an earnable badge, but the live chat is never
-    // held behind a spinner NOR upgraded in place into the baked unit's first
-    // activity — that swap lands minutes into the conversation and reads to
-    // the scholar as being yanked out of the open chat they chose (a scholar
-    // remade the same quest three times on 2026-09-25 trying to keep it). A
-    // future caller that omits `bakePath` for some other reason must pass the
-    // scholar's intent explicitly rather than inheriting this.
-    const scholarIsWaitingForAQuest = !!args.bakePath;
-    if (
-      scholarIsWaitingForAQuest &&
-      !session.activityId &&
-      session.questBakeStatus !== "pending"
-    ) {
-      await ctx.db.patch(args.sessionId, { questBakeStatus: "pending" });
-    }
-    await ctx.scheduler.runAfter(
-      0,
-      internal.bakeUnitFromSeed.bakeCustomQuestUnit,
-      {
-        unitId: args.unitId,
-        // No session → the bake fills the unit but leaves the chat alone.
-        ...(scholarIsWaitingForAQuest ? { sessionId: args.sessionId } : {}),
-        path: args.bakePath,
-      },
-    );
-    return { scheduled: true as const };
+  const unit = await ctx.db.get(args.unitId);
+  if (!unit) throw new Error("Unit not found");
+  // Only the scholar who owns this independent-study unit may call it.
+  if (unit.authorScholarId !== ctx.user._id) throw new Error("Forbidden");
+  // A Quest proposal takes no structure from here either way.
+  assertProposalTakesNoStructure(unit);
+  const session = await ctx.db.get(args.sessionId);
+  if (!session || session.userId !== ctx.user._id) throw new Error("Forbidden");
+  return { scheduled: false as const };
 }
 
 export const scheduleCustomQuestBake = authedMutation({
@@ -1215,13 +1417,15 @@ export const createAndOfferQuestForScholar = teacherMutation({
         icon: args.badgeIcon ?? "🏆",
       },
     });
-    // Offer it as a destination (a star), not a pre-owned quest.
+    // Offer it as a destination (a star), not a pre-owned quest. The
+    // scholar reads `scholarInvitation`: their own blurb, or a kid-voiced
+    // default. `description` is teacher-facing and never becomes scholar copy.
+    const scholarDefault = `A quest your teacher set up for you to explore — fly here when you're ready.`;
     await plantTeacherSeed(ctx, {
       scholarId: args.scholarId,
       topic: title,
-      rationale:
-        args.description?.trim() ||
-        `A quest your teacher set up for you to explore — fly here when you're ready.`,
+      rationale: args.description?.trim() || scholarDefault,
+      scholarInvitation: args.scholarDescription?.trim() || scholarDefault,
       teacherId: ctx.user._id,
       unitId,
     });
@@ -1259,7 +1463,7 @@ export const listScholarAuthored = teacherQuery({
       lens.allowedInstitutionIds.size === 0;
     const allowedScholarIds = adminAll || legacySingleTenant
       ? null
-      : await scholarIdsInLens(ctx, lens);
+      : await scholarIdsInLens(ctx, lens, { includeWithdrawn: true });
 
     // Cheap scan of by_authorScholar to find WHICH scholars have authored a
     // unit (filtered by the institution lens) + a unit → creation-time map for
@@ -1463,7 +1667,9 @@ export const update = authedMutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { user } = await requireUnitEditAccess(ctx, { unitId: args.id });
+    const { user, unit: current } = await requireUnitEditAccess(ctx, {
+      unitId: args.id,
+    });
     const { id, ...updates } = args;
     // Scholar IS-authors can edit the descriptive surface of their
     // own unit (title, emoji, description, big idea, EQs, etc.) but
@@ -1476,8 +1682,15 @@ export const update = authedMutation({
     if (updates.title !== undefined) cleaned.title = updates.title.trim();
     if (updates.emoji !== undefined)
       cleaned.emoji = updates.emoji.trim() || undefined;
-    if (updates.description !== undefined)
+    if (updates.description !== undefined) {
       cleaned.description = updates.description.trim() || undefined;
+      // A scholar author's own words are also their Quest's scholar copy
+      // (what scholar reads show, scholarUnitView), so their edit updates
+      // both, as mintIndependentStudyUnit writes both. A teacher's edit
+      // stays teacher-facing. An explicit scholarDescription below wins.
+      if (current.authorScholarId === user._id)
+        cleaned.scholarDescription = cleaned.description;
+    }
     if (!isScholarOnly && updates.systemPrompt !== undefined)
       cleaned.systemPrompt = updates.systemPrompt.trim() || undefined;
     if (!isScholarOnly && updates.rubric !== undefined)
@@ -1508,10 +1721,22 @@ export const update = authedMutation({
         ? toKeyedGranules(updates.enduringUnderstandings, unit?.enduringUnderstandings, "eu")
         : undefined;
     }
-    if (updates.subject !== undefined)
-      cleaned.subject = updates.subject?.trim() || undefined;
-    if (updates.gradeLevel !== undefined)
-      cleaned.gradeLevel = updates.gradeLevel?.trim() || undefined;
+    if (updates.subject !== undefined) {
+      // A subject names one of the school's classes (TRA-723). The picker
+      // already offers only those; this holds the rule for any other client.
+      const edit = await resolveUnitSubjectEdit(current, updates.subject, () =>
+        unitSubjectOptions(ctx, current, Date.now()),
+      );
+      if (edit.kind === "ask") throw unitSubjectNotAClassError(edit.given, edit.options);
+      if (edit.subject !== current.subject) cleaned.subject = edit.subject;
+    }
+    if (updates.gradeLevel !== undefined) {
+      // One grade or a span within K–8 in one form (lib/unitGrade.ts). The
+      // picker writes only that; this holds the rule for any other client.
+      const grade = resolveUnitGradeEdit(current, updates.gradeLevel);
+      if (grade.kind === "unreadable") throw unitGradeUnreadableError(grade.given);
+      if (grade.gradeLevel !== current.gradeLevel) cleaned.gradeLevel = grade.gradeLevel;
+    }
     if (updates.mathDomain !== undefined)
       cleaned.mathDomain = updates.mathDomain?.trim() || undefined;
     if (updates.scholarDescription !== undefined)
@@ -1731,6 +1956,7 @@ export const remove = authedMutation({
     }
 
     // Cascade design content: lessons + their activities.
+    const removedPlacements: Doc<"schedulePlacements">[] = [];
     const lessons = await ctx.db
       .query("lessons")
       .withIndex("by_unit", (q) => q.eq("unitId", args.id))
@@ -1741,10 +1967,11 @@ export const remove = authedMutation({
         .withIndex("by_lesson", (q) => q.eq("lessonId", l._id))
         .collect();
       for (const a of acts) {
-        await deleteActivityCascade(ctx, a._id, { skipWorkGuard: true });
+        await deleteActivityCascade(ctx, a._id, { skipWorkGuard: true, removedPlacements });
       }
       await ctx.db.delete(l._id);
     }
+    await syncClassesForPlacements(ctx, removedPlacements);
 
     // Curriculum Bot threads scoped to this unit. No unit-only index on
     // either table (both key on teacherId+unitId); these are small
@@ -1778,6 +2005,67 @@ export const remove = authedMutation({
     }
 
     await ctx.db.delete(args.id);
+  },
+});
+
+/** What staff are told when they ask to archive a scholar's own Quest. */
+export const QUEST_ARCHIVE_REFUSAL =
+  "This is a scholar's own Quest, not a teacher unit, so it can't be archived here: archiving it would take it away from the scholar and lock them out of its sessions. Nothing was changed. To take a Quest back, use Retract on the Quests tab, which looks after the scholar's side.";
+
+/**
+ * Archive or un-archive a TEACHER unit for the staff aide (Slack and the
+ * app's Chat tab): the same `isActive` flip as `deactivate` / `reactivate`,
+ * behind the caller's own unit-edit check. Archiving hides the unit from
+ * scholars and stops new sessions in it, so it is refused while any
+ * assignment of the unit is still running. Finished work is kept.
+ *
+ * A scholar's own unit (`authorScholarId`: a Quest, or the thin "My Quest"
+ * unit behind a free-form session) is refused both ways. Deactivating one is
+ * how a Quest is RETRACTED, which locks the scholar out of its sessions
+ * (`isRetractedQuestSession`), and reactivating one skips reopen's cleanup;
+ * the Quests tab owns that lifecycle.
+ */
+export const aideSetUnitArchived = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    unitId: v.id("units"),
+    archived: v.boolean(),
+  },
+  returns: v.object({
+    title: v.string(),
+    archived: v.boolean(),
+    changed: v.boolean(),
+  }),
+  handler: async (ctx, { callerUserId, unitId, archived }) => {
+    const { unit } = await requireAgentUnitEditAccess(ctx, callerUserId, unitId);
+    if (unit.authorScholarId) throw new Error(QUEST_ARCHIVE_REFUSAL);
+    const isArchived = unit.isActive === false;
+    if (isArchived === archived) {
+      return { title: unit.title, archived, changed: false };
+    }
+    if (archived) {
+      // A scholar can't start an activity in an inactive unit
+      // (`sessions.createSessionAs`), even through an assignment that is
+      // still running. So a unit a class is working in stays active until
+      // its assignments end.
+      const live = (
+        await ctx.db
+          .query("assignments")
+          .withIndex("by_unit", (q) => q.eq("unitId", unitId))
+          .collect()
+      ).filter((a) => a.archivedAt === undefined);
+      if (live.length > 0) {
+        const names = live
+          .slice(0, 5)
+          .map((a) => `"${a.title ?? unit.title}"`)
+          .join(", ");
+        throw new Error(
+          `${live.length} assignment(s) still running in this unit (${names}${live.length > 5 ? ", …" : ""}). Archiving it would stop those scholars from starting any activity they haven't opened yet. Nothing was changed. End those assignments first (Archive on the Assignments tab), or leave this unit active.`,
+        );
+      }
+    }
+    await ctx.db.patch(unitId, { isActive: !archived });
+    return { title: unit.title, archived, changed: true };
   },
 });
 
@@ -1936,8 +2224,12 @@ export const aiUpdateIsUnitMetadata = internalMutation({
     }
     const patch: Record<string, unknown> = {};
     if (args.bigIdea !== undefined) patch.bigIdea = args.bigIdea.trim() || undefined;
-    if (args.description !== undefined)
+    // The tutor writes this in the scholar's own Quest, so it is scholar copy
+    // too: update both fields, as mintIndependentStudyUnit writes both.
+    if (args.description !== undefined) {
       patch.description = args.description.trim() || undefined;
+      patch.scholarDescription = patch.description;
+    }
     if (args.essentialQuestions !== undefined)
       patch.essentialQuestions = toKeyedGranules(
         args.essentialQuestions, unit.essentialQuestions, "eq");
@@ -1969,6 +2261,14 @@ export const aiSetIsUnitMission = internalMutation({
     if (!unit) throw new Error("Unit not found");
     if (unit.authorScholarId !== args.scholarId) {
       throw new Error("Forbidden: not your IS unit");
+    }
+    // A proposed Quest's mission is part of its proposal: the scholar changes
+    // it on the proposal while it waits (questProposals.editProposal, which
+    // keeps the thread's copy in step), and it stays as answered after that.
+    if (unit.questApproval) {
+      throw new Error(
+        "This Quest's mission is part of the proposal its teacher answered, so it stays as it is. Nothing was changed.",
+      );
     }
     const text = args.text.trim().replace(/\s+/g, " ");
     const gate = args.gate.trim().replace(/\s+/g, " ");

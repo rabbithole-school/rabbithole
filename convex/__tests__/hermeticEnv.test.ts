@@ -21,4 +21,19 @@ describe("hermetic test environment", () => {
       ).toBeUndefined();
     }
   });
+
+  test("Twilio credentials are stripped so no test can send a real text", () => {
+    for (const key of [
+      "TWILIO_ACCOUNT_SID",
+      "TWILIO_API_KEY_SID",
+      "TWILIO_API_KEY_SECRET",
+      "TWILIO_FROM_NUMBER",
+      "TWILIO_AUTH_TOKEN",
+    ] as const) {
+      expect(
+        process.env[key],
+        `${key} must not leak into unit tests — see vitest.setup.ts`,
+      ).toBeUndefined();
+    }
+  });
 });

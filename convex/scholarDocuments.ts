@@ -1126,7 +1126,8 @@ export const adminFixtureCleanupScholar = internalMutation({
           )
           .collect();
         for (const s of rows) {
-          if (topicSet.has(s.topic.trim())) {
+          // A document never planted a wonder: only the scholar asks those.
+          if (s.origin !== "wonder" && topicSet.has(s.topic.trim())) {
             await ctx.db.delete(s._id);
             seedsDeleted += 1;
           }

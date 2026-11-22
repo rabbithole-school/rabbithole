@@ -127,9 +127,12 @@ afterEach(() => {
 async function renderEditor(deck: Deck) {
   stubLayout();
   const decks: Deck[] = [];
+  // Lets a test hand the editor a deck the way the server subscription would.
+  let pushDeck: (next: Deck) => void = () => {};
 
   function Harness() {
     const [current, setCurrent] = useState(deck);
+    pushDeck = setCurrent;
     // eslint-disable-next-line react/no-children-prop -- Chakra's createElement type requires children in the props object
     return createElement(ChakraProvider, {
       value: system,
@@ -149,7 +152,7 @@ async function renderEditor(deck: Deck) {
   await act(async () => {
     root!.render(createElement(Harness));
   });
-  return { decks };
+  return { decks, pushDeck: (next: Deck) => pushDeck(next) };
 }
 
 /**
@@ -280,5 +283,45 @@ describe("SlidesEditor — committing a blank text box", () => {
     expect(editorTextarea()).toBeNull();
     // Nothing was emitted, so the box is still the one the deck came with.
     expect(deck.slides[0].elementIds).toContain(id);
+  });
+});
+
+describe("SlidesEditor — the tutor reorders slides mid-edit (TRA-704)", () => {
+  it("keeps the scholar on their slide and saves the draft to it", async () => {
+    // Two slides whose boxes share an element id, as older decks did, so a
+    // draft resolved by position would find a box on the wrong slide.
+    const { deck: seeded, id } = deckWithText("Volcanoes");
+    const first = seeded.slides[0];
+    const second = {
+      ...first,
+      id: "slide-2",
+      elements: { [id]: { ...first.elements[id], text: "Rivers" } },
+    } as Deck["slides"][number];
+    const deck: Deck = { ...seeded, slides: [first, second] };
+
+    const { decks, pushDeck } = await renderEditor(deck);
+    const textarea = await openTextEditor(boxAt(BOX_FRAME));
+    await act(async () => typeInto(textarea, "Volcanoes erupt"));
+
+    // The tutor moves slide-1 after slide-2; slide-2 now sits at index 0.
+    const moved = applySlideOps(
+      deck,
+      [{ op: "moveSlide", slideId: "slide-1", afterSlideId: "slide-2" }],
+      makeDeckIdFactory(deck),
+    );
+    if (!moved.ok) throw new Error(moved.error);
+    await act(async () => pushDeck(moved.deck));
+
+    // Still in the same box, with the words they typed.
+    expect(editorTextarea()?.value).toBe("Volcanoes erupt");
+
+    await act(async () => hideTab());
+    const saved = decks.at(-1)!;
+    const textOn = (slideId: string) => {
+      const el = saved.slides.find((s) => s.id === slideId)?.elements[id];
+      return el?.type === "text" ? el.text : null;
+    };
+    expect(textOn("slide-1")).toBe("Volcanoes erupt");
+    expect(textOn("slide-2")).toBe("Rivers");
   });
 });

@@ -15,9 +15,6 @@
 //     conversation reshaped the idea and the scholar agreed to it.
 //   - The kid's OWN words are mandatory (`scholarWords`, verbatim-ish); the
 //     backing mutation records both scholarWords and refined so staff see both.
-//   - At the open-ideas cap the tool returns a friendly "help them prioritize"
-//     result (mirroring the composer's cap message) instead of erroring — the
-//     conversation continues, nothing is a hard wall.
 //
 // Gating: the WHOLE feature is behind the WORKSHOP_IDEA_CONVOS_ENABLED
 // deployment env var (absent = OFF). `isIdeaConvosEnabled()` gates BOTH the
@@ -88,7 +85,6 @@ export interface CaptureIdeaArgs {
  */
 export type CaptureIdeaResult =
   | { status: "captured"; title: string }
-  | { status: "at_cap"; cap: number }
   | { status: "empty" };
 
 /** Injected capture — the DB write (prod) or an echo (eval). */
@@ -102,15 +98,6 @@ export type CaptureIdea = (args: CaptureIdeaArgs) => Promise<CaptureIdeaResult>;
  */
 export function ideaSentMessage(title: string): string {
   return `Sent "${title}" to your teachers — they read every idea. Let them know it's on its way, warmly and in your own words. Don't promise it'll get built or say when; you carried the idea, the humans decide.`;
-}
-
-/**
- * The model-facing line when the scholar is already at the open-ideas cap.
- * Nothing was sent; the model helps them prioritize (guardrail #2 / §9 cap
- * parity with the composer). Never framed as the idea not being good enough.
- */
-export function ideaAtCapMessage(cap: number): string {
-  return `They've already got ${cap} ideas open in the Workshop — that's the most at once, so this one wasn't sent yet. Their idea is a good one; there's just a limit. Help them look at what's already waiting and decide which matters most right now.`;
 }
 
 /** The model-facing line when no scholar words were supplied (defensive). */
@@ -169,19 +156,6 @@ export async function makeIdeaConvoTools(emit: AideEmit, capture: CaptureIdea) {
         refined: input.refined,
       });
 
-      if (result.status === "at_cap") {
-        emit({
-          toolComplete: {
-            name: "send_idea_to_teacher",
-            result: "Not sent (at cap)",
-          },
-        });
-        return JSON.stringify({
-          ok: false,
-          sent: false,
-          message: ideaAtCapMessage(result.cap),
-        });
-      }
       if (result.status === "empty") {
         emit({
           toolComplete: {

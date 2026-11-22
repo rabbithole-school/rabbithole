@@ -34,8 +34,9 @@ export type CompletionCase = {
   /**
    * Fixed scholar turns, played verbatim in order instead of the emergent sim. A
    * scripted scholar never signals [[DONE]]/[[STUCK]], so the goal is
-   * definitionally never reached — any completion is too-soon. Used by
-   * should-withhold fixtures so the scenario can't drift.
+   * never reached unless the fixture also sets `goalEvidencePatterns`. Used by
+   * should-withhold fixtures, and by open-question fixtures, so the scenario
+   * can't drift.
    */
   script?: string[];
   /**
@@ -44,6 +45,13 @@ export type CompletionCase = {
    * so far; they need not all appear in the same turn.
    */
   goalEvidencePatterns?: string[];
+  /**
+   * Scripted scholar turns (1-based) whose message leaves something open for
+   * the tutor: a real question or new confusion. Completing on one of these
+   * turns breaks the "never complete on an open question" rule (TRA-703) and
+   * scores too-soon, even after the goal was reached.
+   */
+  openQuestionTurns?: number[];
   /** Optional prose describing the failure mode this case guards. */
   note?: string;
 };

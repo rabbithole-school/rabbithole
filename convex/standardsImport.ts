@@ -1,7 +1,7 @@
 "use node";
 
 import { v } from "convex/values";
-import { action, internalAction } from "./_generated/server";
+import { internalAction } from "./_generated/server";
 import type { ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { Id } from "./_generated/dataModel";
@@ -189,7 +189,7 @@ export const importFromUrl = internalAction({
 
 // ─── Public action wrappers ────────────────────────────────────────────
 
-export const importCommonCoreMath = action({
+export const importCommonCoreMath = internalAction({
   args: {},
   handler: async (ctx): Promise<ImportResult> => {
     return await ctx.runAction(
@@ -199,7 +199,7 @@ export const importCommonCoreMath = action({
   },
 });
 
-export const importCommonCoreELA = action({
+export const importCommonCoreELA = internalAction({
   args: {},
   handler: async (ctx): Promise<ImportResult> => {
     return await ctx.runAction(
@@ -209,7 +209,7 @@ export const importCommonCoreELA = action({
   },
 });
 
-export const importUCLAHistoricalThinking = action({
+export const importUCLAHistoricalThinking = internalAction({
   args: {},
   handler: async (ctx): Promise<ImportResult> => {
     const { HISTORICAL_THINKING_DATASET } = await import("./historicalThinkingData");
@@ -237,7 +237,7 @@ export const importNGSSFromData = internalAction({
 });
 
 //   npx convex run standardsImport:importNGSS
-export const importNGSS = action({
+export const importNGSS = internalAction({
   args: {},
   handler: async (ctx): Promise<ImportResult> => {
     return await ctx.runAction(internal.standardsImport.importNGSSFromData, {});
@@ -246,7 +246,7 @@ export const importNGSS = action({
 
 // Backward-compatible wrapper for the original proof-of-concept action name:
 //   npx convex run standardsImport:importNGSSScience
-export const importNGSSScience = action({
+export const importNGSSScience = internalAction({
   args: {},
   handler: async (ctx): Promise<ImportResult> => {
     return await ctx.runAction(internal.standardsImport.importNGSSFromData, {});

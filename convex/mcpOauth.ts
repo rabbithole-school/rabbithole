@@ -12,10 +12,12 @@
  *      challenge. Only the sha256 of the code is stored.
  *   3. Claude exchanges the code at /api/oauth/token → the "mcp"
  *      ConvexCredentials provider (auth.ts) consumes it via `takeCode`,
- *      verifies PKCE, and mints a REAL Convex Auth session — so the MCP
- *      access token IS a normal Convex JWT and every existing role /
- *      guardianship gate applies unchanged. Refresh goes through the
- *      standard `auth:signIn { refreshToken }` machinery.
+ *      verifies PKCE, and `openSession` mints a REAL Convex Auth session
+ *      plus its `mcpSessions` row — so the MCP access token IS a normal
+ *      Convex JWT and every existing role / guardianship gate applies
+ *      unchanged. Refresh goes through the standard
+ *      `auth:signIn { refreshToken }` machinery, then `recordMySession`
+ *      pushes the session's end date out (mcpSessionIdleMs).
  *
  * This replaced the bearer `tokens` table (deleted 2026-06).
  */
@@ -23,12 +25,28 @@ import { v } from "convex/values";
 import { mutation, query, internalMutation } from "./_generated/server";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { randomToken, sha256Hex } from "./lib/oauthCrypto";
-import { getAuthSessionId } from "@convex-dev/auth/server";
+import { getAuthSessionId, getAuthUserId } from "@convex-dev/auth/server";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 
 /** Auth codes are one-shot and short-lived: 10 minutes (RFC 6749 §4.1.2). */
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * How long an MCP connection survives without refreshing. Every refresh
+ * pushes the session's end date to now + this, so a connection in use never
+ * hits Convex Auth's fixed 30-day session lifetime, which used to log every
+ * connector out 30 days after it connected, however active it was. Read from
+ * the same setting Convex Auth uses for refresh-token inactivity (default 30
+ * days), so both limits agree: a connection unused that long ends and has to
+ * be reconnected.
+ */
+export function mcpSessionIdleMs(): number {
+  const configured = Number(process.env.AUTH_SESSION_INACTIVE_DURATION_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : 30 * 24 * 60 * 60 * 1000;
+}
 
 /**
  * Validate a redirect URI for client registration. HTTPS for real
@@ -54,6 +72,18 @@ export function isAcceptableRedirectUri(uri: string): boolean {
   }
   return false;
 }
+
+/**
+ * The consent screen's version. Bump it when an older screen misdescribed
+ * what a connection can do: `hasConsent` ignores remembered consents from
+ * older screens, so the person sees the corrected screen once instead of
+ * auto-approving on the old one.
+ *
+ * 1 — TRA-635. Before it, a client could make the screen say "read-only" by
+ *     naming /api/mcp/read in the RFC 8707 `resource` parameter, though the
+ *     token it approved also worked on the full connector.
+ */
+export const CONSENT_SCREEN_VERSION = 1;
 
 /** Cap on outstanding auth codes a revoke deletes in one transaction. */
 const MAX_CODES_BURNED_ON_REVOKE = 256;
@@ -165,13 +195,17 @@ export const approve = authedMutation({
         )
         .unique();
       if (existing) {
-        await ctx.db.patch(existing._id, { lastUsedAt: now });
+        await ctx.db.patch(existing._id, {
+          lastUsedAt: now,
+          consentVersion: CONSENT_SCREEN_VERSION,
+        });
       } else {
         await ctx.db.insert("mcpOauthConsents", {
           userId: ctx.user._id,
           clientId: args.clientId,
           createdAt: now,
           lastUsedAt: now,
+          consentVersion: CONSENT_SCREEN_VERSION,
         });
       }
     }
@@ -180,8 +214,9 @@ export const approve = authedMutation({
 });
 
 /**
- * Whether the caller has already granted remembered consent to this client.
- * The consent page uses this to auto-approve (skip the click) on reconnect.
+ * Whether the caller has already granted remembered consent to this client
+ * on the current consent screen (CONSENT_SCREEN_VERSION). The consent page
+ * uses this to auto-approve (skip the click) on reconnect.
  */
 export const hasConsent = authedQuery({
   args: { clientId: v.string() },
@@ -192,7 +227,9 @@ export const hasConsent = authedQuery({
         q.eq("userId", ctx.user._id).eq("clientId", args.clientId),
       )
       .unique();
-    return row !== null;
+    return (
+      row !== null && (row.consentVersion ?? 0) >= CONSENT_SCREEN_VERSION
+    );
   },
 });
 
@@ -233,10 +270,9 @@ export const takeCode = internalMutation({
 // ── Active-connection management (Account Details → "Connect Claude") ────
 //
 // An MCP token is a stock Convex Auth session, indistinguishable from a
-// browser session, so we keep a sidecar (`mcpSessions`) the connecting
-// session writes about ITSELF at token-exchange. That gives the user a
-// list to see + revoke without us having to reverse-engineer which
-// authSessions rows are MCP ones.
+// browser session, so we keep a sidecar (`mcpSessions`) written at
+// code-exchange time. That gives the user a list to see + revoke, and it is
+// what marks a session as an MCP connection whose end date may slide.
 
 /** Delete dead sidecar rows for a user (authSessions parent gone/expired). */
 async function pruneDeadSessions(
@@ -257,48 +293,81 @@ async function pruneDeadSessions(
 }
 
 /**
- * The just-authenticated MCP session records itself. Called from the OAuth
- * token endpoint after a successful exchange, authenticated as the new
- * session — so `getAuthSessionId` returns ITS OWN sessionId (a caller can
- * never register a session it doesn't hold). `clientId` is passed on the
- * initial code exchange; on refresh it's omitted and we just bump
- * `lastSeenAt`. Idempotent per session.
+ * Mint the session for a code exchange, together with its `mcpSessions` row,
+ * in one transaction. Called only by the "mcp" provider in auth.ts after the
+ * code and PKCE check out; the provider hands the session id to Convex Auth,
+ * which mints the tokens on it (same pattern as `devicePair`). Internal on
+ * purpose: the sidecar row is what lets `recordMySession` slide a session's
+ * end date, and this is the only code that writes one.
  */
-export const recordMySession = authedMutation({
-  args: { clientId: v.optional(v.string()) },
-  handler: async (ctx, args) => {
-    const sessionId = await getAuthSessionId(ctx);
-    if (!sessionId) return; // not session-backed (shouldn't happen via token)
-    const typedSessionId = sessionId as Id<"authSessions">;
+export const openSession = internalMutation({
+  args: { userId: v.id("users"), clientId: v.string() },
+  handler: async (ctx, args): Promise<Id<"authSessions">> => {
     const now = Date.now();
-
-    const existing = await ctx.db
-      .query("mcpSessions")
-      .withIndex("by_session", (q) => q.eq("sessionId", typedSessionId))
+    const sessionId = await ctx.db.insert("authSessions", {
+      userId: args.userId,
+      expirationTime: now + mcpSessionIdleMs(),
+    });
+    const client = await ctx.db
+      .query("mcpOauthClients")
+      .withIndex("by_clientId", (q) => q.eq("clientId", args.clientId))
       .unique();
-    if (existing) {
-      await ctx.db.patch(existing._id, { lastSeenAt: now });
-      return;
-    }
-
-    let clientName: string | undefined;
-    if (args.clientId) {
-      const client = await ctx.db
-        .query("mcpOauthClients")
-        .withIndex("by_clientId", (q) => q.eq("clientId", args.clientId!))
-        .unique();
-      clientName = client?.clientName ?? undefined;
-    }
     await ctx.db.insert("mcpSessions", {
-      sessionId: typedSessionId,
-      userId: ctx.user._id,
-      clientId: args.clientId ?? "unknown",
-      clientName,
+      sessionId,
+      userId: args.userId,
+      clientId: args.clientId,
+      clientName: client?.clientName ?? undefined,
       createdAt: now,
       lastSeenAt: now,
     });
     // Opportunistic GC so the list stays clean without a dedicated cron.
-    await pruneDeadSessions(ctx, ctx.user._id);
+    await pruneDeadSessions(ctx, args.userId);
+    return sessionId;
+  },
+});
+
+/**
+ * Record that an MCP connection is in use, which keeps it alive. The OAuth
+ * token endpoint calls this after every successful code exchange and refresh,
+ * authenticated as that session, so `getAuthSessionId` is the caller's OWN
+ * session. Bumps `lastSeenAt` and pushes the session's end date to
+ * now + mcpSessionIdleMs().
+ *
+ * It acts only on a session that already has an `mcpSessions` row, never
+ * creates one, never shortens an end date, and never revives a session that
+ * has ended. Before 2026-11 this mutation wrote the row itself, so any
+ * signed-in session could give itself one; the rows on prod were checked
+ * when that changed and are all genuine connections. Renewing grants no
+ * access of its own: every later call still goes through the normal gates.
+ *
+ * A plain `mutation` rather than `authedMutation`, whose write gate refuses
+ * read-only accounts: keeping a session alive isn't a write on the user's
+ * behalf, and a read-only account's connection should last like any other.
+ * `clientId` is accepted and ignored — the token route still sends it on the
+ * code exchange, which only an older backend used.
+ */
+export const recordMySession = mutation({
+  args: { clientId: v.optional(v.string()) },
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    const sessionId = await getAuthSessionId(ctx);
+    if (!userId || !sessionId) return;
+    const sidecar = await ctx.db
+      .query("mcpSessions")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .unique();
+    if (!sidecar || sidecar.userId !== userId) return;
+
+    const session = await ctx.db.get(sessionId);
+    const now = Date.now();
+    if (!session || session.userId !== userId) return;
+    if (session.expirationTime <= now) return;
+
+    const renewedUntil = now + mcpSessionIdleMs();
+    if (renewedUntil > session.expirationTime) {
+      await ctx.db.patch(sessionId, { expirationTime: renewedUntil });
+    }
+    await ctx.db.patch(sidecar._id, { lastSeenAt: now });
   },
 });
 

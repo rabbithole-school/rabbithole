@@ -21,11 +21,17 @@ import {
   postMessage,
   uploadImageToSlack,
 } from "./lib/slackApi";
+import { greyLineMessage, type SlackPart } from "./lib/slackGreyLine";
 import { MODELS } from "./lib/models";
 import { requireAnthropicApiKey } from "./lib/anthropic";
 import { recordAnthropicUsage } from "./usage";
 import { sessionPath, siteUrl, withBase } from "./lib/channels";
 import { fileBugReportCard, syncBugReportCard } from "./scholarSuggestions";
+import { sha256Hex } from "./lib/oauthCrypto";
+import {
+  bugReportHandoffEnabled,
+  crashSignatureKey,
+} from "./lib/bugReportSignature";
 
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg"]);
 const AUDIO_MIME_TYPES = new Set([
@@ -38,12 +44,27 @@ const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 const RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 10 * 60_000, 30 * 60_000];
 const STUCK_AFTER_MS = 15 * 60_000;
 /** An iPad stuck in a crash loop files one automatic report per window. */
-const AUTO_REPORT_WINDOW_MS = 10 * 60_000;
+export const AUTO_REPORT_WINDOW_MS = 10 * 60_000;
 /**
  * Fleet-wide, per trigger, per window: a regression that hits every iPad
  * posts this many threads (each with a triage call), then raises one alert.
  */
-const AUTO_REPORT_FLEET_CAP = 10;
+export const AUTO_REPORT_FLEET_CAP = 10;
+
+/**
+ * SimpleMDM can queue a restart until the iPad checks in, so the reboot trails
+ * the request. One that lands later than this still posts as an unplanned
+ * restart, which is what every restart did before this check.
+ */
+const STAFF_RESTART_WINDOW_MS = 15 * 60_000;
+// Written by classifyPreviousLaunch (native/src/lib/appHealth.ts). Matched as
+// text so this works on the builds already on iPads.
+const REBOOT_DESCRIPTION_PREFIX = "The iPad restarted (or lost power)";
+const FROZEN_BEFORE_REBOOT_MARKERS = [
+  "JS last ran about",
+  // JS keeps ticking behind the launch-zoom veil, so the line above is absent.
+  'in iOS\'s "inactive" state',
+];
 
 const triggerValidator = v.union(
   v.literal("js_crash"),
@@ -178,6 +199,30 @@ async function validateStoredBlob(
   return `Bug-report ${kind} must be ${expected}`;
 }
 
+/**
+ * When an automatic reboot report was caused by a staff restart: the newest
+ * `device.restart.requested` audit row targeting this scholar in the window.
+ */
+async function recentStaffRestartAt(
+  ctx: MutationCtx,
+  scholarId: Id<"users">,
+  description: string | undefined,
+): Promise<number | null> {
+  if (!description?.startsWith(REBOOT_DESCRIPTION_PREFIX)) return null;
+  const rows = await ctx.db
+    .query("auditLog")
+    .withIndex("by_target", (q) =>
+      q
+        .eq("targetUserId", scholarId)
+        .gt("_creationTime", Date.now() - STAFF_RESTART_WINDOW_MS),
+    )
+    .collect();
+  const restarts = rows.filter(
+    (row) => row.action === "device.restart.requested",
+  );
+  return restarts.at(-1)?.at ?? null;
+}
+
 export const submit = bugReportMutation({
   args: {
     surface: v.union(v.literal("native"), v.literal("web")),
@@ -210,7 +255,12 @@ export const submit = bugReportMutation({
         .first();
       if (existing) {
         // A retried outbox report may predate its Workshop card; reconcile.
-        if (existing.actorRole === ROLES.SCHOLAR && !existing.viewedUserId) {
+        // Automatic reports never get one, same as at first filing below.
+        if (
+          existing.actorRole === ROLES.SCHOLAR &&
+          !existing.viewedUserId &&
+          !existing.trigger
+        ) {
           await fileBugReportCard(ctx, {
             scholarId: existing.actorUserId,
             bugReportId: existing._id,
@@ -227,6 +277,31 @@ export const submit = bugReportMutation({
       }
     }
 
+    let description = args.description;
+    // A staff restart of a working app is not an incident: keep the row but
+    // post nothing. One that followed a freeze still posts, labeled, because
+    // a freeze that never recovers files no `stall` report of its own.
+    let plannedRestart = false;
+    if (args.trigger === "unclean_exit") {
+      const restartAt = await recentStaffRestartAt(
+        ctx,
+        ctx.actor._id,
+        description,
+      );
+      if (restartAt !== null) {
+        if (
+          FROZEN_BEFORE_REBOOT_MARKERS.some((marker) =>
+            description?.includes(marker),
+          )
+        ) {
+          const minutes = Math.round((Date.now() - restartAt) / 60_000);
+          description = `Staff requested an MDM restart of this iPad ${minutes} min before this report.\n\n${description}`;
+        } else {
+          plannedRestart = true;
+        }
+      }
+    }
+
     if (args.trigger) {
       const trigger = args.trigger;
       const since = Date.now() - AUTO_REPORT_WINDOW_MS;
@@ -236,7 +311,9 @@ export const submit = bugReportMutation({
           q.eq("actorUserId", ctx.actor._id).gt("_creationTime", since),
         )
         .collect();
-      const duplicate = recent.find((report) => report.trigger === trigger);
+      const duplicate = recent.find(
+        (report) => report.trigger === trigger && report.status !== "resolved",
+      );
       if (duplicate) {
         return {
           ok: true as const,
@@ -249,9 +326,10 @@ export const submit = bugReportMutation({
         .withIndex("by_trigger", (q) =>
           q.eq("trigger", trigger).gt("_creationTime", since),
         )
+        .filter((q) => q.neq(q.field("status"), "resolved"))
         .order("desc")
         .take(AUTO_REPORT_FLEET_CAP);
-      if (fleet.length >= AUTO_REPORT_FLEET_CAP) {
+      if (!plannedRestart && fleet.length >= AUTO_REPORT_FLEET_CAP) {
         await raiseAlert(ctx, {
           kind: "auto_bug_report_flood",
           severity: "warning",
@@ -315,8 +393,26 @@ export const submit = bugReportMutation({
       institutionId = ctx.actor.institutionId;
     }
 
+    // Only while the Claude handoff is on (bugReportHandoff.ts). Keyed on the
+    // app's own text (args.description), not the possibly
+    // staff-restart-prefixed copy, so the prefix can't split a signature.
+    const signature =
+      args.trigger && !plannedRestart && bugReportHandoffEnabled()
+        ? await sha256Hex(
+            crashSignatureKey({
+              trigger: args.trigger,
+              url: sanitizeReportUrl(args.url),
+              description: args.description,
+            }),
+          )
+        : undefined;
+
     const channel = await ctx.db.query("bugReportChannel").first();
-    const status = channel ? ("received" as const) : ("waiting_for_channel" as const);
+    const status = plannedRestart
+      ? ("resolved" as const)
+      : channel
+        ? ("received" as const)
+        : ("waiting_for_channel" as const);
     const reportId = await ctx.db.insert("bugReports", {
       actorUserId: ctx.actor._id,
       actorRole: ctx.actor.role ?? "unknown",
@@ -333,12 +429,15 @@ export const submit = bugReportMutation({
       userAgent: compactOptional(args.userAgent, 1_000),
       appVersion: compactOptional(args.appVersion, 100),
       appBuild: compactOptional(args.appBuild, 100),
-      description: compactMultiline(args.description, 8_000),
+      description: compactMultiline(description, 8_000),
       audioStorageId: args.audioStorageId,
       screenshotStorageId: args.screenshotStorageId,
       attempts: 0,
+      signature,
+      resolvedAt: plannedRestart ? Date.now() : undefined,
       status,
     });
+    if (plannedRestart) return { ok: true as const, reportId, status };
 
     // A scholar reporting a bug in their OWN view also gets it on their
     // Workshop board + a #workshop thread, where a staff reply reaches them.
@@ -545,10 +644,17 @@ export const commitTriaged = internalMutation({
   handler: async (ctx, args) => {
     const report = await ctx.db.get(args.reportId);
     if (!report || report.triagedAt) return;
+    const now = Date.now();
     await ctx.db.patch(args.reportId, {
-      triagedAt: Date.now(),
+      triagedAt: now,
       status: "triaged",
       ...(report.filesAt ? { lastError: undefined } : {}),
+      // The Claude handoff's durable marker, in the same commit as triage and
+      // only while the handoff is on: a report triaged with it off never
+      // gets one, so it can never be handed over later.
+      ...(bugReportHandoffEnabled() && !report.claudeHandoff
+        ? { claudeHandoff: { outcome: "pending" as const, at: now, since: now } }
+        : {}),
     });
   },
 });
@@ -682,21 +788,20 @@ export const linkBugReportChannel = internalMutation({
   },
 });
 
-function reportRootMessage(context: ProcessingContext): string {
+/**
+ * The triage thread's root post. The capture details (surface, time, URL,
+ * device) sit in the grey line under the description: they are for looking
+ * up, and the headline, the people and the description are what to read.
+ */
+function reportRootParts(context: ProcessingContext): SlackPart[] {
   const { report } = context;
-  const lines = [
+  const main = [
     report.trigger
       ? TRIGGER_HEADLINES[report.trigger]
       : "🐛 **New Rabbithole bug report**",
     `**${report.trigger ? "Signed in" : "Reported by"}:** ${escapeSlackText(context.actor.name)} (${escapeSlackText(context.actor.role)})`,
     context.viewed
       ? `**Viewing:** ${escapeSlackText(context.viewed.name)} (${escapeSlackText(context.viewed.role)})`
-      : null,
-    `**Surface:** ${report.surface}`,
-    `**Captured:** ${new Date(report._creationTime).toISOString()}`,
-    `**Where:** \`${escapeSlackText(report.url.replace(/`/g, "'"))}\``,
-    report.trigger && report.deviceModel
-      ? `**Device:** ${escapeSlackText(report.deviceModel)}, iPadOS ${escapeSlackText(report.osVersion ?? "?")}`
       : null,
     context.session
       ? `**Session:** <${withBase(siteUrl(), sessionPath(context.session.id, context.session.ownerId))}|${escapeSlackText(context.session.title)}>`
@@ -709,7 +814,19 @@ function reportRootMessage(context: ProcessingContext): string {
           .map((line) => `> ${line}`)
       : ["> No description was captured."]),
   ];
-  return lines.filter((line): line is string => line !== null).join("\n");
+  // The URL goes last: a grey line holds 3,000 characters, so an overlong URL
+  // can only cut itself short.
+  const capture = [
+    `**Surface:** ${report.surface}`,
+    `**Captured:** ${new Date(report._creationTime).toISOString()}`,
+    report.trigger && report.deviceModel
+      ? `**Device:** ${escapeSlackText(report.deviceModel)}, iPadOS ${escapeSlackText(report.osVersion ?? "?")}`
+      : null,
+    `**Where:** \`${escapeSlackText(report.url.replace(/`/g, "'"))}\``,
+  ];
+  const lines = (list: Array<string | null>) =>
+    list.filter((line): line is string => line !== null).join("\n");
+  return [lines(main), { grey: lines(capture) }];
 }
 
 function triageUserContent(context: ProcessingContext): string {
@@ -938,8 +1055,7 @@ export const processReport = internalAction({
       try {
         const posted = await postMessage(token, {
           channel: context.channelId,
-          text: reportRootMessage(context),
-          markdown: true,
+          ...greyLineMessage(reportRootParts(context), { markdown: true }),
         });
         if (!posted.ok || !posted.ts) {
           throw new Error(
@@ -1011,6 +1127,30 @@ export const processReport = internalAction({
         await ctx.runAction(internal.bugReports.triageBugReport, args);
       } catch (error) {
         await fail("triage", error);
+        return;
+      }
+    }
+
+    // Hand the triaged report to Claude Tag when commitTriaged marked it
+    // pending. Flag first: with BUG_REPORT_CLAUDE_HANDOFF_ENABLED off this
+    // does nothing at all. Every handoff read sits inside the try, so a
+    // failure there never fails the report; bugReportHandoff.
+    // sweepPendingHandoffs picks up a pending one this run never reached.
+    if (bugReportHandoffEnabled()) {
+      try {
+        const pending = await ctx.runQuery(
+          internal.bugReportHandoff.isHandoffPending,
+          args,
+        );
+        if (pending) {
+          await ctx.runAction(internal.bugReportHandoff.handOffToClaude, {
+            reportId: args.reportId,
+          });
+        }
+      } catch (error) {
+        console.error(
+          `[bugReportHandoff] handoff for report ${args.reportId} threw: ${errorText(error)}`,
+        );
       }
     }
   },

@@ -15,6 +15,7 @@ describe("checkSlideOpsLayoutOnly", () => {
     { op: "moveElement", slideId: "sl1", id: "el1", afterId: "el2" },
     { op: "addSlide", afterSlideId: "sl1" },
     { op: "removeSlide", slideId: "sl2" },
+    { op: "moveSlide", slideId: "sl2", afterSlideId: null },
     { op: "setBackground", slideId: "sl1", color: "#ffffff" },
   ])("allows layout operation %#", (op) => {
     expect(checkSlideOpsLayoutOnly([op], [])).toEqual({ ok: true });

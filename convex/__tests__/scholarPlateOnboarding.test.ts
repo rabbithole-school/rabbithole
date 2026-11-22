@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, withDefaultSchools } from "./scheduleFixtures";
 import type { TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
@@ -78,7 +79,7 @@ async function seedAndEnroll(t: TC, scholarId: Id<"users">) {
 
 describe("scholarPlate — onboarding pin", () => {
   test("an enrolled scholar gets a first-beat pin, not a buried row", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "scholar");
     const { activities } = await seedAndEnroll(t, scholarId);
     const asScholar = await withUser(t, scholarId);
@@ -94,8 +95,8 @@ describe("scholarPlate — onboarding pin", () => {
     ).toBe(false);
   });
 
-  test("onboarding never creates a class-focus lock (excluded from currentClassFocusForMe)", async () => {
-    const t = convexTest(schema, modules);
+  test("onboarding never creates a class focus (excluded from currentClassFocusForMe)", async () => {
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "scholar");
     await seedAndEnroll(t, scholarId);
     const asScholar = await withUser(t, scholarId);
@@ -108,7 +109,7 @@ describe("scholarPlate — onboarding pin", () => {
   });
 
   test("the pin points at the NEXT incomplete beat and stays first mid-way", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "scholar");
     const { unit, activities, assignment } = await seedAndEnroll(t, scholarId);
     const asScholar = await withUser(t, scholarId);
@@ -134,7 +135,7 @@ describe("scholarPlate — onboarding pin", () => {
   });
 
   test("the pin disappears once the welcome unit is 3/3 complete", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "scholar");
     const { unit, activities, assignment } = await seedAndEnroll(t, scholarId);
     const asScholar = await withUser(t, scholarId);
@@ -160,7 +161,7 @@ describe("scholarPlate — onboarding pin", () => {
   });
 
   test("non-onboarding work still shows in the sections while onboarding is pinned", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "scholar");
     await seedAndEnroll(t, scholarId);
     const asScholar = await withUser(t, scholarId);
@@ -189,7 +190,7 @@ describe("scholarPlate — onboarding pin", () => {
         order: 0,
         kind: "online",
       });
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholarId],

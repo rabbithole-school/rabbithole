@@ -19,7 +19,6 @@ import {
 import { formatDistanceToNow } from "date-fns";
 import { WarningCircle } from "@phosphor-icons/react";
 import { ScholarAngleIcon } from "@/lib/scholarAngle";
-import { ActivityModeIcon } from "@/lib/activityMode";
 import { ProcessPicker } from "../ProcessPicker";
 import {
   // DeliverableCollationPanel + ScholarAnglesPanel were dropped here
@@ -401,38 +400,6 @@ export function ActivityFields({
           />
         </Field>
       )}
-      {/* Design-time intent — informs how the activity lands in an
-          Assignment's schedule on create. "Homework" activities
-          auto-push as homework for the cohort; "In class" activities
-          stay dormant until the teacher pushes them from the Run
-          page; "Either" doesn't show any intent hint. */}
-      {!isShareBack && (
-        <Field
-          label="Intended for"
-          hint="When this unit is assigned, homework activities land on each scholar's plate immediately. Class activities sit dormant until the teacher pushes them."
-        >
-          {/* One attached segmented control (tabs), not three loose
-              buttons — the active segment fills violet. */}
-          <SegmentedButtonGroup
-            value={activity.defaultMode ?? "either"}
-            options={[
-              { value: "either", label: "Either" },
-              {
-                value: "classFocus",
-                label: "In class",
-                icon: <ActivityModeIcon mode="classFocus" size={12} />,
-              },
-              {
-                value: "homework",
-                label: "Homework",
-                icon: <ActivityModeIcon mode="homework" size={12} />,
-              },
-            ]}
-            onChange={(defaultMode) => update({ id: activityId, defaultMode })}
-          />
-        </Field>
-      )}
-
       {/* Scheduling — how long the activity runs and how it paces
           relative to the previous one when the unit is assigned. */}
       <Stack gap={3}>
@@ -669,17 +636,15 @@ export function ActivityFields({
               placeholder="Instructions for the AI tutor during this activity..."
             />
           </Field>
-          {/* The mission (TRA-519 B1): any online activity with work to
-              make has one; a non-app activity edits only its gate and what
-              the scholar owns. A discussion (no deliverable) is exploration
-              and resolves no mission, so its fields would steer nothing. */}
-          {defaultGateFor(activity) != null ? (
+          {/* An app always has a mission line; other activities show their
+              mission only when their deliverable supplies a default. A
+              discussion (no deliverable) resolves no mission. */}
+          {isApp || defaultGateFor(activity) != null ? (
             <MissionFields
               activityId={activityId}
               appActivity={isApp}
               defaultGate={defaultGateFor(activity)}
               buildContract={activity.buildContract}
-              allowSilence={activity.allowSilence}
               update={update}
             />
           ) : null}

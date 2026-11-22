@@ -205,67 +205,6 @@ export const insertWhisper = internalMutation({
 });
 
 /**
- * Recent messages across all of a scholar's projects (for Activity tab).
- * Returns last 10 user/assistant messages with project context.
- */
-export const getRecentByScholar = authedQuery({
-  args: { scholarId: v.id("users") },
-  handler: async (ctx, args) => {
-    const isTeacher = isTeacherRole(ctx.user.role);
-    if (!isTeacher && ctx.user._id !== args.scholarId) return [];
-    if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
-
-    const sessions = await ctx.db
-      .query("sessions")
-      .withIndex("by_user", (q) => q.eq("userId", args.scholarId))
-      .collect();
-
-    // Gather recent messages from each project, then sort globally
-    const allMessages: {
-      _id: string;
-      role: string;
-      content: string;
-      sessionId: string;
-      sessionTitle: string;
-      unitTitle: string | null;
-      _creationTime: number;
-    }[] = [];
-
-    for (const session of sessions) {
-      let unitTitle: string | null = null;
-      if (session.unitId) {
-        const unit = await ctx.db.get(session.unitId);
-        unitTitle = unit?.title ?? null;
-      }
-
-      const msgs = await ctx.db
-        .query("messages")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-        .order("desc")
-        .take(10);
-
-      for (const m of msgs) {
-        if (m.role === "user" || m.role === "assistant") {
-          allMessages.push({
-            _id: m._id,
-            role: m.role,
-            content: m.content,
-            sessionId: session._id,
-            sessionTitle: session.title,
-            unitTitle,
-            _creationTime: m._creationTime,
-          });
-        }
-      }
-    }
-
-    // Sort by creation time descending, take 10
-    allMessages.sort((a, b) => b._creationTime - a._creationTime);
-    return allMessages.slice(0, 10);
-  },
-});
-
-/**
  * TYPED user-role message texts for a scholar from the last 30 days — spoken
  * (speech-to-text) and app-button turns are excluded (`isTypedScholarText`).
  * Used by the AI reading-level analysis action, which estimates from the
@@ -285,14 +224,16 @@ export const getScholarUserMessages30d = teacherQuery({
 
     const texts: string[] = [];
     for (const session of sessions) {
+      // Only this session's user turns from the window, through the role index
+      // and its implicit `_creationTime`. A `.filter` after `by_session`
+      // narrowed the result but still read every message of every session.
       const msgs = await ctx.db
         .query("messages")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-        .filter((q) =>
-          q.and(
-            q.eq(q.field("role"), "user"),
-            q.gte(q.field("_creationTime"), since)
-          )
+        .withIndex("by_session_role", (q) =>
+          q
+            .eq("sessionId", session._id)
+            .eq("role", "user")
+            .gte("_creationTime", since),
         )
         .collect();
       for (const m of msgs) {

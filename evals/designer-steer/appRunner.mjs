@@ -181,7 +181,7 @@ export async function createAppRunner({ repo, cacheDir, getClient }) {
       if (st.nonce && msg.nonce !== st.nonce) return; // first ready of a load wins
       if (st.nonce === msg.nonce) return;
       st.nonce = msg.nonce;
-      void page.evaluate((m) => window.__post(m), host.createAppStateHostMessage("init", st.doc, msg.nonce, null));
+      void page.evaluate((m) => window.__post(m), host.createAppStateHostMessage("init", st.doc, msg.nonce));
       st.readyWaiters.splice(0).forEach((f) => f());
       return;
     }
@@ -375,7 +375,7 @@ export async function createAppRunner({ repo, cacheDir, getClient }) {
         try {
           const app = await currentApp();
           if (app && sha(app.html) !== st.hash) entry.reloaded = (await load(app)).broken ? "broken" : "ok";
-          await page.evaluate((m) => window.__post(m), host.createAppStateHostMessage("update", st.doc, st.nonce, null, req));
+          await page.evaluate((m) => window.__post(m), host.createAppStateHostMessage("update", st.doc, st.nonce, req));
           const deadline = Date.now() + 8_000;
           while (!st.actionResults.has(req.id) && Date.now() < deadline) await sleep(200);
           const res = st.actionResults.get(req.id);

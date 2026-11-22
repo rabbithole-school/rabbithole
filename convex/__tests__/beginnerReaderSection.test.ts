@@ -22,7 +22,7 @@ const modules = (
 // TALK level still picks the register, so a beginner who talks at grade 5 gets
 // grade-5 words, never K wording.
 
-const READ_WRITE_INDEX = 54; // same guard as preReaderSection.test.ts
+const READ_WRITE_INDEX = 52; // same guard as preReaderSection.test.ts
 function parts(
   talk: string | null,
   readWrite: {
@@ -33,7 +33,7 @@ function parts(
   unit: Record<string, unknown> | null = null,
 ) {
   const args: unknown[] = new Array(READ_WRITE_INDEX + 1).fill(undefined);
-  args.splice(0, 6, null, talk, "Kai", unit, null, null);
+  args.splice(0, 5, talk, "Kai", unit, null, null);
   args[READ_WRITE_INDEX] = readWrite;
   return (
     buildSystemPromptParts as unknown as (

@@ -16,7 +16,10 @@
  * Apps scholars built sit in the same list (review/teacher-apps-scholar-rows-
  * options.html, Option 2): "All" means all, so they appear beside catalog apps
  * with a Scholar tag, and By scholars shows only them. Teachers see them;
- * operations staff hold no scholar records and don't.
+ * operations staff hold no scholar records and don't. A teacher can publish
+ * one to other scholars (convex/publishedApps.ts): Publish copies it into a
+ * launcher tile and opens the Enable drawer on it; Publish latest refreshes
+ * that copy after the builder changes the app.
  *
  * The launcher union is resolved at read time (convex/scholarApps.ts), so a
  * grant here is followed as membership churns — never fanned out per scholar.
@@ -25,7 +28,11 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import NextLink from "next/link";
-import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
+import {
+  useAction,
+  useMutation,
+  usePaginatedQuery,
+} from "convex/react";
 import {
   Box,
   Button,
@@ -48,9 +55,8 @@ import {
   AppAccessDrawer,
   type AppAccessTarget,
 } from "@/components/AppAccessDrawer";
-import { ScholarPicker } from "@/components/ScholarPicker";
 import { FieldSelect } from "@/components/ui/FieldSelect";
-import { MakeFocusDialog } from "@/components/MakeFocusDialog";
+import { GiveNowDialog } from "@/components/GiveNowDialog";
 import { LiveFocusBar } from "@/components/LiveFocusBar";
 import {
   AppTileEditorDialog,
@@ -58,7 +64,6 @@ import {
   type AppTileDraft,
 } from "@/components/AppTileEditor";
 import { toaster } from "@/lib/toaster";
-import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isTeacherRole } from "@/convex/lib/roles";
 import { serverErrorMessage } from "@/lib/serverErrorMessage";
@@ -74,8 +79,10 @@ import {
   ArchivedCatalogRow,
   CatalogRow,
   ReachLine,
+  PublishButton,
   ScholarAppRow,
   scholarAppHref,
+  type PublishAction,
   scholarAppSource,
   editedLabel,
   type AppRow,
@@ -90,19 +97,6 @@ import {
 import { useNow } from "@/hooks/useNow";
 import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { TEACHER_ARCHIVE_COPY } from "@/shared/teacherArchive";
-
-type RoomRow = {
-  _id: Id<"rooms">;
-  name: string;
-  kind: "assignment" | "group" | "explicit";
-  assignmentId: Id<"assignments"> | null;
-  assignmentTitle: string | null;
-  groupId: Id<"scholarGroups"> | null;
-  groupName: string | null;
-  memberIds: Id<"users">[];
-  members: Array<{ _id: Id<"users">; name: string }>;
-  updatedAt: number;
-};
 
 type KindFilter = "all" | ExternalAppKind | "scholar" | "archived";
 
@@ -174,6 +168,14 @@ export default function TeacherAppsPage() {
             ? {}
             : { scholarIds: scope.scholarIds as Id<"users">[] }),
         },
+    // The scope is the SUBJECT; `now` is only the clock. Switching between
+    // already-loaded scopes must not leave the previous scope's apps, reach
+    // and audience controls on screen under the new picker (TRA-424).
+    {
+      resetKey: scope.isWholePool
+        ? "pool"
+        : [...scope.scholarIds].sort().join(","),
+    },
   ) as AppRow[] | undefined;
   const unassignAudience = useMutation(api.appAudiences.unassignAudience);
   const createCatalogApp = useMutation(api.externalApps.createCatalogApp);
@@ -181,6 +183,8 @@ export default function TeacherAppsPage() {
     api.externalApps.setCatalogAppArchived,
   );
   const restoreScholarApp = useMutation(api.sessions.restoreApp);
+  const publishScholarApp = useAction(api.publishedApps.publish);
+  const publishLatestScholarApp = useAction(api.publishedApps.publishLatest);
   // One archive dialog for the page: a row unmounts the moment its archive
   // lands, so a dialog inside the row would take the body lock down with it.
   const archiveScholarApp = useArchiveAppConfirm();
@@ -323,6 +327,49 @@ export default function TeacherAppsPage() {
       toaster.success({ title: `${row.name} restored` });
     });
 
+  const openPublished = (published: {
+    externalAppId: Id<"externalApps">;
+    name: string;
+    webUrl: string;
+  }) =>
+    setEnableApp({
+      _id: published.externalAppId,
+      name: published.name,
+      webUrl: published.webUrl,
+      credentialSource: null,
+    });
+
+  // Publish copies the app into its own tile and lands in the Enable drawer
+  // to pick who gets it; Publish latest replaces that copy in place.
+  const handlePublish = (app: ScholarBuiltApp, action: PublishAction) => {
+    if (action === "manage" && app.published) {
+      openPublished(app.published);
+      return;
+    }
+    return guarded(async () => {
+      if (action === "publishLatest" && app.published) {
+        const { updated } = await publishLatestScholarApp({
+          customAppId: app.published.customAppId,
+        });
+        toaster.success({
+          title: updated
+            ? `Published the latest ${app.published.name}`
+            : `${app.published.name} is already up to date`,
+          description: updated
+            ? "Everyone who has it gets this version next time they open it."
+            : undefined,
+        });
+        return;
+      }
+      const published = await publishScholarApp({ sessionId: app.sessionId });
+      toaster.success({
+        title: `${published.name} published`,
+        description: "Choose who gets it.",
+      });
+      openPublished(published);
+    });
+  };
+
   const handleRestoreScholarApp = (app: ScholarBuiltApp) =>
     guarded(async () => {
       await restoreScholarApp({ id: app.sessionId });
@@ -349,6 +396,7 @@ export default function TeacherAppsPage() {
           onNavigate={(href) => router.push(href)}
           onArchive={() => archiveScholarApp.open(app.title, app.sessionId)}
           onRestore={() => void handleRestoreScholarApp(app)}
+          onPublish={(action) => void handlePublish(app, action)}
         />
       );
     }
@@ -505,6 +553,11 @@ export default function TeacherAppsPage() {
                     <Button asChild size="xs" colorPalette="violet" fontFamily="heading">
                       <NextLink href={scholarAppHref(app)}>Open</NextLink>
                     </Button>
+                    <PublishButton
+                      app={app}
+                      busy={busy}
+                      onPublish={(action) => void handlePublish(app, action)}
+                    />
                     <Button
                       size="xs"
                       variant="outline"
@@ -625,7 +678,7 @@ export default function TeacherAppsPage() {
               fontFamily="heading"
               onClick={() => setComposeLink(true)}
             >
-              <Timer style={{ marginRight: 4 }} size={14} /> Push a link
+              <Timer style={{ marginRight: 4 }} size={14} /> Give a link
             </Button>
             <Button
               size="sm"
@@ -766,8 +819,6 @@ export default function TeacherAppsPage() {
         </Flex>
 
         {body}
-
-        {isTeacher && <SharedRoomsPanel />}
       </Box>
 
       <AppAccessDrawer
@@ -775,14 +826,14 @@ export default function TeacherAppsPage() {
         onClose={() => setEnableApp(null)}
         app={enableApp}
       />
-      <MakeFocusDialog
+      <GiveNowDialog
         open={composeLink}
         onClose={() => setComposeLink(false)}
         composeLink
         target={null}
         targetTitle=""
       />
-      <MakeFocusDialog
+      <GiveNowDialog
         open={focusApp !== null}
         onClose={() => setFocusApp(null)}
         target={
@@ -816,428 +867,5 @@ function GalleryFacts({
     <Text fontSize="xs" color="charcoal.400" fontFamily="body" lineClamp={1}>
       {parts.join(" · ")}
     </Text>
-  );
-}
-
-function SharedRoomsPanel() {
-  const { activeInstitution } = useActiveInstitution();
-  const institutionScope =
-    activeInstitution === undefined
-      ? undefined
-      : activeInstitution.scope === "all"
-        ? "all"
-        : activeInstitution.institutionSlug ?? "primary";
-  const rooms = useQuery(api.rooms.listOwned, {}) as RoomRow[] | undefined;
-  const assignments = useQuery(api.assignments.listForTeacher, {
-    includeArchived: false,
-  });
-  const groups = useQuery(
-    api.scholarGroups.list,
-    institutionScope === undefined ? "skip" : { institutionScope },
-  );
-  const createRoom = useMutation(api.rooms.create);
-  const setRoomMembers = useMutation(api.rooms.setMembers);
-  const [showCreate, setShowCreate] = useState(false);
-  const [name, setName] = useState("");
-  const [scope, setScope] =
-    useState<"explicit" | "assignment" | "group">("explicit");
-  const [assignmentId, setAssignmentId] = useState("");
-  const [groupId, setGroupId] = useState("");
-  const [members, setMembers] = useState<Set<string>>(new Set());
-  const [selectedId, setSelectedId] = useState<Id<"rooms"> | null>(null);
-  const [editingMembers, setEditingMembers] = useState(false);
-  const [memberDraft, setMemberDraft] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-
-  const selected =
-    rooms?.find((room) => room._id === selectedId) ?? rooms?.[0] ?? null;
-  const sharedState = useQuery(
-    api.appStates.getRoomState,
-    selected ? { roomId: selected._id } : "skip",
-  );
-  const presence = useQuery(
-    api.appStates.getRoomPresence,
-    selected ? { roomId: selected._id } : "skip",
-  );
-
-  const resetCreate = () => {
-    setShowCreate(false);
-    setName("");
-    setScope("explicit");
-    setAssignmentId("");
-    setGroupId("");
-    setMembers(new Set());
-  };
-
-  const handleCreate = async () => {
-    setBusy(true);
-    try {
-      const roomId = await createRoom(
-        scope === "assignment"
-          ? {
-              name,
-              kind: "assignment",
-              assignmentId: assignmentId as Id<"assignments">,
-            }
-          : scope === "group"
-            ? {
-                name,
-                kind: "group",
-                groupId: groupId as Id<"scholarGroups">,
-              }
-          : {
-              name,
-              kind: "explicit",
-              memberIds: Array.from(members) as Id<"users">[],
-            },
-      );
-      setSelectedId(roomId);
-      resetCreate();
-      toaster.success({ title: "Shared room created" });
-    } catch (error) {
-      toaster.error({
-        title: serverErrorMessage(error, "Could not create room"),
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleSaveMembers = async () => {
-    if (!selected) return;
-    setBusy(true);
-    try {
-      await setRoomMembers({
-        roomId: selected._id,
-        memberIds: Array.from(memberDraft) as Id<"users">[],
-      });
-      setEditingMembers(false);
-      toaster.success({ title: "Room members updated" });
-    } catch (error) {
-      toaster.error({
-        title:
-          serverErrorMessage(error, "Could not update members"),
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const canCreate =
-    name.trim().length > 0 &&
-    (scope === "assignment"
-      ? assignmentId.length > 0
-      : scope === "group"
-        ? groupId.length > 0
-        : members.size > 0);
-
-  return (
-    <Box as="section" mt={10}>
-      <Flex
-        direction={{ base: "column", md: "row" }}
-        justify="space-between"
-        align={{ base: "stretch", md: "flex-start" }}
-        gap={3}
-        mb={4}
-      >
-        <Stack gap={1}>
-          <Heading
-            size="md"
-            color="navy.500"
-            fontFamily="heading"
-            fontWeight="700"
-          >
-            Shared rooms
-          </Heading>
-          <Text fontSize="sm" color="charcoal.400" fontFamily="body">
-            Multiplayer state for teacher-created app rooms
-          </Text>
-        </Stack>
-        <Button
-          size="sm"
-          colorPalette="violet"
-          variant="outline"
-          alignSelf={{ base: "flex-start", md: "auto" }}
-          onClick={() => setShowCreate((value) => !value)}
-        >
-          <Plus style={{ marginRight: 4 }} />
-          New room
-        </Button>
-      </Flex>
-
-      {showCreate && (
-        <Surface p={4} mb={4}>
-          <Stack gap={4}>
-            <Input
-              aria-label="Room name"
-              placeholder="Room name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              bg="white"
-            />
-            <HStack gap={2}>
-              <Button
-                size="xs"
-                variant={scope === "explicit" ? "solid" : "outline"}
-                colorPalette="violet"
-                onClick={() => setScope("explicit")}
-              >
-                Pick members
-              </Button>
-              <Button
-                size="xs"
-                variant={scope === "assignment" ? "solid" : "outline"}
-                colorPalette="violet"
-                onClick={() => setScope("assignment")}
-              >
-                Assignment cohort
-              </Button>
-              <Button
-                size="xs"
-                variant={scope === "group" ? "solid" : "outline"}
-                colorPalette="violet"
-                onClick={() => setScope("group")}
-              >
-                Scholar group
-              </Button>
-            </HStack>
-            {scope === "assignment" ? (
-              <FieldSelect
-                value={assignmentId}
-                onChange={setAssignmentId}
-                fieldProps={{ "aria-label": "Assignment cohort" }}
-              >
-                <option value="">Choose an assignment</option>
-                {(assignments ?? []).map((assignment) => (
-                  <option key={assignment._id} value={assignment._id}>
-                    {assignment.title ?? assignment.unitTitle} ·{" "}
-                    {assignment.scholarCount} scholars
-                  </option>
-                ))}
-              </FieldSelect>
-            ) : scope === "group" ? (
-              <FieldSelect
-                value={groupId}
-                onChange={setGroupId}
-                fieldProps={{ "aria-label": "Scholar group" }}
-              >
-                <option value="">Choose a group</option>
-                {(groups ?? []).map((group) => (
-                  <option key={group._id} value={group._id}>
-                    {group.emoji ? `${group.emoji} ` : ""}
-                    {group.name} · {group.scholarIds.length} scholars
-                  </option>
-                ))}
-              </FieldSelect>
-            ) : (
-              <Box
-                borderWidth="1px"
-                borderColor="gray.200"
-                borderRadius="lg"
-                p={2}
-              >
-                <ScholarPicker
-                  mode="multi"
-                  selected={members}
-                  onChange={setMembers}
-                  maxH="260px"
-                />
-              </Box>
-            )}
-            <HStack justify="flex-end">
-              <Button size="xs" variant="ghost" onClick={resetCreate}>
-                Cancel
-              </Button>
-              <Button
-                size="xs"
-                colorPalette="violet"
-                disabled={busy || !canCreate}
-                onClick={() => void handleCreate()}
-              >
-                Create room
-              </Button>
-            </HStack>
-          </Stack>
-        </Surface>
-      )}
-
-      {rooms === undefined ? (
-        <HStack justify="center" py={10}>
-          <Spinner color="violet.500" />
-        </HStack>
-      ) : rooms.length === 0 ? (
-        <Surface p={6}>
-          <Text
-            fontSize="sm"
-            color="charcoal.400"
-            fontFamily="body"
-            textAlign="center"
-          >
-            No shared rooms yet.
-          </Text>
-        </Surface>
-      ) : (
-        <Flex direction={{ base: "column", md: "row" }} gap={4} align="stretch">
-          <Surface p={0} overflow="hidden" flex={{ md: "0 0 260px" }}>
-            {rooms.map((room) => {
-              const active = selected?._id === room._id;
-              return (
-                <Box
-                  as="button"
-                  key={room._id}
-                  display="block"
-                  w="full"
-                  textAlign="left"
-                  px={4}
-                  py={3}
-                  bg={active ? "violet.50" : "white"}
-                  borderBottomWidth="1px"
-                  borderColor="gray.100"
-                  _last={{ borderBottomWidth: 0 }}
-                  _hover={{ bg: "violet.50" }}
-                  onClick={() => {
-                    setSelectedId(room._id);
-                    setEditingMembers(false);
-                  }}
-                >
-                  <Text
-                    fontSize="sm"
-                    fontFamily="heading"
-                    fontWeight="700"
-                    color="charcoal.500"
-                  >
-                    {room.name}
-                  </Text>
-                  <Text fontSize="2xs" color="charcoal.400">
-                    {room.assignmentTitle ??
-                      room.groupName ??
-                      `${room.memberIds.length} members`}
-                  </Text>
-                </Box>
-              );
-            })}
-          </Surface>
-
-          {selected && (
-            <Surface p={5} flex={1} minW={0}>
-              <Stack gap={4}>
-                <Flex justify="space-between" gap={3} align="flex-start">
-                  <Stack gap={0.5} minW={0}>
-                    <Heading size="sm" color="navy.500" fontFamily="heading">
-                      {selected.name}
-                    </Heading>
-                    <Text
-                      fontSize="2xs"
-                      color="charcoal.400"
-                      fontFamily="monospace"
-                      wordBreak="break-all"
-                    >
-                      {selected._id}
-                    </Text>
-                  </Stack>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => {
-                      setMemberDraft(new Set(selected.memberIds));
-                      setEditingMembers((value) => !value);
-                    }}
-                  >
-                    Members
-                  </Button>
-                </Flex>
-
-                {editingMembers ? (
-                  <Stack gap={3}>
-                    <Box
-                      borderWidth="1px"
-                      borderColor="gray.200"
-                      borderRadius="lg"
-                      p={2}
-                    >
-                      <ScholarPicker
-                        mode="multi"
-                        selected={memberDraft}
-                        onChange={setMemberDraft}
-                        maxH="240px"
-                      />
-                    </Box>
-                    <HStack justify="flex-end">
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => setEditingMembers(false)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        size="xs"
-                        colorPalette="violet"
-                        disabled={busy || memberDraft.size === 0}
-                        onClick={() => void handleSaveMembers()}
-                      >
-                        Save members
-                      </Button>
-                    </HStack>
-                  </Stack>
-                ) : (
-                  <Text fontSize="sm" color="charcoal.500">
-                    {selected.members.map((member) => member.name).join(", ")}
-                  </Text>
-                )}
-
-                <Box>
-                  <Text
-                    fontSize="xs"
-                    fontFamily="heading"
-                    fontWeight="700"
-                    color="charcoal.500"
-                    mb={1}
-                  >
-                    Present now
-                  </Text>
-                  <Text fontSize="sm" color="charcoal.400">
-                    {presence === undefined
-                      ? "Loading…"
-                      : presence.length > 0
-                        ? presence.map((entry) => entry.name).join(", ")
-                        : "Nobody is connected."}
-                  </Text>
-                </Box>
-
-                <Box>
-                  <Text
-                    fontSize="xs"
-                    fontFamily="heading"
-                    fontWeight="700"
-                    color="charcoal.500"
-                    mb={2}
-                  >
-                    Shared state · read only
-                  </Text>
-                  <Box
-                    as="pre"
-                    bg="gray.900"
-                    color="green.200"
-                    borderRadius="md"
-                    p={3}
-                    maxH="260px"
-                    overflow="auto"
-                    fontFamily="monospace"
-                    fontSize="xs"
-                    whiteSpace="pre-wrap"
-                    wordBreak="break-word"
-                  >
-                    {sharedState === undefined
-                      ? "Loading…"
-                      : JSON.stringify(sharedState?.doc ?? {}, null, 2)}
-                  </Box>
-                </Box>
-              </Stack>
-            </Surface>
-          )}
-        </Flex>
-      )}
-    </Box>
   );
 }

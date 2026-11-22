@@ -1,3 +1,4 @@
+import { readSchedule } from "../lib/scheduleStore";
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
@@ -72,7 +73,7 @@ describe("standingPractice.create", () => {
     expect(row).not.toBeNull();
     expect(row!.unitId).toBeUndefined();
     expect(row!.practiceMode).toBe("standing");
-    expect(row!.activitySchedule).toEqual([]);
+    expect(await t.run((ctx) => readSchedule(ctx, { _id: assignmentId }))).toEqual([]);
     expect(row!.practiceConfig?.domain).toBe(WHOLE_NUMBER_ARITHMETIC_DOMAIN);
     expect(row!.practiceConfig?.dailyGoalMinutes).toBe(15);
     expect(row!.practiceConfig?.pinnedStrands).toEqual(["multiplication"]);
@@ -429,6 +430,35 @@ describe("standingPractice.myActiveStanding", () => {
     const result = await asScholar.query(api.standingPractice.myActiveStanding, {});
     expect(result!.domains).toEqual(["fraction-arithmetic", "probability"]);
     expect(result!.domain).toBe("fraction-arithmetic");
+  });
+
+  test("reads only standing assignments, not the unit assignments beside them", async () => {
+    // `transactionLimits.documentsRead` throws past the limit. The lookup used
+    // to scan the whole assignments table; it reads the standing ones through
+    // `by_practice_mode`.
+    const t = convexTest({ schema, modules, transactionLimits: { documentsRead: 40 } });
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+
+    await asTeacher.mutation(api.standingPractice.create, {
+      scholarIds: [scholarId],
+      dailyGoalMinutes: 15,
+    });
+    await t.run(async (ctx) => {
+      const [standing] = await ctx.db.query("assignments").take(1);
+      const { _id, _creationTime, ...fields } = standing;
+      void _id;
+      void _creationTime;
+      for (let i = 0; i < 60; i++) {
+        await ctx.db.insert("assignments", { ...fields, practiceMode: "unit" });
+      }
+    });
+
+    const result = await asScholar.query(api.standingPractice.myActiveStanding, {});
+    expect(result).not.toBeNull();
+    expect(result!.dailyGoalMinutes).toBe(15);
   });
 
   test("a teacher may look up another scholar's standing assignment", async () => {

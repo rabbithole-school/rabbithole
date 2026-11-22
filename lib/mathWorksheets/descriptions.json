@@ -1,0 +1,1614 @@
+{
+  "absolute_value_contexts": {
+    "gist": "Use absolute value to say how far below sea level something is, ignoring the minus sign.",
+    "about": "A cave floor at -4 meters is 4 meters from sea level, and that distance is the absolute value |-4| = 4. Each problem gives a negative elevation and asks for its absolute value. Before this, a child describes positions with positive and negative numbers and understands absolute value as distance from zero."
+  },
+  "absolute_value_distance_zero": {
+    "gist": "Find an integer's absolute value, its distance from zero on the number line.",
+    "about": "Absolute value ignores direction and only says how far a number is from zero. Both -5 and 5 are 5 units away, so the absolute value of each is 5. Each problem puts a point at a given integer and asks for its distance from zero. It builds on locating integers and their opposites on a number line, and leads to absolute value in situations and to comparing absolute values."
+  },
+  "absolute_value_rationals": {
+    "gist": "Find the absolute value of a positive or negative fraction.",
+    "about": "Absolute value of a fraction works the same way as for whole numbers: it is the distance from zero, so the sign drops away. |-9/4| = 9/4 and |3/4| = 3/4. Each problem gives a fraction and asks for its absolute value. Children usually meet this after locating signed fractions on a number line and learning absolute value as distance from zero."
+  },
+  "add_2digit_no_regroup": {
+    "gist": "Add numbers up to 99 when the ones add to 9 or less, like 43 + 42 = 85.",
+    "about": "Add the ones, add the tens, and put them together. In 43 + 42, 3 + 2 is 5 ones and 4 + 4 is 8 tens, so the answer is 85. Some problems add a single digit or 0, like 97 + 2 = 99 and 99 + 0 = 99. It builds on understanding tens and ones and on adding and subtracting within 20 from memory. It leads to adding two 2-digit numbers with regrouping."
+  },
+  "add_2digit_regroup": {
+    "gist": "Add two-digit numbers when the ones make a new ten, like 98 + 74 = 172.",
+    "about": "When the ones add to 10 or more, carry a ten to the tens column. In 98 + 74, 8 + 4 is 12 ones, so write 2 and carry 1 ten, and 9 + 7 + 1 is 17 tens, giving 172. Sums like 20 + 81 = 101 carry from the tens. It builds on adding two-digit numbers without regrouping and on adding within 20 with regrouping. It leads to adding three-digit numbers without regrouping."
+  },
+  "add_3digit_no_regroup": {
+    "gist": "Add three-digit numbers when no column carries, like 627 + 141 = 768.",
+    "about": "Add each column on its own: ones, then tens, then hundreds. In 627 + 141, 7 + 1 is 8, 2 + 4 is 6, and 6 + 1 is 7, so the answer is 768 and nothing carries. Other problems, like 693 + 303 = 996 and 204 + 13 = 217, work the same way. It builds on hundreds, tens, and ones, and on adding two-digit numbers with regrouping. It leads to adding three-digit numbers with regrouping."
+  },
+  "add_3digit_regroup": {
+    "gist": "Add three-digit numbers with carrying, like 261 + 758 = 1019.",
+    "about": "Carrying can happen in any column, and a carry out of the hundreds makes a thousand. In 261 + 758, 1 + 8 is 9, 6 + 5 is 11 so one ten carries, and 2 + 7 + 1 is 10 hundreds, which gives 1019. Other problems, like 106 + 359 = 465, carry only once. It builds on adding three-digit numbers without regrouping. It leads to the standard written method for adding bigger numbers."
+  },
+  "add_integers": {
+    "gist": "Add any two integers, positive or negative, getting the sign right.",
+    "about": "When the signs match, add the sizes and keep the sign. When they differ, subtract the smaller size from the larger and keep the sign of the larger. So (-16) + (-3) = -19, and 20 + (-16) = 4. Each sheet mixes both cases. It builds on adding integers with the same sign and with opposite signs, and leads to subtracting integers by adding the opposite."
+  },
+  "add_integers_opposite_signs": {
+    "gist": "Add a positive and a negative integer by finding which is larger in size and by how much.",
+    "about": "When the signs differ, the sizes partly cancel. Subtract the smaller size from the larger, and keep the sign of the larger. 13 + (-10) = 3, and (-13) + 5 = -8. It builds on using opposites to make zero and on absolute value as distance from zero. It leads to adding integers with any signs."
+  },
+  "add_integers_same_sign": {
+    "gist": "Add two integers that are both positive or both negative.",
+    "about": "When both integers have the same sign, add the sizes and keep the sign. (-3) + (-3) = -6, and 12 + 11 = 23. Two debts that combine make a bigger debt. Each problem adds two positive integers or two negative integers. It builds on locating integers and their opposites on a number line, and leads to adding integers of any combination of signs."
+  },
+  "add_multidigit_algorithm": {
+    "gist": "Add numbers in the thousands in columns, carrying when a column reaches 10 or more.",
+    "about": "This is the column method, like 7032 + 7861 = 14893, where you carry to the next place when a column reaches 10. Each problem adds two four-digit numbers. It builds on adding three-digit numbers with regrouping and on place value. It leads to multi-step word problems and to adding decimals."
+  },
+  "add_subtract_decimals": {
+    "gist": "Add and subtract decimals by lining up the decimal points, like 7.8 − 5.81.",
+    "about": "Digits with the same place value go in the same column, so 7.8 is written as 7.80 before subtracting 5.81, which gives 1.99. Carrying and borrowing work as they do with whole numbers. It builds on decimal place value and on adding and subtracting multi-digit numbers. It leads to multiplying decimals and to finding sales tax or a discount."
+  },
+  "add_subtract_fluency_within_20": {
+    "gist": "Add and subtract within 20 quickly, like 4 + 9 = 13 and 19 − 5 = 14.",
+    "about": "These are the addition and subtraction facts with numbers up to 20, like 15 + 2 = 17. The goal is to know them quickly so bigger problems go more smoothly. They build on adding within 20 with regrouping and on subtracting within 20. They lead to adding and subtracting two-digit numbers without regrouping and to understanding multiplication as equal groups."
+  },
+  "add_subtract_integers": {
+    "gist": "Work through expressions that mix adding and subtracting integers.",
+    "about": "Longer expressions chain several steps, and each subtraction can be turned into adding the opposite. 4 - (-6) + (-7) becomes 4 + 6 + (-7) = 3. Each problem has three integers joined by adding and subtracting. It builds on subtracting integers by adding the opposite, and leads to multi-operation integer expressions and to two-step equations with negative numbers."
+  },
+  "add_subtract_like": {
+    "gist": "Add or subtract fractions whose pieces are the same size, like 10/11 − 7/11.",
+    "about": "When two fractions share a denominator, the pieces are the same size, so you add or subtract the counts: 10/11 − 7/11 = 3/11. Some sums pass one whole, as in 3/6 + 5/6 = 4/3, and some answers simplify, like 5/6 − 2/6 = 1/2. It builds on seeing a fraction like 3/8 as three copies of 1/8. Next come breaking a fraction into a sum of fractions and adding and subtracting mixed numbers."
+  },
+  "add_subtract_mixed_like": {
+    "gist": "Add and subtract mixed numbers like 2 11/12 + 8 2/12 when the denominators match.",
+    "about": "A mixed number has a whole part and a fraction part, like 5 2/11. Here the fractions share a denominator, and each answer is written as a single fraction, so 5 2/11 − 1 9/11 comes out as 37/11. It builds on adding and subtracting like-denominator fractions and on converting between mixed numbers and improper fractions, which are fractions with a bigger top than bottom."
+  },
+  "add_subtract_properties": {
+    "gist": "Use addition rules, like adding 0 changes nothing and regrouping addends keeps the sum.",
+    "about": "Addition has a few rules: adding 0 changes nothing, and numbers can be added in either order or grouped differently. Most problems add or subtract 0, as in 19 + 0 = 19 and 28 − 0 = 28, and a few ask for the missing number in a regrouped sum like (8 + 12) + 26 = 8 + (12 + ___). It builds on adding within 10. It leads to adding two 2-digit numbers without regrouping and to the matching rules for multiplication."
+  },
+  "add_subtract_signed_rationals": {
+    "gist": "Add and subtract positive and negative fractions.",
+    "about": "The integer rules still apply, now with fractions. For unlike denominators, rewrite with a common one first: -3/2 - 9/4 = -6/4 - 9/4 = -15/4. Each problem is a sum or difference of fractions and whole numbers, positive or negative. It builds on negative fractions and decimals and on adding fractions with unlike denominators, and leads to problems using all four operations on signed fractions."
+  },
+  "add_subtract_unlike": {
+    "gist": "Add and subtract fractions with different denominators, like 5/7 − 1/8.",
+    "about": "The fractions are first rewritten with a common denominator, then the counts are added or subtracted: 5/7 − 1/8 = 40/56 − 7/56 = 33/56. It builds on adding fractions with like denominators and on finding a common denominator. It leads to adding and subtracting negative numbers, including negative fractions."
+  },
+  "add_subtract_word_problems_multidigit": {
+    "gist": "Solve word problems that take two steps of adding and subtracting large numbers.",
+    "about": "A warehouse starts with 2421 notebooks, receives 2572 more, and sends out 219, which leaves 4774. Each problem is a short story like that, with an addition first and then a subtraction. It builds on the column methods for adding and subtracting numbers in the thousands."
+  },
+  "add_subtract_word_problems_within_10": {
+    "gist": "Solve short story problems about adding, taking away or comparing, with numbers up to 10.",
+    "about": "Each problem is a short story with numbers up to 10. If 4 ducks are in a pond and 4 more join, there are 8. If Nia has 10 shells and Bo has 2 fewer, Bo has 8. If 5 apples are taken out of a basket of 5, none remain. It builds on adding within 10 and subtracting within 10, and it is where those facts start answering questions about shells, ducks and apples."
+  },
+  "add_within_10": {
+    "gist": "Add two numbers with a sum up to 10, like 4 + 3 = 7.",
+    "about": "These addition facts have sums up to 10, like 4 + 3 = 7 and 0 + 8 = 8. The sheet gives bare equations with the answer left blank. It builds on adding within 5 and on counting forward from any number. It leads to add and subtract word problems within 10 and to the make-ten strategy."
+  },
+  "add_within_20_no_regroup": {
+    "gist": "Add within 20 when nothing needs carrying, like 4 + 2 = 6.",
+    "about": "Addition facts with sums up to 20 where no ten has to be carried, like 1 + 3 = 4, 14 + 4 = 18 and 19 + 0 = 19. The sheet gives bare equations with the answer left blank. It builds on the make-ten strategy and on adding within 10. It leads to adding within 20 with regrouping, which means carrying, and to subtracting within 20."
+  },
+  "add_within_20_regroup": {
+    "gist": "Add within 20 when the ones add past 9 and a ten forms, like 5 + 8 = 13.",
+    "about": "Some sums within 20 cross 10, like 5 + 8 = 13 and 7 + 7 = 14, and the ones make a new ten. The sheet gives these as bare equations with the answer left blank. It builds on adding within 20 without regrouping. It leads to adding and subtracting within 20 from memory and to adding two 2-digit numbers with regrouping."
+  },
+  "add_within_5": {
+    "gist": "Add two small numbers with a sum of 5 or less, like 3 + 2 = 5.",
+    "about": "The first addition facts are the ones with every sum up to 5, like 1 + 1 = 2 and 3 + 2 = 5, with a few that add 0. Each problem is a bare equation with the answer left blank, and the goal is to know the answers quickly. It builds on counting objects to tell how many. It leads to adding within 10."
+  },
+  "addition_principle": {
+    "gist": "Count the choices when you pick exactly one item from separate groups.",
+    "about": "If a menu has 4 sandwiches and 8 salads and you pick exactly one item, you have 4 + 8 = 12 choices, because no item sits in both groups. Each problem lists two or three groups, such as sandwiches and salads or board games, card games and puzzles, and asks for the total number of choices. It builds on counting the outcomes of a scenario with two features by listing them."
+  },
+  "additive_inverses_make_zero": {
+    "gist": "Find the number you add to an integer to get zero.",
+    "about": "A number and its opposite add to zero: -3 + 3 = 0 and 9 + (-9) = 0. Each problem gives an equation with a blank, like -2 + ? = 0, and asks which integer fills it. It builds on opposite numbers and on locating integers and their opposites on a number line. It leads to adding integers with opposite signs by comparing sizes."
+  },
+  "angle_additivity": {
+    "gist": "Find a missing part of an angle when you know the whole and one part.",
+    "about": "A big angle is the sum of its adjacent parts, so a missing part is found by subtraction. If the whole angle is 101° and one part is 38°, the other part is 101 − 38 = 63°. It builds on measuring angles with a protractor. It leads to using the 180° angle sum of a triangle to find a missing angle."
+  },
+  "angle_classification": {
+    "gist": "Sort angles into acute, right, obtuse, and straight.",
+    "about": "An acute angle is smaller than 90°, a right angle is exactly 90°, an obtuse angle is between 90° and 180°, and a straight angle is 180°. Each problem shows an angle and asks which of these names fits. It builds on measuring angles and on estimating them against 90° and 180°. It leads to parallel and perpendicular lines and to classifying triangles by their angles."
+  },
+  "angle_concept": {
+    "gist": "See an angle as two rays from one point, with its size showing the amount of turn.",
+    "about": "An angle is made of two rays that start at the same point, called the vertex. Its size tells how far one ray turns from the other. The questions, each with a drawn angle, ask what the size of an angle measures and what the meeting point is called. It leads to degrees as parts of a full turn and to finding parallel and perpendicular lines."
+  },
+  "angle_measure_protractor": {
+    "gist": "Read an angle's size in degrees from a protractor.",
+    "about": "A protractor is shown centered on an angle's vertex and lined up with the first ray, and the question asks for the measure, such as 75° or 160°. It builds on degrees as 1/360 of a turn. It leads to estimating angles against 90° and 180° and to finding a missing angle by adding or subtracting."
+  },
+  "angle_sum_triangle": {
+    "gist": "Find the third angle of a triangle when you know two, since the three always total 180°.",
+    "about": "The three angles inside any triangle add up to 180°. If angle A is 94° and angle B is 29°, angle C is 180 - 94 - 29 = 57°. Each problem gives two angles of a plotted triangle and asks for the third. Children usually meet this after putting adjacent angles together to find an unknown angle, and after sorting triangles by their angles."
+  },
+  "angle_turns_circle": {
+    "gist": "Connect degrees to turns: one degree is 1/360 of a full turn.",
+    "about": "A full turn around a circle is 360 degrees, and one degree is 1/360 of that turn. An angle that is 120/360 of a full turn measures 120°, and 90/360 gives 90°, a quarter turn. It builds on seeing an angle as the amount of turn between two rays. It leads to measuring angles with a protractor."
+  },
+  "area_composite_polygons": {
+    "gist": "Find the area of an odd-shaped polygon by cutting it into rectangles and other simple shapes.",
+    "about": "Many shapes are easier when broken into pieces. One way is to find the area of a whole rectangle and subtract the corner that is missing. Each problem shows a plotted polygon that is a rectangle with a rectangular corner removed and asks for its area in square units. Before this, a child splits L-shaped figures into rectangles and finds the area of a triangle."
+  },
+  "area_distributive": {
+    "gist": "Split a rectangle into two smaller ones and add their areas.",
+    "about": "A rectangle with an 8 cm side split into 3 cm and 5 cm becomes two smaller rectangles, and their areas add up to the area of the whole rectangle, 48 cm². This is the picture behind a × (b + c) = a × b + a × c. It builds on finding the area of a rectangle by multiplying its side lengths."
+  },
+  "area_fraction_side": {
+    "gist": "Find the area of a rectangle whose sides are fractions or decimals of a unit.",
+    "about": "When the sides are not whole numbers, the area is still length × width, now in square meters, and the answers on the sheet are written as decimals such as 8.75 m². It builds on finding the area of a rectangle, on multiplying fractions, and on multiplying decimals."
+  },
+  "area_model_multiplication": {
+    "gist": "Multiply by splitting a two-digit number into tens and ones.",
+    "about": "To find 7 × 42, split 42 into 40 + 2, then add 7 × 40 = 280 and 7 × 2 = 14 to get 294. Each problem comes with a drawing and a hint for how to split the number. It builds on the distributive property and on tens and ones in two-digit numbers. It leads to multiplying a 2-digit number by a 1-digit number."
+  },
+  "area_parallelogram": {
+    "gist": "Find the area of a parallelogram by multiplying its base by its perpendicular height.",
+    "about": "A parallelogram is a slanted rectangle, and its area is base × height, where the height is measured straight up, not along the slanted side. With a base of 12 units and a height of 6 units, the area is 72 square units. Each problem gives the base and the perpendicular height. It builds on finding the area of a rectangle by multiplying side lengths, and leads to the area of a triangle and of a trapezoid."
+  },
+  "area_perimeter_relationship": {
+    "gist": "Compare two rectangles to see how their areas and perimeters differ.",
+    "about": "A 2 cm by 18 cm rectangle and a 3 cm by 12 cm rectangle both cover 36 cm², yet their perimeters are 40 cm and 30 cm. Each problem gives two rectangles and asks which statement is true: same area with different perimeters, same perimeter with different areas, or both different. It builds on perimeter and area. It leads to multi-step area and perimeter problems and to finding the rectangle with the greatest area."
+  },
+  "area_perimeter_unknown_side": {
+    "gist": "Find a missing side of a rectangle from its area or its perimeter.",
+    "about": "If a rectangle has an area of 50 cm² and one side of 10 cm, the other side is 50 ÷ 10 = 5 cm. If its perimeter is 16 cm and one side is 4 cm, half the perimeter is 8, so the other side is 4 cm. It builds on finding area and on finding perimeter. It leads to multi-step area and perimeter problems."
+  },
+  "area_rectangle": {
+    "gist": "Find the area of a rectangle by multiplying its length by its width.",
+    "about": "A rectangle covered in unit squares has rows with the same number of squares in each, so its area is length × width: a rectangle 6 cm by 8 cm covers 48 cm². The sheet shows rectangles with labeled sides and asks for the area in square centimeters. It builds on counting unit squares and on arrays of rows and columns. It leads to splitting a rectangle into two parts and to finding an unknown side."
+  },
+  "area_rectilinear_decompose": {
+    "gist": "Find the area of an L-shaped figure by cutting it into two rectangles.",
+    "about": "An L-shaped figure can be split into two rectangles. Find each rectangle's area, then add them, giving answers like 39 cm². It builds on finding the area of a rectangle. It leads to finding the perimeter of a figure with unlabeled sides and to finding the area of shapes made from triangles, rectangles, and parallelograms."
+  },
+  "area_trapezoid": {
+    "gist": "Find the area of a trapezoid by splitting it into shapes whose areas you already know.",
+    "about": "A trapezoid has two parallel sides, the bases. Splitting it into a rectangle and triangles, or into two triangles, gives its area. With bases 7 and 9 and height 6, the area is 48 square units. Each problem gives the two bases and the height and asks for the area. It builds on the area of a parallelogram and the area of a triangle."
+  },
+  "area_triangle": {
+    "gist": "Find the area of a triangle as half of its base times its perpendicular height.",
+    "about": "A triangle takes up half the space of a parallelogram with the same base and height, so its area is 1/2 × base × height. A triangle with base 16 units and height 7 units has area 1/2 × 16 × 7 = 56 square units. The height is measured at a right angle to the base. This follows from the area of a parallelogram. It leads to trapezoids and to shapes made from several pieces."
+  },
+  "area_unit_squares": {
+    "gist": "Find the area of a rectangle by counting the unit squares that cover it.",
+    "about": "Each small square is 1 square unit, so a rectangle covered by 16 squares has an area of 16 square units. The sheet shows rectangles made of squares to count. It builds on splitting a rectangle into equal rows and columns of squares. It leads to finding area by multiplying side lengths and to measuring volume by counting unit cubes."
+  },
+  "area_word_problems": {
+    "gist": "Solve fencing problems that take several steps with area and perimeter.",
+    "about": "The sheet's problems are all about fencing a rectangular garden with a gap left for a gate. A 13 m by 8 m garden needs 2 × (13 + 8) = 42 m around, minus 4 m for the gate, which is 38 m. It builds on finding an unknown side of a rectangle and on comparing rectangles by area and perimeter."
+  },
+  "arrays_concept": {
+    "gist": "Count the dots in a rectangle of rows and columns to find a product.",
+    "about": "An array is a rectangle of dots in rows and columns, so a 3 × 6 array has 3 rows of 6 dots, 18 in all. Each problem names the array size and asks how many dots it holds. It builds on seeing multiplication as equal groups, since every row is one group. It leads to finding the area of a rectangle, where the rows and columns become the side lengths."
+  },
+  "benchmark_angles": {
+    "gist": "Estimate an angle's size without measuring, by comparing it with 90° and 180°.",
+    "about": "A right angle is 90° and a straight line is 180°, which makes good checkpoints. If an angle looks wider than a right angle but not as wide as a straight line, 125° is a sensible guess and 45° is not. Each problem offers choices and asks for the best estimate. It builds on measuring with a protractor and leads to classifying angles."
+  },
+  "cardinality_within_10": {
+    "gist": "See that the last number counted tells how many are in a group.",
+    "about": "The last number you say when counting a group is the total. Count a group of dots and end on 8, and there are 8 dots. The sheet shows dots and asks how many. It builds on counting to 10 by ones. It leads to counting objects to tell how many."
+  },
+  "combinations_r_from_n": {
+    "gist": "Count the ways to pick a team from a group when order does not matter.",
+    "about": "Choosing 2 friends from 5 can be done in 10 ways, half of the 5 × 4 = 20 ordered ways, because picking Ann then Ben is the same team as Ben then Ann. Each problem asks how many teams of 2, 3 or 4 can be chosen from a group of 4 to 9 people. It builds on counting ordered arrangements and on counting the edges of a complete graph. Deciding between permutation and combination, and counting by subtracting forbidden cases, come next."
+  },
+  "common_denominators": {
+    "gist": "Find a denominator two fractions can share, like 35 for 1/5 and 1/7.",
+    "about": "To add 1/5 + 1/7, both fractions need pieces of the same size. The sheet asks for the smallest denominator that works for both, which is 35 here, 77 for 1/7 and 1/11, and 70 for 1/7 and 1/10. It builds on making equivalent fractions. It leads straight to adding and subtracting fractions with different denominators."
+  },
+  "common_factors": {
+    "gist": "Count the factors that two numbers share.",
+    "about": "The factors of 24 are 1, 2, 3, 4, 6, 8, 12 and 24, and the factors of 16 are 1, 2, 4, 8 and 16. They share four of them: 1, 2, 4 and 8. Each problem asks how many common factors a pair of numbers has. It builds on finding factor pairs. It leads to the greatest common factor."
+  },
+  "common_multiples": {
+    "gist": "Check whether a number is a multiple of two different numbers at once.",
+    "about": "48 is a multiple of 4 but not of 5, so 48 is not a common multiple of 4 and 5. Each problem asks a yes or no question about a number and two others. It builds on deciding whether a number is a multiple of a one-digit number. It leads to the least common multiple and to remainder cycles."
+  },
+  "compare_2digit": {
+    "gist": "Pick the larger of two two-digit numbers.",
+    "about": "Compare the tens first: 99 is greater than 29 because 9 tens beat 2 tens. When the tens match, the ones decide, so 57 is greater than 56. Each problem shows two two-digit numbers and asks for the larger one to be written. It builds on understanding tens and ones in two-digit numbers, and it is how a child learns to read which of two prices or scores is bigger."
+  },
+  "compare_3digit": {
+    "gist": "Pick the larger of two three-digit numbers.",
+    "about": "Compare the hundreds first: 701 is greater than 296 because 7 hundreds beat 2 hundreds. If the hundreds match, look at the tens, then the ones. The sheet shows two numbers and asks for the larger one to be written. It builds on understanding hundreds, tens, and ones. It leads to comparing larger multi-digit numbers."
+  },
+  "compare_absolute_values": {
+    "gist": "Compare the sizes of two numbers while ignoring their signs.",
+    "about": "Absolute value drops the sign, so |-9| = 9 is greater than |2| = 2, even though -9 is less than 2. For -5 and 7 both comparisons agree: -5 is less than 7, and |-5| = 5 is less than |7| = 7. Each problem asks how one absolute value compares to another. Children usually meet this after comparing integers on a number line and learning absolute value as distance from zero."
+  },
+  "compare_benchmarks": {
+    "gist": "Compare a fraction to 1/2 to decide whether it is greater, less, or equal.",
+    "about": "A benchmark gives a quick check, and 1/2 is the handiest one. 8/9 is more than half because 8 is more than half of 9, and 1/7 is less than half. Each problem asks whether a fraction is less than, equal to, or greater than 1/2. It builds on comparing fractions with the same denominator or the same numerator, and on placing fractions on a number line. It leads to comparing fractions with unlike numerators and denominators."
+  },
+  "compare_decimals": {
+    "gist": "Tell which of two decimals is larger, such as 0.3 and 0.28.",
+    "about": "Decimals are compared place by place from the left, so 0.3 is greater than 0.28 even though 0.28 has more digits. Pairs like 0.30 and 0.3 are equal, because a zero at the end changes nothing. Each problem asks for less than, equal to, or greater than. It builds on writing tenths and hundredths as decimals, and it leads to reading decimal place value to thousandths and rounding decimals."
+  },
+  "compare_graph_categories": {
+    "gist": "Use a picture graph to find how many more one group has than another.",
+    "about": "Once a child can read each row of pictures, the next question is how the categories compare. \"How many more votes did Art receive than Music?\" means reading both totals and subtracting the smaller from the larger. This builds on reading a one-symbol picture graph and a single-unit bar graph. Finding the mode, the value that shows up most often in a data set, comes later."
+  },
+  "compare_integers": {
+    "gist": "Tell whether one integer is greater than, less than, or equal to another using the number line.",
+    "about": "On a number line, the number farther right is greater. So -1 is less than 8, and -8 is less than 5. Each problem gives two integers and asks how the first compares to the second. It builds on locating integers on a number line. It leads to comparing absolute values and comparing negative fractions and decimals."
+  },
+  "compare_lengths_difference": {
+    "gist": "Find how much longer one thing is than another, like 11 cm and 9 cm.",
+    "about": "Two lengths are given and the question asks how much longer the first is, which is a subtraction: a ribbon of 11 centimeters is 2 cm longer than a string of 9 centimeters. No ruler is needed, since each word problem states both lengths. It builds on measuring a length with a ruler."
+  },
+  "compare_multidigit": {
+    "gist": "Decide whether one number up to six digits is greater than, less than, or equal to another.",
+    "about": "To compare 50273 with 65314, start at the left and find the first place where the digits differ. Here 5 ten-thousands is less than 6, so 50273 < 65314. Each problem is multiple choice, with greater than, less than and equal as the choices, and the numbers run up to six digits. It builds on place value and on comparing three-digit numbers."
+  },
+  "compare_populations_from_samples": {
+    "gist": "Compare two groups using the centers and spread of a sample from each.",
+    "about": "Given random samples from two populations, you can compare their means and look at how spread out each sample is before drawing a conclusion. Each problem lists five values from each sample and asks which inference is best supported, such as which population likely has the higher typical value and more or less variability. It builds on choosing a representative sample, finding the mean, and finding the range."
+  },
+  "compare_same_center_different_spread": {
+    "gist": "Tell which of two data sets is more spread out when their means match.",
+    "about": "Two data sets can have the same mean and still look very different, because one may cluster tightly while the other spreads far out. Each problem shows Set A and Set B on line plots with equal means and asks which has the greater spread. It builds on finding the mean, the median, and the range. Predicting how an outlier affects the mean and median comes next."
+  },
+  "compare_same_denominator": {
+    "gist": "Compare two fractions that have the same bottom number, like 8/10 and 6/10.",
+    "about": "With the same denominator, the pieces are the same size, so the fraction with more pieces is larger. 8/10 is more than 6/10, because 8 pieces beat 6. Each problem asks whether the first fraction is less than, equal to, or greater than the second. It builds on seeing a fraction as copies of a unit fraction. It leads to comparing fractions using benchmarks."
+  },
+  "compare_same_numerator": {
+    "gist": "Compare two fractions with the same top number, like 4/8 and 4/3.",
+    "about": "When the top numbers match, look at the bottom. A bigger bottom number means smaller pieces, so 4/8 is less than 4/3, even though 8 is bigger than 3. Each problem asks whether the first fraction is less than, equal to, or greater than the second. It builds on knowing a unit fraction as one of b equal parts. It leads to comparing fractions using benchmarks."
+  },
+  "compare_signed_rationals": {
+    "gist": "Tell which of two positive or negative fractions or decimals is greater.",
+    "about": "The rule from whole numbers carries over: the number farther right on the number line is greater. So -3/2 is less than -3/4, because -3/2 sits farther left. Each problem gives two numbers, fractions or whole numbers, and asks how the first compares to the second. Before this, a child locates signed fractions on a number line and compares integers. It leads to writing inequalities in situations and ordering a set of numbers."
+  },
+  "compare_unlike": {
+    "gist": "Decide which of two fractions is larger, even when the pieces are different sizes.",
+    "about": "Fractions like 1/9 and 2/10 are cut into different sized pieces. Children rewrite them with matching pieces, or use equivalent fractions, and then choose less than, equal to, or greater than. Some pairs turn out equal, such as 4/5 and 12/15. It builds on comparing fractions to familiar ones like 1/2 and on making equivalent fractions, and it leads to putting a whole set of fractions in order."
+  },
+  "compare_within_10": {
+    "gist": "Pick the larger of two numbers within 10.",
+    "about": "Comparing numbers means deciding which is greater. Of 1 and 9 the greater is 9, and of 10 and 8 it is 10. Each problem shows two numbers from 0 to 10 and asks for the larger one to be written. It builds on counting objects to tell how many, and it is the habit behind reading a number line or a scoreboard."
+  },
+  "complement_probability": {
+    "gist": "Find the chance that something does NOT happen.",
+    "about": "The chances of all outcomes add to 1, so the chance that an event does not happen is 1 minus the chance that it does. Rolling a fair die, the chance of a number greater than 2 is 4/6, so the chance of NOT doing that is 2/6, or 1/3. Each problem rolls a fair die and asks for the chance of NOT getting some result. It builds on finding theoretical probability."
+  },
+  "compose_ten": {
+    "gist": "Find the number that goes with another to make 10, like 8 + 2.",
+    "about": "Every number from 11 to 19 is a ten and some ones, and a first step is knowing which pairs make 10. The sheet's problems ask for the missing number, as in 8 + ? = 10, where the answer is 2. It builds on counting to 100 by tens and counting objects to tell how many. It leads to understanding tens and ones in two-digit numbers and to the make-ten strategy for addition."
+  },
+  "compound_two_dice": {
+    "gist": "Count how many ways two dice can add up to a given total.",
+    "about": "Two dice make 36 equally likely outcomes. Each problem asks how many of them give a certain total, such as 3, which can happen two ways (1 and 2, or 2 and 1), or 9, which can happen four ways. Totals near 7 come up most often and 2 and 12 least. This builds on finding theoretical probability and on listing the sample space."
+  },
+  "coordinate_distance": {
+    "gist": "Find how far apart two points are when they sit on the same row or column of the grid.",
+    "about": "When two points share a y-coordinate they lie on a horizontal line, and when they share an x-coordinate they lie on a vertical line. In both cases the distance is the gap between the two coordinates that differ, found by counting or subtracting. Each problem shows points A and B and asks for the distance in units. It builds on plotting points in all four quadrants. It leads to polygons on the grid and their perimeter or area."
+  },
+  "coordinate_missing_vertex": {
+    "gist": "Find the missing corner of a rectangle on a coordinate grid from the other three.",
+    "about": "In a rectangle whose sides run straight across and up, corners next to each other share either an x-coordinate or a y-coordinate. If the other three corners are known, the fourth takes its x from one and its y from another. Each problem gives three plotted vertices and asks for the x- or y-coordinate of D. Before this, a child draws polygons from coordinates and finds side lengths. Perimeter and area of polygons on the grid come after it."
+  },
+  "coordinate_perimeter_area": {
+    "gist": "Find the area or perimeter of a rectangle drawn on a coordinate grid from its corners.",
+    "about": "Once you can read side lengths from coordinates, perimeter is the sum of the sides and area is length × width. A plotted rectangle 3 units wide and 5 units tall has area 15 square units and perimeter 16 units. Each problem shows a rectangle and asks for either its area or its perimeter. It builds on finding distances between points and on finding a missing vertex."
+  },
+  "coordinate_plane_first_quadrant": {
+    "gist": "Read the x and y coordinates of a point on the top-right part of a coordinate grid.",
+    "about": "The first quadrant is the top-right section of a coordinate plane, where both numbers are positive. A point at (2, 10) is 2 across and 10 up. Each problem shows a plotted point and asks for either its x-coordinate or its y-coordinate. Children usually meet this after learning that an ordered pair means across, then up from the origin. Plotting points in all four quadrants, with negative coordinates, comes after it."
+  },
+  "count_complementary": {
+    "gist": "Count by taking the total and subtracting the cases you do not want.",
+    "about": "How many 3-digit codes, repeats allowed, have at least one digit that is not 0? Counting those directly is tangled. The total is 1000 and only 000 fails, so the answer is 1000 − 1 = 999. Each problem uses codes of 2, 3 or 4 digits, gives the total, and asks the same question about a named digit. It builds on counting restricted arrangements and unordered selections."
+  },
+  "count_list_outcomes": {
+    "gist": "Work out all the possible outcomes when you flip, pick or spin twice.",
+    "about": "Flip a sun-or-moon token twice and the outcomes are sun-sun, sun-moon, moon-sun and moon-moon, four in all. Listing every possibility in an orderly way keeps any from repeating or going missing. Each problem describes two steps, such as picking a card from A, B or C and then spinning a 3-color spinner, and asks how many outcomes there are in total. A child can start here. Counting the outcomes of a scenario with two features, such as color and size, comes after it."
+  },
+  "count_mixed_coins": {
+    "gist": "Add up a pocketful of mixed coins to find the total in cents.",
+    "about": "Two quarters, 4 dimes, 3 nickels, and 4 pennies make 109¢. Starting with the biggest coins and counting on helps: 50, 90, 105, 109. It builds on knowing the value of a penny, nickel, dime, and quarter. It leads to making an amount with coins, including with the fewest coins."
+  },
+  "count_objects_within_10": {
+    "gist": "Count a group of up to 10 objects and say how many there are.",
+    "about": "Counting a group means giving each dot exactly one number, then saying the last number as the total. Here the groups run from 1 to 10 dots, and each problem asks how many dots there are. It builds on knowing that the last number counted tells how many, and on counting to 10 by ones. It leads to comparing two groups within 10 and to adding within 5."
+  },
+  "count_objects_within_20": {
+    "gist": "Count a group of up to 20 objects and say how many there are.",
+    "about": "Counting bigger groups, up to 20 dots, takes more care to give each dot one number without skipping or repeating any. The sheet shows a group of dots and asks how many. It builds on counting objects to tell how many and on counting to 20 by ones. It leads to seeing the numbers 11 to 19 as ten plus some ones."
+  },
+  "count_on": {
+    "gist": "Start counting from any number up to 20 and name the next one.",
+    "about": "Counting forward from a number means you do not have to begin again at 1. Starting at 15, the next number is 16, and after 19 comes 20. The sheet asks what number comes after a given one. It builds on counting to 20 by ones. It leads to adding within 10, where you count on from the bigger number."
+  },
+  "count_organized_count": {
+    "gist": "Count the combinations when something has two features, like color and size.",
+    "about": "A shirt that comes in 2 colors and 4 sizes gives 2 × 4 = 8 color-and-size combinations, which you can see by listing them in rows and columns. Each problem is a short word problem about a product with two choices, such as a phone case, and asks for the total number of combinations. Before this, a child lists every outcome of a small scenario in an organized way. Next come adding up separate cases and multiplying the options at each stage of a choice."
+  },
+  "count_to_10": {
+    "gist": "Name the number that comes right after another, within 10.",
+    "about": "Counting to 10 by ones means knowing the order of the numbers, so that 9 follows 8 and 2 follows 1. The sheet asks what number comes right after a given one. A child can start here. Next come counting to 20 by ones and counting objects to tell how many."
+  },
+  "count_to_100_ones": {
+    "gist": "Name the number right after another, counting by ones up to 100.",
+    "about": "Counting to 100 by ones carries the count through all the two-digit numbers, so 34 follows 33 and 11 follows 10. The sheet asks what comes right after a number. It builds on counting to 20 by ones. It leads to understanding tens and ones in two-digit numbers and to skip-counting by 2s, 5s, and 10s."
+  },
+  "count_to_100_tens": {
+    "gist": "Count by tens up to 100 and name the next number.",
+    "about": "Counting by tens goes 10, 20, 30 and on to 100, so after 80 comes 90. The sheet gives a number and asks what comes next when counting by tens. It builds on counting to 10 by ones. It leads to seeing the numbers 11 to 19 as ten plus some ones, and to skip-counting by 2s, 5s, and 10s."
+  },
+  "count_to_20": {
+    "gist": "Name the number that comes right after another, counting up to 20.",
+    "about": "Counting to 20 by ones takes the count past 10 and into the teens, where 17 follows 16 and 14 follows 13. The sheet asks what number comes right after a given one. It builds on counting to 10 by ones. Next come counting to 100 by ones and counting forward from any number within 20."
+  },
+  "count_with_restriction": {
+    "gist": "Count the ways to seat people in a row when one person has a seat rule.",
+    "about": "If 6 people sit in a row and Evan must sit at the left end, the other 5 fill the seats in 5! = 120 ways. If one of 7 people must not take the left end, count all 7! = 5,040 seatings and subtract the 6! = 720 with that person there, leaving 4,320. Each problem seats 4 to 7 people in a row with one person required to take, or avoid, an end seat. It builds on counting ordered arrangements and leads to subtracting forbidden cases."
+  },
+  "decimal_notation_fractions": {
+    "gist": "Write fractions with a denominator of 10 or 100 as decimals, like 81/100 as 0.81.",
+    "about": "A fraction with a denominator of 10 or 100 can be written straight as a decimal: 2/10 is 0.2, 76/100 is 0.76, and 2/100 is 0.02. The tenths and hundredths places match the denominator. It builds on seeing a fraction as copies of a unit fraction such as 1/10. Next come comparing decimals and reading decimal place value out to thousandths."
+  },
+  "decimal_place_value_round": {
+    "gist": "Name the value of a decimal digit and round decimals, like 2.821 to the nearest tenth.",
+    "about": "Each place to the right of the decimal point has one tenth the value of the place before it. Problems ask for the value of a digit, such as the 7 in the tenths place of 7.746, which is 0.7, and for rounding to the nearest whole number or tenth: 7.153 rounds to 7, and 2.821 rounds to 2.8. It builds on writing and comparing decimals and on rounding whole numbers. It leads to adding and subtracting decimals."
+  },
+  "decompose_fraction": {
+    "gist": "Break one fraction into a sum of smaller fractions that share its denominator.",
+    "about": "A fraction can be split into parts that add back up to it. For 4/7, that might be 2/7 + 2/7, and 6/7 can be 1/7 + 5/7. Each problem lists several equations and asks which one is correct, and some of the fractions are larger than 1, like 13/11. It builds on adding and subtracting fractions with like denominators, since each split is an addition problem read backward."
+  },
+  "divide_decimals": {
+    "gist": "Divide a decimal by a whole number or by another decimal, like 0.4 ÷ 0.5.",
+    "about": "For 37.2 ÷ 4 the answer is 9.3. When the divisor is a decimal, as in 0.4 ÷ 0.5, both numbers are multiplied by 10 so the divisor becomes whole, and 4 ÷ 5 gives 0.8. Likewise 7.2 ÷ 0.4 becomes 72 ÷ 4 = 18. It builds on multiplying decimals and on long division by a one-digit number."
+  },
+  "divide_fractions": {
+    "gist": "Divide one fraction by another, like 1/2 ÷ 4/5.",
+    "about": "Dividing by a fraction is the same as multiplying by its flip: 1/2 ÷ 4/5 = 1/2 × 5/4 = 5/8. Likewise 2/7 ÷ 1/11 = 2/7 × 11 = 22/7. It builds on dividing unit fractions by whole numbers and the reverse. It leads to unit rates with fractional amounts and to dividing negative numbers."
+  },
+  "divide_integers": {
+    "gist": "Divide integers and choose the sign of the answer.",
+    "about": "Division follows the same sign rules as multiplication. Two negatives give a positive, so (-15) ÷ (-3) = 5, and (-50) ÷ (-10) = 5. A positive divided by a positive is also positive, as in 45 ÷ 9 = 5. It builds on multiplying integers, and leads to finding signs with many factors and to two-step equations with signed numbers."
+  },
+  "divide_signed_rationals": {
+    "gist": "Divide by positive and negative fractions and whole numbers.",
+    "about": "Dividing by a fraction means multiplying by its flip, with the sign rules from integer division. 1 ÷ (-7/2) = 1 × (-2/7) = -2/7, and (-2) ÷ (-7/3) = (-2) × (-3/7) = 6/7. It builds on negative fractions, signs of products and quotients, and dividing a fraction by a fraction. It leads to problems using all four operations on signed fractions."
+  },
+  "divide_unit_fractions": {
+    "gist": "Divide a whole number by a unit fraction, or a unit fraction by a whole number.",
+    "about": "A unit fraction has 1 on top, like 1/4. Dividing 10 ÷ 1/4 asks how many fourths fit in 10, which is 40, and 1/3 ÷ 11 splits a third into 11 parts, giving 1/33. It builds on seeing a fraction as division and on multiplying fractions. It leads to dividing a fraction by any other fraction."
+  },
+  "divisibility_rules_2_5_10": {
+    "gist": "Use the last digit of a number to tell whether 2, 5 or 10 divides into it evenly.",
+    "about": "Each problem asks for the remainder when a number is divided by 2, 5 or 10, and a remainder of 0 means it divides evenly. The last digit tells you: 901 ÷ 10 leaves 1, and a number ending in 0 divides evenly by 10 and by 5. It builds on factors and multiples. It leads to telling even numbers from odd ones."
+  },
+  "divisibility_rules_3_9": {
+    "gist": "Use the sum of a number's digits to find the remainder when dividing by 3 or 9.",
+    "about": "The digit sum of 6235 is 6 + 2 + 3 + 5 = 16, and 16 ÷ 9 leaves 7, which is also what 6235 ÷ 9 leaves. Each problem gives the digit sum and asks for the remainder. It builds on factors and multiples. It leads to prime factorization and to explaining why the digit-sum rule works."
+  },
+  "division_as_grouping": {
+    "gist": "Find how many groups you get when a total is sorted into groups of a set size.",
+    "about": "Here division means sorting. With 24 dots in groups of 4, you ask how many groups of 4 fit, and the answer is 6. It is the same as subtracting 4 over and over until nothing is left. The skill builds on multiplication as equal groups, and it leads to the division facts for 6 through 9."
+  },
+  "division_as_sharing": {
+    "gist": "Split a total equally into some number of groups and find how many land in each.",
+    "about": "Dealing out 30 dots equally into 5 groups puts 6 in each group, so 30 ÷ 5 = 6. The sheet gives the total and the number of groups and asks for the size of one group. It builds on multiplication as equal groups. It leads to the division facts through ÷5 and to unit fractions, where 1/4 means one of 4 equal parts."
+  },
+  "division_facts_0_5": {
+    "gist": "Recall division answers quickly when dividing by numbers up to 5.",
+    "about": "Each problem is a division fact with a small divisor, like 15 ÷ 5 = 3 or 12 ÷ 4 = 3. A child can find the answer by asking which number times the divisor gives the total. It builds on the easy times tables and on division as equal sharing. The next step is the division facts for 6 through 9."
+  },
+  "division_facts_6_9": {
+    "gist": "Recall division answers quickly when dividing by 6, 7, 8 and 9.",
+    "about": "These division facts mirror the times tables, so 48 ÷ 8 = 6 because 8 × 6 = 48. Each problem divides by 6, 7, 8 or 9 and comes out even, like 81 ÷ 9 or 36 ÷ 6. Before this, a child needs the division facts through ÷5, the ×7, ×8 and ×9 facts, and division as grouping. After it come division with remainders and factors and multiples."
+  },
+  "division_with_remainders": {
+    "gist": "Divide when the numbers do not split evenly and give the leftover as a remainder.",
+    "about": "41 ÷ 8 is 5 with 1 left over, written 5 R 1, because 8 × 5 = 40. Each problem asks for the quotient and the remainder in that form. It builds on the division facts for 6 through 9. It leads to long division with a one-digit divisor and to remainder cycles, where remainders repeat around a clock or a calendar."
+  },
+  "elapsed_time_minutes": {
+    "gist": "Find what time it will be after some minutes pass, even across the hour.",
+    "about": "Starting at 8:50, 20 minutes later is 9:10: 10 minutes reaches 9:00, and 10 more finishes it. The clock wraps at 60 minutes, so the hour number goes up when the minutes pass 60. It builds on telling time to the nearest minute."
+  },
+  "eq_both_sides": {
+    "gist": "Solve equations with the letter on both sides, like 5x − 15 = 2x − 33.",
+    "about": "When x appears on both sides, gather the x terms on one side first. For 5x − 15 = 2x − 33, subtract 2x to get 3x − 15 = −33, add 15 to get 3x = −18, so x = −6. It builds on equations that need distribution and on two-step equations with negative numbers. Next come equations with one, none, or infinitely many solutions, and equations that need like terms combined."
+  },
+  "eq_context_multi_step": {
+    "gist": "Solve word problems like a booking fee plus a price per ticket to find the price of one.",
+    "about": "Many everyday totals have a one-time fee plus a repeated price. If a group pays a $15 fee plus the same price for each of 4 tickets and the total is $63, then 4t + 15 = 63, so 4t = 48 and t = 12. It builds on one-step word problems and on two-step equations with negatives and with fractions."
+  },
+  "eq_identity_contradiction": {
+    "gist": "Tell whether an equation has one solution, none, or infinitely many.",
+    "about": "Sometimes both sides simplify to the same thing. In 3(x + 5) = 3x + 15 both sides are identical, so every x works: infinitely many solutions. In 5x + 7 = 5x + 11 no x can work, so there is no solution, and in 8x + 5 = 6x + 15, x = 5 is the only solution. Each problem asks how many solutions the equation has. It builds on solving equations with the letter on both sides. It leads to systems with no solution or infinitely many."
+  },
+  "eq_one_step_add_sub": {
+    "gist": "Solve equations like x + 2 = 18 by undoing the addition or subtraction.",
+    "about": "To solve x + 2 = 18, do the opposite of adding 2: subtract 2 from both sides, so x = 16. Doing the same to both sides keeps the equation balanced. Some problems subtract from x instead, as in x − 2 = 11, where adding 2 gives 13. It builds on testing whether a number is a solution. Next come one-step word problems and two-step equations."
+  },
+  "eq_one_step_context": {
+    "gist": "Find the price of one item when you know how many were bought and what they cost together.",
+    "about": "A short story gives a count and a total cost, and the question asks for the price of one. If 5 identical notebooks cost $40, then 5 × n = 40 and one notebook costs $8. The work is choosing the operation that undoes the story. It builds on solving one-step addition and subtraction equations and one-step multiplication and division equations. Next come word problems that take more than one step."
+  },
+  "eq_one_step_fraction": {
+    "gist": "Solve equations where x is multiplied by a fraction, like 2/3x = 10/3.",
+    "about": "When x is multiplied by a fraction, as in 2/3x = 10/3, undo it by dividing both sides by that fraction. Dividing 10/3 by 2/3 gives x = 5. Some answers are fractions too, such as 3/4x = 9/16, which gives x = 3/4. Before this, a child needs one-step multiplication and division equations and multiplying a fraction by a fraction. Next come two-step equations with fraction or decimal values."
+  },
+  "eq_one_step_mult_div": {
+    "gist": "Solve equations like 6x = 54 or x ÷ 2 = 8 by undoing the multiplication or division.",
+    "about": "When x is multiplied by a number, divide both sides by it: for 6x = 54, x is 54 ÷ 6 = 9. When x is divided by a number, multiply instead: x ÷ 2 = 8 gives x = 16. It builds on testing whether a number is a solution. Next come equations with a fraction coefficient and one-step word problems."
+  },
+  "eq_parentheses": {
+    "gist": "Solve equations like 5(x + 1) = 45 where a group is multiplied.",
+    "about": "When a number multiplies a group, first share it across the group, or divide both sides by it. For 5(x + 1) = 45, dividing by 5 gives x + 1 = 9, so x = 8. It builds on positive two-step equations and on the distributive property. Next come equations with the letter on both sides and equations that need distributing over parentheses first."
+  },
+  "eq_solution_meaning": {
+    "gist": "See that a solution is the number that makes both sides of an equation equal.",
+    "about": "An equation says two things are equal, like a balanced scale. A solution is a value for the letter that keeps the two sides balanced. In x + 2 = 10, the value 8 works because 8 + 2 is 10. The sheet asks which value makes both sides balance. It builds on finding an unknown number in arithmetic and on reading a letter as a number. Next comes testing a given number to see whether it is a solution."
+  },
+  "eq_test_solution": {
+    "gist": "Check whether a number is a solution by putting it into the equation.",
+    "about": "To test a number, put it in place of the letter and see whether both sides come out equal. For 6x − 6 = 0, try x = 1: 6 − 6 is 0, so it works. The sheet asks which value makes an equation true, including negatives like −5 in 4x − 7 = −27 and zero in 3x + 5 = 5. It builds on what a solution means and on evaluating expressions. Next come solving one-step equations."
+  },
+  "eq_two_step_fraction_decimal": {
+    "gist": "Solve two-step equations with fractions in them, like 3x + 3/2 = 9.",
+    "about": "The steps stay the same, with fractions to calculate carefully. For 3x + 3/2 = 9, subtract 3/2 to get 3x = 15/2, then divide by 3 to get x = 5/2. Answers are often fractions. It builds on one-step equations with a fraction and on positive two-step equations. It leads to multi-step word problems."
+  },
+  "eq_two_step_integers": {
+    "gist": "Solve two-step equations that include negative numbers, like 4x − 2 = −38.",
+    "about": "These equations follow the same two steps as before, with negative numbers to track. For 4x − 2 = −38, add 2 to get 4x = −36, then divide by 4 to get x = −9. Some have a negative coefficient, like −4x + 4 = 52. It builds on positive two-step equations and on adding and subtracting integers. Next come multi-step word problems and equations with the letter on both sides."
+  },
+  "eq_two_step_positive": {
+    "gist": "Solve two-step equations like 5x + 4 = 64 using positive numbers.",
+    "about": "Two operations were applied to x, so undo them in reverse order. For 5x + 4 = 64, subtract 4 to get 5x = 60, then divide by 5 to get x = 12. It builds on one-step addition and subtraction equations and on one-step multiplication and division equations. Next come two-step equations with negative numbers and with fractions."
+  },
+  "eq_unknown_in_arithmetic": {
+    "gist": "Find the missing number in a short multi-step equation by working backward from the result.",
+    "about": "A question mark stands in for a number, as in (? + 11) × 5 = 75. Each problem has this shape, and the work is undoing the operations in reverse order: 75 ÷ 5 = 15, and 15 − 11 = 4, so the missing number is 4. Before this, a child needs the order of operations. It leads to the idea that a solution is a value that makes an equation true."
+  },
+  "equal_groups_concept": {
+    "gist": "Find the total when several equal groups each hold the same number of things.",
+    "about": "Multiplication starts here as equal groups: 3 groups of 2 make 6 in all, which is 2 + 2 + 2. The sheet gives the number of groups and the size of each group and asks for the total. It builds on skip-counting by 2s, 5s and 10s and on adding within 20 from memory. Next come arrays (rows and columns), the easy times tables, and division as sharing and as grouping."
+  },
+  "equivalent_fractions_general": {
+    "gist": "Find the missing number in equivalent fractions, like 4/8 = ?/56.",
+    "about": "Equivalent fractions name the same amount. Multiply the top and bottom by the same number. For 4/8 = ?/56, 8 × 7 = 56, so 4 × 7 = 28. It builds on recognizing simple equivalent fractions with models. It leads to simplifying fractions and finding a common denominator."
+  },
+  "estimate_population_from_sample": {
+    "gist": "Use a sample's fraction to estimate a count for the whole population.",
+    "about": "If 20 of 25 households in a random sample support a proposal, that is 4/5, so about 4/5 of 250 households, or 200, would support it. Each problem gives a sample result and a population size and asks for the estimate. It builds on choosing a sample that represents a population and on writing probability as a fraction. After this, children see how estimates vary from one random sample to the next."
+  },
+  "exp_fn_evaluate": {
+    "gist": "Find the value of an exponential function, like 5·3ˣ, when x is a given number.",
+    "about": "For f(x) = 5·3ˣ, putting in x = 3 gives 5 × 27 = 135. For f(x) = 2ˣ, x = 0 gives 1. Each problem gives a function and one whole-number input, from 0 to 3. It builds on zero and negative exponents. The next skill is telling growth from decay."
+  },
+  "exp_growth_decay": {
+    "gist": "Tell whether y = a·bˣ shows growth or decay by looking at b.",
+    "about": "In y = a·bˣ, a base b above 1 means the value grows, as in y = 3·3ˣ. A base between 0 and 1, like y = 8·0.5ˣ, makes it shrink. Each problem gives an equation and asks whether it shows growth or decay. It builds on evaluating exponential functions and on percent change. Telling linear growth from exponential growth comes next."
+  },
+  "exp_power_rule": {
+    "gist": "Find the exponent when a power is raised to another power, like (3²)⁵.",
+    "about": "(3²)⁵ is five groups of 3², which is ten 3s multiplied, so it equals 3¹⁰. The exponents get multiplied. Each problem asks for the missing exponent in an expression like this. Before this, a child needs the product and quotient rules for exponents. The next skill is zero and negative exponents."
+  },
+  "exp_product_quotient": {
+    "gist": "Multiply or divide powers with the same base by adding or subtracting the exponents.",
+    "about": "2⁹ ÷ 2⁴ means nine 2s multiplied, divided by four 2s, which leaves five 2s, so the result is 2⁵. Multiplying works the other way: 5³ · 5⁴ is seven 5s, or 5⁷. Each problem asks for the missing exponent. It builds on understanding exponents as repeated multiplication. Next comes the rule for a power raised to a power."
+  },
+  "exp_zero_negative": {
+    "gist": "Work out what a negative exponent means, like 2⁻², as a fraction.",
+    "about": "A negative exponent means the reciprocal: 3⁻² is 1/3², which is 1/9. Each problem asks for a value like this, such as 2⁻² = 1/4, with the answer written as a fraction. It builds on the power-of-a-power rule and on multiplying integers. Scientific notation and exponential functions come next."
+  },
+  "expanded_form_3digit": {
+    "gist": "Fill in the missing piece when a three-digit number is split into hundreds, tens, and ones.",
+    "about": "Expanded form writes a number as the sum of its places, so 347 is 300 + 40 + 7. The sheet gives a number with one piece missing, like 516 = 500 + 10 + ___, and asks for the missing piece, which is 6. It builds on understanding hundreds, tens, and ones. It leads to writing a number given in expanded form as an ordinary numeral."
+  },
+  "expanded_form_multidigit": {
+    "gist": "Fill in the missing piece when a big number is written as a sum of its place values.",
+    "about": "Expanded form splits a number by place: 84812 = 80000 + 4000 + 800 + 10 + 2. Each problem hides one piece, and your child works out what it must be. It builds on place value in numbers up to 1,000,000. Writing a number from its expanded form back into standard form comes next."
+  },
+  "expanded_to_standard_form": {
+    "gist": "Add up place-value pieces to write the number in ordinary form.",
+    "about": "3000 + 500 + 80 is 3580, and 300 + 30 + 8 is 338. Each problem gives a number as a sum of place-value pieces and asks for the number itself, so 5000 + 10 = 5010 has no hundreds or ones. It builds on writing three-digit numbers in expanded form, place value through 1,000, and expanded form for larger numbers."
+  },
+  "expected_frequency": {
+    "gist": "Predict about how many times something will happen in a number of tries.",
+    "about": "To predict a count, multiply the chance by the number of trials. A fair die shows each number 1/6 of the time, so in 60 rolls you would expect about 10 fours, and in 180 rolls about 30 sixes. The word is about, since real results wobble. This builds on estimating probability from experimental results."
+  },
+  "experimental_probability": {
+    "gist": "Estimate a probability from how often something happened in trials.",
+    "about": "When you cannot work out the chances ahead of time, you can try it many times and see. If a spinner lands on blue 19 times in 80 trials, the estimate for the chance of blue is 19/80. Each problem gives counts like these, and the answer is a fraction, simplified when it can be. It builds on finding theoretical probability. Next come why more trials make the estimate steadier, and using a probability to predict how often something will happen."
+  },
+  "exponents_repeated_mult": {
+    "gist": "Read a small power like 3^4 and work it out as repeated multiplication.",
+    "about": "2^3 means 2 × 2 × 2 = 8, and 3^4 means 3 × 3 × 3 × 3 = 81. Each problem asks for the value of a power like these, with a base from 2 to 5. It builds on the ×7, ×8 and ×9 facts and on multiplying and dividing by powers of ten. It leads to squares and cubes, expressions that contain exponents, and the units digit of a power."
+  },
+  "expr_distributive_numeric": {
+    "gist": "Work out a product like 12(200 − 7) by multiplying each part, then subtracting.",
+    "about": "The distributive property lets you multiply a number by each part of a sum or difference. For 12(200 − 7), find 12 × 200 = 2400 and 12 × 7 = 84, then subtract to get 2316. Each problem gives a number times a difference like 200 − 7 or 100 − 9. It builds on evaluating expressions with two letters and on the distributive property from third grade. Next come linear expressions with signed numbers and two-step equations that need distribution."
+  },
+  "expr_evaluate_exponents": {
+    "gist": "Calculate expressions that include a small power, like 2 × 6³ + 5.",
+    "about": "An exponent says how many times to multiply a number by itself, so 6³ is 6 × 6 × 6 = 216. In 2 × 6³ + 5, the power is worked out first, then the multiplication, then the addition: 2 × 216 + 5 = 437. It builds on evaluating expressions with grouping and the order of operations, and on exponents as repeated multiplication. Next come linear expressions with negative numbers and distribution."
+  },
+  "expr_evaluate_formulas": {
+    "gist": "Plug measurements into a formula, such as the area of a triangle, and calculate.",
+    "about": "A formula is a rule written with letters. The area of a triangle is A = (b × h) ÷ 2, so with b = 20 cm and h = 8 cm, A = 160 ÷ 2 = 80. Every problem gives the triangle formula and two measurements and asks for the number only. It builds on evaluating expressions with two letters and with fraction values."
+  },
+  "expr_evaluate_fractions": {
+    "gist": "Find the value of an expression like 4x + 3/4 when x is a fraction.",
+    "about": "A letter can stand for a fraction too. If x = 3/4, then 4x + 3/4 is 4 × 3/4 + 3/4 = 3 + 3/4, which is 15/4 as an improper fraction. Answers are written as fractions. Children usually reach this after evaluating expressions with one letter and multiplying a fraction by a whole number. It leads to evaluating a formula from measurements."
+  },
+  "expr_evaluate_numerical": {
+    "gist": "Work out the value of an expression that mixes grouping, multiplication, and addition.",
+    "about": "Here children find the full value of an expression such as 5 + 7 × (2 + 8). The parentheses go first, giving 10, then 7 × 10 = 70, then 5 + 70 = 75. It builds on reading grouping symbols and on the order of operations. The next steps are plugging a number in for a letter in a one-variable expression and working with exponents."
+  },
+  "expr_evaluate_one_variable": {
+    "gist": "Find the value of an expression like 7x + 14 when x is given.",
+    "about": "To evaluate an expression, replace the letter with the number you are given and calculate. If x = 7, then 7x + 14 is 7 × 7 + 14 = 49 + 14 = 63, with the multiplication done before the addition. It builds on evaluating numerical expressions and on reading a letter as a number. Next come expressions with two letters and testing whether a number solves an equation."
+  },
+  "expr_evaluate_two_variables": {
+    "gist": "Find the value of an expression with two letters when both are given numbers.",
+    "about": "Some expressions have two letters, like 5x + 5y. If x = 7 and y = 4, then 5 × 7 + 5 × 4 = 35 + 20 = 55. The work is placing each number in the right spot and keeping the order of operations. It builds on evaluating an expression with one letter. Next come using the distributive property and evaluating a formula from given measurements."
+  },
+  "expr_grouping_symbols": {
+    "gist": "Spot which operation to do first inside brackets or parentheses in an expression.",
+    "about": "Parentheses, brackets, and braces tell you to treat what is inside as one unit and work it out first. In 11 + [4 + 4 × 2], the problem asks which operation inside the brackets comes first, and the answer is 4 × 2, because multiplication goes before addition. Each problem is multiple choice. A child needs only comfort with the four operations to start. Next comes evaluating whole expressions with grouping, and later naming the terms, factors, and coefficients in an expression."
+  },
+  "expr_multi_step_signed": {
+    "gist": "Find the value of 2(2x − 4) − 2(x + 4) when x is given, including negative values of x.",
+    "about": "Here a letter is replaced by a number, possibly negative, and the expression has parentheses to multiply through. For x = 6, 2(2x − 4) is 2 × 8 = 16 and 2(x + 4) is 2 × 10 = 20, so the result is 16 − 20 = −4. It builds on the distributive property and on multi-operation integer expressions. It leads to solving linear equations by combining like terms."
+  },
+  "expr_terms_factors_coefficients": {
+    "gist": "Name the parts of an algebra expression, such as the number multiplying a letter.",
+    "about": "An expression like 8x + 4 − 2y is built from pieces called terms. The coefficient is the number multiplying a letter, so in this expression the coefficient of x is 8. The sheet asks for the coefficient of x in expressions of this shape. It builds on reading a letter as a number and on grouping symbols. Next come evaluating an expression for a given value and using the distributive property."
+  },
+  "expr_translate_words": {
+    "gist": "Choose the algebra expression that matches a phrase like \"6 less than 4 times a number n\".",
+    "about": "Words about numbers can be written with a letter. \"6 less than 4 times a number n\" means multiply n by 4 first, then take away 6, which is 4n − 6. Each problem gives a phrase of this shape, such as \"7 less than 5 times a number n\", and several expressions to choose from. It builds on reading a letter as a number."
+  },
+  "expr_variable_meaning": {
+    "gist": "Read a letter in a word problem as a number, such as the price of one ticket.",
+    "about": "A letter can stand for a number we do not know yet. If 7 equal-price tickets cost $28 and p is the price of one ticket, then 7 × p = 28, so p is 4. Each problem is a short ticket story with answers to choose from, and the question asks what value the letter has. A child needs only multiplication and division facts to start. It leads to naming the parts of an expression and matching words to expressions."
+  },
+  "factor_gcf": {
+    "gist": "Pull the largest common factor out of an expression, like 6x² + 15x = 3x(2x + 5).",
+    "about": "Both 6x² and 15x can be divided by 3x, which leaves 2x and 5, so 6x² + 15x = 3x(2x + 5). Multiplying back out checks the answer. Each problem is multiple choice and asks for the complete factoring, with wrong choices that pull out too little. It builds on multiplying a polynomial by a single term, which factoring reverses. Using the zero-product property in equations comes next."
+  },
+  "factor_pairs": {
+    "gist": "Count the pairs of whole numbers that multiply to make a given number.",
+    "about": "The factor pairs of 24 are 1 × 24, 2 × 12, 3 × 8 and 4 × 6, which makes 4 pairs. Each problem asks how many pairs a number has, such as 42 or 12. It builds on factors and multiples. It leads to telling prime numbers from composite ones and to finding the factors two numbers share."
+  },
+  "factor_special_forms": {
+    "gist": "Factor perfect squares like x² + 6x + 9 and differences of squares like x² − 81.",
+    "about": "x² + 6x + 9 is (x + 3)², and x² − 81 is (x + 9)(x − 9). Each answer comes from running the matching expanding pattern in reverse, and each problem is multiple choice. It builds on expanding those patterns and on factoring simple trinomials."
+  },
+  "factor_trinomial_general": {
+    "gist": "Factor a trinomial with a number in front of x², like 6x² + 11x + 4.",
+    "about": "The answer to 6x² + 11x + 4 is (3x + 4)(2x + 1), which multiplies back to 6x² + 3x + 8x + 4. A number in front of x² gives more ways to split the terms, so each problem is multiple choice and asks which pair of groups is right. It builds on factoring trinomials that start with a plain x²."
+  },
+  "factor_trinomial_simple": {
+    "gist": "Rewrite x² − 9x + 20 as two groups multiplied together.",
+    "about": "Look for two numbers that multiply to 20 and add to −9. Those are −4 and −5, so x² − 9x + 20 = (x − 4)(x − 5). Each problem is multiple choice and asks which pair of groups multiplies back to the trinomial. It builds on multiplying two binomials, which factoring undoes. Next come trinomials with a number in front of x², special patterns, and solving quadratics by factoring."
+  },
+  "factorial_arrangements": {
+    "gist": "Count the different orders objects can be lined up in, using n!.",
+    "about": "Four runners can finish a race in 4 × 3 × 2 × 1 = 24 different orders, which is written 4! and read 'four factorial'. Each problem asks how many ways 3 to 7 runners, books, friends or students can be put in order, and 6! comes to 720. It builds on multiplying the options at each stage of a choice. Ordering only some of the objects, such as 4 chosen from 7, comes next."
+  },
+  "factors_and_multiples": {
+    "gist": "Count the factors of a number up to 100, or find a multiple of a number.",
+    "about": "The factors of 12 are 1, 2, 3, 4, 6 and 12, so it has 6 factors. The multiples of 8 are what you get counting by 8s, so the 4th multiple of 8 is 32. Each problem asks either how many factors a number has or what the 3rd, 5th or 10th multiple of a number is. It builds on the ×7, ×8 and ×9 facts and the division facts for 6 through 9. It leads to factor pairs, divisibility rules and the greatest common factor."
+  },
+  "fn_compare_representations": {
+    "gist": "Compare the growth rate of one line given as an equation and one given as two points.",
+    "about": "One function is given as an equation, like y = 3x + 6. The other is given by two points it passes through, like (0, −2) and (1, −1). The slope of each is its rate of change, here 3 and 1, so the equation grows faster. Each problem is multiple choice: which function changes faster, or are the rates equal. Children usually meet this after moving between y = mx + b and its graph, and after reading slope from a graph."
+  },
+  "fn_notation_evaluate": {
+    "gist": "Find the output of a function written like f(x) = 5x + 2 for a given input.",
+    "about": "f(x) = 5x + 2 is a rule, and f(0) means putting 0 in for x, which gives 2. For f(x) = −4x + 2, f(−3) is 12 + 2 = 14. The inputs can be zero, positive or negative. Children usually meet this after deciding whether a table, graph, or set of pairs is a function."
+  },
+  "four_operations_signed_rationals": {
+    "gist": "Evaluate expressions with fractions and negatives that use all four operations.",
+    "about": "Work in order: parentheses first, then multiplication and division from left to right, then addition and subtraction. For (5/2 + 3/2) × 4 ÷ 2 - (-5/2), the parentheses give 4, then 4 × 4 ÷ 2 = 8, and 8 + 5/2 = 21/2. Before this, a child adds, subtracts, multiplies, and divides signed fractions one operation at a time."
+  },
+  "four_quadrant_plane": {
+    "gist": "Read the x and y coordinates of points on a full grid, including negative numbers.",
+    "about": "A coordinate plane has four sections. Moving left of the origin makes x negative, and moving below it makes y negative. So a point 6 left and 8 down is at (-6, -8). Each problem shows a plotted point and asks for its x- or y-coordinate. It builds on plotting points in the first quadrant, and leads to reflecting points and to finding distances between points."
+  },
+  "fraction_as_division": {
+    "gist": "See a fraction as a division problem, so 2 ÷ 6 is the fraction 2/6.",
+    "about": "A fraction bar means divide. Written as a fraction, 4 ÷ 9 is 4/9 and 1 ÷ 2 is 1/2. The sheet gives a division problem and asks for the matching fraction. It builds on dividing into equal shares and on placing fractions on a number line. It leads to dividing unit fractions by whole numbers and to finding a unit rate."
+  },
+  "fraction_scaling": {
+    "gist": "Tell whether a product is bigger or smaller than a number without calculating it.",
+    "about": "Multiplying by a fraction less than 1 shrinks a number, and multiplying by a fraction greater than 1 grows it. The sheet asks children to compare 17 × 1/4 with 17 without working out the product, and the answer is less than 17. A fraction like 7/7 equals 1, so 7 × 7/7 equals 7. It builds on multiplying fractions and leads to telling scaling apart from adding in ratio problems."
+  },
+  "gcf": {
+    "gist": "Find the biggest number that divides evenly into both of two numbers.",
+    "about": "The factors of 16 are 1, 2, 4, 8 and 16, and the factors of 24 are 1, 2, 3, 4, 6, 8, 12 and 24. The biggest one they share is 8, so GCF(16, 24) = 8. It builds on factors and multiples, prime factorization, and common factors. It is mostly used for reducing fractions, and it leads to the Euclidean algorithm, a quicker way to find it for large numbers."
+  },
+  "gt_bipartite": {
+    "gist": "Decide whether a network's dots can be split into two colors with no neighbors matching.",
+    "about": "A graph is bipartite when you can color its vertices with two colors so that every edge joins different colors. A ring of 4 vertices works by alternating colors all the way around, and a ring of 3 or 5 cannot. Each problem describes a ring of 3 to 8 vertices and asks whether it is bipartite. It builds on deciding whether a graph is connected. Finding the least number of colors a graph needs comes after it."
+  },
+  "gt_coloring": {
+    "gist": "Find the fewest colors needed so connected dots never share a color.",
+    "about": "A triangle needs 3 colors because each vertex touches the other two, while a tree with 3 vertices needs only 2. Each problem asks for the fewest colors for a small tree, a ring of 3 to 8 vertices, or a complete graph where every vertex touches every other and so needs one color apiece. Children usually meet this after deciding whether a graph is bipartite, which means two colors are enough."
+  },
+  "gt_complete_edges": {
+    "gist": "Count the lines in a network where every dot connects to every other dot.",
+    "about": "In a complete graph every pair of vertices has an edge. With 6 vertices each has degree 5, so the degrees add to 6 × 5 = 30, and half of that is 15 edges. Each problem asks for the edge count of a complete graph on 3 to 8 vertices. Children usually meet this after the rule that the degrees add up to twice the number of edges. It leads to counting unordered selections of r objects from n."
+  },
+  "gt_connected": {
+    "gist": "Decide whether you can get from any dot to any other along the lines.",
+    "about": "A graph is connected when you can travel from any vertex to any other along its edges. On vertices A to E with edges {D–B, C–B, A–D}, vertex E touches nothing, so the graph is not connected. Each problem gives the vertices and edges and asks whether the graph is connected. It builds on finding the degree of a vertex. Telling a path from a circuit and deciding whether a graph is a tree come after it."
+  },
+  "gt_degree_sequence": {
+    "gist": "List how many connections each dot in a small network has, from most to fewest.",
+    "about": "A degree sequence lists every vertex's degree, the number of edges touching it, from largest to smallest. For the edges {B–C, A–B, A–C}, each vertex touches two edges, so the sequence is (2, 2, 2). Each problem gives an edge list and asks which of four degree sequences matches it. Before this, a child needs the degree of a single vertex. The handshake rule follows, which says the degrees add up to twice the number of edges."
+  },
+  "gt_euler_path": {
+    "gist": "Decide whether a connected graph can be traced using every edge exactly once.",
+    "about": "An Euler path travels along every edge exactly once. In a connected graph it exists when 0 or 2 vertices have an odd degree. In the edge list {C–D, A–D, B–C, E–C, C–A, B–A}, only A and E are odd, so a path exists. Each problem gives the edges of a connected graph and asks yes or no. It builds on the rule that degrees add up to twice the edges and on telling paths from circuits."
+  },
+  "gt_handshake_sum": {
+    "gist": "Connect the degrees of a graph's dots to the number of edges it has.",
+    "about": "Every edge touches two vertices, so adding up all the degrees counts each edge twice. A graph with 5 edges has a degree sum of 10, and a graph with degree sequence (2, 2, 2, 2, 1, 1) has 10 ÷ 2 = 5 edges. Some problems give a degree sequence and ask for the edges, and others give the edges and ask for the degree sum. It builds on writing a degree sequence, and it leads to Euler paths and to counting the edges of a complete graph."
+  },
+  "gt_path_vs_circuit": {
+    "gist": "Tell whether a walk along a graph ends somewhere new or back where it started.",
+    "about": "A walk through a graph is a circuit if it ends where it began, and a path if it ends somewhere else. D→A→C→D returns to D, so it is a circuit, while A→D→C→E→F→B ends at B, a different vertex from the start, so it is a path. Each problem lists the stops of a walk and asks which it is. Before this, a child decides whether a graph is connected. Euler paths come after it."
+  },
+  "gt_tree_definition": {
+    "gist": "Decide whether a connected graph is a tree, one with no loops.",
+    "about": "A tree is a connected graph with no closed loops, meaning no route that circles back to its start, and it has one fewer edge than vertices. A connected graph on 5 vertices with 4 edges is a tree, and one with 5 edges must contain a loop. Each problem gives the vertices and edges of a connected graph and asks whether it is a tree. It builds on deciding whether a graph is connected, and it leads to the edge count of a tree."
+  },
+  "gt_tree_edges": {
+    "gist": "Find how many edges a tree has from its number of vertices.",
+    "about": "A tree on n vertices always has n − 1 edges, so a tree with 11 vertices has 10. Each new vertex added to a tree arrives with exactly one new edge, and the first vertex has none. The problems give a number of vertices, from 3 to 12, and ask for the edges. Before this, a child decides whether a graph is a tree."
+  },
+  "gt_vertex_degree": {
+    "gist": "Count how many connections a single dot has in a small network.",
+    "about": "The degree of a vertex is the number of edges that touch it. In the edge list {E–B, A–E, D–E, C–B}, vertex D appears once, so its degree is 1. Each problem gives a list of edges and asks for the degree of one named vertex. It builds on identifying the vertices and edges of a graph from an edge list. Next come writing the degrees of a whole graph as a sequence and deciding whether a graph is connected."
+  },
+  "gt_vertices_edges": {
+    "gist": "Count the dots and the lines in a small network given as a list of connections.",
+    "about": "A graph here means dots joined by lines. The dots are called vertices and the lines are edges, so an edge written A–B joins dot A to dot B. Each problem lists a graph's vertices and edges in braces and asks how many vertices or how many edges it has. A child can start here. Finding how many edges meet at a vertex, called its degree, is the next step."
+  },
+  "hundreds_tens_ones": {
+    "gist": "Tell how many hundreds are in a three-digit number, like 2 in 218.",
+    "about": "A three-digit number is some hundreds, tens, and ones, so 218 is 2 hundreds, 1 ten, and 8 ones. The sheet asks how many hundreds are in numbers like 938 and 506. It builds on understanding tens and ones in two-digit numbers. It leads to writing three-digit numbers in expanded form and to comparing them."
+  },
+  "ineq_boundary_direction": {
+    "gist": "Match an inequality to a description of its number line, such as open at 1, shaded left.",
+    "about": "A number-line picture of an inequality has a boundary point, a circle that is open or closed, and a shaded direction. x < 1 is open at 1 and shaded left, while x ≤ 4 is closed at 4 and shaded left, because 4 itself is included. Each problem gives an inequality and several descriptions to choose from. It builds on solving one-step inequalities with addition, subtraction, multiplication, and division."
+  },
+  "ineq_context_one_step": {
+    "gist": "Use an inequality to find the most tickets a club can buy with its money, after a fixed fee.",
+    "about": "A limit like a budget gives a range of answers, and the question asks for the greatest whole number. A club has $53, pays a $4 fee, and each ticket costs $7. That leaves $49, and 49 ÷ 7 = 7 tickets. Before this, a child needs one-step inequalities with addition and subtraction and with multiplication and division. It leads to two-step inequality word problems."
+  },
+  "ineq_context_two_step": {
+    "gist": "Find the most trials that fit in a time limit when setup takes time first.",
+    "about": "A time limit with a setup cost makes a two-step inequality. If setup takes 19 minutes, each trial takes 6, and 61 minutes are available, then 61 − 19 = 42 and 42 ÷ 6 = 7 trials at most. The answer is a whole number. It builds on one-step inequality word problems and on two-step inequalities."
+  },
+  "ineq_negative_coefficient": {
+    "gist": "Solve inequalities like −3x < −6, where dividing by a negative number flips the sign.",
+    "about": "Dividing both sides by a negative number reverses the direction of the sign. For −3x < −6, divide by −3 and flip to get x > 2, so the least whole number is 3. Each problem comes with a number line and asks for the least possible whole number. It builds on solving inequalities with a positive multiplier and on dividing integers. It leads to two-step inequalities."
+  },
+  "ineq_one_step_add_sub": {
+    "gist": "Solve inequalities like x − 4 ≥ 6 and name the smallest or largest whole number that works.",
+    "about": "Solving an inequality follows the same steps as solving an equation, and the answer is a whole range of numbers. For x − 4 ≥ 6, add 4 to get x ≥ 10, so the least whole number is 10. For x + 5 < −1, x < −6, so the greatest whole number is −7. Each problem comes with a number line. It builds on testing whether a number satisfies an inequality. Next come word problems and linking boundary and direction to the solution set."
+  },
+  "ineq_one_step_mult_div_positive": {
+    "gist": "Solve inequalities like 3x ≤ −9 or x ÷ 5 > −5 and name the greatest or least whole number.",
+    "about": "Dividing both sides by a positive number leaves the inequality sign facing the same way, and so does multiplying. For 6x ≤ −12, dividing by 6 gives x ≤ −2, so the greatest whole number is −2. For x ÷ 6 > 8, multiplying by 6 gives x > 48, so the least whole number is 49. It builds on testing whether a number satisfies an inequality and on one-step multiplication and division equations. Next come word problems and inequalities with a negative multiplier."
+  },
+  "ineq_symbol_meaning": {
+    "gist": "Match an inequality like x < −7 to its shaded picture on a number line.",
+    "about": "An inequality uses < or > to say a letter can be many numbers, such as every number less than −7. Each problem shows a shaded number line and asks which inequality matches it. Shading to the left goes with < and to the right with >, and the dot at the end shows whether that number itself is included, which decides between < and ≤. A child only needs to compare numbers, including negatives, to start. Next comes testing whether a given number satisfies an inequality."
+  },
+  "ineq_test_solution": {
+    "gist": "Check which number makes an inequality like x > −5 true.",
+    "about": "To test a number, put it in for x and see whether the statement is true. For x > −5, the number −4 works because −4 is greater than −5, while −6 would not. Each problem shows a number line and lists three values to pick from, and the numbers are sometimes negative. Children usually meet this after reading inequality symbols and evaluating expressions. Next come solving one-step inequalities with addition, subtraction, multiplication, or division."
+  },
+  "ineq_two_step": {
+    "gist": "Solve two-step inequalities like −4x − 8 < −28 and find the least or greatest whole number.",
+    "about": "First undo the addition or subtraction, then divide, and flip the sign when dividing by a negative. For −4x − 8 < −28, add 8 to get −4x < −20, then divide by −4 to get x > 5, so the least whole number is 6. When the multiplier is positive, as in 6x − 4 < 50, the sign stays and the question asks for the greatest whole number, here 8. It builds on inequalities with a negative multiplier. Next come two-step word problems and multi-step linear inequalities."
+  },
+  "integer_context_problems": {
+    "gist": "Solve multi-step problems where a temperature rises and falls by given amounts.",
+    "about": "Each problem gives a starting temperature and two changes, some up and some down, and asks for the final temperature. Starting at 5°C, changing by -3°C and then by 5°C, ends at 5 - 3 + 5 = 7°C. Before this, a child describes amounts above and below zero and evaluates integer expressions."
+  },
+  "integer_expressions": {
+    "gist": "Evaluate expressions that mix adding, subtracting, and multiplying with negative integers.",
+    "about": "Order of operations still applies: multiply before adding. In 10 + (-9) × (-4), first (-9) × (-4) = 36, then 10 + 36 = 46. Each problem combines one addition with one multiplication. Before this, a child adds and subtracts integers in mixed expressions and follows the order of operations. It leads to multi-step integer problems and linear expressions with signed values."
+  },
+  "integer_sign_rules": {
+    "gist": "Tell whether a product of several integers is positive or negative without multiplying.",
+    "about": "Count the negative factors. An even count makes the product positive and an odd count makes it negative. (-7) × 2 × 6 has one negative, so it is negative. (-9) × (-4) × 5 × 9 × (-7) has three, so it is negative too. It builds on multiplying and dividing integers. It leads to integer expressions, and multiplying and dividing signed fractions."
+  },
+  "integers_on_number_line": {
+    "gist": "Read the integer at an unlabeled tick mark on a number line, including negative ones.",
+    "about": "A number line puts integers in order, with negatives to the left of zero and positives to the right. Each opposite pair sits the same distance from zero, so -3 and 3 mirror each other. Each problem marks point P on an unlabeled tick and asks which integer is there. It builds on understanding opposites, and leads to comparing integers and to absolute value."
+  },
+  "is_factor": {
+    "gist": "Decide whether one number divides evenly into another.",
+    "about": "3 is a factor of 57 because 3 × 19 = 57, but 7 is not a factor of 96. Each problem asks a Yes or No question of this kind, with a number from 2 to 12 as the possible factor. It builds on factors and multiples and on the division facts for 6 through 9."
+  },
+  "is_multiple": {
+    "gist": "Decide whether a number is a multiple of a one-digit number.",
+    "about": "A multiple of 5 shows up when you count by 5s, so 96 is not one. Each problem asks a yes or no question like this one. It builds on factors and multiples and on the ×7, ×8 and ×9 facts. It leads to spotting numbers that are multiples of two different numbers at once."
+  },
+  "law_of_large_numbers": {
+    "gist": "Decide which experiment gives a steadier estimate, the one with more trials.",
+    "about": "Results from a few trials can swing a lot, while results from many trials settle close to the true chance. Each problem compares two experiments, such as a fair coin flipped 2800 times and another flipped 28 times, and asks which estimate would be more stable from run to run. The one with more flips is steadier. It builds on estimating probability from experimental results."
+  },
+  "lcm": {
+    "gist": "Find the smallest number that both of two numbers divide into evenly.",
+    "about": "Multiples of 9 are 9, 18, 27, 36 and multiples of 12 are 12, 24, 36, so LCM(9, 12) = 36. Each problem asks for the LCM of a pair of numbers, from small pairs like (4, 6) to pairs in the forties. It builds on factors and multiples, prime factorization, and common multiples. It helps with adding fractions that have different denominators."
+  },
+  "length_iterate_units": {
+    "gist": "Measure a length by counting same-size units laid end to end.",
+    "about": "The sheet gives word problems about Maya measuring a leaf with paper clips, tiles or cubes placed end to end with no gaps and no overlaps. She lays down 6 clips, then 5 more, so the leaf is 11 clips long. A child only needs to add small numbers to start. It leads to measuring with a ruler."
+  },
+  "lg_and": {
+    "gist": "Decide whether two statements joined by AND are both true.",
+    "about": "A statement joined by AND is true only when both parts are true, so '5 + 3 = 8 AND 15 + 20 = 35' is true and '17 is less than 20 AND 27 is less than 23' is false. Each problem pairs two short number facts, such as sums, comparisons or even and odd, and asks whether the whole statement is true. It builds on deciding whether a single statement is true or false. Mixing and, or and not in one statement comes after it."
+  },
+  "lg_compound_truth": {
+    "gist": "Work out whether a statement built from AND, OR and NOT is true.",
+    "about": "Parentheses say what to work out first. In '(False OR True) AND NOT False', the parentheses give True and NOT False gives True, so True AND True is true. Each problem uses only the words True and False joined with AND, OR and NOT, and asks for the result. Children usually meet this after AND, OR and NOT, each learned on its own. If-then statements come after it."
+  },
+  "lg_converse": {
+    "gist": "Swap the two parts of an if-then statement and check whether it still holds.",
+    "about": "The converse of 'If a number is divisible by 4, then it is divisible by 2' is 'If a number is divisible by 2, then it is divisible by 4.' The original is true and its converse is not, since 6 is divisible by 2 and not by 4. Some problems ask which sentence is the converse of a given statement, and others ask whether a stated converse is also true. It builds on deciding whether an if-then statement is true."
+  },
+  "lg_counterexample": {
+    "gist": "Find one example that shows a claim about every case is wrong.",
+    "about": "One example breaks a claim that something is always true. 'Every number divisible by 3 is divisible by 9' fails for 6, which is divisible by 3 and not by 9. Each problem states a claim about numbers or shapes and asks which of four values disproves it, such as a 2-by-4 rectangle for 'every rectangle is a square'. It builds on writing the negation of a statement."
+  },
+  "lg_deduce_clues": {
+    "gist": "Use clues like 'Evan beat Fay' to work out the one order that fits.",
+    "about": "If Evan beat Fay and Fay beat Ana, then Evan finished first, Fay second and Ana third. Each problem gives two such clues about three friends in a race and asks who finished in a stated place. It builds on working out who tells the truth and who lies from a set of statements."
+  },
+  "lg_if_then": {
+    "gist": "Decide whether an if-then statement about numbers is true or false.",
+    "about": "An if-then statement is false only when the 'if' part is true and the 'then' part is false. So 'If 2 is even, then 25 is less than 11' is false, and 'If 8 is odd, then 2 is less than 15' is true because 8 is not odd. Each problem asks whether a conditional about numbers is true. It builds on statements that mix and, or and not. Writing a converse, and working out who tells the truth and who lies, come after it."
+  },
+  "lg_knights_knaves": {
+    "gist": "Work out whether a speaker always tells the truth or always lies from what they say.",
+    "about": "In these puzzles everyone either always tells the truth or always lies. Cara says '14 is less than 23,' which is true, so she is a truth-teller, and Ann saying '23 is even' must be a liar. When someone says 'I am a liar,' neither answer can hold, so the answer is impossible. Each problem gives one statement and asks what the speaker is. It builds on deciding whether an if-then statement is true, and it leads to deducing a single answer from a small set of clues."
+  },
+  "lg_negate": {
+    "gist": "Write the opposite of a statement, like the opposite of 'All cats are black'.",
+    "about": "The negation of a statement says the opposite, so the negation of 'It is raining' is 'It is not raining.' Statements with 'all' or 'some' need care: the negation of 'All cats are black' is 'Some cat is not black,' and the negation of 'Some birds cannot swim' is 'All birds can swim.' Each problem asks for the negation and offers four choices. It builds on deciding whether a negated statement is true, and it leads to finding a counterexample."
+  },
+  "lg_not": {
+    "gist": "Decide whether a statement is true after it is flipped with NOT.",
+    "about": "NOT turns true into false and false into true. 'It is NOT true that 14 is greater than 22' is true, because 14 is not greater than 22. Each problem wraps a short statement about numbers in 'It is NOT true that' and asks whether the result is true or false. It builds on deciding whether a simple statement is true. After it come statements that mix and, or and not, and writing out the negation of a statement."
+  },
+  "lg_or": {
+    "gist": "Decide whether at least one of two statements joined by OR is true.",
+    "about": "A statement joined by OR is true when at least one part is true. '7 is odd OR 13 is odd' is true, and so is '19 + 18 = 35 OR 27 is greater than 16', since the second part holds even though the first does not. Only when both parts are false is the whole statement false. Children usually meet this after deciding whether a simple statement is true. Statements that mix and, or and not come later."
+  },
+  "lg_truth_value": {
+    "gist": "Decide whether a simple statement about numbers is true or false.",
+    "about": "A statement like '7 is greater than 5' is true, and '13 is equal to 2' is false. Each problem gives one short statement, either a comparison of two numbers or a sum such as '9 + 11 = 21', and asks whether it is true or false. A child only needs to compare and add small numbers to start. After it come statements joined with and, with or, and flipped with not."
+  },
+  "likelihood_scale": {
+    "gist": "Describe how likely an event is, from impossible to certain.",
+    "about": "Probability starts with words before numbers. Each problem describes a bag of marbles, such as 9 red and 2 blue, and asks how likely drawing red is: impossible, unlikely, equally likely, likely, or certain. With 6 red and 6 blue the answer is equally likely. It needs only the ability to compare two counts. Listing every possible outcome of a chance process comes next."
+  },
+  "lin_eq_abs_value": {
+    "gist": "Solve equations like |x + 2| = 5, which have two answers, and name the larger one.",
+    "about": "Absolute value is distance from zero, so |x + 2| = 5 means x + 2 is either 5 or −5. That gives x = 3 and x = −7, and the problems ask for the greater one, 3. It builds on equations with parentheses to distribute and on absolute value as distance from zero."
+  },
+  "lin_eq_clear_fractions": {
+    "gist": "Solve equations with x over a number by multiplying every term to get rid of the fractions.",
+    "about": "When x is divided by a number, as in x/5 + 3 = 9, multiplying every term by 5 clears the fraction, leaving x + 15 = 45 and x = 30. Some problems have two fractions, such as x/6 + x/4 = 15, where 12 works as the multiplier. It builds on solving equations that need distributing first. Next come rearranging a formula for one letter and writing equations from a situation."
+  },
+  "lin_eq_combine_terms": {
+    "gist": "Solve an equation after merging the matching x terms on one side.",
+    "about": "When an equation has x terms to merge, like 6x − 2x − 5 = 19, they combine first: 4x − 5 = 19, and then x = 6. With each side tidy, the usual undo-the-operations steps finish the work. It builds on solving equations with x on both sides and on simplifying expressions that contain negative numbers and like terms. Next come equations with parentheses to distribute and inequalities that need the direction flipped."
+  },
+  "lin_eq_distribute": {
+    "gist": "Solve equations where a number multiplies a group in parentheses, like 4(x − 1) + 3x = 24.",
+    "about": "Parentheses get multiplied out first. In 4(x − 1) + 3x = 24 that gives 4x − 4 + 3x = 24, so 7x = 28 and x = 4. Before this, a child needs to be comfortable combining like terms inside an equation and solving two-step equations that need distributing. Afterward come equations with fraction or decimal coefficients, and solving a system of two equations by substitution."
+  },
+  "lin_eq_model_context": {
+    "gist": "Pick the equation that matches a gym price story, like a sign-up fee plus a monthly charge.",
+    "about": "A gym with a $25 one-time fee and $8 per month costs c = 8x + 25 after x months. The monthly amount multiplies x and the one-time fee gets added. Each problem is multiple choice and asks which equation fits a gym story like this, without solving it. It builds on equations with fraction or decimal coefficients."
+  },
+  "lin_fn_from_two_points": {
+    "gist": "Find where a line crosses the y-axis given two points it passes through.",
+    "about": "A line through (2, 8) and (1, 3) goes up 5 for each step right, so its slope is 5. Going back from (1, 3) to x = 0 lowers y by 5, so it crosses the y-axis at −2. Each problem asks for this y-intercept. It builds on moving between y = mx + b and its graph, and on using a table rule to predict a missing value. Point-slope form and parallel and perpendicular slopes come next."
+  },
+  "lin_fn_interpret_context": {
+    "gist": "Say what the numbers in a linear formula mean in a situation like a tutoring bill.",
+    "about": "In a tutoring charge of C = 44h + 24 dollars for h hours, the 44 is the cost per hour and the 24 is a one-time base charge. Each problem gives a formula like this and asks, as multiple choice, what one of its numbers stands for. It builds on moving between y = mx + b and its graph."
+  },
+  "lin_fn_parallel_perpendicular": {
+    "gist": "Find the slope of a line parallel or perpendicular to a line with a given slope.",
+    "about": "Parallel lines have the same slope. Perpendicular lines meet at a right angle, and their slopes are negative reciprocals: flip the fraction and change the sign. A slope of 1/4 turns into −4, and 5/6 turns into −6/5. Each problem gives a slope and asks for the parallel or perpendicular one. It builds on writing the equation of a line through two points."
+  },
+  "lin_fn_point_slope": {
+    "gist": "Use a point and a slope to find another point on the same line.",
+    "about": "A line has slope 5 and passes through (−1, 8). Moving from x = −1 to x = 1 is 2 steps, so y rises by 10 to reach 18. That is the point-slope idea: start at the known point and move by the slope. Each problem asks for y at a new x. It builds on writing the equation of a line through two points. Converting among linear forms comes next."
+  },
+  "lin_fn_standard_form": {
+    "gist": "Find where a line crosses the x-axis from an equation like 6x + 4y = 12.",
+    "about": "In standard form, Ax + By = C, setting y to 0 shows where the line crosses the x-axis. For 6x + 4y = 12, that gives 6x = 12, so x = 2. Most problems ask for this x-intercept, and an occasional one asks for the y-intercept, found by setting x to 0. It builds on point-slope form."
+  },
+  "lin_ineq_compound": {
+    "gist": "Match words like \"greater than −1 and less than 1\" to the correct inequality.",
+    "about": "Two conditions joined by \"and\" give a range between two numbers. Numbers greater than −2 and at most 3 are written −2 < x ≤ 3, where < leaves out −2 and ≤ keeps 3. The problems are multiple choice and ask which inequality fits a description in words. It builds on multi-step inequalities. Graphing a system of inequalities comes next."
+  },
+  "lin_ineq_multi_step": {
+    "gist": "Solve inequalities with several steps and decide whether the answer is least or greatest.",
+    "about": "An inequality has a range of answers instead of one. Dividing by a negative number flips the sign: from −3(x + 4) < −21 you get x + 4 > 7, so x > 3, and the least whole number that works is 4. Each problem asks for the least or greatest whole number and comes with a number line. Children usually meet this after combining like terms in equations and solving two-step inequalities with fractions and decimals. Compound inequalities follow."
+  },
+  "lin_vs_exp": {
+    "gist": "Look at a table of values and decide whether the pattern is linear or exponential.",
+    "about": "In 3, 7, 11, 15 the same amount, 4, is added each time, so it is linear. In 3, 6, 12, 24 each value is multiplied by 2, so it is exponential. Each problem shows a table of four y-values and asks which kind of pattern it is. It builds on telling growth from decay and on moving between y = mx + b and its graph."
+  },
+  "liquid_volume_combine": {
+    "gist": "Add two amounts of liquid measured in liters.",
+    "about": "Two jugs of water are given, and the question asks how many liters there are altogether, so 2 liters and 9 liters make 11 liters. The totals run up to 15 liters, all single-step addition. It builds on reading liquid volume from a marked container."
+  },
+  "liquid_volume_measure": {
+    "gist": "Read how much water is in a beaker from its marked scale.",
+    "about": "A beaker is marked every 200 milliliters and the water sits on the 7th mark, so there are 7 × 200 = 1,400 milliliters. Each problem gives the spacing of the marks and which mark the water reaches. A child only needs to count by 50s, 100s or 200s to start. It leads to adding and comparing liquid volumes."
+  },
+  "long_division_1digit_divisor": {
+    "gist": "Divide a three- or four-digit number by a one-digit number using long division.",
+    "about": "Long division works through the number a digit at a time: divide, multiply, subtract, and bring down the next digit. 2332 ÷ 4 = 583 is a typical problem. It builds on division with remainders, column subtraction and multiplying a 2-digit number by a 1-digit number. It leads to long division by a two-digit number and to dividing decimals."
+  },
+  "long_division_2digit_divisor": {
+    "gist": "Divide a three- or four-digit number by a two-digit number using long division.",
+    "about": "2814 ÷ 21 = 134 works through the same steps as long division by one digit, but each step needs an estimate of how many 21s fit. It builds on long division with a one-digit divisor and on multiplying two-digit numbers. It leads to turning fractions into decimals."
+  },
+  "make_amount_with_coins": {
+    "gist": "Find the fewest coins that make a given amount, like 34¢.",
+    "about": "Each problem asks for the fewest quarters, dimes, nickels, and pennies that make an amount. For 34¢ the answer is 6 coins: a quarter, a nickel, and four pennies. Starting with the biggest coin that fits gets to the fewest. It builds on counting a mixed collection of coins to find its total value."
+  },
+  "make_ten_strategy": {
+    "gist": "Add larger numbers by first filling up to a round number, like 497 + 6 = 503.",
+    "about": "Make-ten means adding by first filling up to a round number. For 8 + 5, take 2 from the 5 to make 10, then add the other 3 to get 13. The problems on this sheet use bigger numbers, such as 497 + 6 = 503, 85 + 23 = 108 and 99 + 99 = 198. It builds on adding within 10 and on seeing 11 to 19 as ten plus some ones. It leads to adding within 20 without regrouping."
+  },
+  "margin_of_error_range": {
+    "gist": "Use a margin of error to find the range an estimate could plausibly fall in.",
+    "about": "A poll gives an estimate and a margin of error, and together they give a range. With 67% support and a margin of 4 percentage points, the plausible range is 63% to 71%, so 65% fits and 75% does not. Each problem asks which of four percentages falls inside the range. It builds on seeing how estimates vary across repeated random samples. Poll results in the news are meant to be read this way."
+  },
+  "mean": {
+    "gist": "Find the mean by adding the numbers and sharing the total equally.",
+    "about": "The mean, often called the average, is what each value would be if the total were shared out evenly. For 14, 10, 7, 13 the total is 44, and sharing it among 4 gives 11. Each problem shows the numbers on a line plot. Before this, a child needs to put numbers in order and to see division as equal sharing. Seeing the mean as a balance point, and comparing data sets with the same center but different spread, come next."
+  },
+  "mean_balance_point": {
+    "gist": "See the mean as the balance point, where distances above and below match.",
+    "about": "If the numbers in a data set were weights on a number line, the mean is the spot where it would balance. Each problem shows dots with the mean marked and asks for the total distance of the dots above the mean, which equals the total distance of the dots below it. It builds on finding the mean as a fair share of the total. It leads to reasoning about the typical distance from the mean."
+  },
+  "measure_from_nonzero": {
+    "gist": "Find a length when the object starts at a mark other than 0 on the ruler.",
+    "about": "The length is the end mark minus the start mark. A crayon that runs from the 3 mark to the 10 mark is 10 − 3 = 7 cm long. Each problem describes where the crayon starts and ends on a centimeter ruler. It builds on measuring from the 0 mark."
+  },
+  "measure_half_quarter_inch": {
+    "gist": "Read an inch ruler to the nearest half and quarter inch.",
+    "about": "The sheet describes a ribbon that starts at 0 and ends past a whole-number mark, such as one half inch past the 5, and the answers are written as fractions, so 5 and a half inches appears as 11/2. One quarter past the 2 is 9/4. It builds on measuring in whole units with a ruler."
+  },
+  "measure_with_ruler": {
+    "gist": "Read a length off a ruler when the object starts at the 0 mark.",
+    "about": "A pencil lined up with 0 on a centimeter ruler and ending at the 13 mark is 13 cm long. The sheet describes the ruler in words. It builds on measuring with same-size units laid end to end. It leads to measuring objects that do not start at zero and to measuring to the nearest half and quarter inch."
+  },
+  "median": {
+    "gist": "Find the middle number of a list after putting it in order.",
+    "about": "The median is the middle value once the numbers are lined up from least to greatest. For 14, 16, 12, 9, 11, the ordered list is 9, 11, 12, 14, 16, so the median is 12. Each problem gives five numbers and shows them on a line plot. Before this, a child needs to put a set of numbers in order. Comparing data sets with the same center, and seeing how an outlier moves the mean and median, come after."
+  },
+  "mixed_improper": {
+    "gist": "Rewrite a mixed number like 9 1/9 as an improper fraction like 82/9.",
+    "about": "A mixed number has a whole part and a fraction part. To rewrite 9 1/9, multiply 9 × 9 = 81 and add 1 to get 82/9, since each whole holds 9 ninths. Each problem gives the mixed number and the denominator and asks for the top number, going from mixed number to improper fraction. It builds on seeing a/b as copies of 1/b. It leads to adding and subtracting mixed numbers with like denominators."
+  },
+  "mode": {
+    "gist": "Find the number that appears most often in a list.",
+    "about": "The mode is the value that shows up the most times in a data set. For 6, 7, 4, 9, 6, 6, the number 6 appears three times and nothing else does, so the mode is 6. Each problem shows its numbers on a line plot. This builds on comparing categories in a graph and on ordering numbers from least to greatest, which makes repeats easy to spot."
+  },
+  "mult_2digit_by_1digit": {
+    "gist": "Multiply a two-digit number by a one-digit number.",
+    "about": "Problems like 89 × 3 = 267 and 53 × 5 = 265 are worked by multiplying the ones and the tens separately and adding the pieces, or by the column method. It builds on the distributive property, the ×7, ×8 and ×9 facts, and the area model. It leads to multiplying three-digit numbers, multiplying two-digit by two-digit numbers, and long division."
+  },
+  "mult_2digit_by_2digit": {
+    "gist": "Multiply a two-digit number by another two-digit number.",
+    "about": "For 26 × 32, multiply 26 by 2, multiply 26 by 30, and add the two results to get 832. It builds on multiplying a 2-digit and a 3-digit number by a 1-digit number. It leads to long division with a two-digit divisor."
+  },
+  "mult_3digit_by_1digit": {
+    "gist": "Multiply a three-digit number by a one-digit number.",
+    "about": "A problem like 341 × 9 = 3069 takes the ones, tens and hundreds one at a time, carrying as needed. It builds on multiplying a 2-digit number by a 1-digit number and on hundreds, tens and ones. Multiplying a 2-digit number by a 2-digit number comes next."
+  },
+  "mult_commutative_associative": {
+    "gist": "Use the swap and regroup rules of multiplication to fill in a missing factor.",
+    "about": "Two rules let you rearrange multiplication: 3 × 2 = 2 × 3, and (3 × 11) × 7 = 3 × (11 × 7). Each problem leaves one number blank in an equation like these. It builds on the easy times tables and on the matching swap and regroup rules for addition. It leads to the distributive property and to order of operations."
+  },
+  "mult_distributive": {
+    "gist": "Split one factor into two parts to turn a hard multiplication into easier ones.",
+    "about": "3 × (7 + 12) is the same as 3 × 7 plus 3 × 12, so each problem gives one of those two pieces and asks for the other. For example, 3 × (7 + 12) = 21 + 36. It builds on the swap and regroup rules for multiplication. It leads to the area model, to multiplying a 2-digit number by a 1-digit number, and later to simplifying expressions."
+  },
+  "mult_facts_0_1_2_5_10": {
+    "gist": "Recall the times tables for 0, 1, 2, 5 and 10 quickly and without counting.",
+    "about": "These are the easiest times tables, with facts such as 2 × 2 = 4, 10 × 5 = 50 and 0 × 9 = 0. Anything times 0 is 0, and anything times 1 stays the same. It builds on multiplication as equal groups and on skip-counting by 2s, 5s and 10s. After it come the ×3, ×4 and ×6 facts, division facts through ÷5, and the idea that each place in a number has 10 times the value of the place to its right."
+  },
+  "mult_facts_3_4_6": {
+    "gist": "Recall the times tables for 3, 4 and 6 quickly and without counting.",
+    "about": "Each problem is one fact with a 3, 4 or 6 in it, such as 4 × 6 = 24, 6 × 9 = 54 or 3 × 5 = 15. Children usually meet it after the 0, 1, 2, 5 and 10 times tables and after skip-counting by 3s and 4s. The ×7, ×8 and ×9 facts come next."
+  },
+  "mult_facts_7_8_9": {
+    "gist": "Recall the times tables for 7, 8 and 9 quickly and without counting.",
+    "about": "Each problem is one fact with a 7, 8 or 9 in it, such as 8 × 6 = 48, 7 × 7 = 49 or 9 × 7 = 63. It builds on the ×3, ×4 and ×6 facts and on skip-counting by 6s through 9s. It leads to the division facts for 6 through 9, multiplying a 2-digit number by a 1-digit number, and finding factors and multiples."
+  },
+  "multiplication_principle": {
+    "gist": "Count the outcomes of a choice made in stages by multiplying the options at each stage.",
+    "about": "A lock code with 3 slots, each a digit from 0 to 9, has 10 × 10 × 10 = 1,000 possible codes, and an outfit with 4 shirts and 5 pants has 4 × 5 = 20. Each problem describes two, three or four choices, such as fruit and liquid for a smoothie, and asks for the total. Children usually meet this after counting two-feature outcomes by listing them and seeing multiplication as equal groups. Factorials and the pigeonhole principle come next."
+  },
+  "multiply_decimals": {
+    "gist": "Multiply decimals, like 0.56 × 9 or 0.2 × 1.9.",
+    "about": "Multiply as if the decimal points were not there, then put the point back by counting decimal places: 56 × 9 = 504, so 0.56 × 9 = 5.04. The same idea handles two decimals, so 2 × 19 = 38 gives 0.2 × 1.9 = 0.38. It builds on adding and subtracting decimals and on multiplying a 2-digit number by a 1-digit number. It leads to dividing decimals."
+  },
+  "multiply_fraction_by_whole": {
+    "gist": "Multiply a fraction by a whole number, as in 6 × 3/5.",
+    "about": "Multiplying by a whole number means taking that many copies of the fraction, so 6 × 3/5 is six copies of 3/5, which makes 18/5. Some answers simplify to a whole number, as in 12 × 4/8 = 6. It builds on seeing a fraction like 3/5 as three copies of 1/5. It leads to multiplying a fraction by a fraction and to finding a percent of a quantity."
+  },
+  "multiply_fractions": {
+    "gist": "Multiply two fractions by multiplying the tops and the bottoms, like 5/8 × 1/6.",
+    "about": "Finding a fraction of a fraction means multiplying the numerators together and the denominators together: 5/8 × 1/6 = 5/48. Some answers simplify, as 8/9 × 9/12 = 72/108 = 2/3. It builds on multiplying a fraction by a whole number and on equivalent fractions. It leads to seeing multiplication as resizing and to finding the area of a rectangle with fractional sides."
+  },
+  "multiply_integers": {
+    "gist": "Multiply integers and choose the sign of the product.",
+    "about": "A positive times a positive is positive, and a negative times a negative is also positive. One negative factor makes the product negative. So (-7) × 3 = -21, and (-8) × (-3) = 24. Each problem multiplies two integers, some with negatives and some without. Children usually meet this after locating integers and their opposites on a number line. Dividing integers and finding signs with many factors come after it."
+  },
+  "multiply_signed_rationals": {
+    "gist": "Multiply positive and negative fractions.",
+    "about": "Multiply the numerators, multiply the denominators, then fix the sign: one negative makes the answer negative. 1/3 × (-5/4) = -5/12, and 3/5 × 2/3 = 6/15 = 2/5. It builds on negative fractions, the sign of products, and multiplying fractions. It leads to problems using all four operations on signed fractions."
+  },
+  "nets_of_solids": {
+    "gist": "Pick the set of flat rectangles that a box unfolds into.",
+    "about": "A net is a 3D shape cut along its edges and laid flat. A rectangular box unfolds into six rectangles in three matching pairs. A 10 × 5 × 2 box gives two 10×5, two 10×2, and two 5×2 rectangles. Each problem shows a box and offers choices of which set of rectangles makes its net. Before this, a child finds the volume of a rectangular prism. Surface area from a net comes after it."
+  },
+  "nt_divisibility_proof": {
+    "gist": "Use digit sums to tell whether a number is divisible by 3, 9 or 11.",
+    "about": "A number is divisible by 3 or 9 when its digit sum is, so 2046 with digit sum 12 is divisible by 3 and not by 9. For 11, add and subtract the digits alternately from the right, and 216 gives 6 − 1 + 2 = 7, so it is not divisible by 11. Each problem hands over the digit sum or alternating sum and asks what the rule says. It builds on adding and multiplying modulo n and on the divisibility rules for 3 and 9."
+  },
+  "nt_gcd_euclid": {
+    "gist": "Find the greatest common divisor of two numbers by repeated division with remainders.",
+    "about": "The Euclidean algorithm divides the larger number by the smaller, then repeats with the divisor and the remainder until the remainder is 0. For 54 and 50 the remainder is 4, then 50 ÷ 4 leaves 2, then 4 ÷ 2 leaves 0, so the GCD is 2. Each problem names two numbers and asks for their GCD. It builds on finding remainders with a repeating cycle and on the greatest common factor, and it leads to solving a·x ≡ b by testing remainders."
+  },
+  "nt_last_digit": {
+    "gist": "Find the last digit of a big power like 7¹¹ by spotting the repeating pattern.",
+    "about": "The last digits of powers of 7 run 7, 9, 3, 1 and then repeat, so 7¹¹ ends in 3, because 11 is two full cycles of 4 plus 3 more steps. Each problem asks for the last digit of a power of 2, 3, 5, 7 or 9, such as 2¹⁰ or 5⁶. It builds on the remainder-on-a-clock idea and on exponents as repeated multiplication."
+  },
+  "nt_linear_congruence": {
+    "gist": "Find the whole number that makes a remainder equation like 3x ≡ 1 (mod 5) true.",
+    "about": "3x ≡ 1 (mod 5) asks for a number x from 0 to 4 where 3x leaves a remainder of 1 when divided by 5. Testing x = 2 gives 6, which leaves a remainder of 1, so x = 2. Each problem gives a modulus of 5 to 13 and asks for x by trying the possible values. It builds on computing a GCD with the Euclidean algorithm and on adding and multiplying modulo n."
+  },
+  "nt_mod_cycle": {
+    "gist": "Find which item in a repeating pattern sits at a far-off position.",
+    "about": "If a row of flags repeats A, B, C, D, E, the 92nd flag is found by dividing 92 by 5, which leaves a remainder of 2, so it is B. A remainder of 0 means the last flag in the pattern, so the 365th is E. Each problem repeats a pattern of 3, 4 or 5 items, such as beads or tiles, and asks for a far-off position. It builds on remainders on a clock of size n. Computing a GCD with the Euclidean algorithm comes next."
+  },
+  "nt_modular_arithmetic": {
+    "gist": "Add or multiply whole numbers and keep only the remainder after dividing by n.",
+    "about": "(20 + 18) mod 8 asks for the remainder when 38 is divided by 8, which is 6, and (4 + 29) mod 11 is 33 mod 11 = 0. Each problem asks for a sum or a product mod a small number, such as (22 × 23) mod 9 = 2. Before this, a child reduces a whole number to its remainder on a clock of size n. Justifying divisibility rules with digit sums, and solving a·x ≡ b by testing remainders, come after it."
+  },
+  "nt_modular_clock": {
+    "gist": "Find what time a clock of any size shows after a long stretch of hours.",
+    "about": "On a 10-hour clock that wraps back to 0 after 9, 37 hours after 9 lands on 6, since 9 + 37 = 46 and 46 leaves a remainder of 6 when divided by 10. Each problem uses a clock of 4 to 12 hours and asks which hour it shows after a stretch of time. It builds on spotting how remainders repeat. Remainders of large numbers, and adding and multiplying on a clock of size n, come next."
+  },
+  "nt_parity_argument": {
+    "gist": "Say whether adding or multiplying odd and even numbers gives an even or odd result.",
+    "about": "An odd plus an odd is always even, and an odd times an odd is always odd. Each problem names two kinds of number, odd or even, joined by plus or times, and asks which result is guaranteed. Children usually meet this after classifying a number, sum or product as even or odd. It leads to using these rules to show that a proposed equation cannot be true."
+  },
+  "nt_parity_classify": {
+    "gist": "Tell whether a whole number, sum or product, like 11 × 7, is even or odd.",
+    "about": "Even numbers split into pairs with nothing left over, and odd numbers leave one extra. The last digit tells you, so 98 and 562 are even. Each problem shows a number, a sum such as 20 + 18, or a product such as 11 × 7 = 77, and asks whether it is even or odd. It builds on the divisibility rules for 2, 5, and 10. Working out the evenness of a sum or product from the evenness of its parts comes next."
+  },
+  "nt_parity_proof": {
+    "gist": "Show that a sum of even and odd numbers can never equal a given total.",
+    "about": "Even plus even plus odd is always odd, so it can never equal 8, and even + even + even can never equal 11. Odd + odd, on the other hand, can equal 18. Each problem lists a sum of 2 to 4 numbers marked only as even or odd, and asks whether it can equal a given total, possible or impossible. It builds on working out the evenness of a sum from its parts."
+  },
+  "nt_prime_gaps": {
+    "gist": "Find the gap between two neighboring primes.",
+    "about": "Consecutive primes are primes with no other prime between them, and the gap is how far apart they are. 17 and 19 have a gap of 2, while 31 and 37 have a gap of 6 because 32 through 36 are all composite. Each problem names two consecutive primes below 90 and asks for the gap. It builds on deciding whether a number up to 200 is prime."
+  },
+  "nt_prime_test_deeper": {
+    "gist": "Decide whether a number up to 200 is prime by testing the primes up to its square root.",
+    "about": "To check 187, try dividing by the primes up to about 14. It splits as 11 × 17, so it is composite, while 163 survives every test and is prime. Each problem gives a number between 100 and 200 with a hint about how far to test, and asks prime or composite. Before this, a child tells primes from composites and knows square numbers. Finding twin primes and the gaps between consecutive primes come after it."
+  },
+  "nt_twin_primes": {
+    "gist": "Count the pairs of primes that differ by 2 up to a limit.",
+    "about": "Twin primes are two primes exactly 2 apart, like 11 and 13 or 17 and 19. Below 30 there are 4 such pairs, starting with 3 and 5, and below 100 there are 8. Each problem asks for the number of pairs with both primes below a limit between 20 and 100. It builds on deciding whether a number up to 200 is prime."
+  },
+  "number_name_to_standard": {
+    "gist": "Turn a number written in words, like nine hundred eighty-eight, into digits.",
+    "about": "Each problem gives a number in words and asks for the numeral, so \"three thousand six hundred ninety-one\" becomes 3691. The numbers run from hundreds into the thousands, and a place left out of the name gets a 0, as in nine thousand four hundred two, which is 9402. It builds on hundreds, tens and ones and on place value in larger numbers."
+  },
+  "opposite_numbers": {
+    "gist": "Name the opposite of a number, the one the same distance from zero on the other side.",
+    "about": "The opposite of 2 is -2, and the opposite of -3 is 3. Zero is its own opposite, since it sits at the center. Each problem gives a number and asks for its opposite. Children usually meet this after describing amounts above and below zero with positive and negative numbers. Placing integers on a number line and making a sum of zero come after it."
+  },
+  "order_of_operations": {
+    "gist": "Work out an expression with several operations in the right order.",
+    "about": "In 9 + 4 × 3, the multiplication comes first, so the answer is 9 + 12 = 21. Parentheses go before that, so (9 + 7) × 3 is 16 × 3 = 48. Some problems divide, and some put parentheses inside parentheses. It builds on the swap and regroup rules, multiplying a 2-digit number by a 1-digit number, and expressions with two operations. It leads to expressions with grouping and to a missing number in a multi-step relation."
+  },
+  "order_signed_rationals": {
+    "gist": "Put a list of positive and negative fractions in order from least to greatest.",
+    "about": "Ordering a list is comparing several numbers at once. Picture them on a number line, then read from left to right. For 0, -5/2, -3/4, and 1, the order is -5/2, -3/4, 0, 1. Each problem asks which of four lists puts the given numbers in the correct order. Before this, a child compares signed fractions and decimals two at a time."
+  },
+  "ordered_pair_meaning": {
+    "gist": "Read an ordered pair like (4, 2) as 4 steps across, then 2 steps up from the start.",
+    "about": "An ordered pair such as (7, 2) tells you where a point sits on a grid: 7 units right of the origin (the corner where the axes meet), then 2 units up. The first number always counts across and the second counts up. Each problem names a point and offers several movements from the origin to choose from. A child can start here. It leads to plotting and reading points in the first quadrant."
+  },
+  "ordering": {
+    "gist": "Put a list of numbers in order from smallest to largest, keeping every repeat.",
+    "about": "Before summarizing a set of numbers, it helps to line them up from least to greatest. Each problem gives a list such as 9, 3, 7, 5, 5 and asks which of three choices is the ordered version, 3, 5, 5, 7, 9, with the repeated 5 kept both times. Comparing numbers is all it needs beforehand. It leads straight to finding the mode and the median."
+  },
+  "outlier_effect_on_mean_median": {
+    "gist": "Predict how one very large value changes the mean and the median.",
+    "about": "An outlier is a value far from the rest. Take 4, 5, 5, 6, whose mean is 5 and median is 5. Add the outlier 15 and the mean jumps to 7 while the median stays at 5. Each problem asks for the new mean or the new median after an outlier is added. Before this, a child needs the mean, the median, and a way to compare spread."
+  },
+  "parallel_perpendicular_lines": {
+    "gist": "Spot parallel and perpendicular line segments in a plotted shape.",
+    "about": "Parallel lines never meet and stay the same distance apart, and perpendicular lines meet at a right angle. In a plotted rectangle, sides AB and CD are parallel and sides AB and BC are perpendicular. It builds on seeing angles as turns and on classifying angles as acute, right, obtuse, or straight. It leads to classifying quadrilaterals."
+  },
+  "partition_rectangles_rows_cols": {
+    "gist": "Count the squares in a rectangle split into equal rows and columns.",
+    "about": "A drawn rectangle divided into 5 equal rows and 8 equal columns holds 40 same-size squares, which is 5 rows of 8. Each problem gives the rows and columns and asks for the total. A child can start here. It leads to measuring area by counting unit squares."
+  },
+  "pattern_additive_next": {
+    "gist": "Find the next number in a pattern that goes up or down by the same amount each step.",
+    "about": "In 2, 10, 18, 26 the pattern adds 8 each time, so the next term is 34. A pattern can also count down, as in 12, 4, −4, −12, which drops by 8 and continues to −20. Each problem shows four numbers and asks for the next one. It builds on generating terms from a stated rule. Comparing terms of two related sequences, and finding a distant term in an arithmetic sequence, come after it."
+  },
+  "pattern_arithmetic_sequence": {
+    "gist": "Jump straight to a far-off term, like the 20th, of a sequence that adds the same amount.",
+    "about": "An arithmetic sequence adds the same number, the common difference, each step. The 20th term takes 19 steps from the first. With first term 5 and difference −5, that is 5 − 5 × 19 = −90. Differences and starting values can be negative. It builds on finding the next term and missing terms in an additive sequence. It leads to using a linear table rule to predict a value."
+  },
+  "pattern_corresponding_sequences": {
+    "gist": "Compare two number patterns term by term to see how far apart they grow.",
+    "about": "Two sequences start at the same number but add different amounts each step. If A starts at 2 and adds 6, and B starts at 2 and adds 8, then at the 7th term B is 12 more than A, since the gap grows by 2 each step for 6 steps. Children work out and compare the matching terms. It builds on finding the next term in additive and multiplicative sequences, and leads to finding a missing value in an input-output table."
+  },
+  "pattern_function_machine_one_step": {
+    "gist": "Use the rule of a number machine, found from example pairs, to find what comes out.",
+    "about": "A function machine takes a number in and gives a number out by one rule. The sheet shows three pairs like 2 → 6, 5 → 15, 8 → 24, and children see the machine multiplies by 3, so 17 in gives 51 out. Other machines add instead, as in 2 → 7, 5 → 10, 8 → 13, which adds 5. It builds on generating terms from a stated number pattern rule. Next come machines with two steps, and filling in missing values in an input-output table."
+  },
+  "pattern_function_machine_two_step": {
+    "gist": "Find the two-step rule of a number machine from example pairs and use it on a new input.",
+    "about": "This machine uses two operations, such as multiply then add. Say a machine turns 1 into 6, 3 into 16 and 6 into 31. The output goes up by 5 each time the input goes up by 1, and input 1 gives 6, so the rule is ×5 then +1 and an input of 15 gives 76. It builds on one-step function machines. It leads to using a linear table rule to predict a value that is not listed."
+  },
+  "pattern_graph_rate_change": {
+    "gist": "Read a graph of points on a line to find a missing y value or how fast y changes.",
+    "about": "Points on a graph follow a straight-line pattern, so y changes by the same amount for each step in x. The sheet shows plotted points and asks for y at a given x, or the rate of change, which is how much y changes when x goes up by 1. It builds on using a linear table rule and on finding the constant of proportionality from a graph. It leads to reading slope and intercepts from a graph."
+  },
+  "pattern_linear_table_rule": {
+    "gist": "Find the rule behind a table of x and y values and use it for a value not shown.",
+    "about": "In a linear table, y changes by the same amount each time x goes up by the same step. With x = 0, 2, 4 giving y = 5, 13, 21, y goes up 8 for each 2, so the rule is y = 4x + 5 and x = 8 gives 37. Each question asks about a larger x. It builds on missing values in input-output tables and arithmetic sequences. It leads to reading rate of change from a graph and writing the equation of a line."
+  },
+  "pattern_multiplicative_next": {
+    "gist": "Find the next number in a list where each term is the last one multiplied by the same number.",
+    "about": "In a multiplicative sequence each term comes from multiplying the one before by the same number. In 2, 4, 8, 16 the rule is ×2, so the next term is 32. Every problem shows four terms and asks for the fifth, and the numbers grow fast. Children usually meet this after following a stated number pattern rule. After it comes comparing the matching terms of two related sequences."
+  },
+  "pattern_rule_sequence": {
+    "gist": "Find a later number in a pattern that starts somewhere and adds the same amount each time.",
+    "about": "A sequence that starts at 10 and adds 7 each time runs 10, 17, 24, 31, 38, 45, so the 6th term is 45. Each problem gives a starting number and an add rule and asks for a later term, from the 5th to the 8th. A child can start here. Next come finding the next term in addition or multiplication patterns and using a one-step function machine."
+  },
+  "pattern_table_missing_value": {
+    "gist": "Fill in the missing output in an input-output table where every row follows one rule.",
+    "about": "A table lists inputs and outputs that follow the same rule. With 1 → 6, 5 → 14, and 8 → 20, the rule is ×2 then +4, so input 3 gives output 10. Children find the rule from the rows that are filled in and use it for the blank. It builds on comparing two related sequences and on one-step function machines. It leads to using a linear table rule to predict an unlisted value."
+  },
+  "percent_benchmark_reasoning": {
+    "gist": "Estimate a percent of a number using easy percents like 10% and 50%.",
+    "about": "Benchmark percents such as 10%, 25%, 50%, and 100% are easy landmarks that make quick estimates possible. For 12% of 800, 10% of 800 is 80, so the estimate is 80. Each problem offers four numbers and asks which benchmark estimate is closest, without calculating exactly. It builds on reading a percent as a rate per 100 and converting between percent, fraction, and decimal. The next step is finding an exact percent of a quantity."
+  },
+  "percent_change": {
+    "gist": "Work out how much a quantity went up or down, as a percent of where it started.",
+    "about": "Percent change compares how far a quantity moved with the amount it started at. A price that goes from 200 to 160 dropped by 40, and 40 is 20% of 200, so it fell 20%. Each problem gives an old and a new number and asks for the percent increase or decrease. It builds on finding what percent one quantity is of another, and it leads to telling growth from decay in equations like y = a·bˣ."
+  },
+  "percent_decrease": {
+    "gist": "Find a new value after it goes down by a percent.",
+    "about": "Find the percent of the amount, then take it away. For 800 decreasing by 25%, 25% of 800 is 200, so the new value is 600. Each problem gives a starting value and a percent decrease and asks for the new value. It builds on finding a percent of a quantity. The next step is finding a discount and the sale price."
+  },
+  "percent_discount_price": {
+    "gist": "Find how much a percent discount takes off a price, then the sale price.",
+    "about": "A discount takes a percent off the listed price. At 25% off an $84.00 item, the discount is $21.00 and the sale price is $63.00. Each problem asks for either the discount amount in dollars or the sale price. It builds on finding a percent decrease and on adding and subtracting decimals to hundredths, and it is the math behind reading a sale tag."
+  },
+  "percent_error": {
+    "gist": "Measure how far an estimate is from the true value, as a percent of the true value.",
+    "about": "Percent error shows how big a miss is compared with the true amount. If the actual value is 400 and the estimate is 420, the miss is 20, and 20 is 5% of 400. Each problem gives the actual value and an estimate and asks for the percent, and the estimate can be too high or too low. Children usually meet this after finding what percent one quantity is of another. It is the math behind judging how close a measurement or a guess came."
+  },
+  "percent_find_rate": {
+    "gist": "Find what percent one number is of another.",
+    "about": "Turn the comparison into a fraction of the whole, then into out of 100. For \"24 is what percent of 200?\", 24 out of 200 is 12 out of 100, so the answer is 12%. Answers are written as plain numbers, like 12. It builds on reading a percent as a rate per 100 and on finding a unit rate. Percent change and percent error come next."
+  },
+  "percent_find_whole": {
+    "gist": "Find the whole when you know a part and what percent it is.",
+    "about": "This works a percent problem backward. If 700 is 25% of a number, then 25% is one fourth, so the whole is 700 × 4 = 2800. And if 260 is 10%, the whole is 2600. This builds on reading a percent as a rate per 100 and finding a percent of a quantity."
+  },
+  "percent_fraction_decimal": {
+    "gist": "Change a percent into a decimal.",
+    "about": "Percent means per hundred, so 25% is 25 out of 100, or 0.25, and 62% is 0.62. Each problem gives a percent and asks for the decimal, including a few like 4% (0.04) and 125% (1.25). It builds on reading a percent as a rate per 100 and on writing fractions with denominators 10 and 100 as decimals. Estimating with benchmark percents and finding a percent of a quantity come after."
+  },
+  "percent_increase": {
+    "gist": "Find a new value after it goes up by a percent.",
+    "about": "Find the percent of the amount, then add it on. For 600 increasing by 5%, 5% of 600 is 30, so the new value is 630. Each problem gives a starting value and a percent increase and asks for the new value. It builds on finding a percent of a quantity. The next step is finding sales tax and the total price."
+  },
+  "percent_of_quantity": {
+    "gist": "Find a percent of a number, such as 25% of 400.",
+    "about": "To find a percent of a number, turn the percent into a fraction or decimal and multiply. 25% of 400 is 1/4 of 400, which is 100, and 30% of 800 is 240. This builds on reading a percent as a rate per 100 and on converting between percent, fraction and decimal. Finding the whole from a part and its percent, and percent increase and decrease, come after."
+  },
+  "percent_rate_per_hundred": {
+    "gist": "Understand a percent as that many out of every 100.",
+    "about": "A percent is a ratio where the second number is always 100, so 18% means 18 out of every 100. Each problem gives a percent and asks which of four statements explains it. It builds on describing a ratio and on writing a ratio in different forms. Converting between percent, fraction, and decimal, and finding a percent of a quantity, come next."
+  },
+  "percent_sales_tax": {
+    "gist": "Add sales tax to a price to get the total, or find the tax amount alone.",
+    "about": "Sales tax is a percent of the price that gets added at the register. On a $32.00 purchase with 8% tax, the tax is $2.56 and the total is $34.56. Each problem asks for either the total price or the tax amount. Before this, a child needs to find a percent increase and to add and subtract decimals to hundredths. It is the same arithmetic a shopper does at checkout."
+  },
+  "percent_simple_interest": {
+    "gist": "Find the interest on money that earns the same percent each year, and the final balance.",
+    "about": "Simple interest adds the same percent of the starting amount every year. $200 at 6% earns $12 a year, so 3 years gives $36 of interest and a final balance of $236. Each problem asks for either the interest earned or the final balance. It builds on finding a percent of a quantity, and it describes a savings account that never earns interest on its interest."
+  },
+  "perimeter_composite": {
+    "gist": "Find the perimeter of an L-shaped figure when some sides are not labeled.",
+    "about": "Some inner sides of the figure carry no label, so they have to be worked out from the sides that do. Then the whole boundary is added up, giving answers like 34 cm. It builds on finding the perimeter of a polygon and on finding the area of an L-shaped figure by splitting it into rectangles."
+  },
+  "perimeter_polygons": {
+    "gist": "Find the distance around a shape by adding up its side lengths.",
+    "about": "A figure is shown with its side lengths labeled in centimeters, and the perimeter is the total of all the sides, such as 34 cm. A child only needs to add small numbers to start. It leads to comparing rectangles with the same perimeter but different areas and to finding the perimeter of figures with unlabeled sides."
+  },
+  "permutation_vs_combination": {
+    "gist": "Decide whether the order of the picks matters in a counting problem.",
+    "about": "Order matters, making it a permutation, when swapping two picks gives a different result, as with 1st, 2nd and 3rd place in a race. It does not matter, making it a combination, when you only record who was picked, as with lottery numbers. Each problem describes a situation, such as a race, a committee or a password, and asks which one it is. Before this, a child counts unordered selections."
+  },
+  "permutations_r_from_n": {
+    "gist": "Count the ways to put some of your objects in order, like 4 of 7 toys on a shelf.",
+    "about": "Placing 4 of 7 toys in order on a shelf can be done in 7 × 6 × 5 × 4 = 840 ways, since each spot has one fewer toy to choose from. Each problem asks how many ways some of a set of books, toys, photos or stickers can be placed in order on a shelf. Before this, a child counts the arrangements of all n objects with n!. Choosing without caring about order, and arrangements with a restriction on position, come after it."
+  },
+  "pigeonhole_basic": {
+    "gist": "Find how many things you must grab to be sure two share a category.",
+    "about": "If buttons come in 3 colors, grabbing one of each leaves you with no match, and a 4th button must repeat a color. The answer is always the number of colors plus 1. Each problem names an item such as buttons, gloves or socks that comes in 3 to 8 colors and asks how many to grab to be sure of two the same. It builds on multiplying the options at each stage of a choice. The generalized version, which handles bigger piles, follows."
+  },
+  "pigeonhole_generalized": {
+    "gist": "Find the fewest items some group must hold when you share them out.",
+    "about": "Spread 16 books over 3 shelves as evenly as you can and you get 5 on each shelf with 1 left over, so some shelf must hold at least 6. Each problem gives a number of books on 2 to 6 shelves and asks how many some shelf must hold at least. The answer comes from dividing and rounding up. It builds on the basic pigeonhole principle."
+  },
+  "place_value_multidigit": {
+    "gist": "Give the value of a digit based on where it sits in a number.",
+    "about": "In 12619, the 1 sits in the ten-thousands place, so its value is 10,000, and in 6442 the 4 in the hundreds place has a value of 400. Each problem names a digit and its place and asks for its value, in numbers with four or five digits. It builds on place value through 1,000 and on rounding three-digit numbers. It leads to expanded form, rounding bigger numbers, comparing numbers, and adding and subtracting them in columns."
+  },
+  "place_value_relationships": {
+    "gist": "Compare two matching digits in a number to see how many times bigger one is than the other.",
+    "about": "In 6060, the 6 in the thousands place stands for 6000 and the 6 in the tens place stands for 60, so one is 100 times the other. The problems ask for that multiple. It builds on place value in multi-digit numbers and on the ×10 facts. It leads to multiplying and dividing by powers of ten and to decimal place value."
+  },
+  "place_value_to_1000": {
+    "gist": "Find the value of a digit from its place, like the 3 in 535 being 30.",
+    "about": "The same digit stands for different amounts in different places. In 535, the 3 is in the tens place, so its value is 30, and the 4 in 431 has a value of 400. The sheet names a digit and asks for its value. It builds on understanding hundreds, tens, and ones. It leads to place value in bigger whole numbers and to writing a number from expanded form."
+  },
+  "poly_add_subtract": {
+    "gist": "Add or subtract two polynomials and read off the coefficient of x in the answer.",
+    "about": "Only matching terms combine. For (4x² − 2x − 8) − (4x² + 3x − 1), the x² terms cancel and the x terms give −2x − 3x = −5x, so the coefficient is −5. Subtracting means changing every sign in the second group. It builds on naming polynomials and on adding and subtracting integers. Multiplying a polynomial by a single term comes next."
+  },
+  "poly_classify": {
+    "gist": "Name a polynomial by its highest power: linear, quadratic, or cubic.",
+    "about": "The degree of a polynomial is its highest power of x. 4x² + 6x − 6 has degree 2, so it is quadratic, while 3x³ + 5x − 3 has degree 3 and is cubic. Each problem is multiple choice and asks for the name that goes with an expression's degree. A child only needs to read expressions like 4x² + 6x − 6 to start. Adding and subtracting polynomials comes next."
+  },
+  "poly_multiply_binomials": {
+    "gist": "Multiply two two-term expressions, like (x − 5)(2x + 5), and find a coefficient.",
+    "about": "Every term in the first group multiplies every term in the second. (x − 5)(2x + 5) gives 2x² + 5x − 10x − 25, so the x coefficient is −5. Each problem asks for that x coefficient. It builds on multiplying a polynomial by a single term. Next come special products, like squaring a binomial, and factoring simple trinomials."
+  },
+  "poly_multiply_monomial": {
+    "gist": "Multiply every term in a polynomial by a single term, like 2x(5x² + 4x + 2).",
+    "about": "Each term inside the parentheses gets multiplied by 2x, so 2x(5x² + 4x + 2) becomes 10x³ + 8x² + 4x. Each problem asks for the x² coefficient of the result, here 8. It builds on adding and subtracting polynomials. Multiplying two binomials and factoring out a common factor come next."
+  },
+  "poly_special_products": {
+    "gist": "Expand squares like (x − 3)² and products like (x + 4)(x − 4) in a quick pattern.",
+    "about": "(x − 3)² is x² − 6x + 9, and (x + 4)(x − 4) is x² − 16, where the middle terms cancel. Recognizing these patterns skips the term-by-term work. Each problem is multiple choice and asks for the full expanded expression. It builds on multiplying two binomials. Factoring these patterns backward and completing the square come next."
+  },
+  "polygons_on_coordinate_plane": {
+    "gist": "Read a rectangle's side lengths from its corner coordinates on a grid.",
+    "about": "Corners of a rectangle on a grid are given as coordinates, and the length of a side is the distance between two corners that share an x or a y. If A is at (1, 2) and B is at (8, 2), side AB is 7 units. Each problem shows a plotted rectangle and asks for one side's length. It builds on finding distance between points on one line and plotting in all four quadrants. It leads to finding a missing corner, and to perimeter and area."
+  },
+  "positive_negative_contexts": {
+    "gist": "Use a positive or negative number to say how far above or below zero something is.",
+    "about": "Positive and negative numbers describe amounts above and below a zero point. With sea level as 0 meters, a research station 8 meters below sea level is at -8, and one 15 meters above is at 15. Each problem describes a station's position relative to sea level and asks for the matching signed number. A child can start here. It leads to opposites and absolute value."
+  },
+  "powers_of_ten": {
+    "gist": "Multiply or divide a whole number by 10, 100 or 1000 by shifting its digits.",
+    "about": "Multiplying by 10 adds a zero, so 32 × 100 = 3200, and dividing takes zeros off, so 53000 ÷ 1000 = 53. Each step of ÷10 moves every digit one place to the right. Problems on the sheet both multiply and divide. It builds on seeing each place as 10 times the one to its right and on the ×10 facts. It leads to exponents and to converting among percents, fractions and decimals."
+  },
+  "prime_factorization": {
+    "gist": "Break a number down into prime numbers multiplied together, and count how often one appears.",
+    "about": "24 = 2 × 2 × 2 × 3, so the prime 2 appears 3 times. The problems ask how often a particular prime shows up in a number like 18 or 48. It builds on telling prime from composite numbers and on the divisibility rules for 3 and 9. It leads to the greatest common factor and the least common multiple."
+  },
+  "prime_or_composite": {
+    "gist": "Tell whether a number has only two factors (prime) or more than two (composite).",
+    "about": "21 is composite because 3 × 7 = 21, so it has factors besides 1 and itself. Each problem names a number, such as 25 or 35, and asks which kind it is. It builds on finding all the factor pairs of a number. It leads to prime factorization and to testing larger numbers for primes."
+  },
+  "probability_as_fraction": {
+    "gist": "Write a probability as a fraction in simplest form.",
+    "about": "A probability is a fraction, so it can be simplified like any other. If 4 of the 12 marbles in a bag are green, the chance of drawing green is 4/12, which simplifies to 1/3. Each problem gives a bag of marbles and asks for the answer in simplest form. It builds on finding theoretical probability and on reading a fraction like 3/4 as three pieces of size 1/4. The next step is estimating a population count from a sample."
+  },
+  "prop_decide_graph": {
+    "gist": "Tell from a graph whether a relationship is proportional: a straight line through (0, 0).",
+    "about": "A graph shows a proportional relationship when its points form a straight line that passes through the origin, the point (0, 0). A straight line that misses the origin is not proportional. Each problem shows a plotted relationship and asks whether it is proportional. It builds on plotting pairs of equivalent ratios and on telling multiplying from adding. It leads to finding the constant of proportionality from a graph and to interpreting a point on it."
+  },
+  "prop_decide_table": {
+    "gist": "Check from a table whether y is always the same multiple of x.",
+    "about": "A relationship is proportional when y divided by x gives the same number in every row. If x runs 1, 2, 3, 4 and y runs 7, 14, 21, 28, every row gives 7, so it is proportional. Change the 21 to 22 and it is not. Each problem shows a four-row table and gives answer choices to pick from. It builds on making ratio tables and on telling multiplying from adding. It leads to finding the constant of proportionality from a table."
+  },
+  "prop_interpret_point": {
+    "gist": "Say what a point on a proportional graph means in a story, like 4 hours and 8 kilometers.",
+    "about": "A point (x, y) on a graph says that x of one thing goes with y of another. If the horizontal axis shows hours and the vertical axis shows kilometers, a point at (4, 8) means 4 hours correspond to 8 kilometers. Problems name the axes and ask what a labeled point means. It builds on deciding whether a graph is proportional and on writing y = kx. It leads to interpreting the points (0, 0) and (1, r)."
+  },
+  "prop_interpret_unit_point": {
+    "gist": "Say what (0, 0) and (1, r) mean on a proportional graph, like 1 hour for 6 liters.",
+    "about": "On a proportional graph, the point (0, 0) says that none of one quantity goes with none of the other. The point (1, r) gives the rate for one unit, so with hours and liters, 1 hour corresponds to 6 liters. Each problem labels one of these two points and asks what it means. It builds on finding the constant of proportionality from a graph and on interpreting a point in context."
+  },
+  "prop_missing_value": {
+    "gist": "Use y = kx and a given x to find y, like y = 7x when x = 12.",
+    "about": "Once you know the rule for a proportional relationship, any missing value follows from it. With y = 7x and x = 12, y is 7 × 12 = 84. Each problem gives the equation and a value of x from 3 to 12 and asks for y. It builds on writing an equation y = kx for a proportional relationship, and it is the step that turns that equation into answers."
+  },
+  "prop_multiplicative_vs_additive": {
+    "gist": "Pick the pair that keeps a ratio the same, from choices that multiply or add.",
+    "about": "To keep the ratio 7 to 3, multiply both numbers by the same amount, so (14, 6) works because both doubled. Adding 2 to both gives (9, 5), a different comparison. Each problem gives a pair and asks which new pair keeps the ratio, and each choice comes with a reason. It builds on making equivalent ratios by scaling and on seeing multiplication as resizing. Building a ratio table from a rule, and deciding whether a table is proportional, come next."
+  },
+  "prop_table_from_rule": {
+    "gist": "Use a rule like y = 7 times x to fill in the missing number in a table.",
+    "about": "A multiplying rule produces a table where every output is the input times the same number. With y = 7 times x, an x of 1 gives 7, an x of 3 gives 21, and an x of 7 gives 49. Each problem shows a table with the first rows filled in and asks for the missing output in the last row. It builds on completing a table of equivalent ratios and on telling multiplying apart from adding. Plotting the pairs on the coordinate plane comes next."
+  },
+  "prop_write_equation": {
+    "gist": "Write y = kx for a steady rate, like y = 6x for 6 parts a minute.",
+    "about": "When something happens at a steady rate, the equation y = kx describes it, with k as the rate. A machine that makes 6 parts per minute gives y = 6x, where x is minutes and y is parts. Each problem describes a machine making 2 to 8 parts per minute and asks which equation fits. It builds on finding the constant of proportionality from a table. It leads to finding a missing value in a proportional relationship and to y = mx + b and its graph."
+  },
+  "quad_complete_square": {
+    "gist": "Find the number that turns x² − 6x into a perfect square, by adding it.",
+    "about": "Half of −6 is −3, and squaring it gives 9. Adding 9 gives x² − 6x + 9, which is (x − 3)². Each problem asks for the number to add. It builds on solving by taking square roots and on expanding squares as patterns. The quadratic formula and vertex form come next."
+  },
+  "quad_discriminant": {
+    "gist": "Calculate b² − 4ac for a quadratic equation.",
+    "about": "For x² − 6x − 3 = 0, a is 1, b is −6, and c is −3, so b² − 4ac = 36 + 12 = 48. This number sits under the square root in the quadratic formula, and it can come out negative. Each problem asks for its value. It builds on the quadratic formula."
+  },
+  "quad_formula": {
+    "gist": "Use the quadratic formula to solve equations like 2x² − 13x + 20 = 0.",
+    "about": "The formula uses a, b and c from ax² + bx + c = 0. For 2x² − 13x + 20 = 0 the roots are 4 and 5/2, and the problems ask for the larger, 4. Answers are whole numbers or fractions. It builds on completing the square, where the formula comes from, and on simplifying roots. The discriminant and modeling with a quadratic come next."
+  },
+  "quad_graph_features": {
+    "gist": "Read the vertex of a parabola from its graph.",
+    "about": "A parabola is the U-shaped curve of a quadratic. Its vertex is the lowest or highest point. Each problem shows a graph and asks for the x-coordinate of that point. It builds on moving between y = mx + b and its graph. Next come vertex form and modeling a thrown object or an area with a quadratic."
+  },
+  "quad_model_context": {
+    "gist": "Use a quadratic formula to find when a thrown ball lands.",
+    "about": "A ball's height in meters after t seconds is given by a formula like h = 30t − 5t², and the question is when it lands, which means h = 0. Factoring gives t(30 − 5t) = 0, so the ball lands at t = 6 seconds. Each problem is a ball with a formula of this kind. It builds on solving a quadratic equation with the quadratic formula and on reading a parabola's vertex and intercepts, and it puts both to use on a physical question."
+  },
+  "quad_solve_factoring": {
+    "gist": "Solve a quadratic like x² + 3x − 10 = 0 by factoring, then picking the larger answer.",
+    "about": "Factor x² + 3x − 10 into (x + 5)(x − 2). Setting each group to zero gives x = −5 or x = 2, and the larger is 2. Each problem asks for that larger solution. Before this, a child needs the zero-product property and factoring simple trinomials."
+  },
+  "quad_solve_sqrt": {
+    "gist": "Solve equations like 3x² = 48 by dividing and then taking the square root.",
+    "about": "Divide both sides by 3 to get x² = 16, then take the square root. x can be 4 or −4, and each problem asks for the positive one. It builds on finding square and cube roots. The next skill is completing the square."
+  },
+  "quad_vertex_form": {
+    "gist": "Read the vertex of a parabola straight from an equation like y = 2(x − 3)² + 5.",
+    "about": "In y = 2(x − 3)² + 5, the vertex is (3, 5): the x-coordinate has the opposite sign of the number inside the parentheses, and the y-coordinate is the number added on the end. Each problem asks for one coordinate of the vertex. It builds on completing the square and on reading a parabola's features from its graph."
+  },
+  "quad_zero_product": {
+    "gist": "Solve an equation already written as two groups multiplied to make zero.",
+    "about": "If (x + 4)(x − 5) = 0, one of the groups must be zero, so x = −4 or x = 5. Each problem asks for the larger of the two. It builds on factoring out the greatest common factor. Solving a quadratic by factoring comes next."
+  },
+  "range": {
+    "gist": "Find how far apart the smallest and largest numbers in a list are.",
+    "about": "The range tells you how spread out a set of numbers is, by subtracting the least value from the greatest. For 3, 6, 8, 9, 5 the greatest is 9 and the least is 3, so the range is 6. Each problem shows five numbers on a line plot. Ordering a data set comes first, since it puts the two ends in plain view. Comparing data sets with the same center but different spread comes after."
+  },
+  "rate_constant_speed": {
+    "gist": "Use a steady speed to find how far something goes in a given time.",
+    "about": "At a constant speed, distance is speed times time. A cyclist riding 25 kilometers per hour for 5 hours covers 25 × 5 = 125 kilometers. Each problem gives the speed and the time and asks for the distance. It builds on finding a unit rate from a ratio of whole numbers, and it can be run backward to find a time."
+  },
+  "rate_measurement_conversion": {
+    "gist": "Switch a measurement to another unit, like 8 minutes to seconds.",
+    "about": "A conversion fact, such as 1 minute = 60 seconds, is a rate that lets you switch units. To convert 8 minutes to seconds, multiply 8 × 60 to get 480 seconds. Each problem states the fact first, then asks for a conversion such as 6 kilograms to grams, 3 feet to inches or 8 quarts to cups. It builds on finding a unit rate and on making equivalent ratios by scaling."
+  },
+  "rate_unit_price": {
+    "gist": "Work out the price of one item to pick the better buy.",
+    "about": "Different package sizes are hard to compare until you find the price of one. Package A with 7 notebooks for $3.50 costs $0.50 each, and Package B with 9 for $4.95 costs $0.55 each, so A is the better buy. Each problem asks which package is the better buy, and the choices include the price per notebook. It builds on finding a unit rate from whole numbers."
+  },
+  "rate_unit_whole_numbers": {
+    "gist": "Find how much there is for one, such as posters per minute.",
+    "about": "A unit rate says how much for one unit of the second quantity. If a printer makes 18 posters in 12 minutes, divide 18 by 12 to get 3/2 posters per minute, which is 1 1/2. Answers come as fractions. This builds on describing a ratio and on seeing a fraction as division. Comparing unit prices and using a constant speed to find distance or time come after."
+  },
+  "ratio_compare": {
+    "gist": "Decide which of two rates is greater by putting them on the same scale.",
+    "about": "To compare Machine A making 10 parts in 2 minutes with Machine B making 6 parts in 3 minutes, bring both to a common scale, such as parts per minute: 5 for A and 2 for B, so A is faster. Each problem asks which rate is greater, from four choices. It builds on reducing ratios and on completing a table of equivalent ratios."
+  },
+  "ratio_concept_language": {
+    "gist": "Describe a ratio in words, such as 7 red tiles for every 3 blue.",
+    "about": "A ratio compares two amounts, saying how much of one there is for each amount of the other. Each problem describes a mosaic, such as 7 red tiles and 3 blue tiles, and asks which statement matches, \"There are 7 red tiles for every 3 blue tiles.\" Counting and comparing are all it needs beforehand. Writing the same ratio in different forms, and telling a ratio from its reverse, come after."
+  },
+  "ratio_double_number_line": {
+    "gist": "Fill in a missing tick mark on two matching number lines.",
+    "about": "A double number line lines up two scales, such as meters on top and seconds below, so each tick on one matches a tick on the other. Each problem lists both scales starting at 0, with a blank at the last tick. If 5, 10, 15 meters line up with 9, 18 seconds, the blank is 27. This builds on completing a table of equivalent ratios."
+  },
+  "ratio_equivalent_scale": {
+    "gist": "Find a matching ratio by multiplying both numbers by the same factor.",
+    "about": "Equivalent ratios describe the same comparison at a different size. To fill in 3:6 = 12:?, notice 3 was multiplied by 4 to get 12, so 6 gets multiplied by 4 as well, giving 24. This builds on writing ratios in different forms and on multiplying a 2-digit number by a 1-digit number. Next come reducing a ratio to smallest whole numbers, and completing tables of equivalent ratios."
+  },
+  "ratio_forms": {
+    "gist": "Write a ratio given in words, such as 7 to 8, with a colon, as 7:8.",
+    "about": "The same ratio can be said \"7 to 8,\" written 7:8, or written as the fraction 7/8. Each problem gives a ratio in words and asks for it in colon notation, such as \"7 to 8\" becoming 7:8, from four choices. It builds on describing a ratio as a comparison of two quantities. Making equivalent ratios by scaling, and reading a percent as a rate per 100, come next."
+  },
+  "ratio_order_matters": {
+    "gist": "Write a ratio in the order the question names, like cellos to violins.",
+    "about": "The order of a ratio matters. With 4 violins and 8 cellos, the ratio of cellos to violins is 8:4, while violins to cellos is 4:8, a different comparison. Each problem asks for the ratio in a stated order, so you read which thing comes first. It builds on describing a ratio as a comparison of two quantities. Comparing two ratios using equivalent ratios or unit rates comes after."
+  },
+  "ratio_part_part_to_whole": {
+    "gist": "Tell apart part-to-part and part-to-whole ratios.",
+    "about": "Compare one group with the other group, or compare one group with everything. A shelf with 9 fiction and 3 nonfiction books has a fiction-to-nonfiction ratio of 9:3 and a fiction-to-all-books ratio of 9:12, because the whole shelf holds 12 books. Each problem asks for the part-to-whole version. It builds on describing a ratio as a comparison of two quantities."
+  },
+  "ratio_reduce": {
+    "gist": "Simplify a ratio by dividing both numbers by the same factor.",
+    "about": "Reducing a ratio works like simplifying a fraction. For 4:6, both numbers divide by 2, giving 2:3, and nothing larger divides both. For 21:35 the common factor is 7, giving 3:5. This builds on making equivalent ratios by scaling. The next step is comparing two ratios using equivalent ratios or unit rates."
+  },
+  "ratio_table_complete": {
+    "gist": "Fill in the missing number in a table of equivalent ratios.",
+    "about": "A ratio table lists matching pairs that all describe the same comparison. Each problem shows a table with three rows, such as 8 and 5, then 16 and 10, then 24 and a blank. Doubling 8 gives 16 and tripling it gives 24, so the blank is 5 tripled, which is 15. This builds on making equivalent ratios by scaling. Finding missing values on a double number line, and comparing ratios, come next."
+  },
+  "rational_between_numbers": {
+    "gist": "Find the number halfway between two fractions on a number line.",
+    "about": "The midpoint between two numbers is their average. Between -3/2 and -1/2, add to get -2, then halve it: -1. Between -1/4 and 3/4 the midpoint is 1/4. Each problem asks for the midpoint of two signed numbers. It builds on placing signed fractions on a number line and comparing them."
+  },
+  "rational_coordinate_pairs": {
+    "gist": "Read x and y coordinates that are fractions or whole numbers on a four-quadrant grid.",
+    "about": "Points on a grid do not always land on whole numbers. A point halfway between 1 and 2 has the coordinate 3/2, and one left of the y-axis has a negative x. Each problem shows a plotted point and asks for its x- or y-coordinate, like -3/2 or 1/2. Before this, a child locates signed fractions on a number line and plots points in all four quadrants."
+  },
+  "rational_inequalities_contexts": {
+    "gist": "Compare two temperatures given as positive or negative fractions and whole numbers.",
+    "about": "Which is colder, -1/2°C or -5/4°C? The lower the number, the colder, so -5/4 is colder and -1/2 is greater. Each problem gives the temperatures at Station A and Station B and asks how A compares to B. It builds on comparing signed fractions and on describing amounts above and below zero."
+  },
+  "read_bar_graph": {
+    "gist": "Read a bar graph by matching the length of each bar to the number scale.",
+    "about": "A bar graph draws each category as a bar, and the bar's length against the number scale gives the count. \"How many votes did Gold receive?\" means finding the end of the Gold bar and reading across to the scale. Now and then the total is given and the value of a missing bar has to be found. Counting is all it needs beforehand. Questions that compare bars come next, then graphs where each step on the scale means more than one."
+  },
+  "read_fractional_line_plot": {
+    "gist": "Read a line plot whose numbers include halves and fourths.",
+    "about": "This line plot has whole numbers with fractions between them, like 2 1/2 or 2 3/4, and each X is one measurement. Each problem asks how many measurements land at a given spot, so you find that fraction on the number line and count the Xs above it. It builds on reading a whole-number line plot and on placing fractions on a number line."
+  },
+  "read_line_plot": {
+    "gist": "Read a line plot, where each X above a number is one measurement.",
+    "about": "A line plot is a number line with an X placed above a number each time that value turns up in the data. Each problem asks how many observations sit at one number, such as \"How many observations are at 3?\", which means counting the Xs stacked there. Counting is the only thing needed first. Line plots that include halves and fourths come after this."
+  },
+  "read_picture_graph": {
+    "gist": "Read a graph where each little picture stands for one thing, and count a row.",
+    "about": "A picture graph lines up small pictures in rows, one row per category, and a key says what each picture means. Here every picture stands for one, so \"How many Hawks are shown?\" is answered by counting the hawks in their row. Nothing comes before this except counting. Later, children compare categories (\"how many more owls than robins\") and read graphs where one picture stands for more than one."
+  },
+  "read_scaled_picture_bar_graph": {
+    "gist": "Read graphs where one picture or one step on the scale stands for more than one.",
+    "about": "In a scaled graph, one symbol or one scale step can mean more than 1, such as 2, 5, or 10, so counting the marks one by one gives the wrong answer. Each problem asks for the total shown for a category, like the votes for Dogs, by reading the scale and then multiplying or skip counting. Some are picture graphs and some are bar graphs. It builds on reading a one-symbol picture graph and a single-unit bar graph."
+  },
+  "reflect_across_axis": {
+    "gist": "Find where a point lands after a flip across the x-axis or y-axis, and see which sign changes.",
+    "about": "Flipping a point across the x-axis moves it to the same spot on the other side, so its y-coordinate switches sign and its x-coordinate stays. A point at (3, 8) lands at (3, -8). Flipping across the y-axis switches the sign of x instead. Each problem names the axis and asks for the one coordinate that changes. It builds on plotting points in all four quadrants and on lines of symmetry."
+  },
+  "remainder_cycles": {
+    "gist": "Use remainders to solve clock and calendar puzzles that wrap around.",
+    "about": "On a 12-hour clock, 71 hours after 3 o'clock is 2 o'clock, because 71 ÷ 12 leaves 11 and 3 + 11 = 14 wraps around to 2. Day-of-the-week puzzles work the same way with 7 days, numbered 0 to 6. It builds on division with remainders and on common multiples. It leads to reducing any whole number to its remainder on a clock of a given size."
+  },
+  "roots_simplify_radicals": {
+    "gist": "Simplify roots like √45 by pulling out perfect squares or cubes.",
+    "about": "45 is 9 × 5 and 9 is a perfect square, so √45 = 3√5. In the same way, ∛162 = 3∛6 because 162 = 27 × 6. Most problems use square or cube roots, and some use fourth or fifth roots, like √[4]567 = 3√[4]7. It builds on finding square and cube roots. Solving quadratics with the quadratic formula comes next."
+  },
+  "roots_square_cube": {
+    "gist": "Find the number that squares or cubes to a given value, like x³ = 216.",
+    "about": "A square root undoes squaring and a cube root undoes cubing. If x³ = 216, then x = 6 because 6 × 6 × 6 = 216. For squares, the problems ask for the positive solution, such as x = 9 for x² = 81. A child only needs to know how to square and cube a number to start. Simplifying roots and solving equations by taking square roots come next."
+  },
+  "round_multidigit": {
+    "gist": "Round a large number to the nearest 10, 100 or 1000 by looking at the digit to its right.",
+    "about": "To round 23248 to the nearest 1000, look at the hundreds digit. It is a 2, so the number rounds down to 23000. Each problem asks for the nearest 10, 100 or 1000 of a number in the thousands or ten-thousands. It builds on place value in multi-digit numbers and on rounding three-digit numbers to the nearest 10 or 100. Rounding decimals comes next."
+  },
+  "round_to_nearest_10_100": {
+    "gist": "Round a number to the nearest 10 or 100, like 189 to 190.",
+    "about": "Rounding swaps a number for a nearby round one. Rounded to the nearest 10, 189 becomes 190. Rounded to the nearest 100, 202 becomes 200 and 980 becomes 1000. The numbers have two or three digits, and each problem says which place to round to. It builds on understanding hundreds, tens, and ones. It leads to rounding bigger numbers to any place and to place value in multi-digit whole numbers."
+  },
+  "same_perimeter_optimize": {
+    "gist": "Pick the rectangle with the greatest area from several that have the same perimeter.",
+    "about": "Each problem lists rectangles that share one perimeter, such as 34 cm, and asks which covers the most area. The winner is the one closest to a square, which is 8 cm × 9 cm for 34 cm, and 9 cm × 9 cm for 36 cm. It builds on comparing rectangles with the same perimeter but different areas."
+  },
+  "sample_space": {
+    "gist": "Count every possible outcome when you flip, roll, or spin.",
+    "about": "The sample space is the full list of things that could happen. If you roll a die and flip a coin, each of the 6 die faces can pair with heads or tails, giving 6 × 2 = 12 outcomes. Each problem asks how many outcomes there are in all, for combinations like dice, coins, and spinners. It builds on describing likelihood. It leads to finding theoretical probability and to totals with two dice."
+  },
+  "sampling_variability": {
+    "gist": "Understand why different random samples give slightly different estimates.",
+    "about": "Draw several random samples of the same size from one population and each will give a nearby but different estimate. Each problem shows four poll results, such as 39%, 43%, 46%, and 48%, and asks which statement about the variation is right, or which conclusion is not justified. It builds on estimating a population count from a sample. Margin of error, a range around an estimate, comes after."
+  },
+  "sci_notation_convert": {
+    "gist": "Write a big number as a number from 1 to 10 times a power of ten, and read off the power.",
+    "about": "Scientific notation writes 70,000 as 7 × 10⁴, with the exponent counting the places the decimal point moved. Each problem gives a large whole number, from 150 to several million, and asks for the exponent n when it is written as a × 10ⁿ with a between 1 and 10. It builds on zero and negative exponents. Multiplying and dividing numbers in scientific notation comes next."
+  },
+  "sci_notation_operations": {
+    "gist": "Multiply two numbers written in scientific notation and give the power of ten.",
+    "about": "To multiply (2 × 10⁶)(2 × 10⁷), multiply the front numbers to get 4 and add the exponents to get 13, so the answer is 4 × 10¹³. Each problem is a multiplication like this and asks for the exponent of the result. Before this, a child needs to be able to convert between ordinary and scientific notation."
+  },
+  "signed_fraction_decimal_equivalence": {
+    "gist": "Pick the decimal that equals a given positive or negative fraction.",
+    "about": "Divide the top of a fraction by the bottom to get its decimal. -1/4 is -0.25, 5/8 is 0.625, and -1/3 is -0.333..., which repeats forever. Each problem is multiple choice and asks which decimal matches a given signed fraction. It builds on negative fractions and decimals, and on long division with a two-digit divisor."
+  },
+  "signed_rationals_on_number_line": {
+    "gist": "Read the fraction or decimal at an unlabeled tick mark on a number line, positive or negative.",
+    "about": "Between the whole numbers on a number line sit fractions and decimals, and on the left of zero they are negative. If ticks are fourths, the first mark past 1 is 5/4 and the mark one step left of zero is -1/4. Each problem marks point P on an unlabeled tick and asks for its value as a fraction. It builds on negative fractions and decimals and on fractions on a number line. It leads to comparing them and plotting them as coordinates."
+  },
+  "simplify_fractions": {
+    "gist": "Rewrite a fraction in lowest terms, like 6/30 as 1/5.",
+    "about": "To simplify, divide the top and bottom by a number that goes into both. For 6/30, divide both by 6 to get 1/5. For 48/66 the number is also 6, and the result is 8/11. A fraction is in lowest terms when no number other than 1 divides both. It builds on generating equivalent fractions."
+  },
+  "skip_count_2s_5s_10s": {
+    "gist": "Count forward in jumps of 2, 5, or 10 and name the next number.",
+    "about": "Skip-counting means counting in jumps, like 40, 50, 60, 70 by tens, 25, 30, 35, 40 by fives, or 4, 6, 8, 10 by twos. Each problem shows three numbers in a pattern and asks for the next. It builds on counting to 100 by ones and by tens. It leads to skip-counting by 3s and 4s and to understanding multiplication as equal groups."
+  },
+  "skip_count_3s_4s": {
+    "gist": "Count forward in jumps of 3 or 4 and name the next number.",
+    "about": "Skip-counting by 3s goes 9, 12, 15, 18, and by 4s goes 12, 16, 20, 24. Each problem shows three numbers in a pattern and asks for the next one. It builds on skip-counting by 2s, 5s, and 10s. It leads to skip-counting by 6s, 7s, 8s, and 9s and to the multiplication facts for 3, 4, and 6."
+  },
+  "skip_count_6s_7s_8s_9s": {
+    "gist": "Count forward in bigger jumps and name the next number, like 14, 21, 28, 35.",
+    "about": "The jumps here are bigger, like 16, 24, 32, 40 by eights or 14, 21, 28, 35 by sevens. Each problem skip-counts by 6, 7, 8 or 9, shows three numbers in a pattern and asks for the next. It builds on skip-counting by 3s and 4s. It leads to the multiplication facts for 7, 8, and 9."
+  },
+  "slope_from_graph": {
+    "gist": "Read the slope of a line from two marked points on its graph.",
+    "about": "Each problem shows a line with two plotted points and asks for its slope: count how far it moves up or down for each step to the right. A line that heads downhill has a negative slope, like −3, and some slopes are fractions such as 1/2. It builds on using a graphed pattern to find its rate of change and on plotting points in all four quadrants. Next come moving between y = mx + b and its graph, and comparing two lines written in different ways."
+  },
+  "slope_intercept_form": {
+    "gist": "Find where a line given as y = mx + b crosses the x-axis.",
+    "about": "In y = mx + b, m is the slope and b is where the line crosses the y-axis. Here the problems ask where a line like y = 2x − 6 crosses the x-axis: set y to 0 and solve, which gives x = 3. Before this, a child needs slope from two points, slope from a graph, and the equation y = kx for a proportional relationship. Writing a line through two points and solving a system by graphing follow."
+  },
+  "slope_two_points": {
+    "gist": "Find how steep a line is from two points on it.",
+    "about": "Slope is the rise divided by the run between two points. For (0, −1) and (4, 4), the line rises 5 while moving 4 to the right, so the slope is 5/4. Answers can be whole numbers or fractions, and the points can include negatives. It builds on finding the constant of proportionality from a graph, which is slope for a line through the origin. Moving between y = mx + b and a graph comes after it."
+  },
+  "square_cube_numbers": {
+    "gist": "Find the square or cube of a number, like 7 squared or 2 cubed.",
+    "about": "7 squared is 7 × 7 = 49, and 2 cubed is 2 × 2 × 2 = 8. The names come from the area of a square and the volume of a cube. It builds on exponents as repeated multiplication. It leads to deciding whether a number up to 200 is prime."
+  },
+  "subtract_2digit_no_regroup": {
+    "gist": "Subtract two-digit numbers when no borrowing is needed, like 74 − 23 = 51.",
+    "about": "Subtract the ones, then the tens. In 74 − 23, 4 − 3 is 1 and 7 tens − 2 tens is 5 tens, so the answer is 51. Each ones digit on top is big enough, so nothing is borrowed, as in 99 − 50 = 49 and 27 − 12 = 15. It builds on understanding tens and ones and on facts within 20 from memory. It leads to subtracting with regrouping."
+  },
+  "subtract_2digit_regroup": {
+    "gist": "Subtract two-digit numbers when you must borrow a ten, like 72 − 16 = 56.",
+    "about": "When the ones digit on top is too small, trade one ten for ten ones. In 72 − 16, 72 becomes 6 tens and 12 ones, then 12 − 6 is 6 and 6 tens − 1 ten is 5 tens, so the answer is 56. It builds on subtracting two-digit numbers without regrouping and on subtracting within 20. It leads to subtracting three-digit numbers with regrouping."
+  },
+  "subtract_3digit_regroup": {
+    "gist": "Subtract three-digit numbers when you need to borrow, like 436 − 198 = 238.",
+    "about": "Borrowing can happen in several columns. In 436 − 198, 6 − 8 needs a ten from the tens place, and then 2 tens − 9 tens needs a hundred, which gives 238. Other problems, like 613 − 506 = 107 and 962 − 459 = 503, need one borrow or two. It builds on hundreds, tens, and ones, and on subtracting two-digit numbers with regrouping. It leads to the standard written method for subtracting bigger numbers."
+  },
+  "subtract_integers_add_opposite": {
+    "gist": "Subtract integers by turning the problem into adding the opposite.",
+    "about": "Subtracting a number gives the same result as adding its opposite. 3 - 18 becomes 3 + (-18) = -15, and (-11) - (-4) becomes (-11) + 4 = -7. The sheet has subtraction problems with positive and negative numbers. It builds on adding integers and on opposite numbers. It leads to expressions mixing adding and subtracting integers."
+  },
+  "subtract_multidigit_algorithm": {
+    "gist": "Subtract numbers in the thousands in columns, borrowing when a digit is too small.",
+    "about": "This is the column method, like 5362 − 2164 = 3198, where you borrow from the next place when the top digit is smaller. Each problem subtracts from a four-digit number. It builds on subtracting three-digit numbers with regrouping and on place value. It leads to multi-step word problems, long division, and subtracting decimals."
+  },
+  "subtract_within_10": {
+    "gist": "Subtract within 10, like 9 − 3 = 6.",
+    "about": "Subtraction facts within 10, like 3 − 1 = 2, 10 − 2 = 8, and 9 − 3 = 6, are each the reverse of an addition fact. The sheet gives bare equations with the answer left blank. It builds on subtracting within 5. It leads to add and subtract word problems within 10 and to subtracting within 20."
+  },
+  "subtract_within_20": {
+    "gist": "Subtract within 20, like 20 − 3 = 17.",
+    "about": "Take-away facts with numbers up to 20 include 10 − 6 = 4, 20 − 3 = 17, and 18 − 12 = 6. The sheet gives bare equations with the answer left blank. It builds on subtracting within 10 and on adding within 20 without regrouping. It leads to adding and subtracting within 20 from memory and to subtracting two 2-digit numbers with regrouping."
+  },
+  "subtract_within_5": {
+    "gist": "Take away within 5, like 5 − 1 = 4.",
+    "about": "Subtraction within 5 covers facts like 5 − 1 = 4 and 4 − 1 = 3, including taking everything away, 5 − 5 = 0. Each problem is a bare equation with the answer left blank, and the goal is to know the answers quickly. It builds on counting objects to tell how many. It leads to subtracting within 10."
+  },
+  "surface_area_nets": {
+    "gist": "Find the total area of the outside of a box by adding up its six faces.",
+    "about": "Surface area is the total area of the outside of a solid. Unfold the box into its flat faces, find the area of each, and add them. A box 10 cm by 5 cm by 2 cm has faces of 50, 20, and 10 square centimeters, two of each, for 160 square centimeters in all. Each problem shows a box and asks for the total surface area in square centimeters. It builds on drawing a net of a solid and on the area of a rectangle."
+  },
+  "sys_elimination": {
+    "gist": "Solve two equations together by adding or subtracting them to cancel one letter.",
+    "about": "Take 2x + 3y = 1 and 4x + 4y = 4. Multiplying the first by 4 and the second by 3 makes the y terms match, and subtracting removes y, leaving 4x = 8, so x = 2. Each problem asks for the x-value. Before this, a child needs to know how to solve a system by substitution."
+  },
+  "sys_linear_inequalities": {
+    "gist": "Pick the point that satisfies two inequalities at once, like x + y ≤ 9 and y ≥ 3.",
+    "about": "A point works only if it makes both inequalities true. For (0, 6), 0 + 6 ≤ 9 and 6 ≥ 3, so it fits. Each problem is multiple choice and asks which point satisfies both inequalities. It builds on solving a system by graphing and on compound inequalities."
+  },
+  "sys_model_context": {
+    "gist": "Turn a ticket-buying story into two equations and find how many of one kind were bought.",
+    "about": "A group buys 10 tickets for $52, with adult tickets at $6 and child tickets at $5. Two facts, the count and the total cost, give two equations, and solving them shows 2 adult tickets. Each problem is a ticket story like this one that asks for the number of adult tickets. It builds on solving a system by substitution."
+  },
+  "sys_solution_meaning": {
+    "gist": "Understand that the solution of a system is the point where two lines cross.",
+    "about": "A system is two equations with the same two unknowns. If its lines cross at (−4, −4), that point makes both equations true, and it is the only one that does. The problems are multiple choice and ask which equations a crossing point satisfies, how many solutions the system has, or what the point stands for. A child only needs to read a point like (−4, −4) to start. Solving a system by graphing comes next."
+  },
+  "sys_solve_graphing": {
+    "gist": "Find where two lines cross on a graph to solve a pair of equations.",
+    "about": "Both lines are drawn on a graph, and the solution is the point where they meet. For y = x − 1 and y = 2x − 2 they meet where x = 1. Each problem gives the two equations along with the graph and asks for the x-value of the crossing. It builds on knowing that the solution is a point on both lines and on moving between y = mx + b and its graph. Next come solving by substitution and systems with no solution or endless solutions."
+  },
+  "sys_special_cases": {
+    "gist": "Tell whether a pair of equations has one solution, none, or endlessly many.",
+    "about": "Lines can cross once, never cross if they are parallel, or sit exactly on top of each other. In 2x + y = 7 and 4x + 2y = 14, the second equation is the first doubled, so every point on the line is a solution. Each problem is multiple choice and asks how many solutions a pair of equations has. It builds on solving by graphing and on telling equations with one, none, or infinitely many solutions apart."
+  },
+  "sys_substitution": {
+    "gist": "Solve two equations together by swapping one expression in for y.",
+    "about": "When both equations start with y =, the two right sides must be equal. For y = x − 6 and y = 3x − 16, set x − 6 = 3x − 16 to get x = 5. This turns two equations into one that a child already knows how to solve. Each problem asks for the x-value. It builds on solving a system by graphing and on equations with parentheses to distribute. Elimination and word problems that need a system come next."
+  },
+  "tell_time_five_minutes": {
+    "gist": "Read an analog clock to the nearest five minutes, like 7:30 or 11:05.",
+    "about": "The minute hand moves one five-minute step for each number on the clock, so a hand pointing at the 4 means 20 minutes past, and one at the 1 means 5 minutes past. The sheet describes both hands in words. It builds on telling time to the hour and half hour. It leads to telling time to the nearest minute."
+  },
+  "tell_time_hour_half_hour": {
+    "gist": "Read a clock at half past the hour, like 1:30, from where the two hands point.",
+    "about": "Each problem describes the clock in words, and every one is a half-past time. If the hour hand is halfway between the 1 and the 2 and the minute hand points at the 6, the time is 1:30. The answers are multiple choice. A child can start here. It leads to telling time to the nearest five minutes and to using a.m. and p.m."
+  },
+  "tell_time_to_minute": {
+    "gist": "Read an analog clock to the exact minute by counting the small tick marks.",
+    "about": "Between the numbers on a clock are small ticks, one for each minute. If the minute hand is 4 ticks past the 7, that is 35 + 4 = 39 minutes, and with the hour hand between the 5 and the 6 the time is 5:39. It builds on telling time to the nearest five minutes. It leads to finding the time after some minutes have passed."
+  },
+  "ten_more_ten_less": {
+    "gist": "Find 10 more or 10 less than a two-digit number in your head.",
+    "about": "Adding or subtracting 10 changes only the tens digit. Ten more than 86 is 96, and ten less than 14 is 4. The sheet asks for the number that is 10 more or 10 less than the one shown. It builds on understanding tens and ones in two-digit numbers. It leads to skip-counting by 2s, 5s, and 10s."
+  },
+  "tens_ones_to_99": {
+    "gist": "Tell how many tens are in a two-digit number, like 7 tens in 79.",
+    "about": "Every two-digit number is some tens and some ones, so 79 is 7 tens and 9 ones. The sheet asks how many tens are in a number such as 48 or 22. It builds on seeing 11 to 19 as ten plus some ones and on counting to 100 by ones. It leads to comparing two-digit numbers and to hundreds, tens, and ones in three-digit numbers."
+  },
+  "theoretical_probability_simple": {
+    "gist": "Find the chance of an event as favorable outcomes over all outcomes.",
+    "about": "When every outcome is equally likely, the probability of an event is the number of outcomes you want divided by the total number. Rolling a fair die, the chance of a number greater than 2 is 4 out of 6, which is 2/3. Each problem rolls a fair die. This builds on listing the sample space. Writing probability as a fraction and finding the chance that an event does not happen come next."
+  },
+  "two_step_expressions": {
+    "gist": "Work out an expression with two operations, doing the multiplication or division first.",
+    "about": "6 + 18 ÷ 6 means dividing first, 18 ÷ 6 = 3, then adding to get 9. Similarly 75 − 8 × 9 = 75 − 72 = 3. It builds on the ×7, ×8 and ×9 facts, adding and subtracting within 20, and multiplying a 2-digit number by a 1-digit number. It leads to the full order of operations."
+  },
+  "typical_distance_from_fair_share": {
+    "gist": "Find the average distance of the dots from the mean on a dot plot.",
+    "about": "Spread can be measured by how far the values sit from the mean, on average. Each problem shows dots on a line plot with the mean marked and asks for the mean absolute distance, meaning every distance is counted as positive and then the distances are averaged. It builds on seeing the mean as a balance point and on finding the range."
+  },
+  "unit_fraction": {
+    "gist": "Name the fraction for one part of a shape split into equal pieces, like 1/4.",
+    "about": "A unit fraction is one piece of a whole cut into equal parts. If a shape is split into 4 equal parts and 1 is shaded, the fraction shaded is 1/4. The bottom number tells how many equal parts, and the top number is 1. It builds on splitting shapes into equal shares and on division as equal sharing. Next come fractions made of several of those pieces, and comparing fractions with the same top number."
+  },
+  "volume_by_layers": {
+    "gist": "Find how many unit cubes fill a box when you know the cubes in one layer and the layer count.",
+    "about": "A box filled with cubes is a stack of identical layers. If one layer holds 10 cubes and there are 3 layers, the volume is 3 groups of 10, or 30 cubes. Each problem shows a box, gives the cubes in one layer and the number of layers, and asks for the total. Children usually meet this after counting unit cubes to measure volume and finding the area of a rectangle. It leads to the volume formula for a rectangular prism."
+  },
+  "volume_composite_prisms": {
+    "gist": "Find the volume of a solid made by joining two boxes, using its side view.",
+    "about": "Some solids look like an L or a step, but they are two boxes stuck together. Find the volume of each box, then add. Each problem shows a side view of two joined boxes with a given depth and asks for the total volume in cubic centimeters. A child needs two things first: volume stays the same when pieces are moved, and how to find the volume of one rectangular prism."
+  },
+  "volume_conservation": {
+    "gist": "Know that rearranging the same cubes into a new solid leaves the volume unchanged.",
+    "about": "Take 12 cubes, build a tower, then knock it over and build a flat slab. You still have 12 cubes, so the volume is still 12 cubic units. Each problem says how many cubes were rearranged with none added or removed and asks which statement must be true. Before this, a child measures volume by counting unit cubes. Afterward comes finding the volume of a solid made of two rectangular prisms."
+  },
+  "volume_fractional_edges": {
+    "gist": "Find the volume of a box whose edge lengths are fractions or decimals.",
+    "about": "The volume formula for a box stays the same when the edges are not whole numbers: length × width × height. A box 2.5 m by 3 m by 1.5 m has volume 2.5 × 3 × 1.5 = 11.25 cubic meters. Each problem shows a box and asks for its volume in cubic meters. A child needs the volume of a rectangular prism first, along with multiplying fractions and multiplying decimals."
+  },
+  "volume_rectangular_prism": {
+    "gist": "Find the volume of a box shape by multiplying its length, width, and height.",
+    "about": "Volume is the amount of space inside a box, measured in cubic units. Multiply length by width to get the area of the bottom layer, then multiply by the height. A box 4 cm by 6 cm by 4 cm holds 4 × 6 × 4 = 96 cubic centimeters. Each problem shows a box and asks for its volume in cubic centimeters. It builds on counting equal layers of cubes, and leads to solids made of two boxes and to finding a missing edge."
+  },
+  "volume_unit_cubes": {
+    "gist": "Find how many unit cubes it takes to fill a box-shaped solid.",
+    "about": "A prism packed completely with unit cubes has a volume equal to the number of cubes, such as 54. It is the 3D version of covering a rectangle with unit squares. It builds on measuring area by counting unit squares. It leads to seeing that volume stays the same when a solid is rearranged and to finding volume by counting layers of cubes."
+  },
+  "volume_unknown_dimension": {
+    "gist": "Find a box's missing edge length when you know its volume and the other two edges.",
+    "about": "Volume is length × width × height, so a missing edge can be found by dividing. A box with volume 84 cm³, length 4 cm, and width 7 cm has a base of 4 × 7 = 28, and 84 ÷ 28 = 3, so the height is 3 cm. Each problem gives the volume and two edges and asks for the height. It builds on finding the volume of a rectangular prism."
+  },
+  "whole_as_fraction": {
+    "gist": "Write a whole number as a fraction with 1 on the bottom, like 17 = 17/1.",
+    "about": "Every whole number can be written as a fraction over 1, since dividing by 1 changes nothing: 17 = 17/1. Each problem gives a whole number and asks for the top number of the fraction over 1. It builds on placing and reading fractions on a number line. Next comes reading a fraction as division."
+  },
+  "write_numerals_to_20": {
+    "gist": "Write the numeral for a number named in words, or for the number after it, up to 20.",
+    "about": "Writing numerals means putting down the symbols for a number, like 6 for the number after five. Each problem names a number in words, such as twelve or eighteen, and asks for its numeral, or for the numeral of the number after it, which is 19 in the case of eighteen. It builds on counting to 20 by ones. It is the step where counting out loud turns into writing digits."
+  }
+}

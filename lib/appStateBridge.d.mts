@@ -12,24 +12,29 @@ export const APP_STATE_MAX_WRITE_LATENCY_MS: 2_000;
 export const APP_STATE_MAX_LOG_ENTRIES: 30;
 export const APP_STATE_MAX_LOG_CHARS: 300;
 export const RABBITHOLE_APP_STATE_SDK: string;
+export const APP_SNAPSHOT_NODE_FILTER_SOURCE: string;
+export const APP_SNAPSHOT_PAINT_SOURCE: string;
 export const RABBITHOLE_APP_STATE_SDK_BYTES: number;
+export const APP_ACTIVITY_TYPE: "rabbithole:activity";
+export const APP_ACTIVITY_PING_MS: 5_000;
+export const RABBITHOLE_APP_ACTIVITY_SDK: string;
+export const RABBITHOLE_APP_ACTIVITY_SDK_BYTES: number;
+
+/** Someone interacted with the app (throttled in the frame). Carries the
+ *  activity script's own nonce, not the app-state SDK's. */
+export interface AppStateBridgeActivityMessage {
+  type: "rabbithole:activity";
+  nonce: string;
+}
 
 export interface AppStateBridgeReadyMessage {
   type: "ready";
   nonce: string;
 }
 
-export interface AppStateBridgeSharedSelectMessage {
-  type: "sharedSelect";
+export interface AppStateBridgeComposeKeyMessage {
+  type: "composeKey";
   nonce: string;
-  roomId: string;
-}
-
-export interface AppStateBridgeSharedChangeMessage {
-  type: "sharedChange";
-  nonce: string;
-  roomId: string;
-  patch: Record<string, unknown>;
 }
 
 export interface AppStateBridgeActionsMessage {
@@ -90,9 +95,9 @@ export type AppBridgeResponseMessage = {
 );
 
 export type AppStateBridgeMessage =
+  | AppStateBridgeActivityMessage
   | AppStateBridgeReadyMessage
-  | AppStateBridgeSharedSelectMessage
-  | AppStateBridgeSharedChangeMessage
+  | AppStateBridgeComposeKeyMessage
   | AppStateBridgeActionsMessage
   | AppStateBridgeAskTutorMessage
   | AppStateBridgeActionResultMessage
@@ -125,7 +130,6 @@ export function createAppStateHostMessage(
   type: "init" | "update",
   doc: unknown,
   nonce: string,
-  shared?: unknown,
   actionRequest?: unknown,
   characterLine?: CharacterLine | null,
 ): Record<string, unknown>;
@@ -133,7 +137,6 @@ export function appStateHostInjectionScript(
   type: "init" | "update",
   doc: unknown,
   nonce: string,
-  shared?: unknown,
   actionRequest?: unknown,
   characterLine?: CharacterLine | null,
 ): string;
@@ -148,3 +151,6 @@ export function appBridgeResponseInjectionScript(
   payload: AppBridgeResponsePayload<unknown>,
 ): string;
 export function injectAppStateSdk(html: string): string;
+
+export const APP_STATE_DEFAULTS_KEY: "__rhDefaults";
+export function withoutAppStateDefaults<T>(doc: T): T;

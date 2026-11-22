@@ -15,7 +15,7 @@
 // silently dropped: a per-row cap that is hit is reported as `auditIncomplete`.
 //
 // Invariants (severity in brackets):
-//   scholarParticipantCount    [error] mentor/workshop thread without exactly
+//   scholarParticipantCount    [error] scholar thread without exactly
 //                              one scholar-side participant
 //   strayScholarSide           [error] a scholar-side participant who is not
 //                              the thread's scholar
@@ -39,10 +39,13 @@ import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, type QueryCtx } from "./_generated/server";
 import {
+  aboutThreadInstitutionId,
   isPlatformAdminUser,
   scholarThreadInstitutionId,
   teachesAtInstitution,
+  threadFlavor,
   threadKind,
+  type ThreadKind,
 } from "./lib/scholarThreadAccess";
 import { mentorCoversScholar } from "./lib/staffCapabilities";
 import { isRetractedMessage } from "./parentMessages";
@@ -63,7 +66,7 @@ export type MessageAccessViolation = {
   invariant: MessageAccessInvariant;
   severity: "error" | "warn" | "info";
   threadId: Id<"parentThreads">;
-  kind: "family" | "mentor" | "workshop";
+  kind: ThreadKind;
   /** Ids only — never names or message text. */
   detail: Record<string, string | number>;
 };
@@ -105,6 +108,7 @@ async function auditThreadHeader(
   report: Report,
 ): Promise<number> {
   const kind = threadKind(thread);
+  const flavor = threadFlavor(thread);
   const rows = await ctx.db
     .query("parentThreadParticipants")
     .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
@@ -133,10 +137,10 @@ async function auditThreadHeader(
         ((await isPlatformAdminUser(ctx, staff)) ||
           (!!thread.institutionId &&
             (await teachesAtInstitution(ctx, staff._id, thread.institutionId))) ||
-          (kind === "mentor" && (await mentorCoversScholar(ctx, staff, scholar))));
+          (flavor === "general" && (await mentorCoversScholar(ctx, staff, scholar))));
       if (!standing) report("namedStaffWithoutStanding", { userId: row.parentUserId });
     }
-    if (kind === "workshop" && thread.suggestionId) {
+    if (flavor === "workshop" && thread.suggestionId) {
       const suggestion = await ctx.db.get(thread.suggestionId);
       if (suggestion && suggestion.scholarId !== thread.scholarId) {
         report("suggestionScholarMismatch", {
@@ -149,7 +153,11 @@ async function auditThreadHeader(
 
   if (scholar && thread.institutionId) {
     const current =
-      kind === "family" ? scholar.institutionId ?? null : await scholarThreadInstitutionId(ctx, scholar);
+      kind === "family"
+        ? scholar.institutionId ?? null
+        : flavor === "about"
+          ? await aboutThreadInstitutionId(ctx, scholar)
+          : await scholarThreadInstitutionId(ctx, scholar);
     if (current !== thread.institutionId) {
       report("transferredHistory", {
         stampedInstitutionId: thread.institutionId,

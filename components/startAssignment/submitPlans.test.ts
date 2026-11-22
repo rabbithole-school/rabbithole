@@ -21,10 +21,8 @@ const baseTeacher: TeacherAssignmentInputs = {
   pickedActivityId: undefined,
   targetKind: "unit",
   isSingleActivity: false,
-  deliverNow: true,
-  mode: "classFocus",
-  durationMin: 60,
-  dueAt: "2026-10-01T09:00",
+  deliverNow: false,
+  finish: { kind: "by", dayKey: "2026-10-02" },
   scholarSel: new Set(["kai", "lani"]),
   effectiveForSel: null,
   startsMs: 1_000,
@@ -35,16 +33,17 @@ const baseTeacher: TeacherAssignmentInputs = {
 };
 
 describe("buildTeacherAssignmentPlan", () => {
-  test("whole unit: plans assignWork with a unit target, no push/budget", () => {
+  test("whole unit: plans assignWork with a unit target and the finish, no push/budget", () => {
     const plan = buildTeacherAssignmentPlan(baseTeacher);
     expect(plan.assignWork).toEqual({
       unitId: id<"units">("unit_1"),
       scholarIds: ["kai", "lani"],
-      startsAt: 1_000, // not liveNow → scheduled startsMs, not `now`
+      startsAt: 1_000, // shows up later → the chosen time, not `now`
       target: { kind: "unit" },
+      finish: { kind: "by", dayKey: "2026-10-02" },
     });
     expect(plan.worldBudget).toBeNull();
-    expect(plan.pushActivity).toBeNull();
+    expect(plan.liveNow).toBe(false);
   });
 
   test("whole lesson: lesson target carries the picked lesson id", () => {
@@ -57,63 +56,49 @@ describe("buildTeacherAssignmentPlan", () => {
       kind: "lesson",
       lessonId: id<"lessons">("lesson_9"),
     });
-    expect(plan.pushActivity).toBeNull();
+    expect(plan.liveNow).toBe(false);
   });
 
-  test("single activity, start now, classFocus: live push from `now`", () => {
+  test("single activity, shows up now, in that class: live push from `now`", () => {
     const plan = buildTeacherAssignmentPlan({
       ...baseTeacher,
       targetKind: "activity",
       isSingleActivity: true,
       deliverNow: true,
-      mode: "classFocus",
-      durationMin: 45,
+      finish: { kind: "inClass" },
       pickedActivityId: id<"activities">("act_7"),
     });
-    expect(plan.assignWork.startsAt).toBe(500); // liveNow → measured from now
+    expect(plan.assignWork.startsAt).toBe(500);
     expect(plan.assignWork.target).toEqual({
       kind: "activity",
       activityId: id<"activities">("act_7"),
-      mode: "classFocus",
-      endsAt: 500 + 45 * 60_000,
-      dueAt: undefined,
     });
-    expect(plan.pushActivity).toEqual({
-      activityId: id<"activities">("act_7"),
-      mode: "classFocus",
-      endsAt: 500 + 45 * 60_000,
-    });
+    expect(plan.assignWork.finish).toEqual({ kind: "inClass" });
+    // One write: assignWork makes it live; no second push.
+    expect(plan.liveNow).toBe(true);
+    expect(plan.liveScholarCount).toBe(2);
   });
 
-  test("single activity, scheduled, homework: no push, dueAt from string", () => {
+  test("single activity, shows up later, by a date: no push", () => {
     const plan = buildTeacherAssignmentPlan({
       ...baseTeacher,
       targetKind: "activity",
       isSingleActivity: true,
       deliverNow: false,
-      mode: "homework",
-      dueAt: "2026-10-05T15:30",
+      finish: { kind: "by", dayKey: "2026-10-05" },
       pickedActivityId: id<"activities">("act_7"),
     });
-    const dueMs = new Date("2026-10-05T15:30").getTime();
     expect(plan.assignWork.startsAt).toBe(1_000);
-    expect(plan.assignWork.target).toEqual({
-      kind: "activity",
-      activityId: id<"activities">("act_7"),
-      mode: "homework",
-      endsAt: undefined,
-      dueAt: dueMs,
-    });
-    expect(plan.pushActivity).toBeNull();
+    expect(plan.assignWork.finish).toEqual({ kind: "by", dayKey: "2026-10-05" });
+    expect(plan.liveNow).toBe(false);
   });
 
-  test("a proper subset 'For' selection narrows scholarIds on target + push", () => {
+  test("a proper subset 'For' selection narrows scholarIds on the target", () => {
     const plan = buildTeacherAssignmentPlan({
       ...baseTeacher,
       targetKind: "activity",
       isSingleActivity: true,
       deliverNow: true,
-      mode: "classFocus",
       scholarSel: new Set(["kai", "lani", "mika"]),
       effectiveForSel: new Set(["kai"]),
       pickedActivityId: id<"activities">("act_7"),
@@ -121,7 +106,7 @@ describe("buildTeacherAssignmentPlan", () => {
     expect(
       (plan.assignWork.target as { scholarIds?: Id<"users">[] }).scholarIds,
     ).toEqual(["kai"]);
-    expect(plan.pushActivity?.scholarIds).toEqual(["kai"]);
+    expect(plan.liveScholarCount).toBe(1);
   });
 
   test("a full 'For' selection is not treated as a subset (no scholarIds)", () => {
@@ -135,7 +120,7 @@ describe("buildTeacherAssignmentPlan", () => {
       pickedActivityId: id<"activities">("act_7"),
     });
     expect(plan.assignWork.target).not.toHaveProperty("scholarIds");
-    expect(plan.pushActivity).not.toHaveProperty("scholarIds");
+    expect(plan.liveScholarCount).toBe(2);
   });
 
   test("a World target with a valid budget plans the per-scholar budget", () => {

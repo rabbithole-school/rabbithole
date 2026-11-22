@@ -18,6 +18,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useMutation } from "convex/react";
 
 import { api, type Id } from "@/lib/convex";
+import { NO_MIC, useVoiceKeyTarget } from "@/lib/voiceKey";
 import { fonts, useColors } from "@/theme";
 import type { SimulatorSceneV1, SimulatorSpec } from "../../../vendor/simulator/contract";
 import { ecosystemBiome } from "../../../vendor/simulator/ecosystemTerrainTiles";
@@ -77,6 +78,9 @@ export function WorkbenchScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [tutorOpen, setTutorOpen] = useState(false);
+  // ⌘/ (src/lib/voiceKey.ts) opens the sideline tutor ready to type. Its
+  // composer has no mic, so the voice key does nothing here.
+  const [tutorFocusRequest, setTutorFocusRequest] = useState(0);
   const [speciesIcons, setSpeciesIcons] = useState<Record<string, string | undefined>>({});
   const addSpecies = useMutation(api.simulatorBenches.addSpeciesToBench);
 
@@ -118,6 +122,19 @@ export function WorkbenchScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     const parsed: unknown = JSON.parse(renderSpecJson);
     return parsed ? (parsed as SimulatorSpec) : undefined;
   }, [renderSpecJson]);
+  // Registered once the bench renders below; before that the sheet isn't
+  // mounted, and opening it then would leave it stranded off screen.
+  const benchReady = !isLoading && !!bench && !!simulatorSpec && !!renderSpec;
+  useVoiceKeyTarget(
+    {
+      ...NO_MIC,
+      compose: () => {
+        setTutorOpen(true);
+        setTutorFocusRequest((n) => n + 1);
+      },
+    },
+    benchReady,
+  );
   const maxTick = selectedRun?.latestCommittedTick ?? 0;
   const rendererFamily = renderSpec ? getWorkbenchRendererFamily(renderSpec.templateId) : null;
   // The engine is still producing days (so the live head is "next day baking",
@@ -223,7 +240,7 @@ export function WorkbenchScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     return (
       <SafeAreaView style={[styles.loading, { backgroundColor: colors.bg }]} edges={["bottom"]}>
         <ActivityIndicator size="large" color={colors.violet} />
-        <Text style={[styles.loadingText, { color: colors.fgMuted }]}>opening the bench…</Text>
+        <Text style={[styles.loadingText, { color: colors.fgMuted }]}>Opening the bench…</Text>
       </SafeAreaView>
     );
   }
@@ -453,6 +470,7 @@ export function WorkbenchScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
         sessionId={sessionId}
         open={tutorOpen}
         onClose={() => setTutorOpen(false)}
+        focusRequest={tutorFocusRequest}
       />
     </SafeAreaView>
   );

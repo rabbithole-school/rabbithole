@@ -13,6 +13,7 @@ export const APP_KIT_V2_SCRIPT_FILES = [
   "math.min.js",
   "three.iife.min.js",
   "rh-expression-editor.js",
+  "highlight-python.min.js",
 ] as const;
 
 export const APP_KIT_STYLESHEET_FILES = [
@@ -38,6 +39,7 @@ export const APP_KIT_V2_FILES = [
   "three.iife.min.js",
   "rh-expression-editor.js",
   "rh-expression-editor.css",
+  "highlight-python.min.js",
 ] as const;
 export const APP_KIT_FILES = [
   ...APP_KIT_V1_FILES,

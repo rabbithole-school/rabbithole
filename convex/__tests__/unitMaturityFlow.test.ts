@@ -111,8 +111,8 @@ describe("unitReviews.recordInternal — the bot tool's writer", () => {
     );
 
     const asTeacher = await withUser(t, teacher);
-    const m = await asTeacher.query(api.unitMaturity.getForUnit, { unitId });
-    expect(m.stages[1].done).toBe(true);
+    const statuses = await asTeacher.query(api.unitMaturity.getNodeStatuses, { unitId });
+    expect(statuses.readiness.unit.steps[1].state).toBe("done");
     const review = await asTeacher.query(api.unitReviews.latestForUnit, { unitId });
     expect(review?.openGapCount).toBe(0);
     expect((review?.summary as { note?: string })?.note).toBe("all EQs covered");
@@ -134,33 +134,33 @@ describe("unitReviews.recordInternal — the bot tool's writer", () => {
   });
 });
 
-describe("unitMaturity.getForUnit — rolls up real data", () => {
-  test("built-but-unreviewed unit sits at Draft, frontier=reviewed", async () => {
+describe("unitMaturity.getNodeStatuses — unit Readiness rolls up real data", () => {
+  test("built-but-unreviewed unit is Built, frontier=heuristic review", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", { username: "t3" });
     const unitId = await seedBuiltUnit(t, teacher);
     const asTeacher = await withUser(t, teacher);
 
-    const m = await asTeacher.query(api.unitMaturity.getForUnit, { unitId });
-    expect(m.stages[0].done).toBe(true); // Draft built
-    expect(m.frontierStageId).toBe("reviewed");
-    expect(m.completeness.completed).toBe(7);
+    const { readiness } = await asTeacher.query(api.unitMaturity.getNodeStatuses, { unitId });
+    expect(readiness.unit.steps[0].state).toBe("done"); // all 7 essentials
+    expect(readiness.unit.frontierStepId).toBe("heuristicReview");
   });
 
-  test("recording a clean review advances to Reviewed", async () => {
+  test("recording a clean review clears the heuristic review", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", { username: "t4" });
     const unitId = await seedBuiltUnit(t, teacher);
     const asTeacher = await withUser(t, teacher);
 
     await asTeacher.mutation(api.unitReviews.record, { unitId, openGapCount: 0 });
-    const m = await asTeacher.query(api.unitMaturity.getForUnit, { unitId });
-    expect(m.stages[1].done).toBe(true);
-    expect(m.currentStageId).toBe("reviewed");
-    expect(m.frontierStageId).toBe("rehearsed");
+    const { readiness } = await asTeacher.query(api.unitMaturity.getNodeStatuses, { unitId });
+    expect(readiness.unit.steps[1].state).toBe("done");
+    // No online activities yet, so the rehearsal step is n/a and the unit is Ready.
+    expect(readiness.unit.steps[2].state).toBe("na");
+    expect(readiness.unit.ready).toBe(true);
   });
 
-  test("a passing rehearsal on the unit's only online activity earns Rehearsed", async () => {
+  test("a passing rehearsal on the unit's only online activity clears the rehearsal", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", { username: "t5" });
     const unitId = await seedBuiltUnit(t, teacher);
@@ -189,9 +189,70 @@ describe("unitMaturity.getForUnit — rolls up real data", () => {
 
     const asTeacher = await withUser(t, teacher);
     await asTeacher.mutation(api.unitReviews.record, { unitId, openGapCount: 0 });
-    const m = await asTeacher.query(api.unitMaturity.getForUnit, { unitId });
-    expect(m.stages[2].done).toBe(true);
-    expect(m.currentStageId).toBe("rehearsed");
-    expect(m.stages[2].detail).toBe("1/1 activities");
+    const { readiness } = await asTeacher.query(api.unitMaturity.getNodeStatuses, { unitId });
+    expect(readiness.unit.steps[2].state).toBe("done");
+    expect(readiness.unit.steps[2].detail).toBe("1/1 activities");
+    expect(readiness.unit.ready).toBe(true);
+  });
+});
+
+// Carl's rule: when a class finishes a unit, archive the run and keep the unit
+// for the next teacher. Archiving must not cost the unit the record of having
+// been taught.
+describe("a unit whose runs are all archived keeps its record", () => {
+  test("Sessions still counts the archived run's work, and Readiness is unchanged", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", { username: "t6" });
+    const scholar = await seedUser(t, "scholar", { username: "s6" });
+    const unitId = await seedBuiltUnit(t, teacher);
+    const { activityId, assignmentId } = await t.run(async (ctx) => {
+      const lesson = await ctx.db
+        .query("lessons")
+        .withIndex("by_unit", (q) => q.eq("unitId", unitId))
+        .first();
+      const activityId = await ctx.db.insert("activities", {
+        lessonId: lesson!._id,
+        title: "Build a model",
+        kind: "online",
+        systemPrompt: "p",
+        order: 0,
+      });
+      const assignmentId = await ctx.db.insert("assignments", {
+        teacherId: teacher,
+        unitId,
+        scholarIds: [scholar],
+        startedAt: Date.now() - 7 * 86_400_000,
+      });
+      await ctx.db.insert("sessions", {
+        userId: scholar,
+        unitId,
+        lessonId: lesson!._id,
+        activityId,
+        assignmentId,
+        title: "Build a model",
+        isArchived: false,
+        activityCompletedAt: Date.now() - 6 * 86_400_000,
+      });
+      return { activityId, assignmentId };
+    });
+    const asTeacher = await withUser(t, teacher);
+    await asTeacher.mutation(api.unitReviews.record, { unitId, openGapCount: 0 });
+
+    const before = {
+      statuses: await asTeacher.query(api.unitMaturity.getNodeStatuses, { unitId }),
+      sessions: await asTeacher.query(api.activitySessions.getForUnit, { unitId }),
+    };
+    expect(before.sessions.unit.completeCount).toBe(1);
+
+    await t.run(async (ctx) => ctx.db.patch(assignmentId, { archivedAt: Date.now() }));
+
+    const after = {
+      statuses: await asTeacher.query(api.unitMaturity.getNodeStatuses, { unitId }),
+      sessions: await asTeacher.query(api.activitySessions.getForUnit, { unitId }),
+    };
+    expect(after.sessions.unit.completeCount).toBe(1);
+    expect(after.sessions.unit).toEqual(before.sessions.unit);
+    expect(after.statuses.readiness.unit).toEqual(before.statuses.readiness.unit);
+    expect(after.statuses.activitiesAssigned[String(activityId)]).toBe(true);
   });
 });

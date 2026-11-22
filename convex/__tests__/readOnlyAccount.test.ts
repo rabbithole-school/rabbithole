@@ -2,6 +2,8 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
+import { ConvexError } from "convex/values";
+import { READ_ONLY_ACCOUNT_ERROR } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
 import { makeWorld, type WorldSchool } from "./factories/world";
 
@@ -59,6 +61,14 @@ describe("read-only identity (users.readOnly)", () => {
     await expect(
       asTeacher.mutation(api.scholars.updateReadingLevel, { scholarId, readingLevel: "4" }),
     ).rejects.toThrow(READ_ONLY);
+
+    // TRA-506: a ConvexError, so the message reaches the client on prod
+    // (plain Error messages are redacted to "Server Error").
+    const refusal = await asTeacher
+      .mutation(api.scholars.updateReadingLevel, { scholarId, readingLevel: "4" })
+      .catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ConvexError);
+    expect((refusal as ConvexError<string>).data).toBe(READ_ONLY_ACCOUNT_ERROR);
 
     const scholar = await t.run((ctx) => ctx.db.get(scholarId));
     expect(scholar?.readingLevel).toBe("3");
@@ -133,8 +143,13 @@ describe("read-only identity (users.readOnly)", () => {
       READ_ONLY,
     );
     // Action gated by a central action auth helper (requireStaffAction).
-    await expect(
-      asTeacher.action(api.googleAccountsActions.disconnect, {}),
-    ).rejects.toThrow(READ_ONLY);
+    // TRA-506: this one runs assertWritableAction, which must throw a
+    // ConvexError so the message survives prod redaction (a plain Error
+    // reaches a read-only teacher as "Server Error").
+    const actionRefusal = await asTeacher
+      .action(api.googleAccountsActions.disconnect, {})
+      .catch((e: unknown) => e);
+    expect(actionRefusal).toBeInstanceOf(ConvexError);
+    expect((actionRefusal as ConvexError<string>).data).toBe(READ_ONLY_ACCOUNT_ERROR);
   });
 });

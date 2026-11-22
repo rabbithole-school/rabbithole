@@ -68,6 +68,8 @@ import {
   type SlidesEditorNativeHandle,
 } from "./SlidesEditorNative";
 import { SlidesPresentationNative } from "./SlidesPresentationNative";
+import { SlidesTalkNative } from "./SlidesTalkNative";
+import { chooseHowToPresent, type PresentChoice } from "@/components/talk/presentChoice";
 import {
   SlidesViewToggleNative,
   type SlidesViewMode,
@@ -84,6 +86,10 @@ export function SlidesDeliverable({
   const insets = useSafeAreaInsets();
   const scratchpadInset = useScratchpadInset();
   const artifacts = useQuery(api.artifacts.getBySession, { sessionId });
+  // The slide clipboard belongs to the signed-in user, and only an editable
+  // deck (its owner's) offers Copy and Paste.
+  const me = useQuery(api.users.currentUser, readOnly ? "skip" : {});
+  const clipboardOwnerId = me?._id ?? null;
   // The deck's artifact id, readable from async work that outlives a render —
   // a picture that finishes after the editor closed still needs somewhere to go.
   const artifactRef = useRef<Id<"artifacts"> | null>(null);
@@ -99,7 +105,7 @@ export function SlidesDeliverable({
   const [editorOpen, setEditorOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [slideIndex, setSlideIndex] = useState(0);
-  const [presenting, setPresenting] = useState(false);
+  const [presenting, setPresenting] = useState<PresentChoice | null>(null);
   const [editorView, setEditorView] = useState<SlidesViewMode>("slide");
   const ensuring = useRef(false);
   const exportInFlight = useRef(false);
@@ -630,16 +636,18 @@ export function SlidesDeliverable({
 
   const presentDeck = useCallback(() => {
     void (async () => {
+      const choice = await chooseHowToPresent("Present slides", SLIDES_COPY.present);
+      if (!choice) return;
       const saved = (await editorRef.current?.commitPendingEdit()) ?? true;
       if (!saved) return;
       scratchpadBus.close();
       setEditorVisible(false);
-      setPresenting(true);
+      setPresenting(choice);
     })();
   }, [setEditorVisible]);
 
   const exitPresentation = useCallback(() => {
-    setPresenting(false);
+    setPresenting(null);
     if (!readOnly) setEditorVisible(true);
   }, [readOnly, setEditorVisible]);
 
@@ -782,6 +790,7 @@ export function SlidesDeliverable({
                 resolveAsset={resolveAsset}
                 onAddMedia={onAddMedia}
                 onAddSketch={onAddSketch}
+                clipboardOwnerId={clipboardOwnerId}
               />
             </Animated.View>
             {makePictureOpen && (
@@ -815,15 +824,27 @@ export function SlidesDeliverable({
         onRequestClose={exitPresentation}
         presentationStyle="fullScreen"
         supportedOrientations={["landscape", "landscape-left", "landscape-right"]}
-        visible={presenting}
+        visible={presenting !== null}
       >
-        <SlidesPresentationNative
-          deck={deck}
-          slideIndex={slideIndex}
-          onSlideIndexChange={setSlideIndex}
-          onExit={exitPresentation}
-          resolveAsset={resolveAsset}
-        />
+        {presenting && artifact ? (
+          <SlidesTalkNative
+            deck={deck}
+            deckKey={artifact._id}
+            mode={presenting}
+            slideIndex={presenting === "present" ? slideIndex : undefined}
+            onSlideIndexChange={presenting === "present" ? setSlideIndex : undefined}
+            onExit={exitPresentation}
+            resolveAsset={resolveAsset}
+          />
+        ) : (
+          <SlidesPresentationNative
+            deck={deck}
+            slideIndex={slideIndex}
+            onSlideIndexChange={setSlideIndex}
+            onExit={exitPresentation}
+            resolveAsset={resolveAsset}
+          />
+        )}
       </Modal>
     </>
   );

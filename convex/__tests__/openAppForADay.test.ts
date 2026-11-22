@@ -7,6 +7,7 @@ import type { Id } from "../_generated/dataModel";
 import { MANAGED_NATIVE_APPS } from "../lib/managedNativeApps";
 import { scheduleWeekStartMs } from "../../shared/scheduleWeek";
 import {
+  seedOperationsStaff,
   seedScholarInInstitution,
   seedStaffWithMembership,
   seedTestInstitution,
@@ -630,5 +631,124 @@ describe("the device console — when the app opens, and until when", () => {
     expect(await panel()).toMatchObject([{ appId: w.appId, direct: true, directThroughDay: "2026-09-28" }]);
     vi.setSystemTime(TUESDAY_MIDNIGHT);
     expect(await panel()).toEqual([]);
+  });
+});
+
+// TRA-448: the staff aide reads the same two facts the console does, and says
+// them in its results — an end on a direct add, and the blocks that open a
+// block-scoped app — so it never relays a day's opening as standing access or
+// a closed block as a missing grant.
+describe("the staff aide — when opened access ends, and which blocks open it", () => {
+  const roster = (w: World, now = Date.now()) =>
+    w.asTeacher.query(internal.appAudiences.aideGetAppAccess, {
+      callerUserId: w.teacherId,
+      appName: "LEGO SPIKE",
+      now,
+    });
+
+  test("the app-wide roster gives an opened add's last day, and drops it at its end", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const target = { scholarId: w.scholarId, appId: w.appId };
+    await w.asTeacher.mutation(api.scholarApps.openForScholar, { ...target, throughDay: "2026-09-30" });
+    expect((await roster(w)).scholars).toMatchObject([
+      { username: "kai-open", enabled: true, throughDay: "2026-09-30" },
+    ]);
+
+    // Past the end, before the expiry job has removed the row.
+    const END = hst("2026-10-01T00:00:00");
+    vi.setSystemTime(END);
+    expect((await roster(w, END - 1)).scholars).toHaveLength(1);
+    expect((await roster(w, END)).scholars).toEqual([]);
+
+    await w.asTeacher.mutation(api.scholarApps.addToScholar, target);
+    expect((await roster(w)).scholars).toMatchObject([{ username: "kai-open", throughDay: null }]);
+  });
+
+  test("the aide's enable says when a kept end runs out, and nothing once the add is standing", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const enable = () =>
+      t.mutation(internal.scholarApps.aideSetScholarAccess, {
+        callerUserId: w.teacherId,
+        appName: "LEGO SPIKE",
+        scholarQuery: "kai-open",
+        enabled: true,
+      });
+    await w.asTeacher.mutation(api.scholarApps.openForScholar, { scholarId: w.scholarId, appId: w.appId });
+    expect(await enable()).toMatchObject({ enabled: true, throughDay: "2026-09-28" });
+    vi.setSystemTime(TUESDAY_MIDNIGHT);
+    expect(await enable()).toMatchObject({ enabled: true, throughDay: null });
+  });
+
+  test("list_managed_devices passes the console's blocks and the grant's last day", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const opsId = await seedOperationsStaff(t, { institutionId: w.institutionId, username: "hoku-ops" });
+    await t.run(async (ctx) => {
+      const term = await ctx.db.insert("reportingPeriods", {
+        label: "Fall 2026",
+        startsAt: Date.now() - 30 * DAY,
+        endsAt: Date.now() + 90 * DAY,
+        status: "open",
+        institutionId: w.institutionId,
+      });
+      const blockId = await ctx.db.insert("scheduleBlocks", {
+        periodId: term,
+        key: "blockE",
+        label: "Block E",
+        startLocal: "15:05",
+        endLocal: "16:30",
+        weekdays: [1, 2, 3, 4, 5],
+        order: 0,
+        kind: "class",
+      });
+      await ctx.db.insert("schedulePlacements", {
+        periodId: term,
+        groupId: w.groupId,
+        weekday: 1,
+        blockId,
+        subject: "Robotics",
+        teacherId: w.teacherId,
+        externalAppId: w.appId,
+      });
+    });
+    const spike = async () => {
+      const r = await t.query(internal.managedDeviceClaims.listForAgent, { callerUserId: opsId });
+      if (!r.ok) throw new Error(r.message);
+      return r.devices[0].appAccess.find((a) => a.key === "lego-spike")!;
+    };
+    // Block-scoped and outside its window: "grant", with the block that opens it.
+    expect(await spike()).toMatchObject({
+      blocker: "grant",
+      grantThroughDay: null,
+      schedule: [{ subject: "Robotics", block: "Block E", weekdays: [1], opensLocal: "14:50", closesLocal: "16:40" }],
+    });
+    await w.asTeacher.mutation(api.scholarApps.openForScholar, { scholarId: w.scholarId, appId: w.appId });
+    expect(await spike()).toMatchObject({ granted: true, grantThroughDay: "2026-09-28" });
+  });
+
+  test("get_audit_log shows an add's end, and an expiry as no one removing it", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const opened = await w.asTeacher.mutation(api.scholarApps.openForScholar, {
+      scholarId: w.scholarId,
+      appId: w.appId,
+    });
+    vi.setSystemTime(TUESDAY_MIDNIGHT);
+    await t.mutation(internal.scholarApps.expireDirectGrant, {
+      scholarAppId: opened.scholarAppId,
+      expiresAt: TUESDAY_MIDNIGHT,
+    });
+    const log = await t.query(internal.auditLog.aideListAuditLog, {
+      callerUserId: w.teacherId,
+      actionPrefix: "app-grant.scholar",
+      now: Date.now(),
+    });
+    const details = log.entries.map((e) => e.detail);
+    expect(details).toContain("app LEGO SPIKE; none → on; ends 2026-09-29, 00:00; via ui");
+    expect(details).toContain(
+      "app LEGO SPIKE; on → removed; reached its end 2026-09-29, 00:00; via expiry (ended on its own; no one removed it)",
+    );
   });
 });

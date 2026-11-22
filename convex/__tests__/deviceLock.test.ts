@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import schema from "../schema";
+import { READ_ONLY_ACCOUNT_ERROR } from "../lib/auth";
 import {
   applyCommandToRows,
   resolveManagedSerialsForRows,
@@ -1228,19 +1229,55 @@ describe("Freeze Mode", () => {
     ).toMatchObject({ desiredState: "armed" });
   });
 
+  test("an agent can freeze to an exact end up to 96 hours away", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, pairedDeviceId } = await seedOne(t);
+    const freeze = (args: { minutes?: number; untilMs?: number }) =>
+      t.mutation(internal.deviceLock.freezeFromAgent, {
+        callerUserId: teacherId,
+        source: "slack" as const,
+        pairedDeviceIds: [pairedDeviceId],
+        frozen: true,
+        ...args,
+      });
+    const now = Date.now();
+    const hour = 3_600_000;
+
+    const atCap = now + 96 * hour;
+    const frozen = await freeze({ untilMs: atCap });
+    expect(frozen.ok).toBe(true);
+    expect(frozen.message).toContain("1 iPad frozen until ");
+    expect((await t.run((ctx) => ctx.db.get(pairedDeviceId)))?.freezeUntil).toBe(
+      atCap,
+    );
+
+    for (const untilMs of [now + 96 * hour + 60_000, now + 60_000, now - hour, atCap + 0.5]) {
+      const refused = await freeze({ untilMs });
+      expect(refused.ok).toBe(false);
+      expect(refused.message).toMatch(/between 5 minutes and 96 hours/);
+    }
+    expect(await freeze({ minutes: 60, untilMs: now + hour })).toMatchObject({
+      ok: false,
+      message: expect.stringMatching(/not both/),
+    });
+    expect((await t.run((ctx) => ctx.db.get(pairedDeviceId)))?.freezeUntil).toBe(
+      atCap,
+    );
+  });
+
   test("rejects out-of-range minutes and devices outside the caller's school", async () => {
     const t = convexTest(schema, modules);
     const a = await seedOne(t, "school-a");
     const b = await seedOne(t, "school-b");
     const asTeacherA = await withUser(t, a.teacherId);
-    for (const minutes of [undefined, 4, 481, 12.5]) {
+    for (const minutes of [undefined, 4, 5761, 12.5]) {
       await expect(
         asTeacherA.mutation(api.deviceLock.setFreezeMode, {
           pairedDeviceId: a.pairedDeviceId,
           frozen: true,
           minutes,
         }),
-      ).rejects.toThrow(/between 5 and 480/);
+      ).rejects.toThrow(/between 5 and 5760/);
     }
     await expect(
       asTeacherA.mutation(api.deviceLock.setFreezeMode, {
@@ -1278,7 +1315,7 @@ describe("Freeze Mode", () => {
       minutes: 20,
     });
     expect(frozen).toMatchObject({ ok: true, changedCount: 2 });
-    expect(frozen.message).toMatch(/2 iPads frozen for 20 minutes/);
+    expect(frozen.message).toMatch(/2 iPads frozen until /);
 
     const badMinutes = await t.mutation(internal.deviceLock.freezeFromAgent, {
       callerUserId: teacherId,
@@ -1303,5 +1340,522 @@ describe("Freeze Mode", () => {
       frozen: false,
     });
     expect(thawed).toMatchObject({ ok: true, changedCount: 1, message: "1 iPad unfrozen." });
+  });
+});
+
+describe("Guardian freeze", () => {
+  async function seedGuardian(
+    t: TestHarness,
+    scholarId: Id<"users">,
+    createdBy: Id<"users">,
+    name = "Test parent",
+    role: "parent" | StaffRole = "parent",
+    institutionId?: Id<"institutions">,
+  ) {
+    const guardianId =
+      role === "parent"
+        ? await t.run((ctx) =>
+          ctx.db.insert("users", {
+            name,
+            username: name.toLowerCase().replaceAll(" ", "-"),
+            role: "parent" as const,
+          }),
+        )
+        : await seedUser(t, role, institutionId, name);
+    await t.run((ctx) =>
+      ctx.db.insert("guardianships", {
+        parentUserId: guardianId,
+        scholarUserId: scholarId,
+        createdBy,
+      }),
+    );
+    return guardianId;
+  }
+
+  async function seedFamily(t: TestHarness, slug = "moli") {
+    const institutionId = await seedInstitution(t, slug);
+    const teacherId = await seedUser(t, "teacher", institutionId, `${slug} teacher`);
+    const scholarId = await seedUser(t, "scholar", institutionId, `${slug} Kai`);
+    const pairedDeviceId = await seedDevice(
+      t,
+      institutionId,
+      scholarId,
+      teacherId,
+      `ipad-${slug}`,
+    );
+    const parentId = await seedGuardian(t, scholarId, teacherId, `${slug} parent`);
+    return { institutionId, teacherId, scholarId, pairedDeviceId, parentId };
+  }
+
+  const guardianFreeze = (
+    t: TestHarness,
+    guardianUserId: Id<"users">,
+    scholarId: Id<"users">,
+    frozen: boolean,
+    minutes?: number,
+  ) =>
+    t.mutation(internal.deviceLock.freezeFromGuardian, {
+      guardianUserId,
+      scholarId,
+      source: "parent_app" as const,
+      frozen,
+      ...(minutes === undefined ? {} : { minutes }),
+    });
+
+  test("a guardian freezes every paired row for their child, and the device reads family", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-17T20:00:00.000Z"));
+    const t = convexTest(schema, modules);
+    const { institutionId, teacherId, scholarId, pairedDeviceId, parentId } =
+      await seedFamily(t);
+    // A second binding for the same child (a re-paired iPad).
+    const second = await seedDevice(t, institutionId, scholarId, teacherId, "ipad-moli-2");
+
+    expect(
+      await t.query(api.deviceLock.stateForDevice, { deviceId: "ipad-moli" }),
+    ).toMatchObject({ frozenUntil: null, frozenBy: null });
+
+    const result = await guardianFreeze(t, parentId, scholarId, true, 60);
+    const end = Date.parse("2026-10-17T21:00:00.000Z");
+    expect(result).toMatchObject({ ok: true, changedCount: 2, frozenUntil: end });
+    expect(result.message).toMatch(
+      /^moli Kai's 2 BunnyPads will be frozen until .+\. The freeze takes effect once they are connected\.$/,
+    );
+
+    for (const id of [pairedDeviceId, second]) {
+      expect(await t.run((ctx) => ctx.db.get(id))).toMatchObject({
+        freezeUntil: end,
+        freezeUpdatedBy: parentId,
+      });
+    }
+    const device = await t.query(api.deviceLock.stateForDevice, {
+      deviceId: "ipad-moli-2",
+    });
+    expect(device).toMatchObject({ frozenUntil: end, frozenBy: "family" });
+    // Unauthenticated read: no person data rides along with the owner.
+    expect(Object.keys(device!).sort()).toEqual(
+      [
+        "desiredState",
+        "desiredUpdatedAt",
+        "disarmExpiresAt",
+        "disarmMode",
+        "frozenBy",
+        "frozenUntil",
+        "pairedDeviceId",
+        "settingsPath",
+      ].sort(),
+    );
+
+    const audits = await t.run((ctx) =>
+      ctx.db
+        .query("auditLog")
+        .filter((q) => q.eq(q.field("action"), "device.freeze.start"))
+        .collect(),
+    );
+    expect(audits).toHaveLength(2);
+    expect(audits.every((row) => row.detail?.includes("via parent_app"))).toBe(true);
+
+    const status = await t.query(internal.deviceLock.freezeStatusForGuardian, {
+      guardianUserId: parentId,
+    });
+    expect(status.children).toHaveLength(1);
+    expect(status.children[0]).toMatchObject({ scholarId, name: "moli Kai" });
+    expect(status.children[0].devices).toHaveLength(2);
+    expect(
+      status.children[0].devices.every(
+        (row) =>
+          row.frozenUntil === end &&
+          row.frozenBy === "family" &&
+          row.setByYou &&
+          typeof row.frozenUntilLabel === "string",
+      ),
+    ).toBe(true);
+
+    const thawed = await guardianFreeze(t, parentId, scholarId, false);
+    expect(thawed).toMatchObject({ ok: true, changedCount: 2, frozenUntil: null });
+    expect(
+      await t.query(api.deviceLock.stateForDevice, { deviceId: "ipad-moli" }),
+    ).toMatchObject({ frozenUntil: null, frozenBy: null });
+  });
+
+  test("authorization is guardianship, not role: a staff member who is a guardian can freeze", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedInstitution(t, "moli");
+    const teacherId = await seedUser(t, "teacher", institutionId);
+    const scholarId = await seedUser(t, "scholar", institutionId, "Kai");
+    await seedDevice(t, institutionId, scholarId, teacherId, "ipad-kai");
+    const staffParent = await seedGuardian(
+      t,
+      scholarId,
+      teacherId,
+      "Staff parent",
+      "school_admin",
+      institutionId,
+    );
+    expect(await guardianFreeze(t, staffParent, scholarId, true, 30)).toMatchObject({
+      ok: true,
+      changedCount: 1,
+    });
+    expect(
+      await t.query(api.deviceLock.stateForDevice, { deviceId: "ipad-kai" }),
+    ).toMatchObject({ frozenBy: "family" });
+
+    // ...and staff standing alone, without the guardianship, is not enough.
+    const lani = await seedUser(t, "scholar", institutionId, "Lani");
+    await seedDevice(t, institutionId, lani, teacherId, "ipad-lani");
+    expect(await guardianFreeze(t, staffParent, lani, true, 30)).toMatchObject({
+      ok: false,
+      message: "You can only freeze your own child's BunnyPad.",
+    });
+  });
+
+  test("a non-guardian is refused, and another institution's scholar is unreachable", async () => {
+    const t = convexTest(schema, modules);
+    const home = await seedFamily(t, "moli");
+    const away = await seedFamily(t, "kona");
+    // Same school, someone else's child.
+    const lani = await seedUser(t, "scholar", home.institutionId, "Lani");
+    await seedDevice(t, home.institutionId, lani, home.teacherId, "ipad-lani");
+
+    for (const scholarId of [lani, away.scholarId]) {
+      for (const frozen of [true, false]) {
+        expect(
+          await guardianFreeze(t, home.parentId, scholarId, frozen, frozen ? 30 : undefined),
+        ).toEqual({
+          ok: false,
+          message: "You can only freeze your own child's BunnyPad.",
+        });
+      }
+    }
+    const rows = await t.run((ctx) => ctx.db.query("pairedDevices").collect());
+    expect(rows.every((row) => row.freezeUntil === undefined)).toBe(true);
+
+    // The status list names only the guardian's own child.
+    const status = await t.query(internal.deviceLock.freezeStatusForGuardian, {
+      guardianUserId: home.parentId,
+    });
+    expect(status.children.map((child) => child.scholarId)).toEqual([home.scholarId]);
+  });
+
+  test("a staff freeze can't be lifted or replaced by a parent", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-17T20:00:00.000Z"));
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId, pairedDeviceId, parentId } = await seedFamily(t);
+    await (await withUser(t, teacherId)).mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 90,
+    });
+    const end = Date.parse("2026-10-17T21:30:00.000Z");
+    expect(
+      await t.query(api.deviceLock.stateForDevice, { deviceId: "ipad-moli" }),
+    ).toMatchObject({ frozenUntil: end, frozenBy: "school" });
+
+    for (const [frozen, minutes] of [
+      [false, undefined],
+      [true, 30],
+      [true, 240],
+    ] as const) {
+      const refused = await guardianFreeze(t, parentId, scholarId, frozen, minutes);
+      expect(refused.ok).toBe(false);
+      expect(refused.message).toMatch(/^The school froze moli Kai's BunnyPad until /);
+      expect(refused.message).toMatch(/Only the school can change that freeze/);
+    }
+    expect(await t.run((ctx) => ctx.db.get(pairedDeviceId))).toMatchObject({
+      freezeUntil: end,
+      freezeUpdatedBy: teacherId,
+    });
+
+    const status = await t.query(internal.deviceLock.freezeStatusForGuardian, {
+      guardianUserId: parentId,
+    });
+    expect(status.children[0].devices[0]).toMatchObject({
+      frozenUntil: end,
+      frozenBy: "school",
+      setByYou: false,
+    });
+
+    // Once the school's freeze has ended on the clock, it outranks no one,
+    // even before its thaw job has run.
+    vi.setSystemTime(end + 1);
+    expect(await guardianFreeze(t, parentId, scholarId, true, 30)).toMatchObject({
+      ok: true,
+    });
+  });
+
+  test("one school-frozen row blocks the whole request", async () => {
+    const t = convexTest(schema, modules);
+    const { institutionId, teacherId, scholarId, pairedDeviceId, parentId } =
+      await seedFamily(t);
+    const second = await seedDevice(t, institutionId, scholarId, teacherId, "ipad-moli-2");
+    await (await withUser(t, teacherId)).mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId: second,
+      frozen: true,
+      minutes: 60,
+    });
+    const refused = await guardianFreeze(t, parentId, scholarId, true, 30);
+    expect(refused.ok).toBe(false);
+    expect((await t.run((ctx) => ctx.db.get(pairedDeviceId)))?.freezeUntil).toBeUndefined();
+  });
+
+  test("staff override a parent's freeze, and their re-freeze becomes the school's", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId, pairedDeviceId, parentId } = await seedFamily(t);
+    const asTeacher = await withUser(t, teacherId);
+
+    await guardianFreeze(t, parentId, scholarId, true, 60);
+    expect(
+      await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+        pairedDeviceId,
+        frozen: false,
+      }),
+    ).toEqual({ changed: true, frozenUntil: null });
+
+    await guardianFreeze(t, parentId, scholarId, true, 60);
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 15,
+    });
+    expect(
+      await t.query(api.deviceLock.stateForDevice, { deviceId: "ipad-moli" }),
+    ).toMatchObject({ frozenBy: "school" });
+    expect((await guardianFreeze(t, parentId, scholarId, false)).ok).toBe(false);
+
+    // The agent path overrides a family freeze too.
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: false,
+    });
+    await guardianFreeze(t, parentId, scholarId, true, 60);
+    expect(
+      await t.mutation(internal.deviceLock.freezeFromAgent, {
+        callerUserId: teacherId,
+        source: "slack" as const,
+        pairedDeviceIds: [pairedDeviceId],
+        frozen: false,
+      }),
+    ).toMatchObject({ ok: true, changedCount: 1 });
+  });
+
+  test("between two guardians, the latest request wins", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId, pairedDeviceId, parentId } = await seedFamily(t);
+    const otherParent = await seedGuardian(t, scholarId, teacherId, "Other parent");
+
+    await guardianFreeze(t, parentId, scholarId, true, 60);
+    const replaced = await guardianFreeze(t, otherParent, scholarId, true, 10);
+    expect(replaced).toMatchObject({ ok: true, changedCount: 1 });
+    expect(await t.run((ctx) => ctx.db.get(pairedDeviceId))).toMatchObject({
+      freezeUpdatedBy: otherParent,
+    });
+    const status = await t.query(internal.deviceLock.freezeStatusForGuardian, {
+      guardianUserId: parentId,
+    });
+    expect(status.children[0].devices[0]).toMatchObject({
+      frozenBy: "family",
+      setByYou: false,
+    });
+
+    expect(await guardianFreeze(t, parentId, scholarId, false)).toMatchObject({
+      ok: true,
+      changedCount: 1,
+    });
+  });
+
+  test("family freezes are at least 5 minutes, up to 8 hours with no bell schedule, and an unpaired child is named", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-16T19:58:00.000Z")); // Mon 9:58am HST
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId, institutionId, parentId } = await seedFamily(t);
+    for (const minutes of [undefined, 4, 481, 30.5]) {
+      expect(await guardianFreeze(t, parentId, scholarId, true, minutes)).toEqual({
+        ok: false,
+        message:
+          "A family freeze lasts at least 5 minutes, and right now it can run until Mon, Nov 16, 5:58 PM HST at the latest (480 minutes from now).",
+      });
+    }
+    expect((await guardianFreeze(t, parentId, scholarId, true, 480)).ok).toBe(true);
+
+    const lani = await seedUser(t, "scholar", institutionId, "Lani");
+    await seedGuardian(t, lani, teacherId, "Lani parent");
+    const laniParent = await t.run(async (ctx) =>
+      (await ctx.db
+        .query("guardianships")
+        .withIndex("by_scholar", (q) => q.eq("scholarUserId", lani))
+        .first())!.parentUserId,
+    );
+    expect(await guardianFreeze(t, laniParent, lani, true, 30)).toEqual({
+      ok: false,
+      message: "Lani doesn't have a BunnyPad paired yet.",
+    });
+  });
+
+  async function seedBellSchedule(
+    t: TestHarness,
+    institutionId: Id<"institutions">,
+    closures: Array<{ startDayKey: string; endDayKey: string }> = [],
+  ) {
+    await t.run(async (ctx) => {
+      const periodId = await ctx.db.insert("reportingPeriods", {
+        label: "Fall 2026",
+        startsAt: Date.parse("2026-08-01T00:00:00Z"),
+        endsAt: Date.parse("2026-12-20T00:00:00Z"),
+        status: "open",
+        institutionId,
+      });
+      await ctx.db.insert("scheduleBlocks", {
+        periodId,
+        key: "blockA",
+        label: "Block A",
+        startLocal: "08:30",
+        endLocal: "15:00",
+        weekdays: [1, 2, 3, 4, 5],
+        order: 1,
+      });
+      // The virtual homework rail (start == end) is not a school-day start.
+      await ctx.db.insert("scheduleBlocks", {
+        periodId,
+        key: "homework-due",
+        label: "Homework due",
+        startLocal: "08:00",
+        endLocal: "08:00",
+        weekdays: [1, 2, 3, 4, 5, 6, 7],
+        order: 9999,
+        kind: "homework",
+      });
+      for (const c of closures) {
+        await ctx.db.insert("schoolClosures", {
+          institutionId,
+          ...c,
+          label: "Closed",
+          kind: "holiday",
+        });
+      }
+    });
+  }
+
+  test("a family freeze can run until the next school day starts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-16T19:58:00.000Z")); // Mon 9:58am HST
+    const t = convexTest(schema, modules);
+    const { institutionId, scholarId, pairedDeviceId, parentId } = await seedFamily(t);
+    await seedBellSchedule(t, institutionId);
+
+    // 12 hours from mid-morning ends overnight, well before Tuesday 8:30am.
+    expect(await guardianFreeze(t, parentId, scholarId, true, 720)).toMatchObject({
+      ok: true,
+    });
+    // Tuesday 8:30am HST is 1352 minutes away; one more runs into school.
+    expect((await guardianFreeze(t, parentId, scholarId, true, 1352)).ok).toBe(true);
+    expect(await t.run((ctx) => ctx.db.get(pairedDeviceId))).toMatchObject({
+      freezeUntil: Date.parse("2026-11-17T18:30:00.000Z"),
+    });
+    // The aide's clock is minute-truncated: 40 seconds later, "until 8:30am"
+    // is still 1352 minutes, and the end is clamped to the first bell.
+    await guardianFreeze(t, parentId, scholarId, false);
+    vi.setSystemTime(new Date("2026-11-16T19:58:40.000Z"));
+    expect((await guardianFreeze(t, parentId, scholarId, true, 1352)).ok).toBe(true);
+    expect(await t.run((ctx) => ctx.db.get(pairedDeviceId))).toMatchObject({
+      freezeUntil: Date.parse("2026-11-17T18:30:00.000Z"),
+    });
+    vi.setSystemTime(new Date("2026-11-16T19:58:00.000Z"));
+    expect(await guardianFreeze(t, parentId, scholarId, true, 1353)).toEqual({
+      ok: false,
+      message:
+        "A family freeze lasts at least 5 minutes, and right now it can run until Tue, Nov 17, 8:30 AM HST at the latest (1352 minutes from now).",
+    });
+  });
+
+  test("a weekend or closure extends the family window; an early-morning freeze keeps 8 hours", async () => {
+    vi.useFakeTimers();
+    const t = convexTest(schema, modules);
+    const { institutionId, scholarId, parentId } = await seedFamily(t);
+    // Tuesday Nov 17 is closed.
+    await seedBellSchedule(t, institutionId, [
+      { startDayKey: "2026-11-17", endDayKey: "2026-11-17" },
+    ]);
+
+    // Friday 6pm HST → Monday 8:30am HST is 3750 minutes.
+    vi.setSystemTime(new Date("2026-11-14T04:00:00.000Z"));
+    expect((await guardianFreeze(t, parentId, scholarId, true, 3750)).ok).toBe(true);
+    expect((await guardianFreeze(t, parentId, scholarId, true, 3751)).ok).toBe(false);
+
+    // Monday 10am HST, Tuesday closed → Wednesday 8:30am is 2790 minutes.
+    vi.setSystemTime(new Date("2026-11-16T20:00:00.000Z"));
+    expect((await guardianFreeze(t, parentId, scholarId, true, 2790)).ok).toBe(true);
+    expect((await guardianFreeze(t, parentId, scholarId, true, 2791)).ok).toBe(false);
+
+    // Wednesday 6am HST: school starts in 150 minutes, but 8 hours stays allowed.
+    vi.setSystemTime(new Date("2026-11-18T16:00:00.000Z"));
+    expect((await guardianFreeze(t, parentId, scholarId, true, 480)).ok).toBe(true);
+    expect((await guardianFreeze(t, parentId, scholarId, true, 481)).ok).toBe(false);
+  });
+
+  // TRA-559: accepted for the Parent Freeze pilot (2026-11-01). A guardian
+  // freeze goes through applyFreezeToRows, which arms the row, so it REPLACES
+  // a teacher's active disarm; the disarm's scheduled re-arm then no-ops, and
+  // the BunnyPad stays armed after the family freeze thaws. If a teacher
+  // reports a lost disarm, revisit whether a guardian freeze should be refused
+  // while a staff disarm is active — and change this test with it.
+  test("a guardian freeze replaces a teacher's active disarm and its scheduled re-arm", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-17T20:00:00.000Z"));
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId, pairedDeviceId, parentId } = await seedFamily(t);
+
+    // The teacher disarms for 45 minutes; a re-arm job is scheduled.
+    await t.mutation(internal.deviceLock.setFromAgent, {
+      callerUserId: teacherId,
+      source: "slack" as const,
+      pairedDeviceIds: [pairedDeviceId],
+      state: "disarmed",
+      disarmMode: "timed",
+      disarmMinutes: 45,
+    });
+    expect(await t.run((ctx) => ctx.db.get(pairedDeviceId))).toMatchObject({
+      rabbitholeLockDesiredState: "disarmed",
+      rabbitholeLockDisarmMode: "timed",
+    });
+
+    // Five minutes into the lesson, a parent freezes for five minutes.
+    vi.setSystemTime(new Date("2026-10-17T20:05:00.000Z"));
+    expect((await guardianFreeze(t, parentId, scholarId, true, 5)).ok).toBe(true);
+    const frozen = await t.run((ctx) => ctx.db.get(pairedDeviceId));
+    expect(frozen).toMatchObject({
+      rabbitholeLockDesiredState: "armed",
+      freezeUpdatedBy: parentId,
+    });
+    expect(frozen!.rabbitholeLockDisarmMode).toBeUndefined();
+    expect(frozen!.rabbitholeLockDisarmExpiresAt).toBeUndefined();
+
+    // Run everything scheduled: the thaw at 20:10 and the teacher's stale
+    // re-arm at 20:45, which finds the row moved on and no-ops.
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const jobs = await t.run((ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(jobs.map((job) => [job.name, job.state.kind]).sort()).toEqual([
+      ["deviceLock:rearmTimed", "success"],
+      ["deviceLock:thawFreeze", "success"],
+    ]);
+
+    // Thawed, and still armed: the teacher's disarm does not come back.
+    const after = await t.run((ctx) => ctx.db.get(pairedDeviceId));
+    expect(after!.freezeUntil).toBeUndefined();
+    expect(after).toMatchObject({ rabbitholeLockDesiredState: "armed" });
+    expect(after!.rabbitholeLockDisarmMode).toBeUndefined();
+  });
+
+  test("a read-only guardian is refused before anything is written", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, pairedDeviceId, parentId } = await seedFamily(t);
+    await t.run((ctx) => ctx.db.patch(parentId, { readOnly: true }));
+    expect(await guardianFreeze(t, parentId, scholarId, true, 30)).toEqual({
+      ok: false,
+      message: READ_ONLY_ACCOUNT_ERROR,
+    });
+    expect((await t.run((ctx) => ctx.db.get(pairedDeviceId)))!.freezeUntil).toBeUndefined();
   });
 });

@@ -15,9 +15,11 @@
 // free build can live in a chat-primary session that no session field marks,
 // so the walk tests each session rather than reading an app-only index.
 //
-// A row joins the scope through its builder today; if scholar apps are later
-// shared, `inScope` below is where reach widens.
+// A row joins the scope through its builder. A teacher can publish a row's
+// app to other scholars (convex/publishedApps.ts); the row then carries the
+// published copy and whether it still matches the builder's current app.
 
+import { isTileSession } from "./lib/tileSessions";
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -27,6 +29,12 @@ import { requireScholarsAccessible } from "./lib/access";
 import { couldHoldBuiltApp } from "./lib/homeOrigin";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
 import { MAX_SCOPE_SCHOLARS } from "../shared/teacherAppsScope";
+import {
+  isPublishedCopyCurrent,
+  lineageRoot,
+  livePublishedApp,
+  sessionAppArtifact,
+} from "./lib/publishedAppSource";
 
 export type ScholarBuiltApp = {
   sessionId: Id<"sessions">;
@@ -46,6 +54,15 @@ export type ScholarBuiltApp = {
   /** The activity it was built in carries a learning contract (`buildContract`). */
   hasLearningContract: boolean;
   archivedAt: number | null;
+  /** The copy a teacher published to other scholars, if any. `current` is
+   *  false once the builder has changed the app since the last publish. */
+  published: {
+    customAppId: Id<"customApps">;
+    externalAppId: Id<"externalApps">;
+    name: string;
+    webUrl: string;
+    current: boolean;
+  } | null;
 };
 
 /** Narrow the walk to apps whose activity has (or lacks) a learning contract.
@@ -224,8 +241,15 @@ async function cardFor(
   cached: <T>(key: string, load: () => Promise<T>) => Promise<T>,
 ): Promise<ScholarBuiltApp | null> {
   if (!inScope(session)) return null;
-  // Rehearsals, offline stubs and exemplars are not a scholar's build.
-  if (session.isTestDrive || session.isOffline || session.seedExemplar) {
+  // Rehearsals, offline stubs and exemplars are not a scholar's build, and
+  // neither is a tile session: the scholar opened a first-party app from
+  // their launcher, they did not build it (lib/tileSessions.ts).
+  if (
+    session.isTestDrive ||
+    session.isOffline ||
+    session.seedExemplar ||
+    isTileSession(session)
+  ) {
     return null;
   }
   if ((session.teacherArchivedAt != null) !== archived) return null;
@@ -236,16 +260,9 @@ async function cardFor(
     : null;
   // An ordinary activity's chat is never read for an artifact.
   if (!couldHoldBuiltApp(session, activity)) return null;
-  // The app: the session's first code artifact that has any code in it, read
-  // once.
-  const artifact = await ctx.db
-    .query("artifacts")
-    .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-    .filter((q) =>
-      q.and(q.eq(q.field("type"), "code"), q.neq(q.field("content"), "")),
-    )
-    .first();
-  if (!artifact || artifact.content.trim() === "") return null;
+  // The app: the session's newest code artifact that has any code in it.
+  const artifact = await sessionAppArtifact(ctx, session._id);
+  if (!artifact) return null;
   if (isUnchangedStarterCopy(session, artifact)) return null;
   // One card per free-play lineage: its newest session. A copy is always
   // newer than what it copies, so a session that has a copy steps aside
@@ -288,6 +305,10 @@ async function cardFor(
           .first()
       : null;
   const lastActiveAt = session.lastMessageAt ?? session._creationTime;
+  const publishedCopy = await livePublishedApp(
+    ctx,
+    (await lineageRoot(ctx, session))._id,
+  );
   return {
     sessionId: session._id,
     title: artifact.title || session.title,
@@ -303,5 +324,14 @@ async function cardFor(
     lastEditedAt: revisionRow?.createdAt ?? lastActiveAt,
     hasLearningContract: activity?.buildContract != null,
     archivedAt: session.teacherArchivedAt ?? null,
+    published: publishedCopy
+      ? {
+          customAppId: publishedCopy.app._id,
+          externalAppId: publishedCopy.catalog._id,
+          name: publishedCopy.catalog.name,
+          webUrl: publishedCopy.catalog.webUrl,
+          current: isPublishedCopyCurrent(publishedCopy.app, artifact),
+        }
+      : null,
   };
 }

@@ -161,10 +161,13 @@ describe("seed-spawned session origin context", () => {
       sessionId,
     });
     expect(context?.seedOriginContext?.suggestionType).toBe("cross_domain");
-    // A topic the registry doesn't carry: the card is the row's own copy.
+    // A topic the registry doesn't carry: the card is the row's own copy, and
+    // its teaser is the scholar-facing text (seedScholarText). This observer
+    // seed has only a teacher-facing rationale, so the card showed its title
+    // alone, and the rationale never becomes the teaser.
     expect(context?.seedOriginContext?.card).toEqual({
       title: "Symmetry in origami and group theory",
-      teaser: "She folds paper obsessively.",
+      teaser: "",
     });
   });
 

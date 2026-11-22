@@ -71,7 +71,10 @@ effort sweep (eval-only; applied to every model in the run).
 
 - `report.md` — per-model rubric averages, operational stats (latency/tokens/output
   size), blind pairwise tally, and per-case detail with the judge's errors quoted.
-- `runs.json` — raw observer outputs per (case, model).
+- `runs.json` — parsed observer results plus unparsed API `responses` per
+  (case, model), including retries, raw tool inputs, `stop_reason`, per-attempt
+  token usage, and the request's `maxTokens`. Use these to distinguish model
+  omissions from parser drops; aggregate `usage` includes every attempt.
 - `judgments.json` — raw judge scores + pairwise verdicts.
 
 ## Regenerate dev transcripts

@@ -53,6 +53,11 @@ export type InstitutionPromptProfile = {
   /** Trailing detail appended after the abbreviation in long adult-aide clock
    *  clauses. It is a display label only, never used for arithmetic. */
   timeZoneOffsetNote: string | null;
+  /** The primary school's public page about its technology (what Rabbithole
+   *  is, the tutor's published instructions), which the parent aide offers
+   *  parents. Absent or null omits the line, so no school's parents get a
+   *  borrowed link. */
+  technologyPageUrl?: string | null;
 };
 
 export const DEFAULT_INSTITUTION_PROMPT_PROFILE =

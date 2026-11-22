@@ -7,7 +7,7 @@
 
 /**
  * Normalize a grade tag to the canonical notch shape the practice grade math
- * speaks: `"K"` or `"1"`..`"9"`. Tolerates the legacy / seed long form
+ * speaks: `"K"` or `"1"`..`"11"`. Tolerates the legacy / seed long form
  * (`"Grade 2"`, `"grade k"`, `"G3"`, stray whitespace, casing) that older
  * writes and fixtures persisted on `users.gradeLevel` (and on some
  * `knowledgeNodes.grade` tags) — so a placement prior can never again be skewed

@@ -52,6 +52,7 @@ import {
   momentTriage,
 } from "./sims";
 import { roboticsPortfolioItems } from "./robotics";
+import { classPortfolioItems } from "./classWork";
 
 export const richSeed: RichSeed = {
   // Roster
@@ -73,7 +74,7 @@ export const richSeed: RichSeed = {
   // Execution
   assignments,
   schedulePlacements,
-  portfolioItems: roboticsPortfolioItems,
+  portfolioItems: [...roboticsPortfolioItems, ...classPortfolioItems],
   sessions,
   deliverables,
   completions,

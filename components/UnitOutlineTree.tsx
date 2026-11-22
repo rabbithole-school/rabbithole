@@ -28,8 +28,6 @@ import {
   type ResourceShare,
 } from "./ResourceShareCard";
 import { DashedStatusCircle } from "./MaturityStatusDot";
-import { questLockOf } from "@/lib/missionApi";
-import { questBuildLockLabel } from "@/shared/missionCopy";
 import { ReadinessDot } from "./curriculumDoc/ReadinessGate";
 import type { Readiness } from "@/convex/lib/unitMaturity";
 import {
@@ -614,7 +612,6 @@ export function UnitOutlineTree({
                   nodeStatuses?.readiness.lessons[String(lesson._id)]
                 }
                 activityReadiness={nodeStatuses?.readiness.activities}
-                lockSource={unit}
               />
             ))}
           </VStack>
@@ -792,9 +789,6 @@ interface LessonGroupProps {
   lessonReadiness?: Readiness;
   /** Per-activity readiness keyed by activity id — drives each row's micro-strip. */
   activityReadiness?: Record<string, Readiness>;
-  /** Pick mode, TRA-519 B6: the scholar's own Quest's `units.get` result, so
-   *  a locked build step reads as locked (no tap action). */
-  lockSource?: unknown;
 }
 
 function LessonGroup({
@@ -814,7 +808,6 @@ function LessonGroup({
   dragEnabled,
   lessonReadiness,
   activityReadiness,
-  lockSource,
 }: LessonGroupProps) {
   const isLessonSelected =
     selected?.type === "lesson" && selected.lessonId === lesson._id;
@@ -891,12 +884,8 @@ function LessonGroup({
   const renderActivityRow = (act: ActivityNode) => {
     const isActSelected =
       selected?.type === "activity" && selected.activityId === act._id;
-    // B6: a locked Quest build step is shown, with its unlock line, but has
-    // no tap action (forecast, not a CTA).
-    const lock = mode === "pick" ? questLockOf(lockSource, act._id) : null;
     const pickable =
-      !lock &&
-      (mode === "design" || effectiveActivityKind(act) === "online" || !!enableOfflinePick);
+      mode === "design" || effectiveActivityKind(act) === "online" || !!enableOfflinePick;
     const isCompleted = completedSet.has(String(act._id));
     const sel: TreeSelection = {
       type: "activity",
@@ -917,7 +906,6 @@ function LessonGroup({
         // Archived rows are never draggable (they live outside the ordered list).
         dragEnabled={!!dragEnabled && !act.archivedAt}
         readiness={activityReadiness?.[String(act._id)]}
-        lockLabel={lock ? questBuildLockLabel(lock.prerequisiteTitle) : null}
         onClick={pickable ? () => onSelect(sel) : undefined}
         href={pickable && getHref ? getHref(sel) : undefined}
       />
@@ -1051,7 +1039,6 @@ function ActivityRow({
   pickable,
   dragEnabled,
   readiness,
-  lockLabel,
   onClick,
   href,
 }: {
@@ -1060,8 +1047,6 @@ function ActivityRow({
   isCompleted: boolean;
   pickable: boolean;
   dragEnabled: boolean;
-  /** B6: "Unlocks when you finish …" under a locked Quest build step. */
-  lockLabel?: string | null;
   /** Design-mode readiness micro-strip (replaces the duration tag). Undefined in
    *  pick mode and while the status query is still loading. */
   readiness?: Readiness;
@@ -1148,11 +1133,6 @@ function ActivityRow({
           </HStack>
         }
       />
-      {lockLabel ? (
-        <Text fontSize="xs" color="charcoal.400" pl="68px" pr={2} pb={1}>
-          {lockLabel}
-        </Text>
-      ) : null}
       {act.resources && act.resources.length > 0 && (
         <VStack align="stretch" gap={0} pl="68px" pr={2} pb={1}>
           {act.resources.map((resource) => (

@@ -76,17 +76,15 @@ import { RecentMissesForNode } from "@/components/practice/RecentMisses";
 import { isDomainComplete } from "@/components/practice/serving";
 import {
   formatMasteryGradeLevel,
-  averageDomainMasteryLevel,
-  masteryGradeLevel,
-  levelFromGradeBuckets,
+  highestGradeClause,
 } from "@/components/practice/masteryGradeLevel";
 import {
-  gradeForAgeFromDob,
-  gradeForAgeDisagreesWithTagged,
-} from "@/components/practice/chronologicalGrade";
+  gradeEquivalentFromTag,
+} from "@/shared/gradeEquivalent";
 import {
   masteryLevelTint,
   masteryLevelToneLabel,
+  levelDelta,
   type LevelColoringMode,
 } from "@/components/practice/masteryLevelColor";
 import { MappingMark } from "@/components/practice/MappingMark";
@@ -145,12 +143,13 @@ type SkillNode = {
   grade: string | null;
 };
 
-// Natural grade order (K→8) for ordering skill rows top-to-bottom within a
+// Natural grade order (K→11) for ordering skill rows top-to-bottom within a
 // strand — the vertical mirror of the Map tab's left→right grade x-axis.
 // Ungraded/foundational nodes lead (rank -1), matching the map's leftmost
 // (no-grade) anchor.
 const GRADE_RANK: Record<string, number> = {
-  K: 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8,
+  K: 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+  "10": 10, "11": 11,
 };
 function gradeRank(grade: string | null): number {
   const normalized = normalizeGradeTag(grade);
@@ -357,8 +356,8 @@ type MapStatusResult = { scholars: ScholarMapStatus[] };
 // The signed Δ under a level, 1dp, tabular, with a true minus sign — the exact
 // read the background wash carries pre-attentively (spec §4.1). "0.0" for an
 // on-the-nose match (no sign), "+0.2" / "−2.6" otherwise.
-function formatCellDelta(level: number, gradeForAge: number): string {
-  const rounded = Math.round((level - gradeForAge) * 10) / 10;
+function formatCellDelta(level: number, gradeEquivalent: number): string {
+  const rounded = levelDelta(level, gradeEquivalent);
   const sign = rounded > 0 ? "+" : rounded < 0 ? "−" : "";
   return `${sign}${Math.abs(rounded).toFixed(1)}`;
 }
@@ -381,7 +380,7 @@ type CellVisual = {
 // graded number (spec §4, §6).
 function matrixCellVisual({
   level,
-  gradeForAge,
+  gradeEquivalent,
   mode,
   status,
   blockedBy,
@@ -390,7 +389,7 @@ function matrixCellVisual({
   domainLabelFor,
 }: {
   level: number | null;
-  gradeForAge: number | null;
+  gradeEquivalent: number | null;
   mode: LevelColoringMode;
   status: DomainMapStatus | undefined;
   blockedBy: string[];
@@ -400,20 +399,21 @@ function matrixCellVisual({
 }): CellVisual {
   // A real level is the graded number (covers `converged` with a level, and
   // any interpolated frontier level). The wash carries the band; the digit is
-  // neutral navy; the Δ rides beneath it in age-relative mode.
+  // neutral navy; the Δ rides beneath it in grade-relative mode.
   if (level != null) {
-    const tint = masteryLevelTint(level, gradeForAge, mode) ?? undefined;
-    const showDelta = mode === "ageRelative" && gradeForAge != null;
-    // The tone word is an AGE-relative claim — meaningful only in age-relative
-    // mode, so pass a null anchor otherwise and let the helper omit it.
+    const tint = masteryLevelTint(level, gradeEquivalent, mode) ?? undefined;
+    const showDelta = mode === "gradeRelative" && gradeEquivalent != null;
+    // The tone word is a GRADE-relative claim — meaningful only in
+    // grade-relative mode, so pass a null anchor otherwise and let the helper
+    // omit it.
     const tone = masteryLevelToneLabel(
       level,
-      mode === "ageRelative" ? gradeForAge : null,
+      mode === "gradeRelative" ? gradeEquivalent : null,
     );
     const levelText = formatMasteryGradeLevel(level);
     const noAnchorHint =
-      mode === "ageRelative" && gradeForAge == null
-        ? " — no birthdate on file, try Absolute coloring"
+      mode === "gradeRelative" && gradeEquivalent == null
+        ? " — no grade on file, try Absolute coloring"
         : "";
     return {
       bg: tint,
@@ -438,7 +438,7 @@ function matrixCellVisual({
               fontVariantNumeric="tabular-nums"
               letterSpacing="0.01em"
             >
-              {formatCellDelta(level, gradeForAge)}
+              {formatCellDelta(level, gradeEquivalent)}
             </Text>
           )}
         </Flex>
@@ -515,11 +515,17 @@ function matrixCellVisual({
 // The §5 legend's on-demand "about these colours" copy — the exact thresholds
 // and caveats that don't earn always-on space.
 const COLOR_LEGEND_ABOUT =
-  "Age-relative colours each level by how far it sits from the scholar's grade " +
-  "for age (Δ): behind (Δ below −0.75), on pace (−0.75 to +0.75), ahead (+0.75 " +
-  "to +1.75), far ahead (beyond +1.75). Behind is a calm slate, never red — a " +
-  "not-yet, not a deficit. Absolute colours by the level itself (K–1 … 8+), so " +
-  "a shared colour means a shared instructional group, regardless of age. " +
+  "Levels and grade equivalents share one scale. A level is the highest grade " +
+  "where the scholar has shown a skill in practice, plus the share of that " +
+  "grade's skills they have shown: 4.6 means six tenths of grade 4. It is the " +
+  "same grade the scholar's Math Skills portrait shows. Placement credit does " +
+  "not raise it. A scholar's grade equivalent is their enrolled grade " +
+  "plus the months into the school year (August .1 … April .9). " +
+  "Grade-relative colours each level by how far it sits from the grade " +
+  "equivalent (Δ): behind (Δ below −0.5), on pace (−0.5 to +0.5), ahead " +
+  "(+0.5 to +1.5), far ahead (above +1.5). Behind is a calm slate, never red — " +
+  "a not-yet, not a deficit. Absolute colours by the level itself (K–1 … 8+), " +
+  "so a shared colour means a shared instructional group, regardless of grade. " +
   "Empty cells: not ready (outside the affect-safe grade ring), needs mapping " +
   "(run a placement check-in), in progress (resume it). A white cell means not " +
   "measured yet; a pale-green cell with no number means measured, just getting " +
@@ -559,13 +565,13 @@ function MatrixColorLegend({
   onModeChange: (mode: LevelColoringMode) => void;
 }) {
   const [aboutOpen, setAboutOpen] = useState(false);
-  const ageSwatches: { label: string; bg: string }[] = [
-    { label: "Behind", bg: masteryLevelTint(0, 2, "ageRelative") ?? "white" },
-    { label: "On pace", bg: masteryLevelTint(4, 4, "ageRelative") ?? "white" },
-    { label: "Ahead", bg: masteryLevelTint(5, 4, "ageRelative") ?? "white" },
+  const gradeSwatches: { label: string; bg: string }[] = [
+    { label: "Behind", bg: masteryLevelTint(3, 4, "gradeRelative") ?? "white" },
+    { label: "On pace", bg: masteryLevelTint(4, 4, "gradeRelative") ?? "white" },
+    { label: "Ahead", bg: masteryLevelTint(5, 4, "gradeRelative") ?? "white" },
     {
       label: "Far ahead",
-      bg: masteryLevelTint(6.5, 4, "ageRelative") ?? "white",
+      bg: masteryLevelTint(6, 4, "gradeRelative") ?? "white",
     },
   ];
   const absBands: { label: string; bg: string }[] = [
@@ -596,7 +602,7 @@ function MatrixColorLegend({
         </Text>
         <ViewToggle<LevelColoringMode>
           items={[
-            { value: "ageRelative", label: "Age-relative" },
+            { value: "gradeRelative", label: "Grade-relative" },
             { value: "absolute", label: "Absolute" },
           ]}
           value={mode}
@@ -606,12 +612,12 @@ function MatrixColorLegend({
         />
       </HStack>
       <LegendDivider />
-      {mode === "ageRelative" ? (
+      {mode === "gradeRelative" ? (
         <HStack gap={3} align="center" flexWrap="wrap">
           <Text as="span" fontWeight="700" color="charcoal.600">
-            Δ vs. grade for age:
+            Δ vs. grade equivalent:
           </Text>
-          {ageSwatches.map((swatch) => (
+          {gradeSwatches.map((swatch) => (
             <HStack key={swatch.label} gap={1.5} align="center">
               <LegendSwatch bg={swatch.bg} />
               <Text as="span">{swatch.label}</Text>
@@ -781,7 +787,7 @@ const STRAND_HEADER_HEIGHT = "52px";
 const SCHOLAR_HEADER_H = "82px";
 // The ALL-DOMAINS matrix header is now avatar + first name ONLY (Andy's Paper
 // structure — the aggregate number and grade chips moved into the "Across all
-// math" summary row and the "Grade for age" reference row respectively). So it
+// math" summary row and the "Grade equivalent" reference row respectively). So it
 // is LIGHTER than the single-domain header (no meter, no chip line) and shrinks
 // accordingly. Kept SEPARATE from SCHOLAR_HEADER_H so the single-domain matrix
 // keeps its own pitch. It's the only sticky element at top:0 in its branch and
@@ -791,7 +797,7 @@ const ALL_DOMAINS_HEADER_H = "58px";
 // stretchy — see `allDomainsGridTemplate`. Sized to seat the longest domain
 // label ("Integers & the coordinate plane") on one line.
 const ALL_DOMAINS_LABEL_COL_W = 260;
-// The two BANNER rows (grade-for-age reference + across-all-math summary) sit
+// The two BANNER rows (grade-equivalent reference + across-all-math summary) sit
 // above the per-domain rows at the SAME height as a domain row — a uniform
 // spreadsheet rhythm (founder, v9: the shorter banner rows broke the vertical
 // rhythm). The zone hierarchy is carried by the HEAVY bottom rules alone.
@@ -799,10 +805,10 @@ const ALL_DOMAINS_BANNER_ROW_H = MATRIX_CELL_H;
 // The heatmap cell number rides a light background wash, so it goes NEUTRAL —
 // the wash carries the band, not the digit (spec §4). A dark navy from the app
 // palette, chosen to clear WCAG AA on every tint. The Δ beneath it is a muted
-// grey (tabular), and the grade-for-age reference decimals a lighter grey still.
+// grey (tabular), and the grade-equivalent reference decimals a lighter grey still.
 const CELL_NUMBER_COLOR = "navy.700"; // neutral dark ink on any tint
 const CELL_DELTA_COLOR = "gray.600"; // muted signed Δ, AA on every age tint
-const GRADE_FOR_AGE_COLOR = "gray.400"; // the quiet reference decimals
+const GRADE_EQUIVALENT_COLOR = "gray.400"; // the quiet reference decimals
 // "Measured, just getting started" (converged with a null level — the one
 // sliver of `converged` that has no number). The palest FLOOR tint, no numeral
 // (spec / mapping-mark-spike §3): tinted so it reads as MEASURED (unlike a white
@@ -1212,15 +1218,15 @@ export function MathSkillsMasteryView({
    *  never the developer-facing nodeKey slug. */
   storyCountByNode?: Record<string, number>;
 }) {
-  // The "Level coloring" mode (age-relative Δ vs. absolute level ramp) — the
+  // The "Level coloring" mode (grade-relative Δ vs. absolute level ramp) — the
   // all-domains heatmap's colour axis (spec §4.3). Seeded from the URL
-  // (`?colorBy=level` ⇒ absolute; default age-relative) and written back with a
+  // (`?colorBy=level` ⇒ absolute; default grade-relative) and written back with a
   // shallow `router.replace` so a shared/reloaded link keeps the mode. Owned
   // HERE (not the page) by design — it's a property of this body's matrix.
   const router = useRouter();
   const searchParams = useSearchParams();
   const [coloringMode, setColoringMode] = useState<LevelColoringMode>(() =>
-    searchParams.get("colorBy") === "level" ? "absolute" : "ageRelative",
+    searchParams.get("colorBy") === "level" ? "absolute" : "gradeRelative",
   );
   const handleColoringModeChange = (next: LevelColoringMode) => {
     setColoringMode(next);
@@ -1322,12 +1328,9 @@ export function MathSkillsMasteryView({
     return map;
   }, [mastery]);
 
-  // The "All domains" rail item's cross-domain source: raw green/total counts
-  // by grade, split PER seeded domain (not just the selected one) — a sibling
-  // teacherQuery, gated off in the ordinary per-domain case. Raw per-domain
-  // counts, not a computed level, so the frontier-interpolation FORMULA lives
-  // in exactly one place (masteryGradeLevel.ts), reused by both this and the
-  // per-domain path; here it runs once per domain and the levels are averaged.
+  // The "All domains" rail item's cross-domain source: each seeded domain's
+  // grade level (the portrait's `mathLevel`, computed server-side) — a
+  // sibling teacherQuery, gated off in the ordinary per-domain case.
   const crossDomainMastery = useQuery(
     api.cohortPractice.crossDomainMasteryForScholars,
     rosterLoading || !allDomains
@@ -1388,64 +1391,60 @@ export function MathSkillsMasteryView({
     return map;
   }, [masteryByScholar, domainNodeKeys]);
 
-  // Each scholar's mastery GRADE LEVEL (e.g. "Grade 3.6") — the D1 header
-  // readout, replacing the green/amber band-mix meter. "Green" = the
-  // fluent-family bands (`placed`, `fluent`, `overlearned` — the same set
-  // `MASTERY_FILTER_ORDER` treats as the earned/mastered tiers); `frontier`
-  // (practicing) and `locked` (not started) are NOT green. Per-domain: the
-  // frontier-interpolated level over THIS domain's graded skills. All-domains:
-  // the mean of each domain's OWN frontier level (`averageDomainMasteryLevel`
-  // → `levelFromGradeBuckets` per domain), so the readout stays inside the
-  // range of the per-domain numbers instead of collapsing below them.
+  // Each scholar's GRADE LEVEL (e.g. "3.6") — the D1 header readout and the
+  // column sort key. It is the server's `gradeValue`: the same level the Math
+  // Skills portrait shows (`mathLevel`), so a teacher sees one grade per
+  // scholar (#2462). Placed (inferred) credit keeps its hollow ring on the
+  // dots and counts toward the per-domain level, as it does toward the overall.
+  // Per-domain: that domain's value. All-domains: the server's `overallLevel`,
+  // the canonical overall math level (`mathLevel` over every area) the scholar
+  // profile's Math skills tab shows, so one scholar has one overall number on
+  // every teacher screen (T1). Never a mean of the domain cells.
   const gradeLevelByScholar = useMemo(() => {
     const map = new Map<string, number | null>();
     if (allDomains) {
       for (const row of crossDomainMastery?.scholars ?? []) {
-        map.set(
-          String(row.scholarId),
-          averageDomainMasteryLevel(row.domains, gradeRank),
-        );
+        map.set(String(row.scholarId), row.overallLevel);
       }
       return map;
     }
     for (const [scholarId, readout] of masteryByScholar) {
-      const readingByKey = new Map(
-        readout.readings.map((reading) => [reading.nodeKey, reading]),
-      );
-      const level = masteryGradeLevel(
-        nodes,
-        (nodeKey) => {
-          const reading = readingByKey.get(nodeKey);
-          if (!reading) return false;
-          const band = masteryFilterKey(reading);
-          return band === "placed" || band === "fluent" || band === "overlearned";
-        },
-        gradeRank,
-      );
-      map.set(scholarId, level);
+      map.set(scholarId, readout.gradeValue ?? null);
     }
     return map;
-  }, [allDomains, crossDomainMastery, masteryByScholar, nodes]);
+  }, [allDomains, crossDomainMastery, masteryByScholar]);
 
-  // The "All domains" matrix's CELLS: each scholar's PER-domain frontier level
-  // (not the aggregate above) — scholarId → domain → level. Reuses the same
-  // pre-aggregated per-domain gradeCounts `crossDomainMastery` already fetches
-  // for the aggregate, so the frontier FORMULA still lives in exactly one
-  // place (`levelFromGradeBuckets`) rather than being re-derived here.
-  const domainLevelByScholar = useMemo(() => {
-    const map = new Map<string, Map<string, number | null>>();
-    if (!allDomains) return map;
+  // The legacy "highest" figure (`frontierGradeValue`) per scholar for the
+  // per-domain header's hover text, beside the level. Per-domain only.
+  const highestGradeByScholar = useMemo(() => {
+    const map = new Map<string, number | null>();
+    for (const [scholarId, readout] of masteryByScholar) {
+      map.set(scholarId, readout.highestGradeValue ?? null);
+    }
+    return map;
+  }, [masteryByScholar]);
+
+  // The "All domains" matrix's CELLS: each scholar's PER-domain grade level
+  // (not the aggregate above) — scholarId → domain → level, straight from the
+  // same `crossDomainMastery` rows — and the legacy "highest" figure for the
+  // cell's hover text.
+  const { domainLevelByScholar, domainHighestByScholar } = useMemo(() => {
+    const levels = new Map<string, Map<string, number | null>>();
+    const highest = new Map<string, Map<string, number | null>>();
+    if (!allDomains) {
+      return { domainLevelByScholar: levels, domainHighestByScholar: highest };
+    }
     for (const row of crossDomainMastery?.scholars ?? []) {
       const perDomain = new Map<string, number | null>();
+      const perDomainHighest = new Map<string, number | null>();
       for (const entry of row.domains) {
-        perDomain.set(
-          entry.domain,
-          levelFromGradeBuckets(entry.gradeCounts, gradeRank),
-        );
+        perDomain.set(entry.domain, entry.gradeValue);
+        perDomainHighest.set(entry.domain, entry.highestGradeValue);
       }
-      map.set(String(row.scholarId), perDomain);
+      levels.set(String(row.scholarId), perDomain);
+      highest.set(String(row.scholarId), perDomainHighest);
     }
-    return map;
+    return { domainLevelByScholar: levels, domainHighestByScholar: highest };
   }, [allDomains, crossDomainMastery]);
 
   // The "All domains" matrix's Tier 1 freshness read (spec §9/§10): each
@@ -1487,8 +1486,8 @@ export function MathSkillsMasteryView({
     return map;
   }, [allDomains, queryScholars, masteryByScholar, domain]);
 
-  // The displayed + SORTED matrix columns — sorted by mastery grade level,
-  // descending (most-advanced first), nulls (no green skills at all) sorted
+  // The displayed + SORTED matrix columns — sorted by grade level,
+  // descending (most-advanced first), nulls (no demonstrated skill yet) sorted
   // last, with a stable name tiebreak. Applied in exactly ONE place so the
   // header row, the dot cells, and every other `visibleScholars` consumer
   // below stay aligned — this sort applies in BOTH per-domain and All-domains
@@ -1505,17 +1504,18 @@ export function MathSkillsMasteryView({
     });
   }, [queryScholars, gradeLevelByScholar]);
 
-  // Each scholar's CONTINUOUS grade for age (from DOB + a single `now`), the
-  // anchor the age-relative heatmap colours against: Δ = level − gradeForAge
-  // (spec §4.1a). A null entry (missing/invalid DOB) means "no age anchor" — in
-  // age-relative mode the tint is neutral and no relative claim is made; in
-  // absolute mode the anchor is irrelevant. Reused by the grade-for-age row,
-  // the cell tints, and the tone labels.
+  // Each scholar's grade equivalent (enrolled grade + school-year month, from
+  // a single `now`), the anchor the grade-relative heatmap colours against:
+  // Δ = level − GE, so a scholar on pace reads Δ ≈ 0. A null entry (no
+  // recognisable enrolled grade) means "no anchor" — in grade-relative mode the
+  // tint is neutral and no relative claim is made; in absolute mode the anchor
+  // is irrelevant. Reused by the grade-equivalent row, the cell tints, and the
+  // tone labels.
   const now = useMemo(() => new Date(), []);
-  const gradeForAgeByScholar = useMemo(() => {
+  const gradeEquivalentByScholar = useMemo(() => {
     const map = new Map<string, number | null>();
     for (const scholar of visibleScholars) {
-      map.set(scholar.id, gradeForAgeFromDob(scholar.dateOfBirth, now));
+      map.set(scholar.id, gradeEquivalentFromTag(scholar.gradeLevel, now));
     }
     return map;
   }, [visibleScholars, now]);
@@ -2189,8 +2189,8 @@ export function MathSkillsMasteryView({
   // ── "All domains" rail item ─────────────────────────────────────────────
   // A real matrix: one ROW per registered domain, one COLUMN per scholar (the
   // SAME scholar header the single-domain matrix uses), a rough grade-level
-  // number in each cell, and each scholar's AGGREGATE grade level (across
-  // every domain, already computed above by `gradeLevelByScholar`) under
+  // number in each cell, and each scholar's OVERALL math level (the server's
+  // `overallLevel`, already mapped above by `gradeLevelByScholar`) under
   // their name. `domain == null` also covers here defensively (there is no
   // other reason it would be null). Quiet typography throughout — a bare
   // number, no colour scale, no percent (diagnostics, not scores).
@@ -2363,7 +2363,7 @@ export function MathSkillsMasteryView({
               )}
               {/* Header row — avatar + first name ONLY (Andy's Paper structure).
                   The aggregate number moved to the "Across all math" summary row
-                  and the grade chips to the "Grade for age" reference row. */}
+                  and the grade chips to the "Grade equivalent" reference row. */}
               <Box
                 display="grid"
                 gridTemplateColumns={allDomainsGridTemplate}
@@ -2404,12 +2404,11 @@ export function MathSkillsMasteryView({
                 })}
               </Box>
 
-              {/* Grade-for-age reference row — the anchor the age-relative
-                  washes are read against (spec §4.1a). Hidden in absolute mode
-                  (no anchor in play). Quiet grey decimals; a disagreement with
-                  the enrolled grade flags a small amber ▲. Carries a HEAVY
-                  bottom rule — the first zone divider. */}
-              {coloringMode === "ageRelative" && (
+              {/* Grade-equivalent reference row — the anchor the
+                  grade-relative washes are read against (spec §4.1a). Hidden
+                  in absolute mode (no anchor in play). Quiet grey decimals.
+                  Carries a HEAVY bottom rule — the first zone divider. */}
+              {coloringMode === "gradeRelative" && (
                 <Box
                   display="grid"
                   gridTemplateColumns={allDomainsGridTemplate}
@@ -2430,58 +2429,34 @@ export function MathSkillsMasteryView({
                     pl={4}
                   >
                     <Text fontSize="xs" fontWeight="600" color="gray.400">
-                      Grade for age
+                      Grade equivalent
                     </Text>
                   </Box>
                   {visibleScholars.map((scholar) => {
-                    const gradeForAge =
-                      gradeForAgeByScholar.get(scholar.id) ?? null;
-                    const tagged = scholar.gradeLevel;
-                    const disagrees = gradeForAgeDisagreesWithTagged(
-                      gradeForAge,
-                      tagged,
-                    );
-                    const taggedLabel = normalizeGradeTag(tagged) ?? tagged;
-                    let title: string;
-                    if (gradeForAge == null) {
-                      title = `${scholar.name} · no birthdate on file`;
-                    } else {
-                      title =
-                        `${scholar.name} · grade for age ${gradeForAge.toFixed(1)}` +
-                        (taggedLabel ? ` · enrolled grade ${taggedLabel}` : "") +
-                        (disagrees
-                          ? " — profile may be stale, or accelerated"
-                          : "");
-                    }
+                    const gradeEquivalent =
+                      gradeEquivalentByScholar.get(scholar.id) ?? null;
+                    const enrolled = normalizeGradeTag(scholar.gradeLevel);
+                    const title =
+                      gradeEquivalent == null || enrolled == null
+                        ? `${scholar.name} · no grade on file`
+                        : `${scholar.name} · grade equivalent ${gradeEquivalent.toFixed(1)} (enrolled grade ${enrolled})`;
                     return (
                       <Flex
                         key={scholar.id}
                         align="center"
                         justify="center"
-                        gap="2px"
                         title={title}
-                        data-testid={`mastery-grade-for-age-${scholar.id}`}
+                        data-testid={`mastery-grade-equivalent-${scholar.id}`}
                       >
                         <Text
                           as="span"
                           fontSize="xs"
                           fontWeight="400"
-                          color={GRADE_FOR_AGE_COLOR}
+                          color={GRADE_EQUIVALENT_COLOR}
                           fontVariantNumeric="tabular-nums"
                         >
-                          {gradeForAge == null ? "—" : gradeForAge.toFixed(1)}
+                          {gradeEquivalent == null ? "—" : gradeEquivalent.toFixed(1)}
                         </Text>
-                        {disagrees && (
-                          <Text
-                            as="span"
-                            aria-hidden
-                            fontSize="9px"
-                            lineHeight="1"
-                            color="orange.400"
-                          >
-                            ▲
-                          </Text>
-                        )}
                       </Flex>
                     );
                   })}
@@ -2688,8 +2663,8 @@ export function MathSkillsMasteryView({
                 </Box>
                 {visibleScholars.map((scholar) => {
                   const level = gradeLevelByScholar.get(scholar.id) ?? null;
-                  const gradeForAge =
-                    gradeForAgeByScholar.get(scholar.id) ?? null;
+                  const gradeEquivalent =
+                    gradeEquivalentByScholar.get(scholar.id) ?? null;
                   // Only the surface that was clicked highlights: this cell and
                   // the column heading open the same panel from two origins.
                   const summarySelected =
@@ -2698,7 +2673,7 @@ export function MathSkillsMasteryView({
                     allDomainsFocus?.scholarId === scholar.id;
                   const visual = matrixCellVisual({
                     level,
-                    gradeForAge,
+                    gradeEquivalent,
                     mode: coloringMode,
                     // No single map status for the aggregate — the summary only
                     // ever shows a number or the plain N/A.
@@ -2706,7 +2681,7 @@ export function MathSkillsMasteryView({
                     blockedBy: [],
                     mapLoading: false,
                     readoutLabel:
-                      "aggregate grade level across every domain except Fast math",
+                      "overall math level, the same one the scholar profile shows",
                     domainLabelFor,
                   });
                   return (
@@ -2818,8 +2793,8 @@ export function MathSkillsMasteryView({
                     </Box>
                     {visibleScholars.map((scholar) => {
                       const level = perScholar.get(scholar.id) ?? null;
-                      const gradeForAge =
-                        gradeForAgeByScholar.get(scholar.id) ?? null;
+                      const gradeEquivalent =
+                        gradeEquivalentByScholar.get(scholar.id) ?? null;
                       const planMarks = domainCellMarks(
                         planByScholar.get(scholar.id),
                         row.domain,
@@ -2830,12 +2805,16 @@ export function MathSkillsMasteryView({
                       const retention = domainRetentionByScholar
                         .get(scholar.id)
                         ?.get(row.domain);
+                      const highestClause = highestGradeClause(
+                        level,
+                        domainHighestByScholar.get(scholar.id)?.get(row.domain),
+                      );
                       const cellSelected =
                         allDomainsFocus?.domain === row.domain &&
                         allDomainsFocus.scholarId === scholar.id;
                       const visual = matrixCellVisual({
                         level,
-                        gradeForAge,
+                        gradeEquivalent,
                         mode: coloringMode,
                         status: mapEntry?.status,
                         blockedBy: mapEntry?.blockedBy ?? [],
@@ -2890,6 +2869,7 @@ export function MathSkillsMasteryView({
                           title={cellReadoutWithMarks(
                             joinReadout(
                               `${scholar.name} · ${visual.readout}`,
+                              highestClause,
                               retentionHoverClause(retention, retentionNow),
                             ),
                             planMarks,
@@ -2897,6 +2877,7 @@ export function MathSkillsMasteryView({
                           aria-label={cellReadoutWithMarks(
                             joinReadout(
                               `${scholar.name} · ${visual.readout}`,
+                              highestClause,
                               retentionHoverClause(retention, retentionNow),
                             ),
                             planMarks,
@@ -3205,16 +3186,13 @@ export function MathSkillsMasteryView({
                               testId={`mastery-scholar-header-${scholar.id}`}
                               title={`${scholar.name} across ${domainLabel}`}
                             >
-                              {/* D1: the mastery GRADE LEVEL under the name — a
-                                  computed "how far along" magnitude (e.g. "3.6")
-                                  from the scholar's green skills in this domain,
-                                  replacing the old green/amber band-mix meter (a
-                                  mix ratio wasn't a meaningful glance; a level
-                                  is). Shown in fluent green so it reads as a
-                                  mastery level, not a chronological grade. A
-                                  scholar the placement engine hasn't finished
-                                  mapping shows the honest "still mapping" state
-                                  (spec §3.4) rather than a bare "—". */}
+                              {/* D1: the scholar's GRADE LEVEL under the name
+                                  (e.g. "3.6"), the same level
+                                  the Math Skills portrait shows for this
+                                  domain. A scholar the placement engine
+                                  hasn't finished mapping shows the honest
+                                  "still mapping" state (spec §3.4) rather
+                                  than a bare "—". */}
                               {(() => {
                                 const level =
                                   gradeLevelByScholar.get(scholar.id) ?? null;
@@ -3248,7 +3226,13 @@ export function MathSkillsMasteryView({
                                     color={MASTERY_DOT_COLOR.fluent}
                                     fontVariantNumeric="tabular-nums"
                                     textAlign="center"
-                                    title={`${scholar.name} · mastery grade level in ${domainLabel}: ${formatMasteryGradeLevel(level)}`}
+                                    title={joinReadout(
+                                      `${scholar.name} · grade level in ${domainLabel}: ${formatMasteryGradeLevel(level)}`,
+                                      highestGradeClause(
+                                        level,
+                                        highestGradeByScholar.get(scholar.id),
+                                      ),
+                                    )}
                                   >
                                     {formatMasteryGradeLevel(level)}
                                   </Text>
@@ -4052,15 +4036,11 @@ function ScholarDomainDetail({
     band === "locked" && notConverged
       ? "Not yet measured"
       : MASTERY_FILTER_LABEL[band];
-  // GREEN readings only — must mirror the cell's state-4 test (the same
-  // placed/fluent/overlearned family `masteryGradeLevel` counts), so a
-  // practicing-only domain still gets its "just getting started" strip.
-  const hasGreenReadings = domainNodes.some((node) => {
-    const reading = readingByKey.get(node.nodeKey);
-    if (!reading) return false;
-    const band = masteryFilterKey(reading);
-    return band === "placed" || band === "fluent" || band === "overlearned";
-  });
+  // Mirrors the cell's state-4 test (converged, no grade level): the cell
+  // shows a number exactly when the scholar has a grade level here (any
+  // credited skill, placement check-in credit included), so a practicing-only
+  // domain still gets its "just getting started" strip.
+  const hasGreenReadings = readout?.gradeValue != null;
 
   // Bucket the domain's skills by THIS scholar's band (missing reading ⇒
   // "locked"). Keep the node so a row can name a few skills and drill in.

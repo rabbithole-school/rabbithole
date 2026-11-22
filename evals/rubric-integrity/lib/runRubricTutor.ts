@@ -24,7 +24,11 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt } from "../../../convex/sessionHelpers";
-import { MODELS } from "../../../convex/lib/models";
+import type { ModelId } from "../../../convex/lib/models";
+import {
+  TUTOR_DEFAULT_MODEL,
+  tutorRuntime,
+} from "../../../convex/lib/tutorModel";
 import { toMessages } from "../../../convex/lib/curriculumSimShared";
 import {
   RUBRIC_SCORE_TOOL_NAME,
@@ -38,8 +42,18 @@ import type { RubricCase, RubricTurn } from "./types";
 
 const anthropic = new Anthropic();
 
-export const tutorModel = process.env.TUTOR_MODEL || MODELS.SONNET;
+/**
+ * The production tutor by default (lib/tutorModel.TUTOR_DEFAULT_MODEL), with
+ * production's own runtime for it (effort, max_tokens) from `tutorRuntime`.
+ * This defaulted to MODELS.SONNET until the tutor moved to Opus 5.5 at effort
+ * `low` (TRA-409); a harness on the old model measures a tutor nobody runs.
+ */
+export const tutorModel = (process.env.TUTOR_MODEL ||
+  TUTOR_DEFAULT_MODEL) as ModelId;
+const runtime = tutorRuntime(tutorModel);
 export const tutorTokens = { input: 0, output: 0 };
+/** update_rubric_score calls whose `verdicts` was not an array. */
+export const malformedRubricCalls = { count: 0 };
 
 /** Fictional scholar name — never a real identity. */
 export const SCHOLAR_NAME = "Nova";
@@ -121,32 +135,31 @@ export function assembleTutorPrompt(
   // tightened RUBRIC_TOOL_GUIDANCE under test. Everything between is null for
   // this harness.
   return buildSystemPrompt(
-    null, // 1 teacherWhisper
-    null, // 2 readingLevel
-    SCHOLAR_NAME, // 3 scholarName
-    null, // 4 unitContext
-    null, // 5 personaContext
-    null, // 6 perspectiveContext
-    null, // 7 processContext
-    null, // 8 processStateData
-    artifactData, // 9 artifactData ← the submitted report, once visible
-    null, // 10 dossierContent
-    null, // 11 seedsData
-    null, // 12 masteryContext
-    null, // 13 signalContext
-    null, // 14 timingContext
-    null, // 15 lessonContext
-    null, // 16 teacherDirectives
-    null, // 17 lessonActivityContext
-    null, // 18 priorActivityContext
-    null, // 19 activityContext
+    null, // 1 readingLevel
+    SCHOLAR_NAME, // 2 scholarName
+    null, // 3 unitContext
+    null, // 4 personaContext
+    null, // 5 perspectiveContext
+    null, // 6 processContext
+    null, // 7 processStateData
+    artifactData, // 8 artifactData ← the submitted report, once visible
+    null, // 9 dossierContent
+    null, // 10 seedsData
+    null, // 11 masteryContext
+    null, // 12 signalContext
+    null, // 13 timingContext
+    null, // 14 lessonContext
+    null, // 15 teacherDirectives
+    null, // 16 lessonActivityContext
+    null, // 17 priorActivityContext
+    null, // 18 activityContext
     {
       activityTitle: testCase.activityTitle,
       prompt: testCase.deliverablePrompt,
       rubric: renderRubric(testCase),
       kind: "text",
       isComplete: false,
-    }, // 20 standaloneDeliverableContext ← under test
+    }, // 19 standaloneDeliverableContext ← under test
   );
 }
 
@@ -168,6 +181,12 @@ export type AcceptedRubricCall = {
 export type TutorTurn = {
   /** Scholar-visible text for this turn (post-tool-result, when called). */
   text: string;
+  /**
+   * The API `stop_reason` of every round this turn, in order. Lets a reader
+   * tell an empty reply the model chose (`end_turn` straight after a tool
+   * result) from a cut-off one (`max_tokens`) or a declined one (`refusal`).
+   */
+  stopReasons?: string[];
   /**
    * EVERY `update_rubric_score` call this turn made that production would have
    * ACCEPTED, in tool-round order. Calls the real mutation rejects (a document
@@ -246,6 +265,7 @@ export async function generateTutorTurn(
 
   const calls: AcceptedRubricCall[] = [];
   const textParts: string[] = [];
+  const stopReasons: string[] = [];
 
   /**
    * Apply ONE `update_rubric_score` call and return the tool_result string
@@ -274,6 +294,18 @@ export async function generateTutorTurn(
       return "Failed to record verdicts: Pass artifact_id to score the document rubric.";
     }
 
+    // The model occasionally sends `verdicts` as something other than an
+    // array (seen on Opus 5.5, 2026-11-06). Production's tool `run`
+    // (convex/lib/tutorSessionTools.ts) maps it unguarded, catches the
+    // TypeError, and returns "Failed to record verdicts: <message>" without
+    // recording anything. Mirror that, log what arrived, and count it.
+    if (!Array.isArray(rawInput.verdicts ?? [])) {
+      malformedRubricCalls.count++;
+      process.stderr.write(
+        `⚠️  malformed update_rubric_score input: verdicts is ${typeof rawInput.verdicts}: ${JSON.stringify(rawInput.verdicts).slice(0, 200)}\n`,
+      );
+      return "Failed to record verdicts: input.verdicts.map is not a function";
+    }
     const rawVerdicts = (rawInput.verdicts ?? []).map((v) => ({
       criterionId: v.criterion_id,
       level: v.level,
@@ -308,16 +340,22 @@ export async function generateTutorTurn(
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const res = await anthropic.messages.create({
       model: tutorModel,
-      // Matches the real streaming call's budget (convex/http.ts) — a lower
-      // cap here truncated some responses mid-extended-thinking before any
-      // text or tool_use ever appeared, which this harness misread as an
-      // empty/degenerate turn rather than a token-budget artifact.
-      max_tokens: 4096,
+      // Production's budget and effort for this model (lib/tutorModel
+      // tutorRuntime, read by convex/http.ts) — a lower cap here truncated
+      // some responses mid-thinking before any text or tool_use appeared,
+      // which this harness misread as an empty/degenerate turn.
+      max_tokens: runtime.maxTokens,
       system,
       tools: [RUBRIC_SCORE_TOOL],
+      // convex/http.ts binds the tutor's tools with exactly this choice.
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
       messages,
-    });
+      ...(runtime.effort
+        ? { output_config: { effort: runtime.effort } }
+        : {}),
+    } as Anthropic.MessageCreateParamsNonStreaming);
     accrue(res);
+    stopReasons.push(String(res.stop_reason));
     // EVERY tool_use block in the response, not just the first. The Messages
     // API rejects the NEXT request outright ("`tool_use` ids were found
     // without `tool_result` blocks immediately after") when any block goes
@@ -333,7 +371,7 @@ export async function generateTutorTurn(
 
     if (toolUses.length === 0) {
       // No tool call this round — the model's final word for this turn.
-      return { text: textParts.join("\n\n"), calls };
+      return { text: textParts.join("\n\n"), calls, stopReasons };
     }
 
     const toolResults: Anthropic.ToolResultBlockParam[] = toolUses.map(
@@ -357,7 +395,7 @@ export async function generateTutorTurn(
   // Hit the round cap while the model kept calling the tool with no final
   // text-only response. Report what was actually observed rather than
   // silently treating a stuck loop as a clean pass.
-  return { text: textParts.join("\n\n"), calls };
+  return { text: textParts.join("\n\n"), calls, stopReasons };
 }
 
 /**

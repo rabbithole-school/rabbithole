@@ -170,6 +170,24 @@ The GitHub Actions workflow
 runs it Fridays at 03:00 HST, before the Quality Pulse digest posts at 16:10,
 on the Anthropic engine with the rubric prompt-cached: about $10 a week.
 
+Candidate reads use an explicit 64 MiB CLI buffer because the pool contains
+full transcripts before sampling. CLI failures withhold stdout, stderr and
+arguments from CI logs; malformed write acknowledgments fail rather than
+counting as persisted scores. Reports include only successfully persisted
+scores (including deduplicated writes).
+
+Failed backup and weekly-judge workflow runs on `master` are handed to the
+existing Claude Tag channel by
+[production-followup.yml](../../.github/workflows/production-followup.yml).
+The brief contains only the workflow path and run link, not raw logs or learner
+data. The dispatch ledger deduplicates retries of the same failed run; a refused
+handoff makes the follow-up workflow fail visibly and can be retried there.
+This is code-repair triage, not another executor or schedule. A posted brief
+does not establish recovery: check a subsequent non-dry-run execution and its
+persisted output. This event hook cannot detect a schedule that never fired;
+absence monitoring must compare expected cadence with the last completed run,
+not the unused alert-status field.
+
 ## Fixtures
 
 Hand-authored cases each targeting one failure mode:

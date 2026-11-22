@@ -13,15 +13,27 @@ import {
 } from "./appKitIntegrity";
 
 describe("native app-kit assets", () => {
-  it("hashes UTF-8 source identically to the manifest generator", () => {
+  it("hashes UTF-8 source identically to the manifest generator", async () => {
     for (const source of ["", "abc", "Rabbithole graph: x² + 你好"]) {
-      expect(sha256Hex(source)).toBe(
+      expect(await sha256Hex(source)).toBe(
         createHash("sha256").update(source).digest("hex"),
       );
     }
   });
 
-  it("keeps every renamed native asset byte-identical to its manifest", () => {
+  it("yields between slices of a large source without changing the digest", async () => {
+    // ~200 KB spans several 32 KiB slices, with a multi-byte character straddling
+    // slice edges somewhere along the way.
+    const source = "p5 sketch: ∑ θ 🐇\n".repeat(10_000);
+    let yields = 0;
+    const digest = await sha256Hex(source, async () => {
+      yields += 1;
+    });
+    expect(digest).toBe(createHash("sha256").update(source).digest("hex"));
+    expect(yields).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps every renamed native asset byte-identical to its manifest", async () => {
     for (const file of APP_KIT_FILES) {
       const version = APP_KIT_V1_FILES.includes(
         file as (typeof APP_KIT_V1_FILES)[number],
@@ -37,19 +49,19 @@ describe("native app-kit assets", () => {
       ) as { libraries: Record<string, { sha256: string }> };
       const source = readFileSync(path.join(assetDir, `${file}.kit`), "utf8");
 
-      expect(() =>
+      await expect(
         assertAppKitSourceIntegrity(
           file,
           source,
           manifest.libraries[file].sha256,
         ),
-      ).not.toThrow();
+      ).resolves.toBeUndefined();
     }
   });
 
-  it("fails closed when a bundled source does not match its manifest", () => {
-    expect(() =>
+  it("fails closed when a bundled source does not match its manifest", async () => {
+    await expect(
       assertAppKitSourceIntegrity("katex.min.js", "tampered", "0".repeat(64)),
-    ).toThrow(/integrity mismatch/);
+    ).rejects.toThrow(/integrity mismatch/);
   });
 });

@@ -25,7 +25,8 @@ into this pod** (`ios/vendor/SwiftMath/**`, picked up by the podspec's
 
 Two supporting pieces (see the podspec comments):
 
-- **Fonts:** a trimmed `mathFonts.bundle` (Fira Math only) ships via
+- **Fonts:** a trimmed `mathFonts.bundle` (Fira Math only, under the SIL
+  OFL 1.1 in `FiraMath-OFL.txt`; the bundle's `LICENSE` is SwiftMath's MIT) ships via
   `s.resource_bundles` as `SwiftMathFonts.bundle`.
 - **`Bundle.module` shim:** SwiftMath's font loader calls the SPM-synthesized
   `Bundle.module`, which doesn't exist in a CocoaPods build — the vendored

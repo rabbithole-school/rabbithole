@@ -67,7 +67,10 @@ import {
   type UnlockingApp,
 } from "@/components/AppUnlockingOverlay";
 import { usePresentationAsam } from "@/contexts/AsamControllerContext";
-import { nudgeDeviceAppProjection } from "@/lib/appUnlockClient";
+import {
+  nudgeDeviceAppProjection,
+  readManagedAppInstallState,
+} from "@/lib/appUnlockClient";
 import { runAppReadyGate } from "@/lib/asam/appUnlockGate";
 import { isUnlockManagedApp } from "@/lib/asam/managedAppSchemes";
 import {
@@ -78,6 +81,8 @@ import {
   decideNativeLaunchWatch,
   interpretNativeOpenResult,
   notInstalledMessage,
+  notOnThisIpadMessage,
+  notOnThisIpadTitle,
   handoffMessage,
   handoffTitle,
   openFailedTitle,
@@ -120,10 +125,60 @@ const HANDOFF_FALLBACK_MS = {
 const EXIT_POLL_TOTAL_MS = 4_000;
 const EXIT_POLL_INTERVAL_MS = 100;
 
+// After Single App Mode releases, SpringBoard can still refuse the app switch
+// for a moment: on the pilot iPad (2026-11-06) an openURL sent 51 ms after the
+// unlock was logged as "Guided Access blocking workspace open app request" and
+// came back refused, while opens a few hundred ms later went through. A refusal
+// in this window is the lock catching up, not a missing app, so it is retried
+// briefly before the "may not be installed" alert. Bounded and short, because
+// an open that lands late — after the scholar has moved on — is its own bug.
+const OPEN_RETRY_BUDGET_MS = 1_500;
+const OPEN_RETRY_INTERVAL_MS = 250;
+
+// How long Rabbithole must stay active after a return before the lock re-arms.
+// Re-arming the instant AppState says "active" can land while SpringBoard still
+// has the other app frontmost — on the pilot iPad (2026-11-06) one such lock
+// was logged as "Guided Access App Did go Invalid", and when iOS decides the
+// wrong app is in front it kills that app and relaunches Rabbithole itself
+// with every touch blocked ("GAX Killed Non-SAM app", up to five minutes) —
+// the prime suspect for the frozen-bunny freeze (TRA-331). iOS already ignores
+// all touches for about a second after every lock while it verifies, so
+// waiting this long first costs the scholar nothing they can feel.
+const RELOCK_SETTLE_MS = 1_000;
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * Open a scheme, retrying a refusal while the lock release catches up.
+ * Resolves true once iOS switches apps (or Rabbithole has already left the
+ * foreground, which means it did); false when every attempt was refused or a
+ * newer launch took over.
+ */
+async function openWithRetry(
+  scheme: string,
+  isStale: () => boolean,
+): Promise<boolean> {
+  // A function, not an inline comparison: AppState changes across the awaits
+  // below, and TypeScript would otherwise narrow the second read away.
+  const hasLeft = () => AppState.currentState === "background";
+  const deadline = Date.now() + OPEN_RETRY_BUDGET_MS;
+  while (true) {
+    let opened = false;
+    try {
+      opened = interpretNativeOpenResult(await Linking.openURL(scheme));
+    } catch {
+      opened = false;
+    }
+    if (opened || hasLeft()) return true;
+    if (isStale() || Date.now() >= deadline) return false;
+    await sleep(OPEN_RETRY_INTERVAL_MS);
+    if (isStale()) return false;
+    if (hasLeft()) return true;
+  }
+}
+
 /** Poll until Single App Mode reports inactive, or the budget runs out. */
-async function waitForSingleAppModeExit(budgetMs: number): Promise<boolean> {
+export async function waitForSingleAppModeExit(budgetMs: number): Promise<boolean> {
   const deadline = Date.now() + budgetMs;
   while (isSingleAppModeActive()) {
     if (Date.now() >= deadline) return false;
@@ -237,6 +292,11 @@ export function NativeAppLaunchProvider({
   // launch's own generation supersedes it). See `handleCancel`.
   const committedGenRef = useRef(-1);
 
+  // The pending re-arm after a return (see RELOCK_SETTLE_MS). Separate from the
+  // fallback timer on purpose: arming a fallback must never cancel a re-arm the
+  // scholar's return already earned.
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const clearTimer = useCallback(() => {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
@@ -244,11 +304,34 @@ export function NativeAppLaunchProvider({
     }
   }, []);
 
+  const clearSettleTimer = useCallback(() => {
+    if (settleTimerRef.current) {
+      clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+  }, []);
+
   const applyRestore = useCallback(() => {
     clearTimer();
+    clearSettleTimer();
     stateRef.current = { mode: "idle", sawBackground: false };
     restoreAfterSystemUI();
-  }, [clearTimer, restoreAfterSystemUI]);
+  }, [clearSettleTimer, clearTimer, restoreAfterSystemUI]);
+
+  /**
+   * Re-arm once Rabbithole has stayed active for RELOCK_SETTLE_MS. Until then
+   * the watch stays open (`watching`, background seen), so leaving again inside
+   * the window simply re-arms on the next return instead of losing the restore.
+   */
+  const scheduleSettledRestore = useCallback(() => {
+    clearSettleTimer();
+    settleTimerRef.current = setTimeout(() => {
+      settleTimerRef.current = null;
+      // Not active any more: the listener reschedules on the next return.
+      if (AppState.currentState !== "active") return;
+      applyRestore();
+    }, RELOCK_SETTLE_MS);
+  }, [applyRestore, clearSettleTimer]);
 
   /**
    * Arm the restore fallback for whatever release is currently outstanding.
@@ -290,29 +373,40 @@ export function NativeAppLaunchProvider({
   // completed or superseded launch) makes every transition a no-op.
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
+      // Left (or was interrupted) before a pending re-arm fired. The watch is
+      // still open, so the next return schedules it again.
+      if (next !== "active") clearSettleTimer();
       const decision = decideNativeLaunchWatch(stateRef.current, {
         kind: "appstate",
         previous: appStateRef.current,
         next,
       });
       appStateRef.current = next;
+      if (decision.action === "restore") {
+        clearTimer();
+        setReadyUi(null);
+        // Re-arm once the return has settled, not on this event: SpringBoard
+        // can still have the other app frontmost here (see RELOCK_SETTLE_MS).
+        // Until then keep watching, so a scholar who leaves again inside the
+        // window is re-armed on the following return. There is nothing else to
+        // do on return: the app's place in this iPad's allowlist belongs to the
+        // teacher's grant, not to this launch.
+        stateRef.current = { mode: "watching", sawBackground: true };
+        scheduleSettledRestore();
+        return;
+      }
       stateRef.current = {
         mode: decision.mode,
         sawBackground: decision.sawBackground,
       };
-      if (decision.action === "restore") {
-        clearTimer();
-        setReadyUi(null);
-        // ASAM re-arms NOW and synchronously — the scholar is looking at
-        // Rabbithole again, and that must never wait on anything. There is
-        // nothing else to do on return any more: the app's place in this iPad's
-        // allowlist belongs to the teacher's grant, not to this launch, so
-        // there is no lease whose clock needs starting.
-        restoreAfterSystemUI();
-      }
     });
-    return () => subscription.remove();
-  }, [clearTimer, restoreAfterSystemUI]);
+    return () => {
+      subscription.remove();
+      // A re-arm still waiting for the return to settle runs now rather than
+      // being dropped, or the lock would stay off until the next AppState change.
+      if (settleTimerRef.current) applyRestore();
+    };
+  }, [applyRestore, clearSettleTimer, clearTimer, scheduleSettledRestore]);
 
   const closeReadyUi = useCallback(() => setReadyUi(null), []);
 
@@ -440,6 +534,7 @@ export function NativeAppLaunchProvider({
       const gen = ++genRef.current;
       const isStale = () => gen !== genRef.current;
 
+
       // ── Phase 0: readiness. Runs BEFORE any ASAM release, so a cancel or a
       // timeout here cannot strand Single App Mode.
       //
@@ -466,15 +561,34 @@ export function NativeAppLaunchProvider({
       // with a scheme. A scheme-less managed app therefore has NO local
       // readiness signal: nudge the projection best-effort and proceed. Its
       // tile is only on screen because the grant is live, and that same grant
-      // drives the allowlist, so the sole gap is reconciler lag — which costs
-      // a message naming an icon that lands moments later, not a failed
-      // launch.
+      // drives the allowlist, so reconciler lag costs only a message naming an
+      // icon that lands moments later.
+      //
+      // The grant does NOT install the app, though: that is a SimpleMDM group
+      // deployment, and an app deployed to the wrong group never arrives
+      // (Carnets on 2026-11-18 was granted and allowlisted but deployed only
+      // to the Pilot). So ask the server what SimpleMDM last saw on this iPad
+      // and stop here, before anything is released, when it says the app is
+      // missing. Any doubt reads "unknown" and keeps the handoff.
       if (managed && !nativeUrlScheme) {
-        void getStableDeviceId()
-          .then((deviceId) =>
-            deviceId ? nudgeDeviceAppProjection(convex, deviceId) : undefined,
-          )
-          .catch(() => {});
+        const deviceId = await getStableDeviceId().catch(() => null);
+        if (isStale()) return;
+        if (deviceId) {
+          void nudgeDeviceAppProjection(convex, deviceId).catch(() => {});
+          if (request.externalAppId) {
+            const installState = await readManagedAppInstallState(
+              convex,
+              deviceId,
+              request.externalAppId,
+            );
+            if (isStale()) return;
+            if (installState === "missing") {
+              busyRef.current = false;
+              Alert.alert(notOnThisIpadTitle(appName), notOnThisIpadMessage(appName));
+              return;
+            }
+          }
+        }
       }
       if (managed && nativeUrlScheme) {
         const outcome = await ensureAppReady(
@@ -512,6 +626,9 @@ export function NativeAppLaunchProvider({
       // continuous listener still holds `previous`, so that flow's own
       // background→active re-entry will restore exactly once.
       clearTimer();
+      // A tap inside the settle window after a return: this launch now owns the
+      // outstanding release, so the pending re-arm must not fire mid-launch.
+      clearSettleTimer();
       // Seed from the REAL AppState rather than hardcoding false. A cold
       // readiness gate can resolve after the scholar has already left (a
       // previous handoff released ASAM, they swiped Home, and JS kept running
@@ -584,32 +701,23 @@ export function NativeAppLaunchProvider({
         return;
       }
 
-      try {
-        const result = await Linking.openURL(nativeUrlScheme);
-        if (!interpretNativeOpenResult(result)) {
-          if (isStale()) {
-            busyRef.current = false;
-            return;
-          }
-          failOpen();
-          return;
-        }
-        // Opened. Record the handoff for screen-time telemetry — synchronous,
-        // non-throwing, and never awaited, so it cannot delay the app switch.
-        // Emitted only on a CONFIRMED open: a refused or failed launch is not
-        // time in another app. The matching external_return is emitted by the
-        // queue on the next foreground.
-        recordExternalAppLaunch(request.externalAppId);
-        if (isStale()) {
-          busyRef.current = false;
-          return;
-        }
-      } catch {
+      const opened = await openWithRetry(nativeUrlScheme, isStale);
+      if (!opened) {
         if (isStale()) {
           busyRef.current = false;
           return;
         }
         failOpen();
+        return;
+      }
+      // Opened. Record the handoff for screen-time telemetry — synchronous,
+      // non-throwing, and never awaited, so it cannot delay the app switch.
+      // Emitted only on a CONFIRMED open: a refused or failed launch is not
+      // time in another app. The matching external_return is emitted by the
+      // queue on the next foreground.
+      recordExternalAppLaunch(request.externalAppId);
+      if (isStale()) {
+        busyRef.current = false;
         return;
       }
 
@@ -620,6 +728,7 @@ export function NativeAppLaunchProvider({
     [
       applyRestore,
       armRestoreFallback,
+      clearSettleTimer,
       clearTimer,
       convex,
       closeReadyUi,

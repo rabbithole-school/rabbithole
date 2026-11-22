@@ -3,7 +3,7 @@
  * (convex/bakeUnitFromSeed.ts) + its launch hooks. The LLM design loop itself
  * is NOT exercised here (it needs a live model + is judged by the eval harness,
  * evals/curriculum-sim); these pin the deterministic pieces:
- *   - createFromSeed schedules a bake for TOPIC seeds, not structured ones
+ *   - createFromSeed schedules no bake for any seed (TRA-660)
  *   - the seed-stamp + session-link mutations (idempotency / ownership / races)
  *   - firstOnlineActivityInUnit ordering
  *   - createScholarQuest bake provenance
@@ -91,70 +91,36 @@ function makeTopicSeed(
 }
 
 describe("bake: launch hooks (createFromSeed)", () => {
-  test("a TOPIC seed launch schedules a background bake on the new session", async () => {
+  test("a TOPIC seed launch opens a plain chat: no bake, no pending hold", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await makeScholar(t);
-    const seedId = await makeTopicSeed(t, scholarId);
     const asScholar = await withScholar(t, scholarId);
 
-    const { id: sessionId } = await asScholar.mutation(
-      api.sessions.createFromSeed,
-      { seedId },
-    );
-
-    // The session lands anchorless (the warm ad-lib open) ...
-    const session = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(session?.activityId).toBeUndefined();
-    expect(session?.seedId).toBe(seedId);
-
-    // ... and a bake was scheduled to upgrade it in place.
-    const scheduled = await t.run((ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
-    );
-    expect(scheduled.length).toBe(1);
-    expect(scheduled[0].name).toContain("bakeUnitFromSeed");
-  });
-
-  test("the chosen bake path threads into the scheduled bake", async () => {
-    const t = convexTest(schema, modules);
-    const scholarId = await makeScholar(t);
-    const seedId = await makeTopicSeed(t, scholarId);
-    const asScholar = await withScholar(t, scholarId);
-
-    await asScholar.mutation(api.sessions.createFromSeed, {
-      seedId,
-      bakePath: { title: "Be a sound detective", blurb: "Hunt for the pattern by ear." },
-    });
+    // Every argument an older client can send: nothing, a chosen path, and
+    // the Endless chat choice. None may bake or mark the session pending.
+    const calls = [
+      {},
+      { bakePath: { title: "Be a sound detective", blurb: "Hunt for the pattern by ear." } },
+      { endlessChat: true },
+    ];
+    for (const extra of calls) {
+      const seedId = await makeTopicSeed(t, scholarId);
+      const { id: sessionId } = await asScholar.mutation(
+        api.sessions.createFromSeed,
+        { seedId, ...extra },
+      );
+      const session = await t.run((ctx) => ctx.db.get(sessionId));
+      expect(session?.activityId).toBeUndefined();
+      expect(session?.seedId).toBe(seedId);
+      expect(session?.questBakeStatus).toBeUndefined();
+    }
 
     const scheduled = await t.run((ctx) =>
       ctx.db.system.query("_scheduled_functions").collect(),
     );
-    expect(scheduled.length).toBe(1);
-    // The scheduled bake carries the scholar's chosen way in.
-    const args = scheduled[0].args[0] as { path?: { title: string } };
-    expect(args.path?.title).toBe("Be a sound detective");
-  });
-
-  test('"Endless chat" opens a plain exploration and never bakes', async () => {
-    const t = convexTest(schema, modules);
-    const scholarId = await makeScholar(t);
-    const seedId = await makeTopicSeed(t, scholarId);
-    const asScholar = await withScholar(t, scholarId);
-
-    const { id: sessionId } = await asScholar.mutation(
-      api.sessions.createFromSeed,
-      { seedId, endlessChat: true },
-    );
-
-    // No "building your quest" hold, and no bake that could later swap the
-    // open chat into a baked activity mid-conversation.
-    const session = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(session?.questBakeStatus).toBeUndefined();
-    expect(session?.seedId).toBe(seedId);
-    const scheduled = await t.run((ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
-    );
-    expect(scheduled).toHaveLength(0);
+    expect(
+      scheduled.some((job) => job.name.includes("bake")),
+    ).toBe(false);
   });
 
   test("a structured seed initializes its unit process without a remaining activity", async () => {

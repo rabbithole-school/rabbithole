@@ -1,21 +1,9 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import dynamic from "next/dynamic";
-import { Box } from "@chakra-ui/react";
-
-// The entryway "wall" version of the Class Galaxy — a no-touch, high-density
-// ambient display meant to be perused on the big monitor by the door (the
-// galaxy companion to the Trophy Case). Renders the shared Concept Atlas in
-// Galaxy mode (concepts.classGalaxy), curation disabled.
-const ConceptAtlasView = dynamic(
-  () => import("@/components/ConceptAtlasView").then((m) => m.ConceptAtlasView),
-  { ssr: false },
-);
-
-export default function GalaxyWallPage() {
-  return (
-    <Box h="100dvh" overflow="hidden" bg="#05040c" p={4}>
-      <ConceptAtlasView lockMode="galaxy" canCurate={false} height="calc(100dvh - 32px)" />
-    </Box>
-  );
+// The entryway "wall" kiosk was retired: it re-rendered the Class Galaxy lens
+// inside the same staff chrome, so it never worked as a chrome-free display.
+// Keep old bookmarks working by redirecting to the galaxy lens, whose full
+// screen button gives the takeover the wall was meant to provide.
+export default function GalaxyWallRedirect() {
+  redirect("/teacher/galaxy?lens=galaxy");
 }

@@ -35,7 +35,6 @@ import { canonicalPrepWindow } from "./lib/prepBlock";
 import { raiseAlert } from "./alerts";
 import {
   fanOutWorkshopIdea,
-  MAX_OPEN_SUGGESTIONS_EXPORT,
   openIdeas as openIdeasFor,
 } from "./scholarSuggestions";
 import { isIdeaConvosEnabled } from "./lib/scholarIdeaTools";
@@ -1299,7 +1298,7 @@ export const applyMetaAnalysis = internalMutation({
       alerted = true;
     }
 
-    // 2. Consented ideas → scholarSuggestions rows. Authoritative cap + dedupe
+    // 2. Consented ideas → scholarSuggestions rows. Authoritative dedupe
     //    read here (state may have moved since the model saw it).
     //
     //    IDEA CONVERSATIONS: when WORKSHOP_IDEA_CONVOS_ENABLED is on, the
@@ -1313,7 +1312,6 @@ export const applyMetaAnalysis = internalMutation({
     const open = ideaConvos
       ? []
       : await openIdeasFor(ctx, scholarId);
-    let openCount = open.length;
     const existingTitles = new Set(
       open.map((o) => o.title.trim().toLowerCase()),
     );
@@ -1321,7 +1319,6 @@ export const applyMetaAnalysis = internalMutation({
     let captured = 0;
     for (const s of ideaConvos ? [] : args.suggestions) {
       if (!s.consented) continue; // no consent → never a row
-      if (openCount >= MAX_OPEN_SUGGESTIONS_EXPORT) continue; // at cap → skip
       const title = s.title.trim();
       if (!title) continue;
       const key = title.toLowerCase();
@@ -1338,7 +1335,6 @@ export const applyMetaAnalysis = internalMutation({
         updatedAt: now,
       });
       existingTitles.add(key);
-      openCount++;
       captured++;
 
       await fanOutWorkshopIdea(ctx, {

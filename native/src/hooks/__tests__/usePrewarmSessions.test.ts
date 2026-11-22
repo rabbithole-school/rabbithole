@@ -45,6 +45,18 @@ describe("prewarmSessions", () => {
     expect(teardown).not.toThrow();
   });
 
+  // The fix above only deduped ids within one Home. Practice's "Done" calls
+  // router.replace("/"), which can leave two Home screens mounted at once,
+  // each prewarming the same sessions; build 104 crashed the same way on
+  // 2026-11-05 and 2026-11-06 when one of them tore down after the other.
+  it("tears down cleanly when two mounted Homes prewarm the same session", () => {
+    const convex = makeClient();
+    const first = prewarmSessions(convex, ["s1", "s2"]);
+    const second = prewarmSessions(convex, ["s1"]);
+    expect(first).not.toThrow();
+    expect(second).not.toThrow();
+  });
+
   it("holds one subscription per distinct session", () => {
     const convex = makeClient();
     const watched: unknown[] = [];

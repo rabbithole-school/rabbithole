@@ -158,15 +158,27 @@ function truncate(value: string, maxLength: number): string {
   return `${trimmed.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
+/** Free text we did not author (an AI diagnosis, an error pattern). It sits
+ *  outside any markup of ours, so its content is kept as written: `2*3` stays
+ *  `2*3`. Only Slack's control characters and backticks are neutralized. */
 function safeText(value: string): string {
-  // NOTE: this backslash-escape does NOT survive Slack. These bodies go out as
-  // `markdown_text` (CommonMark): Slack parses `\\*` as a literal asterisk and
-  // then re-emits it RAW into mrkdwn, where its own renderer reads it as markup
-  // again, so an emphasis marker in a label still renders as emphasis. Probed
-  // live 2026-09-17. The fix is NOT `escapeSlackInline` (convex/lib/slackText.ts)
-  // as-is: that STRIPS `_`, which mangles the underscored skill ids this
-  // function is mostly given (`divide_by_6` → `divideby6`). Tracked separately.
-  return escapeSlackText(value.replace(/`/g, "")).replace(/([*_])/g, "\\$1");
+  return escapeSlackText(value.replace(/`/g, ""));
+}
+
+/** A skill label, dropped inside our `**…**` span or at the head of a line.
+ *  These bodies go out as `markdown_text` (CommonMark). A backslash-escape
+ *  does not survive that: Slack parses `\\*` as a literal asterisk, then
+ *  re-emits it RAW into mrkdwn, where it renders as markup again (probed live
+ *  2026-09-17). Stripping is the only form that survives, so every `*` goes,
+ *  and so does any `_` run that is not flanked by a letter or digit on both
+ *  sides, since a delimiter underscore opens or closes emphasis. Intra-word
+ *  underscores stay: labels are mostly skill ids (`divide_by_6`) and CommonMark
+ *  never reads those as emphasis. `escapeSlackInline` (convex/lib/slackText.ts)
+ *  strips every `_`, so it isn't used here (TRA-347). */
+function safeLabel(value: string): string {
+  return safeText(value)
+    .replace(/\*/g, "")
+    .replace(/(?<![\p{L}\p{N}_])_+|_+(?![\p{L}\p{N}_])/gu, "");
 }
 
 function safeCodeSpan(value: string, maxLength: number): string {
@@ -179,7 +191,7 @@ function renderMiss(miss: StuckAlertMiss): string | null {
 
   const elapsed = formatAttemptElapsed(miss.elapsedMs);
   const lines = [
-    `• **${safeText(skillLabel)}**${
+    `• **${safeLabel(skillLabel)}**${
       elapsed ? ` (${elapsed} on this one)` : ""
     }`,
   ];
@@ -220,7 +232,7 @@ function renderNotYetTaughtMiss(miss: StuckAlertMiss): string | null {
 
   const elapsed = formatAttemptElapsed(miss.elapsedMs);
   const lines = [
-    `• **${safeText(skillLabel)}**${
+    `• **${safeLabel(skillLabel)}**${
       elapsed ? ` (${elapsed} on this one)` : ""
     }`,
   ];
@@ -366,7 +378,7 @@ export function breakerSkillStateLine(
   state: BreakerSkillState,
   breaker?: BreakerTelemetry,
 ): string {
-  const label = safeText(state.label);
+  const label = safeLabel(state.label);
   if (!state.episodeProgressKnown) {
     return `${label}: currently ${proficiencyLabel(state.proficiency)} — progress during this episode is unknown.`;
   }
@@ -531,7 +543,7 @@ export function buildStuckAlertBody(input: StuckAlertBodyInput): string {
   if (renderedMisses.length === 0) {
     return [
       scholarOfferLine(input.missStreak, input.breaker),
-      `Most recently on **${safeText(input.fallbackSkillLabel)}**.`,
+      `Most recently on **${safeLabel(input.fallbackSkillLabel)}**.`,
       ...(repeatLine ? [repeatLine] : []),
       "Might be a good moment to check in.",
     ].join("\n");

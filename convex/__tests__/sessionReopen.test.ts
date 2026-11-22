@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
@@ -409,8 +410,8 @@ describe("sessions.reopen — reopened homework is resumable but NOT due", () =>
       activityId: Id<"activities">;
     },
   ) {
-    return await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+    const __mirrored = await t.run(async (ctx) =>
+      insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId],
@@ -425,6 +426,7 @@ describe("sessions.reopen — reopened homework is resumable but NOT due", () =>
         ],
       }),
     );
+    return __mirrored;
   }
 
   test("completed → dropped from due; reopened → resumable card, still NOT due", async () => {

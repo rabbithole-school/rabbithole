@@ -6,8 +6,9 @@
 // attachment's blob (discarding a staged upload, the 24h abandoned-upload
 // sweep, and the account-deletion cascade) asks `attachmentOwnsBlob` first.
 
-import type { Doc, Id } from "../_generated/dataModel";
-import type { MutationCtx, QueryCtx } from "../_generated/server";
+import type { Doc } from "../_generated/dataModel";
+import type { MutationCtx } from "../_generated/server";
+import { storageReferencedByAnotherOwner } from "./storageReferences";
 
 // Matches the lifetime of a Convex upload URL.
 export const UPLOAD_RESERVATION_TTL_MS = 60 * 60 * 1000;
@@ -44,52 +45,7 @@ export async function attachmentOwnsBlob(
     // recoverable; a deleted scan is not.
     if (!proven) return false;
   }
-  return !(await storageReferencedOutsideParentMessages(
-    ctx,
-    attachment.storageId,
-  ));
-}
-
-/**
- * True when a feature other than family messaging holds this blob. Only
- * tables with a storage index are checked, so this is a backstop behind the
- * upload proof above, not a substitute for it.
- */
-export async function storageReferencedOutsideParentMessages(
-  ctx: Pick<QueryCtx | MutationCtx, "db">,
-  storageId: Id<"_storage">,
-): Promise<boolean> {
-  const references = await Promise.all([
-    ctx.db
-      .query("portfolioItems")
-      .withIndex("by_file_storage", (q) => q.eq("fileStorageId", storageId))
-      .first(),
-    ctx.db
-      .query("healthRecordFiles")
-      .withIndex("by_storage", (q) => q.eq("storageId", storageId))
-      .first(),
-    ctx.db
-      .query("slideAssets")
-      .withIndex("by_storage", (q) => q.eq("storageId", storageId))
-      .first(),
-    ctx.db
-      .query("practiceWorkImages")
-      .withIndex("by_storage", (q) => q.eq("storageId", storageId))
-      .first(),
-    ctx.db
-      .query("captureStationCaptures")
-      .withIndex("by_storage", (q) => q.eq("storageId", storageId))
-      .first(),
-    ctx.db
-      .query("captureStationCaptures")
-      .withIndex("by_video_thumb_storage", (q) =>
-        q.eq("videoThumbStorageId", storageId),
-      )
-      .first(),
-    ctx.db
-      .query("captureStationUploadReservations")
-      .withIndex("by_storage", (q) => q.eq("storageId", storageId))
-      .first(),
-  ]);
-  return references.some((row) => row !== null);
+  return !(await storageReferencedByAnotherOwner(ctx, attachment.storageId, {
+    table: "parentMessageAttachments",
+  }));
 }

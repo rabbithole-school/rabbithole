@@ -1,4 +1,6 @@
+import { appTurnOrder } from "./lib/agentTurn";
 import { httpRouter, makeFunctionReference } from "convex/server";
+import { GIVING_WORK_PROMPT } from "./lib/giveQuestions";
 import { httpAction, type ActionCtx } from "./_generated/server";
 import type {
   BetaRunnableTool,
@@ -15,6 +17,11 @@ import { acquireLlmLease } from "./lib/llmLease";
 import { TEACHER_ARCHIVE_COPY } from "../shared/teacherArchive";
 import { levelsPromptLine } from "./lib/readingLevels";
 import { APP_UPDATE_LLM_SURFACE, LLM_BUSY_MESSAGE } from "./lib/llmLimiter";
+import {
+  shouldRecordStreamRefusal,
+  streamRefusalReason,
+  streamTurnRefFromBody,
+} from "./lib/streamRefusal";
 import {
   sseEvent,
   shouldPersistStreamContent,
@@ -113,9 +120,18 @@ import {
 import { buildCharacterOnStageSection } from "./sessionHelpers";
 import { buildUnitDesignerResponse } from "./unitDesignerStream";
 // questDesignerStream removed in the kill-quests refactor.
-import { makeScholarReadTools } from "./lib/scholarReadTools";
-import { buildParentAideSystemPrompt, resolveSelectedChildName } from "./lib/parentAidePrompt";
-import { verifyMetaSignature } from "./lib/parentMessageChannels";
+import {
+  PARENT_AIDE_MAX_ITERATIONS,
+  PARENT_AIDE_MAX_TOKENS,
+  PARENT_AIDE_MODEL,
+  PARENT_AIDE_USAGE_SOURCE,
+  prepareParentAideTurn,
+} from "./lib/parentAideTurn";
+import {
+  twimlResponseBody,
+  verifyMetaSignature,
+  verifyTwilioSignature,
+} from "./lib/parentMessageChannels";
 import { geminiGenerateImage, type GeminiPart } from "./lib/gemini";
 import {
   assembleCurriculumTools,
@@ -147,9 +163,6 @@ import {
   makeScholarCodeTools,
   protectedTermsFromNames,
 } from "./lib/scholarCodeTools";
-
-/** See the parent-chat-stream `maxIterations` comment. */
-const PARENT_AIDE_MAX_ITERATIONS = 8;
 import {
   isIdeaConvosEnabled,
   ideaConvosLoopConfig,
@@ -224,7 +237,9 @@ import {
 import {
   APP_BUILD_TOOL_NAMES,
   CHARACTER_DIRECTOR_TOOL_NAMES,
+  appendPendingCompletionNote,
   makeTutorSessionTools,
+  withPendingCompletionNote,
   type TutorToolSessionState,
 } from "./lib/tutorSessionTools";
 import {
@@ -233,6 +248,7 @@ import {
   requestedArtifactIdFromToolInput,
 } from "./lib/tutorCodeEditor";
 import { academicCalendarIcs } from "../shared/academicCalendarIcs";
+import { extractDriveFileIds } from "./lib/driveAccess";
 import {
   authorizeGoogleEventsPush,
   parseGoogleEventsEnvelope,
@@ -284,6 +300,64 @@ const SSE_ERROR_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Expose-Headers": "Retry-After",
 };
+
+/**
+ * `httpAction` for a browser-facing stream route whose preflight allows `*`.
+ * Holds the rule above for every response the route produces, so an early
+ * return that forgets the header, or a throw before the stream starts, still
+ * reaches the client as its real status:
+ *
+ * - a response without `Access-Control-Allow-Origin` gets `*` added, and
+ *   `Retry-After` exposed as SSE_ERROR_HEADERS does (the unit designer's 404
+ *   in unitDesignerStream.ts relies on this);
+ * - a throw becomes a 500 that carries it. Convex's own 500 for an uncaught
+ *   throw has no CORS header, so the browser reported a CORS failure and hid
+ *   the status (TRA-600: on a preview with no SITE_URL, building the aide's
+ *   tools threw, and the console showed only "No 'Access-Control-Allow-Origin'
+ *   header").
+ *
+ * `errorFormat` matches what the route's clients read on failure: SSE `data:`
+ * lines (the aide and tutor clients parse them without checking the status),
+ * or JSON for routes whose other errors are JSON. Guest mode is not wrapped:
+ * it echoes an allowlisted origin rather than `*`.
+ */
+function corsStreamAction(
+  route: string,
+  errorFormat: "sse" | "json",
+  handler: (ctx: ActionCtx, request: Request) => Promise<Response>,
+) {
+  return httpAction(async (ctx, request) => {
+    let response: Response;
+    try {
+      response = await handler(ctx, request);
+    } catch (error) {
+      console.error(`[${route}] failed before streaming:`, error);
+      return errorFormat === "sse"
+        ? new Response(sseEvent({ error: "Server error" }), {
+            status: 500,
+            headers: SSE_ERROR_HEADERS,
+          })
+        : new Response(JSON.stringify({ error: "Server error" }), {
+            status: 500,
+            headers: {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+    }
+    if (response.headers.has("Access-Control-Allow-Origin")) return response;
+    const headers = new Headers(response.headers);
+    headers.set("Access-Control-Allow-Origin", "*");
+    if (!headers.has("Access-Control-Expose-Headers")) {
+      headers.set("Access-Control-Expose-Headers", "Retry-After");
+    }
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  });
+}
 
 
 // Register @convex-dev/auth HTTP routes (OIDC discovery, JWKS, sign-in endpoints)
@@ -345,7 +419,66 @@ http.route({
  * Reads session context, calls Claude API via beta tool runner,
  * streams tokens back via SSE, and periodically persists content to DB.
  */
-const sessionStreamHandler = httpAction(async (ctx, request) => {
+/**
+ * Wrap the /session-stream handler so any error answer or throw is stamped on
+ * the turn's placeholder (TRA-472; lib/streamRefusal.ts). Without it, an empty
+ * placeholder the server never touched could mean "never arrived" or "refused
+ * before the tutor started", and the rows could not tell which. Recording is
+ * best effort and never changes the response.
+ */
+function withStreamRefusalRecord(
+  handler: (ctx: ActionCtx, request: Request) => Promise<Response>,
+) {
+  return async (ctx: ActionCtx, request: Request): Promise<Response> => {
+    // Every read here is guarded: recording is diagnostic, and a failure in it
+    // must never turn into a failure of the stream route itself.
+    let turn: ReturnType<typeof streamTurnRefFromBody> = null;
+    try {
+      turn = streamTurnRefFromBody(await request.clone().json());
+    } catch {
+      turn = null;
+    }
+    const record = async (status: number, reason: string) => {
+      if (!shouldRecordStreamRefusal(status, reason)) return;
+      console.warn(
+        `[session-stream] turn refused before the tutor started: ${status} ${reason}`,
+        turn ? { sessionId: turn.sessionId, assistantMsgId: turn.assistantMsgId } : {},
+      );
+      if (!turn) return;
+      try {
+        await ctx.runMutation(internal.sessionHelpers.recordStreamRefusal, {
+          ...turn,
+          status,
+          reason,
+        });
+      } catch (error) {
+        console.error("[session-stream] refusal record failed:", error);
+      }
+    };
+    let response: Response;
+    try {
+      response = await handler(ctx, request);
+    } catch (error) {
+      await record(
+        500,
+        `Server error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
+    }
+    if (response.status >= 400) {
+      let body = "";
+      try {
+        body = await response.clone().text();
+      } catch {
+        body = "";
+      }
+      await record(response.status, streamRefusalReason(body));
+    }
+    return response;
+  };
+}
+
+const sessionStreamHandler = corsStreamAction("session-stream", "sse", withStreamRefusalRecord(async (ctx, request) => {
     const body = await request.json();
     const rawStreamId = (body as { streamId?: unknown }).streamId;
     const streamId = typeof rawStreamId === "string" ? rawStreamId : "";
@@ -371,6 +504,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
       assistantMsgId: initialAssistantMsgId,
       platform,
       supportsRenderCheck,
+      supportsAppScripts,
+      supportsQuestProposalCard,
       appRequest,
       rubricCheck,
       kickoff,
@@ -406,6 +541,9 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
         ...(assistantMsgId ? { assistantMsgId: String(assistantMsgId) } : {}),
       }
     );
+    // When this turn read the whisper slot: a Slack whisper queued after it
+    // waits for the turn that actually reads it (whisperReceipts.ts).
+    const whisperReadAt = Date.now();
 
     if (!session) {
       return new Response(
@@ -613,12 +751,21 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
     // actually offered — Play drops the code tools, so the prompt must not
     // advertise them (G5). `workshopMode` is "edit" for any non-Play request;
     // the Play lead-in only renders under the builder stance anyway.
-    // callerIsSessionOwner: stay_silent is offered only to the session owner
-    // (missionToolOffer below), so the prompt's silence branch must agree.
+    const offersProvocation = session.appContext.builderStance && platform === "native";
+    // The proposal card (TRA-690, lib/questProposalCard.ts): a chat that allows
+    // it, a client that draws it, and the scholar at the keyboard, since only
+    // the scholar can tap Propose (questProposals.propose).
+    const offersQuestProposal =
+      session.questProposalOffered &&
+      supportsQuestProposalCard === true &&
+      caller._id === session.scholarId &&
+      workshopMode !== "play";
     const promptContext = {
       ...session,
+      offersProvocation,
+      offersQuestProposal,
       playMode: workshopMode === "play",
-      callerIsSessionOwner: callerUserId === session.scholarId,
+      playEditAccess: turnPolicy.effectiveEditAccess,
     };
     // Cache-split form, ordered by volatility: the stable prefix (cached with
     // the tools array before it), the turn-1-only remainder, the documents
@@ -763,6 +910,11 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
         // recorded as a version too. Out here with the baseline so the error
         // path records it as well.
         let createdCodeArtifact = false;
+        // The app's "activity is done" note, queued by a completion tool and
+        // appended when the turn finalizes (TRA-703). Out here with the
+        // baseline so the error path can still write it: the completion is
+        // already recorded by then.
+        let pendingCompletionNote: string | null = null;
         const stopPredicate = createStreamStopPredicate({
           // A client disconnect is NOT a stop: the scholar's Stop button and a
           // steering send both stop through the database (requestStop /
@@ -870,9 +1022,48 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
               buildCharacterOnStageSection(session.characterContext),
             );
           }
+          // A scholar's chat photos get an app-usable copy before the builder
+          // sees them (messages.appAssetId): the raw upload is sized for the
+          // model, not the app host, which refused it and left the app blank
+          // on the BunnyPad. Lazy and idempotent; a failure only leaves the
+          // photo labelled as unusable in the app.
+          let chatHistory = session.chatHistory;
+          if (
+            session.appContext.builderFeatures &&
+            chatHistory.some(
+              (message) =>
+                message.sourceRole === "user" &&
+                message.imageId &&
+                message.appAssetId === null,
+            )
+          ) {
+            try {
+              const prepared = await ctx.runAction(
+                internal.appAssetActions.prepareSessionPhotoAssets,
+                { sessionId: projId },
+              );
+              const byMessage = new Map(
+                prepared.map((photo) => [
+                  String(photo.messageId),
+                  photo.appAssetId,
+                ]),
+              );
+              if (byMessage.size > 0) {
+                chatHistory = chatHistory.map((message) => {
+                  const appAssetId = byMessage.get(message.id);
+                  return appAssetId ? { ...message, appAssetId } : message;
+                });
+              }
+            } catch (error) {
+              console.warn(
+                "[session-stream] scholar photos not prepared as app assets",
+                error,
+              );
+            }
+          }
           // Build messages for API (with image support).
           let apiMessages = await assembleProjectStreamApiMessages({
-            chatHistory: session.chatHistory,
+            chatHistory,
             appRequest,
             appAiTurns:
               session.characterContext?.turns ??
@@ -1163,6 +1354,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
             set suppressCompletionFollowUp(v) { suppressCompletionFollowUp = v; },
             get activityCompletedThisStream() { return activityCompletedThisStream; },
             set activityCompletedThisStream(v) { activityCompletedThisStream = v; },
+            get pendingCompletionNote() { return pendingCompletionNote; },
+            set pendingCompletionNote(v) { pendingCompletionNote = v; },
             get createdCodeArtifact() { return createdCodeArtifact; },
             set createdCodeArtifact(v) { createdCodeArtifact = v; },
           };
@@ -1187,6 +1380,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
             instructionPlatform: platform,
             chatPracticeOn,
             teachBackOn,
+            supportsAppScripts: supportsAppScripts === true,
+            offersQuestProposal,
           });
 
           const readTextArtifacts = async () => {
@@ -1357,29 +1552,18 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           // Mission steering (TRA-519 B1, lib/designerTools.ts):
           // park_idea / unpark_idea on any turn of a session with a MISSION —
           // tutor stance, or builder stance in Edit — the condition the
-          // prompt's MISSION section / contract steering renders under; and
-          // stay_silent only on a builder-stance app activity, for the
-          // session owner, with allowSilence (the prompt's silence branch uses
-          // the same owner test via promptContext.callerIsSessionOwner).
+          // prompt's MISSION section / contract steering renders under.
           // Appended after the factory's tools so the factory's tool order
           // (and cache prefix) is unchanged.
           const designerOffer = missionToolOffer({
             hasMission: session.mission != null,
-            builderStance: session.appContext.builderStance,
             workshopMode,
             teacherBuild: isTeacherBuildContext(session),
-            appActivity: session.lessonActivityContext?.kind === "vibecode",
-            allowSilence: session.lessonActivityContext?.allowSilence === true,
-            callerIsSessionOwner: callerUserId === session.scholarId,
             freePlay: session.freePlay === true,
           });
-          // One stay_silent per turn (the SDK rejects duplicate tool names):
-          // an app update offers its own below, so the designer's is withheld
-          // on every app-update turn.
-          const designerStaySilent = designerOffer.staySilent && !isAppUpdate;
           toolsForRun.push(
             ...(await makeDesignerTools({
-              offer: { ...designerOffer, staySilent: designerStaySilent },
+              offer: designerOffer,
               parkIdea: (idea) =>
                 ctx.runMutation(internal.sessions.parkIdea, {
                   sessionId: projId,
@@ -1391,9 +1575,25 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                   sessionId: projId,
                   text,
                 }),
-              onSilence: () => {
-                silenced = true;
-              },
+              // A question about the world goes to the scholar's starters,
+              // never the parking lot (TRA-682).
+              saveQuestion: (text) =>
+                ctx.runMutation(internal.sessions.saveStarterFromSession, {
+                  sessionId: projId,
+                  origin: "saved_question",
+                  text,
+                }),
+              // The question shows in the builder's Flair tab, so only a
+              // builder turn is offered set_provocation.
+              ...(offersProvocation
+                ? {
+                    setProvocation: (text: string) =>
+                      ctx.runMutation(internal.sessions.setProvocation, {
+                        sessionId: projId,
+                        text,
+                      }),
+                  }
+                : {}),
             })),
           );
           // An app update with no asks: this branch's stay_silent. Appended
@@ -1417,11 +1617,9 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           const buildToolNames: ReadonlySet<string> = holdBuildNarration
             ? APP_BUILD_TOOL_NAMES
             : new Set();
-          // The designer's hold covers the turn's FIRST message only (later
-          // messages stream as usual); an app update or a builder's Edit turn
-          // re-arms it on every message (below).
-          let holdingText =
-            designerStaySilent || offerStaySilent || holdBuildNarration;
+          // An app update or a builder's Edit turn holds text on every
+          // message (re-armed below).
+          let holdingText = offerStaySilent || holdBuildNarration;
 
           // App designer: capture the pre-turn app baseline so the stream
           // commit path can record a version only when THIS turn changed the
@@ -1464,15 +1662,19 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
             }, tutorFallbackOptions);
 
             // Nested iteration: outer = turns, inner = streaming events.
-            // A stop exits both before the SDK can advance to another tool turn.
+            // A stop exits both before the SDK can advance to another tool turn,
+            // but never by aborting a reply still arriving: in a Convex action
+            // that throws an uncaught TypeError from the fetch underneath and
+            // ends the turn silently, before finalizeStream and recordUsage (a
+            // stopped scholar reply stayed unfinalized and unbilled on the dev
+            // rig, 2026-11-09). From the stop on, the rest of the current
+            // message is read unseen and the loop ends at its boundary, which
+            // is safe — see runAideLoop in lib/aideStream.ts.
             try {
               streamLoop: for await (const messageStream of runner) {
                 activeMessageStream = messageStream;
                 let toolBlockOpen = false;
-                if (await checkStop()) {
-                  messageStream.abort();
-                  break;
-                }
+                await checkStop();
                 // stay_silent ran: end the turn rather than generate a reply
                 // to its tool result.
                 if (silenced) {
@@ -1485,8 +1687,16 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                 try {
                   for await (const event of messageStream) {
                     if (await checkStop()) {
-                      messageStream.abort();
-                      break streamLoop;
+                      // Read unseen: only what the turn is billed for counts.
+                      if (event.type === "message_start") {
+                        model = event.message.model;
+                        addStartUsage(tutorUsage, event.message.usage);
+                        tutorCacheDiagnostics.observe(event.message);
+                      } else if (event.type === "message_delta" && event.usage) {
+                        tokensUsed += event.usage.output_tokens;
+                        addDeltaOutput(tutorUsage, event.usage.output_tokens);
+                      }
+                      continue;
                     }
                     if (
                       event.type === "content_block_start" &&
@@ -1509,10 +1719,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                           heldText = "";
                         } else releaseHeldText();
                       }
-                      if (await checkStop(true)) {
-                        messageStream.abort();
-                        break streamLoop;
-                      }
+                      if (await checkStop(true)) continue;
                       toolBlockOpen = true;
                       flushSafeText();
                       if (toolName === MARK_ACTIVITY_COMPLETE_TOOL_NAME) {
@@ -1544,10 +1751,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                       event.type === "content_block_stop" &&
                       toolBlockOpen
                     ) {
-                      if (await checkStop(true)) {
-                        messageStream.abort();
-                        break streamLoop;
-                      }
+                      if (await checkStop(true)) continue;
                       toolBlockOpen = false;
                     } else if (event.type === "message_start") {
                       currentAssistantStopReason = null;
@@ -1620,8 +1824,6 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                             stopRequestedFromPersistResult(persistResult)
                           ) {
                             stopped = true;
-                            messageStream.abort();
-                            break streamLoop;
                           }
                         }
                       }
@@ -1676,56 +1878,60 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
 
             activeMessageStream = anthropicStream;
             try {
-              if (await checkStop()) {
-                anthropicStream.abort();
-              } else {
-                for await (const event of anthropicStream) {
-                  if (await checkStop()) {
-                    anthropicStream.abort();
-                    break;
-                  }
+              // As in the tools path: a stop reads the rest unseen, never
+              // aborts a reply still arriving.
+              await checkStop();
+              for await (const event of anthropicStream) {
+                if (await checkStop()) {
                   if (event.type === "message_start") {
                     model = event.message.model;
                     addStartUsage(tutorUsage, event.message.usage);
                     tutorCacheDiagnostics.observe(event.message);
-                    // Heartbeat: proof-of-life before any text streams (see the
-                    // tools-path message_start above and the reap in sendMessage).
-                    await ctx.runMutation(
-                      internal.sessionHelpers.touchStreamActivity,
-                      { messageId: assistantMsgId as Id<"messages"> },
+                  } else if (event.type === "message_delta" && event.usage) {
+                    tokensUsed += event.usage.output_tokens;
+                    addDeltaOutput(tutorUsage, event.usage.output_tokens);
+                  }
+                  continue;
+                }
+                if (event.type === "message_start") {
+                  model = event.message.model;
+                  addStartUsage(tutorUsage, event.message.usage);
+                  tutorCacheDiagnostics.observe(event.message);
+                  // Heartbeat: proof-of-life before any text streams (see the
+                  // tools-path message_start above and the reap in sendMessage).
+                  await ctx.runMutation(
+                    internal.sessionHelpers.touchStreamActivity,
+                    { messageId: assistantMsgId as Id<"messages"> },
+                  );
+                } else if (event.type === "content_block_delta") {
+                  const delta = event.delta;
+                  if ("text" in delta) {
+                    const safeDelta = safeText.push(delta.text);
+                    if (!safeDelta) continue;
+                    fullContent += safeDelta;
+                    enqueue(
+                      encoder.encode(sseEvent({ text: safeDelta })),
                     );
-                  } else if (event.type === "content_block_delta") {
-                    const delta = event.delta;
-                    if ("text" in delta) {
-                      const safeDelta = safeText.push(delta.text);
-                      if (!safeDelta) continue;
-                      fullContent += safeDelta;
-                      enqueue(
-                        encoder.encode(sseEvent({ text: safeDelta })),
+                    if (shouldPersistContent()) {
+                      lastPersistLength = fullContent.length;
+                      const persistResult = await ctx.runMutation(
+                        internal.sessionHelpers.updateStreamContent,
+                        {
+                          messageId: assistantMsgId as Id<"messages">,
+                          content: fullContent,
+                        },
                       );
-                      if (shouldPersistContent()) {
-                        lastPersistLength = fullContent.length;
-                        const persistResult = await ctx.runMutation(
-                          internal.sessionHelpers.updateStreamContent,
-                          {
-                            messageId: assistantMsgId as Id<"messages">,
-                            content: fullContent,
-                          },
-                        );
-                        if (
-                          stopRequestedFromPersistResult(persistResult)
-                        ) {
-                          stopped = true;
-                          anthropicStream.abort();
-                          break;
-                        }
+                      if (
+                        stopRequestedFromPersistResult(persistResult)
+                      ) {
+                        stopped = true;
                       }
                     }
-                  } else if (event.type === "message_delta") {
-                    if (event.usage) {
-                      tokensUsed += event.usage.output_tokens;
-                      addDeltaOutput(tutorUsage, event.usage.output_tokens);
-                    }
+                  }
+                } else if (event.type === "message_delta") {
+                  if (event.usage) {
+                    tokensUsed += event.usage.output_tokens;
+                    addDeltaOutput(tutorUsage, event.usage.output_tokens);
                   }
                 }
               }
@@ -1737,6 +1943,12 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           }
 
           flushSafeText();
+          // A completion tool queued the app's "activity is done" note: it goes
+          // after the tutor's reply, never in place of it (TRA-703). Also on a
+          // disconnect: the completion is already recorded and the turn still
+          // finalizes into the transcript (TRA-501), so the scholar finds the
+          // note when they come back. The SSE writes are no-ops by then.
+          await appendPendingCompletionNote(toolState, splitAfterTool, emit);
           // A turn that showed nothing — stay_silent (either version), or an
           // app update that never split its placeholder: the placeholder goes,
           // and the session's preview, recency and observer are left untouched.
@@ -1771,7 +1983,14 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           if (session.pendingWhisper && !isAppUpdate && !silentTurn) {
             await ctx.runMutation(
               internal.sessionHelpers.clearPendingWhisper,
-              { sessionId: projId }
+              {
+                sessionId: projId,
+                consumed: session.pendingWhisper,
+                readAt: whisperReadAt,
+                ...(initialAssistantMsgId
+                  ? { turnFirstMessageId: String(initialAssistantMsgId) }
+                  : {}),
+              }
             );
           }
 
@@ -1830,10 +2049,16 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           // Finalize the stuck message so it doesn't show an infinite spinner
           if (!finalized) {
             try {
+              // A completion recorded before the error still shows its note,
+              // after any partial reply in the same bubble.
+              const content = withPendingCompletionNote(
+                fullContent,
+                pendingCompletionNote,
+              );
               await ctx.runMutation(internal.sessionHelpers.finalizeStream, {
                 messageId: assistantMsgId as Id<"messages">,
                 sessionId: projId,
-                content: fullContent || "",
+                content,
                 model,
                 tokensUsed,
                 silent: isSilentAppUpdate(),
@@ -1894,6 +2119,11 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           });
         } finally {
           clearInterval(streamHeartbeat);
+          // Backstop for a catch that threw before its release (the stream
+          // is still open then). On the ordinary path this runs after the
+          // close, when Convex may already have ended the action, so after a
+          // successful release above it starts nothing (lib/llmLease.ts,
+          // TRA-607).
           await tutorLease.release();
         }
       },
@@ -1937,7 +2167,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
         "Access-Control-Allow-Origin": "*",
       },
     });
-  });
+  }));
 
 http.route({
   path: "/session-stream",
@@ -2738,7 +2968,7 @@ http.route({
 http.route({
   path: "/story-open",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: corsStreamAction("story-open", "json", async (ctx, request) => {
     const CORS = { "Access-Control-Allow-Origin": "*" };
     const jsonErr = (b: unknown, status: number) =>
       new Response(JSON.stringify(b), {
@@ -2970,6 +3200,8 @@ ${SCHOLAR_PRONOUN_GUIDANCE}
 
 Use tools proactively when asked about a specific scholar or when designing curriculum. Always ground suggestions in actual student data.
 
+**Usage and screen time.** For how much a scholar uses Rabbithole or their BunnyPad (per day, in school vs after school, compared with a group), call \`get_scholar_screen_time\` when you have it. It reads the device telemetry. Never estimate usage from session or web-activity timestamps: those undercount badly, and a web span can stay open for hours. If you don't have the tool, say you can't see screen time rather than estimating.
+
 **Assessing how a scholar (or an activity) is doing — read the real work.** \`get_scholar_sessions\` lists a scholar's sessions with an \`origin\` on each: \`assigned\` (part of a teacher cohort assignment) or \`selfInitiated\` (a Quest — independent study — the scholar chose by following their own curiosity). NEVER call a self-initiated session "assigned"; the \`origin\`/\`originLabel\` fields tell you which it is, so check them before you characterize it. When asked how a session or activity is GOING or PERFORMING, whether a scholar is getting VALUE, or what they're actually exploring, call \`get_session_transcript\` and read the actual conversation — the session list only gives you a title and a 120-char preview, which is not enough to judge depth or engagement. Crucially, assess on the right terms: a self-initiated Quest is NOT graded against an assignment's bar — judge whether the scholar is following genuine curiosity, going deep, struggling productively, and getting real value (${profile.shortName} raises the ceiling; a kid deep in a self-chosen rabbithole is the goal, not a deviation). For assigned work, you can also weigh it against the activity's deliverable + rubric (both returned by the transcript tool). Don't cop out with "there's no formal assignment so I can't assess it" — read the transcript and give a thoughtful, specific read.
 
 When a teacher names a cohort ("make a lesson for the Seals", "how are the Geckos doing?"), call \`list_scholar_groups\` to resolve who is in it, then use the member names with the per-scholar tools. A scholar group is a saved set of scholars, not an assignment — don't say you can't see a group; that tool is how you look them up.
@@ -2996,9 +3228,9 @@ To author from scratch in one go: \`create_unit\` → \`create_scholar_lesson\` 
 
 **Which unit tool — \`create_unit\` is the default.** Classroom work, a cohort's arc, a pod/group's unit, "build me a unit on X" — all of that is GENERAL curriculum, so it starts with \`create_unit\`. Swap in \`create_scholar_quest\` at the top of the chain ONLY when the teacher explicitly asks for a Quest (independent study) belonging to ONE named scholar. That tool hands the unit to the scholar as personal property — it is hidden from every other scholar's unit picker, shows up on their Home and on the teacher Quests board as theirs, and mints them a completion badge — so it is the wrong container for anything more than one scholar will do. Neither "I'm looking at this scholar's page" nor "this is for the Seals" is a request for it; a cohort is many scholars, so a per-scholar unit is never the right container for one. Despite the names, \`create_scholar_lesson\` and \`create_scholar_activity\` are NOT scholar-scoped — they fill in whichever unitId you hand them, so the same two steps finish either kind of unit. If you realize you created the wrong kind, say so and fix it with \`delete_empty_unit\` before building on top of it; don't leave the stray unit sitting on a child's Quests board.
 
-**A new unit is unpublished.** What \`create_unit\` makes is visible to teachers only: scholars do not see it in Start a Quest and cannot start it. Assigning it (\`assign_unit\`, or placing it on a schedule) publishes it automatically. If the teacher wants scholars to find it on their own without an assignment, call \`publish_unit\`; tell the teacher which state the unit is in when you hand it back.
+**A new unit is unpublished.** What \`create_unit\` makes is visible to teachers only: scholars do not see it in Start a Quest and cannot start it. Giving it (\`give\`, or placing it on a schedule) publishes it automatically. If the teacher wants scholars to find it on their own without an assignment, call \`publish_unit\`; tell the teacher which state the unit is in when you hand it back.
 
-**Activity kind.** \`create_scholar_activity\` takes a \`kind\`: \`online\` (default — an AI-tutor session), \`offline\` (a teacher-run classroom task), or \`app\` (an app activity: an online activity with app settings, where the scholar directs an AI builder to make a live web app in the full-screen app builder — its \`systemPrompt\` is the BUILD BRIEF, not a tutor prompt, and the app is its deliverable; \`vibecode\` is the older name). Reach for \`kind:"app"\` whenever the teacher wants scholars to make/build/"vibecode" something interactive — don't default it to a generic online chat. Any online activity's tutor can also build a side app on request, so an app activity is for when the app IS the work.
+**Activity kind.** \`create_scholar_activity\` takes a \`kind\`: \`online\` (default — an AI-tutor session), \`offline\` (a teacher-run classroom task), or \`app\` (an app activity: an online activity with app settings, where the scholar directs an AI builder to make a live web app in the full-screen app builder — its \`systemPrompt\` is the BUILD BRIEF, not a tutor prompt, and the app is its deliverable; \`vibecode\` is the older name). Reach for \`kind:"app"\` whenever the teacher wants scholars to make/build/"vibecode" something interactive — don't default it to a generic online chat. Any online activity's tutor in a teacher's unit can also build a side app on request (not in a scholar's Quest), so an app activity is for when the app IS the work.
 
 **On deliverables (READ THIS):** an ONLINE \`create_scholar_activity\` REQUIRES exactly one evaluation shape: a \`deliverable\` when the scholar produces a document/product, OR an \`advanceRubric\` when readiness is demonstrated in conversation with no document. A deliverable's \`criteria\` array is a private quality map for the tutor, NOT a scholar checklist or a completion gate. The AI gives each criterion a "not"/"half"/"full" verdict; a full criterion permanently awards it as scholar-visible flair, with its label and description shown together, while half/not-full verdicts remain private. Advance-rubric all-full still completes the activity. Criteria written only into systemPrompt are decorative — they cannot award flair or complete an advance rubric. Use 3-6 concrete DIMENSIONAL criteria, each with { label, description }.
 
@@ -3020,7 +3252,7 @@ ${formattingGuidance("web")}`;
 http.route({
   path: "/aide-stream",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: corsStreamAction("aide-stream", "sse", async (ctx, request) => {
     const body = await request.json();
     const { assistantMsgId, sessionId, scholarId, threadLabel, unitId, scope, focusScholarId, focusSwitched, practiceContext } =
       body as {
@@ -3069,13 +3301,13 @@ http.route({
     if (!callerUserId) {
       return new Response(
         sseEvent({ error: "Not authenticated" }),
-        { status: 401, headers: { "Content-Type": "text/event-stream" } }
+        { status: 401, headers: SSE_ERROR_HEADERS }
       );
     }
     if (await isReadOnlyCaller(ctx)) {
       return new Response(
         sseEvent({ error: READ_ONLY_ACCOUNT_ERROR }),
-        { status: 403, headers: { "Content-Type": "text/event-stream" } }
+        { status: 403, headers: SSE_ERROR_HEADERS }
       );
     }
     // "Viewing as" another user is read-only app-wide, but getAuthUserId
@@ -3084,7 +3316,7 @@ http.route({
     if (await ctx.runQuery(internal.users.isSessionImpersonating, {})) {
       return new Response(
         sseEvent({ error: VIEWING_AS_READ_ONLY_ERROR }),
-        { status: 403, headers: { "Content-Type": "text/event-stream" } }
+        { status: 403, headers: SSE_ERROR_HEADERS }
       );
     }
     const caller = await ctx.runQuery(internal.users.getByIdInternal, {
@@ -3093,7 +3325,7 @@ http.route({
     if (!caller || !isStaffRole(caller.role)) {
       return new Response(
         sseEvent({ error: "Forbidden" }),
-        { status: 403, headers: { "Content-Type": "text/event-stream" } }
+        { status: 403, headers: SSE_ERROR_HEADERS }
       );
     }
     const aideInstitutionId = await ctx.runQuery(
@@ -3108,7 +3340,7 @@ http.route({
     if (aideOverBudget !== null) {
       return new Response(
         sseEvent({ error: llmBudgetMessage(aideOverBudget) }),
-        { status: 429, headers: { "Content-Type": "text/event-stream" } },
+        { status: 429, headers: SSE_ERROR_HEADERS },
       );
     }
 
@@ -3173,7 +3405,7 @@ http.route({
     if (!context) {
       return new Response(
         sseEvent({ error: "Context not found" }),
-        { status: 404, headers: { "Content-Type": "text/event-stream" } }
+        { status: 404, headers: SSE_ERROR_HEADERS }
       );
     }
 
@@ -3286,6 +3518,25 @@ http.route({
       // owner (getAuthUserId ignores a view-as overlay), so the device writes
       // themselves refuse while that session is impersonating.
       transport: "app",
+      // One request per user message: a class plan confirms only from a later one.
+      classPlanConfirmScope: { surface: "app", turn: appTurnOrder() },
+      // Sheets the teacher linked here themselves, typed or picked with the
+      // Drive picker: with sheets they own, the only ones a Sheets write may
+      // target (lib/sheetsTools.ts). Turns relayed from Slack or a bug report
+      // carry a speakerName and someone else's words, so they don't count.
+      linkedSheetIds: (
+        context.messages as {
+          role: string;
+          content: string;
+          speakerName?: string | null;
+          driveAttachments?: { driveFileId: string }[];
+        }[]
+      )
+        .filter((m) => m.role === "user" && !m.speakerName)
+        .flatMap((m) => [
+          ...extractDriveFileIds(m.content, 50),
+          ...(m.driveAttachments ?? []).map((d) => d.driveFileId),
+        ]),
     });
 
 
@@ -3324,7 +3575,7 @@ http.route({
         [
           "",
           "## Building a unit from a description",
-          "When a teacher describes a unit they want (\"build me a unit on tide pools for 3rd grade\", \"I need something on fractions\"), use `create_unit` to make a REAL general curriculum unit — don't just outline it in chat. Translate their description into the unit's fields: a clear title, an emoji, a short description, the big idea, 2-4 essential questions, 2-4 enduring understandings, and the subject + grade level when you can infer them.",
+          "When a teacher describes a unit they want (\"build me a unit on tide pools for 3rd grade\", \"I need something on fractions\"), use `create_unit` to make a REAL general curriculum unit — don't just outline it in chat. Translate their description into the unit's fields: a clear title, an emoji, a short description, the big idea, 2-4 essential questions, 2-4 enduring understandings, the broad school subject a class would be named for (always; create_unit requires it), and the grade level when you can infer it.",
           "A unit starts as an empty container. After creating it, either follow up with `create_scholar_lesson` (pass the returned unitId) to add its first lessons, or tell the teacher the unit is ready and point them to open it (the unit's own Curriculum Bot designs lessons + activities in depth). Always confirm what you created and include the returned unit link so they can jump in.",
           "Ask a brief clarifying question first ONLY if the request is too thin to make a sensible unit (no topic at all). Otherwise make reasonable choices and create it — the teacher can refine from there.",
         ].join("\n"),
@@ -3373,26 +3624,26 @@ http.route({
         [
           "",
           "## Running assignments (read + schedule + act now)",
-          "You can read and run the teacher's classroom directly. Create: `assign_unit` (assign a unit to a cohort — see below). Reads: `list_assignments`, `get_schedule`, `get_assignment`, `get_assignment_progress`. Plan-ahead: `schedule_activity`, `reschedule_activity`, `clear_activity`. Act now: `push_activity_now`. Roster + lifecycle: `set_assignment_scholars`, `add_assignment_scholars`, `archive_assignment`.",
+          "You can read and run the teacher's classroom directly. Give work: `give` (see below). Reads: `list_assignments`, `get_schedule`, `get_assignment`, `get_assignment_progress`. Change the plan: `reschedule_activity`, `clear_activity`. Roster + lifecycle: `set_assignment_scholars`, `add_assignment_scholars`, `remove_assignment_scholars`, `archive_assignment`.",
           "",
-          "**An assignment IS a cohort.** Each assignment runs one unit for a FIXED set of scholars (its roster). To act on \"a class\" or \"these kids,\" find the assignment whose roster matches — there is no separate scholar argument, and scheduling an activity reaches everyone on that roster. Two assignments can run the same unit for different cohorts; tell them apart by roster (from `list_assignments` / `get_assignment`).",
+          "**An assignment IS a cohort.** Each assignment runs one unit for a FIXED set of scholars (its roster). To act on \"a class\" or \"these kids,\" find the assignment whose roster matches — giving one of its activities reaches everyone on that roster. Two assignments can run the same unit for different cohorts; tell them apart by roster (from `list_assignments` / `get_assignment`).",
           "",
-          "**Create one (assign a unit to a cohort).** `assign_unit` makes a NEW assignment in one step — pass the unit title plus EITHER a `groupName` (a saved scholar group, e.g. \"the Geckos\") OR explicit `scholarNames`. It plans the whole unit (nothing goes live until you `push_activity_now`/`schedule_activity`) and REUSES an existing active assignment for the same unit + exact roster instead of duplicating. When a teacher says \"assign <unit> to <group/kids>\" and no assignment exists yet, do this directly — don't send them to the UI.",
+          "**`give` is the one way to give work.** Point it at what and who: an activity of an EXISTING assignment (`assignmentId` + `activityId`; add `scholarNames` to give just some of that cohort, e.g. more time for one), a unit for a cohort (the unit plus EITHER a `groupName` such as \"the Geckos\" OR explicit `scholarNames`; add `activityTitle` or `lessonTitle` for just part of it), or a `newActivity` for one scholar. Giving a unit to a cohort with no assignment yet creates it in the same call, and it REUSES an existing active assignment for the same unit + exact roster instead of duplicating. When a teacher says \"assign <unit> to <group/kids>\", do this directly — don't send them to the UI.",
           "",
           "**\"How's it going?\" / \"who hasn't started?\" / \"how many submissions for X?\" / \"open Kai's project\"** → `get_assignment_progress`. It returns the roster (with each scholar's started-status + a `sessionUrl` deep link) and a per-activity roll-up (completed N/total + who's left, submissions in + not/half/full verdicts). `get_schedule` also now carries a quick `completedCount`/`scholarCount` per item.",
           "",
-          "**Start something NOW vs plan it.** THREE tools live here, and picking the wrong one puts work in front of kids at the wrong time. `push_activity_now` makes an activity LIVE immediately on an EXISTING assignment (\"put the Tide Pool activity up\", \"set focus to X\"). `assign_activity_now` CREATES the cohort assignment AND goes live in one call. `schedule_activity` only PLANS a future push (goes live at `startsAtMs`). Don't use schedule_activity with a past/now time to start something — use push_activity_now.",
-          "After dispatching or pushing a class focus, confirm how long it will stay, explain that it fades after today unless the teacher asked for longer, and invite a correction.",
+          "**Now vs later is one argument.** `startsNow: true` puts the work in front of kids immediately; `startsAtMs` plans it for later. Getting it wrong puts work in front of kids at the wrong time, so never pass a past or current `startsAtMs` to start something — use `startsNow: true`.",
+          GIVING_WORK_PROMPT,
           "",
-          "**A stated time means PLAN it, even when the request sounds casual.** \"Now\", \"put it up\", \"set focus\" mean live. Anything carrying a when — \"today at 2:20\", \"this afternoon\", \"for tomorrow\", \"in second period\" — means PLAN: `assign_unit` (nothing goes live), then `get_assignment` for the activityId, then `schedule_activity` at that time. There is deliberately no one-call create-and-schedule tool, so this is three calls; take them. Do NOT reach for `assign_activity_now` just because it is one call — it is live-only, and a bare \"today\" is a day, not a permission to start now. When the teacher names no time at all, ASK before making work appear.",
+          "**A stated time means PLAN it, even when the request sounds casual.** \"Now\", \"put it up\", \"set focus\" mean live. Anything carrying a when — \"today at 2:20\", \"this afternoon\", \"for tomorrow\", \"in second period\" — means a LATER start: `give` with `startsAtMs`, never `startsNow`. A bare \"today\" is a day, not a permission to start now. When the teacher names no time at all, ASK before making work appear.",
           "",
-          "**If a time turns up AFTER something is already live, treat it as a correction, not trivia.** A teacher saying \"they'll be doing this at 2:20\" about work you already pushed is telling you it went live too early. Say so and offer to hold it: `clear_activity` (this clears a LIVE push, not just a planned one) then `schedule_activity` at the stated time. `reschedule_activity` alone is NOT enough — on a live item it only moves the agenda position and does not un-push it. (Observed 2026-08-18: a reflection went live at 12:58 for work the teacher said would happen at 14:20, and the correction two minutes later was read as background information.)",
+          "**If a time turns up AFTER something is already live, treat it as a correction, not trivia.** A teacher saying \"they'll be doing this at 2:20\" about work you already pushed is telling you it went live too early. Say so and offer to hold it: `clear_activity` (this clears a LIVE push, not just a planned one) then `give` it again with `startsAtMs` at the stated time. `reschedule_activity` alone is NOT enough — on a live item it only moves the agenda position and does not un-push it. (Observed 2026-08-18: a reflection went live at 12:58 for work the teacher said would happen at 14:20, and the correction two minutes later was read as background information.)",
           "",
-          "**Roster + lifecycle.** `set_assignment_scholars` REPLACES the roster (anyone unlisted leaves); `add_assignment_scholars` only adds. `archive_assignment` ends an assignment (clears its pushes). All take scholar NAMES, resolved for you — but confirm the resolved names/assignment with the teacher before a roster change or archive.",
+          "**Roster + lifecycle.** `set_assignment_scholars` REPLACES the roster (anyone unlisted leaves); `add_assignment_scholars` only adds; `remove_assignment_scholars` takes the named scholars off and keeps everyone else (use it, not a replace, to remove one child). `archive_assignment` ends an assignment (clears its pushes). All take scholar NAMES, resolved for you — but confirm the resolved names/assignment with the teacher before a roster change or archive.",
           "",
           `**Time.** All times are epoch milliseconds${longClockClause(aideProfile)}. Right now it is ${nowLabel} (${nowMs} ms). One day = 86400000 ms; one week = 604800000 ms. Each schedule item comes back with a human \`whenLabel\` so you can confirm you've got the right one.`,
           "",
-          `**Converting a wall-clock time to ms is error-prone — don't trust your first arithmetic.** Anchor off the current time above (e.g. \"this coming Monday 9am\" = step forward from now), and a useful identity is: ${wallClockUtcIdentity(nowMs, aideTimeZone)}. After ANY schedule_activity / reschedule_activity call, READ the returned \`startsAtLabel\` and check it matches the time the teacher asked for. If it's off, recompute and call again BEFORE telling the teacher it's done — don't narrate a guess as if it were confirmed.`,
+          `**Converting a wall-clock time to ms is error-prone — don't trust your first arithmetic.** Anchor off the current time above (e.g. \"this coming Monday 9am\" = step forward from now), and a useful identity is: ${wallClockUtcIdentity(nowMs, aideTimeZone)}. After ANY give with startsAtMs or reschedule_activity call, READ the returned \`startsAtLabel\` and check it matches the time the teacher asked for. If it's off, recompute and call again BEFORE telling the teacher it's done — don't narrate a guess as if it were confirmed.`,
           "",
           "**Bulk shifts** (e.g. \"push everything in the week of Jun 8 back by 1 week\"): call `get_schedule`, read each item's `whenLabel` to find the ones in that window, then call `reschedule_activity` once per item with `startsAtMs = agendaAtMs + 604800000`. Rescheduling a LIVE item only moves its agenda position; a PLANNED item also moves when it goes live.",
           "",
@@ -3692,8 +3943,44 @@ http.route({
 http.route({
   path: "/tts",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    const body = await request.json();
+  handler: corsStreamAction("tts", "json", async (ctx, request) => {
+    // ── AUTH (TRA-491) ────────────────────────────────────────────────
+    // Every call spends our OpenAI key. Accepted callers:
+    //   1. a signed-in user whose account still exists and whose school is
+    //      not suspended — web and native send their Convex auth token;
+    //   2. the Wonder Lens Pi, which has no user session and presents its
+    //      device secret, the same `x-wonder-secret` it sends to /wonder-snap.
+    // Anyone else, including a caller whose credential fails verification, is
+    // refused before any OpenAI spend.
+    const refuse = (status: 401 | 403, error: string) =>
+      new Response(JSON.stringify({ error }), {
+        status,
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      });
+    const wonderSecret = process.env.WONDER_SNAP_SECRET;
+    const presentedWonderSecret = request.headers.get("x-wonder-secret");
+    let callerUserId: Id<"users"> | null = null;
+    let callerRole: string | null = null;
+    if (presentedWonderSecret) {
+      if (!wonderSecret || presentedWonderSecret !== wonderSecret) {
+        return refuse(401, "Not authenticated");
+      }
+    } else {
+      callerUserId = await getAuthUserId(ctx);
+      if (!callerUserId) return refuse(401, "Not authenticated");
+    }
+    if (callerUserId) {
+      const caller = await ctx.runQuery(internal.accessGuards.activeCallerByUserId, {
+        userId: callerUserId,
+      });
+      if (caller.status === "missing") return refuse(401, "Not authenticated");
+      if (caller.status === "suspended") {
+        return refuse(403, "This learning community is paused.");
+      }
+      callerRole = caller.role;
+    }
+
+    const body: unknown = await request.json();
     const { text, voice, instructions } = body as {
       text?: string;
       voice?: string;
@@ -3734,6 +4021,20 @@ http.route({
     let usedModel = speechBody.model as string;
     if (styled) speechBody.instructions = instructions.trim().slice(0, 1000);
 
+    // Attribute usage to the caller's institution. Resolved alongside the
+    // OpenAI call so it adds no latency, and best-effort: authorization
+    // already happened above. The Wonder Lens stays unattributed like its
+    // other routes.
+    const attribution = callerUserId
+      ? ctx
+          .runQuery(internal.usage.resolveInstitution, {
+            userId: callerUserId,
+            principal: callerRole === "scholar" ? "scholar" : "staff",
+          })
+          .then((institutionId) => ({ role: callerRole, institutionId }))
+          .catch(() => ({ role: callerRole, institutionId: null }))
+      : Promise.resolve({ role: null, institutionId: null });
+
     let openaiRes = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
@@ -3773,11 +4074,15 @@ http.route({
     // /tts is on the voice loop's latency-critical path. The action stays
     // alive while the stream pumps, and the pump's close awaits the write
     // so it can't be dropped when the action ends.
-    const usageRecorded = recordUnitUsage(ctx, {
-      source: "tts",
-      model: usedModel,
-      characters: text.length,
-    });
+    const usageRecorded = attribution.then(({ role, institutionId }) =>
+      recordUnitUsage(ctx, {
+        source: "tts",
+        role,
+        institutionId,
+        model: usedModel,
+        characters: text.length,
+      }),
+    );
 
     // Manually pump the OpenAI stream into a new ReadableStream so the
     // Convex HTTP action stays alive until all audio data is forwarded.
@@ -3805,7 +4110,8 @@ http.route({
   }),
 });
 
-// CORS preflight for tts
+// CORS preflight for tts. Authorization is allowed because the web app now
+// sends its sign-in with every request (TRA-491).
 http.route({
   path: "/tts",
   method: "OPTIONS",
@@ -3815,7 +4121,7 @@ http.route({
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
       },
     });
   }),
@@ -3865,9 +4171,9 @@ http.route({
       returnTo: string;
       nonce: string;
       institutionId?: string;
-      // Personal-link purposes ("default", "admissions") take the per-user
-      // branch below; only the scanner/bot purposes are institution-owned.
-      purpose?: "scanner" | "docs_bot" | "workspace_bot" | "default" | "admissions";
+      // Personal-link purposes ("default", "admissions", "sheets") take the
+      // per-user branch below; only the scanner/bot purposes are institution-owned.
+      purpose?: "scanner" | "docs_bot" | "workspace_bot" | "default" | "admissions" | "sheets";
     }>(state, stateSecret);
     if (!verified) {
       return new Response("Invalid state", { status: 400 });
@@ -3983,6 +4289,29 @@ http.route({
             personalUserEmail
               ? `Connect the Google account for ${personalUserEmail}. You signed in to Google with a different account. Go back to Rabbithole and connect again with ${personalUserEmail}.`
               : "Your Rabbithole account has no email address, so Admissions can't confirm which Google account is yours. Ask an administrator to add your email.",
+            { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+          );
+        }
+      }
+      // A Sheets consent only adds a permission to the link someone already has.
+      // Coming back as a different Google account would swap the whole link
+      // (Drive, Docs, and for admissions staff their mailbox) to that account.
+      if (verified.purpose === "sheets") {
+        const existing = await ctx.runQuery(internal.googleAccounts.getForUserInternal, {
+          userId: verified.userId as Id<"users">,
+        });
+        const { normalizeEmail } = await import("./lib/email");
+        if (existing && normalizeEmail(existing.email) !== (info.email ? normalizeEmail(info.email) : "")) {
+          try {
+            await fetch(
+              `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tokens.refresh_token ?? tokens.access_token)}`,
+              { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+            );
+          } catch {
+            // Silent.
+          }
+          return new Response(
+            `Rabbithole is connected to ${existing.email}. You signed in to Google with a different account. Go back and allow Sheets editing with ${existing.email}.`,
             { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } },
           );
         }
@@ -4109,14 +4438,15 @@ http.route({
 });
 
 // ── Parent aide stream ──────────────────────────────────────────────────
-// The parent-facing AI chat. Authenticates the parent from the session
-// token (never trusts the body), scopes the SHARED scholar-read tools to
-// the parent's OWN children (tier-1 only: mastery/signals/seeds), and
-// streams Claude. Session storage is isolated in parentChatMessages.
+// The parent-facing AI chat, web channel. Authenticates the parent from the
+// session token (never trusts the body), checks the assistant row is theirs,
+// then streams the turn lib/parentAideTurn prepares: the SHARED scholar-read
+// tools scoped to the parent's OWN children (tier-1 only), plus the guarded
+// code explorer. Session storage is isolated in parentChatMessages.
 http.route({
   path: "/parent-chat-stream",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: corsStreamAction("parent-chat-stream", "sse", async (ctx, request) => {
     // SSE responses are cross-origin (app domain → *.convex.site), so every
     // response (success AND error) needs CORS or the browser reports an
     // opaque "Failed to fetch". Mirrors the other stream endpoints.
@@ -4173,10 +4503,16 @@ http.route({
       );
     }
 
-    const context = await ctx.runQuery(internal.parentChat.getContext, {
+    // Scope, tools, and prompt are shared with every other parent-aide
+    // channel (lib/parentAideTurn). The tools close over `emitSSE`, which
+    // runAideStream binds once the stream opens.
+    let emitSSE: AideEmit = () => {};
+    const turn = await prepareParentAideTurn(ctx, {
       parentUserId: callerUserId,
+      channel: { kind: "web", selectedChildId },
+      emit: (data) => emitSSE(data),
     });
-    if (!context) {
+    if (!turn) {
       return new Response(
         sseEvent({ error: "Context not found" }),
         { status: 404, headers: sseHeaders },
@@ -4186,80 +4522,13 @@ http.route({
     const { Anthropic } = await import("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
 
-    // SCOPE: the tool resolver may only see this parent's children.
-    const allowedScholarIds = new Set(context.children.map((c) => c.id));
-    const childNames = context.children.map((c) => c.name);
-    const parentInstitutionId = await ctx.runQuery(
-      internal.usage.resolveSharedScholarInstitution,
-      { userIds: context.children.map((child) => child.id) },
-    );
-    // Identity resolves from the child's institution (byte-identical to the old
-    // primary-school wording when that's the primary / children disagree).
-    const parentProfile = await ctx.runQuery(
-      internal.institutions.promptProfile,
-      { institutionId: parentInstitutionId },
-    );
-
-    let emitSSE: AideEmit = () => {};
-
-    // Same shared tool set as the teacher aide, role-filtered to tier-1 and
-    // id-scoped to this parent's children (lib/scholarReadTools) — plus the
-    // scholar Code Explorer (lib/scholarCodeTools): read-only, public-mirror
-    // reads so "how does Rabbithole decide what's on her frontier?" gets a
-    // true answer from the real code instead of a "can't see that" deflection
-    // (2026-09-16: three of the first nine free-typed parent questions on prod
-    // were about how the engine works, and all three were refused). The
-    // explorer carries no scholar data, so it needs no guardianship scoping.
-    const scholarReadTools = await makeScholarReadTools(
-      ctx,
-      (data) => emitSSE(data),
-      ROLES.PARENT,
-      allowedScholarIds,
-    );
-    // Guarded: the model picks the explorer's arguments AFTER seeing the
-    // child's data, so a child's or parent's name in a path/query would reach
-    // GitHub's request logs — refuse those at the boundary
-    // (lib/scholarCodeTools.guardCodeToolArguments).
-    const codeTools = guardCodeToolArguments(
-      await makeScholarCodeTools((data) => emitSSE(data), ctx),
-      protectedTermsFromNames([...childNames, context.parentName]),
-    );
-    const tools = [...scholarReadTools, ...codeTools];
-
-    const childList =
-      childNames.length > 0 ? childNames.join(", ") : "(no children linked yet)";
-    // The portal header's current selection, resolved ONLY against this
-    // parent's guardianship-derived children — an id for anyone else falls
-    // back to no selection rather than naming a child they can't see.
-    const selectedChildName = resolveSelectedChildName(
-      context.children,
-      selectedChildId,
-    );
-    const systemPrompt = buildParentAideSystemPrompt({
-      profile: parentProfile,
-      parentName: context.parentName,
-      childList,
-      childCount: childNames.length,
-      selectedChildName,
-    });
-
-    const apiMessages = context.messages
-      .filter((m) => m.content.trim() !== "")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-
     return runAideStream({
       anthropic,
-      model: MODELS.SONNET,
-      maxTokens: 2048,
-      system: cachedSystem(systemPrompt),
-      messages: apiMessages,
-      tools,
-      // Cost cap on the tool loop now that the explorer is here. Looser than
-      // the scholar Workshop's CODE_EXPLORER_MAX_ITERATIONS (5) because the
-      // scholar-read tools ran uncapped before and a turn that reads two
-      // children's practice + seeds and then opens a source file is already
-      // four rounds; the SDK stops silently at the cap and the partial text
-      // is finalized as the answer, so the cap must never bite a normal turn.
+      model: PARENT_AIDE_MODEL,
+      maxTokens: PARENT_AIDE_MAX_TOKENS,
+      system: cachedSystem(turn.systemPrompt, turn.turnSystemText),
+      messages: turn.apiMessages,
+      tools: turn.tools,
       maxIterations: PARENT_AIDE_MAX_ITERATIONS,
       bindEmit: (emit) => {
         emitSSE = emit;
@@ -4280,9 +4549,9 @@ http.route({
         }),
       onUsage: (usage, model) =>
         recordUsage(ctx, {
-          source: "parent-chat",
+          source: PARENT_AIDE_USAGE_SOURCE,
           role: ROLES.PARENT,
-          institutionId: parentInstitutionId,
+          institutionId: turn.institutionId,
           model,
           usage,
         }),
@@ -4328,7 +4597,7 @@ http.route({
 http.route({
   path: "/meta-stream",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: corsStreamAction("meta-stream", "sse", async (ctx, request) => {
     const sseHeaders = {
       "Content-Type": "text/event-stream",
       "Access-Control-Allow-Origin": "*",
@@ -4470,8 +4739,7 @@ http.route({
     // The idea tool's capture writes for the CHAT'S OWN scholar (context
     // .scholarId === the authenticated caller, enforced by
     // validateMetaStreamRequest) — never a model-supplied id, so it can't file
-    // on another kid's behalf. At the open-ideas cap the mutation returns
-    // `at_cap` and the tool relays a "help them prioritize" line (no throw).
+    // on another kid's behalf.
     const ideaTools = ideaCfg.withTools
       ? await makeIdeaConvoTools(
           (data) => emitSSE(data),
@@ -4692,10 +4960,12 @@ http.route({
 
 
 
-// ── Inbound parent reply email (reply-by-email → a chat message) ──────────
+
+// ── Inbound reply email (reply-by-email → a chat message) ─────────────────
 // Resend POSTs signed email.received metadata here. The body is then fetched
-// from the Receiving API; ingest fails closed unless the sender matches the
-// thread's parent and deduplicates Resend's at-least-once webhook delivery.
+// from the Receiving API; ingest fails closed unless the sender is one of the
+// thread's guardians or a teacher on its school's staff side, and
+// deduplicates Resend's at-least-once webhook delivery.
 http.route({
   path: "/parent-message-inbound",
   method: "POST",
@@ -4737,6 +5007,11 @@ http.route({
     } catch (error) {
       console.error("[parent-message] inbound email retrieval failed:", error);
       return new Response("email retrieval failed", { status: 503 });
+    }
+    // An out-of-office reply is not a message: posting it would send a
+    // teacher's (or guardian's) auto-responder on to everyone else.
+    if (email.autoReply) {
+      return new Response("ignored auto-reply", { status: 200 });
     }
     const toAddress = findThreadReplyAddress(email);
     const fromEmail = extractEmailAddress(email.from);
@@ -4872,6 +5147,65 @@ http.route({
     }
     // Always 200 so Meta doesn't retry a well-formed, authenticated event.
     return new Response("", { status: 200 });
+  }),
+});
+
+// ── Inbound SMS (Twilio) → the parent aide ─────────────────────────────
+// Configure the toll-free number's "A message comes in" webhook as
+// `${CONVEX_SITE_URL}/twilio/sms`, HTTP POST. Twilio signs the exact URL it
+// calls, so the signature is checked against CONVEX_SITE_URL + this path
+// (the public origin), never the request's internal URL. Missing token,
+// header, or site URL → 403 (fail closed). Everything after verification is
+// convex/parentSms.ts; this handler only answers Twilio, at once, with TwiML
+// (empty, or the HELP text). The aide turn runs in a scheduled action.
+http.route({
+  path: "/twilio/sms",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const forbidden = () => new Response("forbidden", { status: 403 });
+    const siteUrl = process.env.CONVEX_SITE_URL?.trim().replace(/\/+$/, "");
+    if (!siteUrl) return forbidden();
+    const requested = new URL(request.url);
+    const signedUrl = `${siteUrl}${requested.pathname}${requested.search}`;
+
+    const form = new URLSearchParams(await request.text());
+    const params: Record<string, string | string[]> = {};
+    for (const [name, value] of form) {
+      const prior = params[name];
+      params[name] =
+        prior === undefined
+          ? value
+          : Array.isArray(prior)
+            ? [...prior, value]
+            : [prior, value];
+    }
+    const signature = request.headers.get("x-twilio-signature");
+    if (!(await verifyTwilioSignature(signedUrl, params, signature))) {
+      return forbidden();
+    }
+
+    const one = (name: string) => {
+      const value = params[name];
+      return typeof value === "string" ? value : "";
+    };
+    const messageSid = one("MessageSid").trim();
+    const from = one("From").trim();
+    if (!messageSid || !from) {
+      return new Response("bad request", { status: 400 });
+    }
+    const result = await ctx.runMutation(
+      internal.parentSms.ingestInboundSms,
+      {
+        messageSid,
+        from,
+        body: one("Body"),
+        ...(one("OptOutType") ? { optOutType: one("OptOutType") } : {}),
+      },
+    );
+    return new Response(twimlResponseBody(result.reply), {
+      status: 200,
+      headers: { "Content-Type": "text/xml; charset=utf-8" },
+    });
   }),
 });
 
@@ -5112,7 +5446,6 @@ http.route({
     //    the same device `kickoffInstruction()` uses for a real activity — so
     //    nobody has to maintain a second, quietly-diverging tutor prompt.
     const systemPrompt = buildTutorSystemPrompt({
-      teacherWhisper: null,
       readingLevel: null,
       scholarName: null,
       unitContext: null,
@@ -5214,5 +5547,6 @@ http.route({
     });
   }),
 });
+
 
 export default http;

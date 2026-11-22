@@ -1,5 +1,6 @@
 "use client";
 
+import { deviceDisplayName } from "./deviceDisplayName";
 import {
   useCallback,
   useEffect,
@@ -97,6 +98,7 @@ import { PersonCell } from "@/components/PersonCell";
 import { ScholarPickerContent } from "@/components/ScholarPicker";
 import type { RosterScholar } from "@/hooks/useScholarRoster";
 import {
+  batteryReadingIsStale,
   deviceBatteryBand,
   type DeviceBatteryBand,
 } from "@/shared/deviceBattery";
@@ -543,13 +545,16 @@ export default function SchoolDevicesPage() {
   // consults push liveness and when opened access ends. See
   // `listManagedDevices`. Smoothed, because a bare useQuery drops to
   // undefined on every minute's re-arm, which closed the open device drawer
-  // and wiped whatever a staffer was entering in it (TRA-364's shape).
+  // and wiped whatever a staffer was entering in it (TRA-364's shape). Keyed
+  // on the lens so a school switch loads fresh instead of showing the previous
+  // school's fleet under the new heading (TRA-424).
   const devicesMinuteNow = Math.floor(useNow(60_000) / 60_000) * 60_000;
   const managedDevices = useSmoothedQuery(
     api.managedDeviceClaims.listManagedDevices,
     allowed
       ? { institutionScope: scopeParam, now: devicesMinuteNow }
       : "skip",
+    { resetKey: scopeParam },
   );
   const simpleMdmStatus = useQuery(
     api.simplemdm.integrationStatus,
@@ -1008,6 +1013,7 @@ export default function SchoolDevicesPage() {
                         pushResult={row.kind === "managed" ? effectivePushResult(row.device, pushResults[row.device._id]) : undefined}
                         verifyStatus={row.kind === "managed" ? verifyStatusOf(row.device) : undefined}
                         inventory={row.kind === "managed" ? snapshotOf(row.device) : undefined}
+                        nowMs={devicesMinuteNow}
                         pairedDevice={row.kind === "manual" ? row.device : row.device.pairedDeviceId
                           ? pairedDevicesById.get(String(row.device.pairedDeviceId))
                           : undefined}
@@ -1020,6 +1026,7 @@ export default function SchoolDevicesPage() {
                 {filteredDevices.map((row) => (
                   <DeviceMobileRow key={row.key} row={row}
                     inventory={row.kind === "managed" ? snapshotOf(row.device) : undefined}
+                    nowMs={devicesMinuteNow}
                     pairedDevice={row.kind === "manual" ? row.device : row.device.pairedDeviceId
                       ? pairedDevicesById.get(String(row.device.pairedDeviceId))
                       : undefined}
@@ -1058,6 +1065,7 @@ export default function SchoolDevicesPage() {
         pushResult={selectedDevice?.kind === "managed" ? effectivePushResult(selectedDevice.device, pushResults[selectedDevice.device._id]) : undefined}
         verifyStatus={selectedDevice?.kind === "managed" ? verifyStatusOf(selectedDevice.device) : undefined}
         inventory={selectedDevice?.kind === "managed" ? snapshotOf(selectedDevice.device) : undefined}
+        nowMs={devicesMinuteNow}
         pairedDevice={selectedPairedDevice}
         onAssign={handleAssign} onPush={pushDevice} onRename={renameManagedDevice}
         onClaimInvalidated={clearPushResult}
@@ -1073,6 +1081,7 @@ function DeviceTableRow({
   pushResult,
   verifyStatus,
   inventory,
+  nowMs,
   pairedDevice,
   onOpen,
 }: {
@@ -1080,6 +1089,7 @@ function DeviceTableRow({
   pushResult?: PushResult;
   verifyStatus?: VerifyStatus;
   inventory?: SimpleMdmInventory;
+  nowMs: number;
   pairedDevice?: PairedDevice;
   onOpen: () => void;
 }) {
@@ -1142,7 +1152,7 @@ function DeviceTableRow({
         </HStack>
       </Table.Cell>
       <Table.Cell><LockStatusBadge pairedDevice={pairedDevice} /></Table.Cell>
-      <Table.Cell><BatteryStatus inventory={inventory} /></Table.Cell>
+      <Table.Cell><BatteryStatus inventory={inventory} nowMs={nowMs} /></Table.Cell>
       <Table.Cell>
         <Text
           fontSize="sm"
@@ -1164,11 +1174,13 @@ function DeviceTableRow({
 function DeviceMobileRow({
   row,
   inventory,
+  nowMs,
   pairedDevice,
   onOpen,
 }: {
   row: UnifiedDevice;
   inventory?: SimpleMdmInventory;
+  nowMs: number;
   pairedDevice?: PairedDevice;
   onOpen: () => void;
 }) {
@@ -1212,7 +1224,7 @@ function DeviceMobileRow({
                 {pairedDevice && (
                   <LockStatusBadge pairedDevice={pairedDevice} />
                 )}
-                {inventory && <BatteryStatus inventory={inventory} />}
+                {inventory && <BatteryStatus inventory={inventory} nowMs={nowMs} />}
               </HStack>
             )}
           </Box>
@@ -1608,11 +1620,19 @@ const BATTERY_APPEARANCE: Record<Exclude<DeviceBatteryBand, "unknown">, { icon: 
   full: { icon: BatteryFull, color: "charcoal.400" },
 };
 
+/**
+ * The iPad's charge as SimpleMDM last read it. A reading older than
+ * DEVICE_BATTERY_STALE_AFTER_MS reads "Unknown": it dates from before the iPad
+ * went quiet, so showing it would state yesterday's 1% as today's charge.
+ * `nowMs` is the page's one clock, threaded down (see `useNow`).
+ */
 function BatteryStatus({
   inventory,
+  nowMs,
   detailed = false,
 }: {
   inventory?: SimpleMdmInventory;
+  nowMs: number;
   detailed?: boolean;
 }) {
   const band = deviceBatteryBand(inventory?.batteryLevel ?? null);
@@ -1620,6 +1640,22 @@ function BatteryStatus({
     return (
       <Text fontSize="sm" color="charcoal.400">
         {detailed ? "Battery unavailable" : "—"}
+      </Text>
+    );
+  }
+  const readAt = inventory.lastSeenAt ?? null;
+  if (batteryReadingIsStale(readAt, nowMs)) {
+    return (
+      <Text
+        fontSize="sm"
+        color="charcoal.400"
+        title={
+          readAt === null
+            ? `Last reading ${inventory.batteryLevel}%, undated`
+            : `Last reading ${inventory.batteryLevel}%, ${relativeTime(readAt)}`
+        }
+      >
+        {detailed ? "Battery unknown" : "Unknown"}
       </Text>
     );
   }
@@ -2565,6 +2601,7 @@ function DeviceDetailsDrawer({
   pushResult,
   verifyStatus,
   inventory,
+  nowMs,
   pairedDevice,
   onAssign,
   onPush,
@@ -2583,6 +2620,7 @@ function DeviceDetailsDrawer({
   pushResult?: PushResult;
   verifyStatus?: VerifyStatus;
   inventory?: SimpleMdmInventory;
+  nowMs: number;
   pairedDevice?: PairedDevice;
   onAssign: (device: ManagedDevice, scholarId: Id<"users">) => Promise<void>;
   onPush: (id: ManagedDevice["_id"], serial: string) => Promise<PushResult>;
@@ -2639,11 +2677,11 @@ function DeviceDetailsDrawer({
   const device = managedDevice;
   const pairedDeviceId = managedDevice?.pairedDeviceId ?? manualDevice?._id ?? null;
   const managedName = inventory?.name;
-  const displayName =
-    managedName ??
-    managedDevice?.serial ??
-    manualDevice?.deviceLabel ??
-    "iPad";
+  const displayName = deviceDisplayName({
+    managedName,
+    serial: managedDevice?.serial,
+    deviceLabel: manualDevice?.deviceLabel,
+  });
 
   async function withBusy(action: () => Promise<void>) {
     setBusy(true);
@@ -2768,7 +2806,7 @@ function DeviceDetailsDrawer({
     restart: "Restart this iPad? It has to be online to receive the command — if nothing happens, hold volume up, then volume down, then the top button until the Apple logo appears. Anything the scholar hasn't sent is lost. The iPad comes back to the Home Screen; they tap Rabbithole and are still signed in.",
     restore: "Restore automatic sign-in? This sends a fresh enrollment key to this iPad. The current key remains valid until the iPad receives and exchanges the replacement.",
     rotate: "Issue a new enrollment key? The current key will stop working until the replacement is pushed.",
-    unassign: "Unassign this iPad? It will be signed out of Rabbithole and no longer linked to the scholar. It will remain managed and on the device roster.",
+    unassign: "Unassign this iPad? It will be signed out of Rabbithole and no longer linked to the scholar. It will remain managed and on the device roster. Photos and app projects, like Stop Motion and SPIKE, stay on this iPad and don't move with the scholar.",
     revoke: "Disable this iPad? Its enrollment key is invalidated and its pairing to this scholar is dropped \u2014 it cannot sign in again, by hand or otherwise, until you issue a new key. Use this for a lost iPad. The serial stays on the roster.",
     remove: "Remove this device from the roster? Its current session will also be signed out.",
   };
@@ -3058,7 +3096,7 @@ function DeviceDetailsDrawer({
                   <VStack align="stretch" gap={2}>
                     {device ? (
                       <>
-                        <BatteryStatus inventory={inventory} detailed />
+                        <BatteryStatus inventory={inventory} nowMs={nowMs} detailed />
                         {inventory?.lastSeenAt && (
                           <Text fontSize="sm" color="charcoal.600">
                             Last seen {relativeTime(inventory.lastSeenAt)}

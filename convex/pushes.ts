@@ -1,6 +1,6 @@
 // Pushes — "this, to these scholars, right now."
 //
-// The single write surface behind every "Make focus" / "Dispatch as focus"
+// The single write surface behind every "Give" (an app, a file or a link now)
 // affordance: the Run page, an app tile, a curriculum node, and the staff
 // aide (in-app · Slack · MCP) all land here. See review/class-focus-rethink.html.
 //
@@ -13,7 +13,8 @@
 // The pure rules — liveness, audience matching, plate ordering, blocking
 // eligibility — live in lib/pushes.ts and are unit-tested there.
 
-import { v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
+import { v, type Infer } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -34,14 +35,31 @@ import {
 } from "./lib/deviceAppProjection";
 import { groupIdsForScholar } from "./lib/scholarGroupMembership";
 import { schedulePushProjectionRefresh } from "./lib/deviceAppUnlockScheduling";
-import { pushSummaryLine, pushTimeLeftLabel } from "../shared/pushCopy";
-import { dayKeyForTimezone } from "../shared/institutionDay";
+import { pushTimeLeftLabel } from "../shared/pushCopy";
+import { dayKeyForTimezone, shiftDayKey } from "../shared/institutionDay";
 import { timeZoneForInstitution } from "./lib/institutionTime";
+import { classFieldsForPush, endFieldsForPush, unitSubjectForWork } from "./lib/classLink";
+import {
+  GiveQuestionError,
+  bellBlockAt,
+  giveChoices,
+  lastBellAt,
+  resolveGiveWindow,
+  upcomingBellBlocks,
+  type BellBlock,
+  type GiveChoices,
+} from "./lib/giveWindow";
+import { closureForInstitutionOnDay } from "./masterSchedule";
 import {
   FOCUS_DURATION_CHOICES_MIN,
-  assertBlockingAllowed,
+  assertPushAllowed,
+  endlessAppPushReason,
+  explicitFocusEnd,
   focusEndsAt,
+  homeworkDueAt,
+  isScheduleRow,
   isPushBlocking,
+  pushOpenUntil,
   isPushShowing,
   livePushesForScholar,
   type PushDoc,
@@ -64,6 +82,24 @@ const targetValidator = v.union(
     media: v.optional(v.union(v.literal("video"), v.literal("page"))),
   }),
 );
+
+/**
+ * When an app, a file or a link leaves scholars' screens: the give form's
+ * fading choices (TRA-580). Every one fades; an app has nothing to be late on.
+ *
+ *   inClass   → the end of the class meeting now (or starting within the
+ *               passing period), else the end of the school day.
+ *   forAWhile → `minutes` from now, at most the longest quick pick. For a
+ *               window no block lines up with (an after-school session, a
+ *               whole-school game over the lunch bell).
+ *   openUntil → the end of `dayKey`, a later day, at most two weeks out.
+ */
+export const pushFinishValidator = v.union(
+  v.object({ kind: v.literal("inClass") }),
+  v.object({ kind: v.literal("forAWhile"), minutes: v.number() }),
+  v.object({ kind: v.literal("openUntil"), dayKey: v.string() }),
+);
+export type PushFinish = Infer<typeof pushFinishValidator>;
 
 // ───────────────────────────── helpers ─────────────────────────────
 
@@ -102,14 +138,11 @@ async function openPushesForInstitution(
       q.eq("institutionId", institutionId).eq("clearedAt", undefined),
     )
     .collect();
-  // MIGRATION SCAFFOLDING — delete with `activitySchedule` itself.
-  // A schedule mirror is a copy of an entry the plate and the Now tab
-  // already render from `activitySchedule`. Serving it here would show
-  // the same class focus a second time, under a second heading, which is
-  // the exact duplication this migration exists to remove. Mirrors stay
-  // write-only until the read switch deletes the thing they mirror.
-  // See Linear TRA-13.
-  return open.filter((p) => p.scheduleMirror !== true);
+  // An assignment's schedule rows are read through `readSchedule`
+  // (lib/scheduleStore), which the plate and the Now tab already render.
+  // Serving them here too would show the same class focus a second time,
+  // under a second heading (Linear TRA-13).
+  return open.filter((p) => !isScheduleRow(p));
 }
 
 /**
@@ -226,16 +259,156 @@ async function validateTarget(
 
 // ───────────────────────────── write ─────────────────────────────
 
+/** A class starting this soon counts as "in that class" (the passing period). */
+const PASSING_PERIOD_MS = 10 * 60_000;
+/** The longest an app or a link stays open; longer access is a grant
+ *  (enable_app_for_group), not a give. */
+const MAX_OPEN_UNTIL_DAYS = 14;
+/** "For a while" tops out at the longest quick pick; past that, the give is
+ *  "in that class" or "open until". */
+const MAX_FOR_A_WHILE_MIN = Math.max(...FOCUS_DURATION_CHOICES_MIN);
+
 /**
- * Make something the class focus, right now.
+ * The class meeting "in that class" means for a push that shows up now: the
+ * roster's block under way, or one starting within the passing period. None
+ * on a closed day, for a roster with no shared bell schedule, or for the
+ * whole school (which shares no one block).
+ */
+async function pushClassBlock(
+  ctx: QueryCtx,
+  args: {
+    rosterIds: readonly Id<"users">[];
+    institutionId: Id<"institutions">;
+    timeZone: string;
+    now: number;
+  },
+): Promise<BellBlock | null> {
+  const { rosterIds, institutionId, timeZone, now } = args;
+  if (rosterIds.length === 0) return null;
+  if (await closureForInstitutionOnDay(ctx, institutionId, now)) return null;
+  const current = await bellBlockAt(ctx, rosterIds, now, timeZone);
+  if (current) return current;
+  const todayKey = dayKeyForTimezone(now, timeZone);
+  return (
+    (
+      await upcomingBellBlocks(ctx, {
+        scholarIds: rosterIds,
+        institutionId,
+        timeZone,
+        nowMs: now,
+        days: 0,
+      })
+    ).find(
+      (b) => b.dayKey === todayKey && b.startsAt - now <= PASSING_PERIOD_MS,
+    ) ?? null
+  );
+}
+
+/** A push's end; `block` is the meeting that sets it, `lastBell` that it
+ *  ends at the school day's last bell (no class meeting now). */
+type PushEnd = { endsAt: number; block: BellBlock | null; lastBell: boolean };
+
+/**
+ * When a push that shows up now ends, from the teacher's finish answer.
+ * Throws `GiveQuestionError` (worded for the teacher) for an answer that
+ * can't be used. The one place a push's end is worked out, so the dialog's
+ * hint, the dialog's write and the aide's write agree.
+ */
+async function pushEnd(
+  ctx: QueryCtx,
+  args: {
+    rosterIds: readonly Id<"users">[];
+    institutionId: Id<"institutions">;
+    timeZone: string;
+    now: number;
+    finish: PushFinish;
+  },
+): Promise<PushEnd> {
+  const { finish, timeZone, now } = args;
+  switch (finish.kind) {
+    case "inClass": {
+      const block = await pushClassBlock(ctx, args);
+      if (block) {
+        // From the block's start, so resolveGiveWindow reads the same meeting.
+        const window = await resolveGiveWindow(ctx, {
+          scholarIds: args.rosterIds,
+          timeZone,
+          startsAt: block.startsAt,
+          finish,
+        });
+        return { endsAt: window.endsAt!, block, lastBell: false };
+      }
+      // No class meeting now: the school day's last bell, never midnight
+      // (an app stays unlocked on BunnyPads until it ends). With no bell
+      // left today, "in that class" has no end, so it's refused.
+      const closed = await closureForInstitutionOnDay(ctx, args.institutionId, now);
+      const lastBell = closed
+        ? null
+        : await lastBellAt(ctx, {
+            rosterIds: args.rosterIds,
+            institutionId: args.institutionId,
+            dayKey: dayKeyForTimezone(now, timeZone),
+            timeZone,
+          });
+      if (lastBell == null) {
+        throw new GiveQuestionError(
+          `There are no classes today${args.rosterIds.length === 0 ? " on the school's bell schedule" : " for them"}, so "in that class" has no end. Give it for a while, or open until a later day.`,
+        );
+      }
+      if (lastBell <= now) {
+        throw new GiveQuestionError(
+          `The last bell has rung, so "in that class" has no end. Give it for a while, or open until a later day.`,
+        );
+      }
+      return { endsAt: lastBell, block: null, lastBell: true };
+    }
+    case "forAWhile": {
+      const minutes = finish.minutes;
+      if (!Number.isInteger(minutes) || minutes < 1) {
+        throw new GiveQuestionError(
+          `"For a while" needs a whole number of minutes, at least 1. How many minutes?`,
+        );
+      }
+      if (minutes > MAX_FOR_A_WHILE_MIN) {
+        throw new GiveQuestionError(
+          `"For a while" is up to ${MAX_FOR_A_WHILE_MIN} minutes; for longer, give it for the class or open until a later day.`,
+        );
+      }
+      return { endsAt: focusEndsAt(now, minutes), block: null, lastBell: false };
+    }
+    case "openUntil": {
+      const dayKey = finish.dayKey.trim();
+      const todayKey = dayKeyForTimezone(now, timeZone);
+      if (dayKey > shiftDayKey(todayKey, MAX_OPEN_UNTIL_DAYS)) {
+        throw new GiveQuestionError(
+          `An app, a file or a link can stay open for at most ${MAX_OPEN_UNTIL_DAYS} days; for longer access, grant the app to the group.`,
+        );
+      }
+      const window = await resolveGiveWindow(ctx, {
+        scholarIds: args.rosterIds,
+        timeZone,
+        startsAt: now,
+        finish: { kind: "openUntil", dayKey },
+      });
+      return { endsAt: window.endsAt!, block: null, lastBell: false };
+    }
+  }
+}
+
+/**
+ * Put an app, a file or a link in front of scholars, right now.
  *
- * This is the mutation that makes an ad-hoc push possible at all: with no
- * `assignmentId`, an app / video / link can be featured for a group for
- * twenty minutes without inventing a unit, an assignment and a throwaway
- * activity to hold it.
+ * This is the mutation that makes an ad-hoc push possible at all: an app /
+ * video / link can be featured for a group for twenty minutes without
+ * inventing a unit, an assignment and a throwaway activity to hold it.
  *
  * `groupId` absent = the whole institution, matching callRoomCue.
- * `durationMin` absent = 60 minutes.
+ * `finish` is the give form's fading choice (TRA-580).
+ *
+ * `durationMin` (the retired minutes picker) is read as "for a while" and
+ * `assignmentId` is ignored (TRA-575: an ad hoc push is never filed under an
+ * assignment). Both are compatibility for long-lived tabs; remove after
+ * 2026-12-01. With neither `finish` nor `durationMin`, an hour.
  */
 export const makeFocus = teacherMutation({
   args: {
@@ -243,14 +416,87 @@ export const makeFocus = teacherMutation({
     groupId: v.optional(v.id("scholarGroups")),
     scholarIds: v.optional(v.array(v.id("users"))),
     target: targetValidator,
+    finish: v.optional(pushFinishValidator),
     durationMin: v.optional(v.number()),
     note: v.optional(v.string()),
     blocking: v.optional(v.boolean()),
     assignmentId: v.optional(v.id("assignments")),
   },
-  handler: async (ctx, args) => {
-    const result = await createFocus(ctx, ctx.user, args);
+  handler: async (
+    ctx,
+    { assignmentId: _ignored, durationMin, finish, ...args },
+  ) => {
+    const result = await createFocus(ctx, ctx.user, {
+      ...args,
+      finish: finish ?? {
+        kind: "forAWhile",
+        minutes: Math.min(
+          MAX_FOR_A_WHILE_MIN,
+          Math.max(1, Math.round(durationMin ?? 60)),
+        ),
+      },
+    });
     return result.pushId;
+  },
+});
+
+/**
+ * The give form's choices for a push to `groupId` (absent = the whole
+ * school): the school's clock, when "in that class" would end, and the days
+ * "open until" offers. Shaped like `assignments.giveChoices` so the same form
+ * renders it; "in that class" is the push rule (`pushEnd`), with the passing
+ * period, so the hint and the write agree.
+ */
+export const focusGiveChoices = teacherQuery({
+  args: {
+    scope: v.optional(v.string()),
+    groupId: v.optional(v.id("scholarGroups")),
+    nowMs: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const lens = await resolveInstitutionLens(ctx, ctx.user, args.scope);
+    const institution = lens.institution;
+    if (!institution) {
+      return { refused: "Pick a specific school to give it at." };
+    }
+    let rosterIds: Id<"users">[] = [];
+    if (args.groupId) {
+      const group = await ctx.db.get(args.groupId);
+      if (
+        !group ||
+        !scholarInstitutionReadableInLens(lens, group.institutionId)
+      ) {
+        return { refused: "That group belongs to another school." };
+      }
+      rosterIds = group.scholarIds;
+    }
+    const timeZone = await timeZoneForInstitution(ctx, institution._id);
+    const choices = await giveChoices(ctx, {
+      scholarIds: rosterIds,
+      institutionId: institution._id,
+      timeZone,
+      nowMs: args.nowMs,
+    });
+    let inClass: GiveChoices["inClass"];
+    try {
+      const end = await pushEnd(ctx, {
+        rosterIds,
+        institutionId: institution._id,
+        timeZone,
+        now: args.nowMs,
+        finish: { kind: "inClass" },
+      });
+      inClass = {
+        endsAt: end.endsAt,
+        blockLabel: end.block?.subject ?? null,
+        lastBell: end.lastBell,
+      };
+    } catch (error) {
+      if (!(error instanceof GiveQuestionError)) throw error;
+      // The form offers the option disabled, with the reason as its hint.
+      inClass = { ...choices.inClass, unavailable: error.message };
+    }
+    return { ...choices, inClass };
   },
 });
 
@@ -268,16 +514,18 @@ async function createFocus(
     groupId?: Id<"scholarGroups">;
     scholarIds?: Id<"users">[];
     target: PushTarget;
-    durationMin?: number;
+    finish: PushFinish;
     note?: string;
     blocking?: boolean;
-    assignmentId?: Id<"assignments">;
   },
 ): Promise<{
   pushId: Id<"pushes">;
   endsAt: number;
   minutes: number;
   audienceLabel: string;
+  block: BellBlock | null;
+  lastBell: boolean;
+  timeZone: string;
 }> {
   const lens = await resolveInstitutionLens(ctx, user, args.scope);
   const institution = lens.institution;
@@ -288,15 +536,14 @@ async function createFocus(
   await validateTarget(ctx, args.target, lens);
 
   const blocking = args.blocking ?? false;
-  // Refuse rather than silently downgrade: a teacher who asked for a
-  // lock and got a suggestion would never know.
-  assertBlockingAllowed(args.target, blocking);
 
   // ── audience ──
   // Narrowest wins, so an explicit scholar list beats a group, which
-  // beats the whole school.
+  // beats the whole school. `rosterIds` is whose bell schedule "in that
+  // class" reads; the whole school shares no one block.
   let audience: PushDoc["audience"];
   let audienceLabel: string;
+  let rosterIds: Id<"users">[] = [];
   if (args.scholarIds && args.scholarIds.length > 0) {
     const accessible = await filterToAccessibleScholars(
       ctx,
@@ -308,6 +555,7 @@ async function createFocus(
     }
     audience = { kind: "scholars", scholarIds: accessible };
     audienceLabel = `${accessible.length} scholar${accessible.length === 1 ? "" : "s"}`;
+    rosterIds = accessible;
   } else if (args.groupId) {
     const group = await ctx.db.get(args.groupId);
     if (!group) throw new Error("That group no longer exists.");
@@ -320,23 +568,62 @@ async function createFocus(
     }
     audience = { kind: "group", groupId: args.groupId };
     audienceLabel = group.name;
+    rosterIds = group.scholarIds;
   } else {
     audience = { kind: "institution" };
     audienceLabel = "All scholars";
   }
 
   const now = Date.now();
-  const endsAt = focusEndsAt(now, args.durationMin);
+  const timeZone = await timeZoneForInstitution(ctx, institution._id);
+  let end: PushEnd;
+  try {
+    end = await pushEnd(ctx, {
+      rosterIds,
+      institutionId: institution._id,
+      timeZone,
+      now,
+      finish: args.finish,
+    });
+  } catch (error) {
+    // A plain Error, so the dialog's toast and the aide's reply carry the
+    // question as written.
+    if (error instanceof GiveQuestionError) throw new Error(error.message);
+    throw error;
+  }
+  const endsAt = end.endsAt;
+  if (endsAt <= now) {
+    throw new Error("That window has already ended.");
+  }
+  // The teacher's finish, stored as the kind (TRA-726): "open until" a later
+  // day is `openUntil`; "in that class" and "for a while" are `focus`.
+  const timingKind = args.finish.kind === "openUntil" ? "openUntil" as const : "focus" as const;
+  // Refuse rather than silently downgrade: a teacher who asked for a lock and
+  // got a suggestion would never know. Also refuses an app give without a
+  // finite end (TRA-336).
+  assertPushAllowed({ target: args.target, timing: { kind: timingKind }, blocking, endsAt });
 
   const pushId = await ctx.db.insert("pushes", {
     institutionId: institution._id,
     target: args.target,
     audience,
-    timing: { kind: "focus", endsAt },
+    // The kind alone; the end lives in `endsAt` + `afterEnd` (TRA-580).
+    timing: { kind: timingKind },
+    ...endFieldsForPush(timingKind, endsAt, now, undefined, timeZone),
+    // Linked to the class whose meeting sets the end: in the passing period
+    // that is the class about to start, not the one ending or none.
+    ...await classFieldsForPush(ctx, {
+      institutionId: institution._id,
+      audience,
+      at: end.block ? Math.max(now, end.block.startsAt) : now,
+      timeZone,
+      timingKind,
+      unitSubject: args.target.kind === "activity"
+        ? await unitSubjectForWork(ctx, { activityId: args.target.activityId }) : undefined,
+    }),
     blocking,
     note: args.note?.trim() || undefined,
     setAt: now,
-    assignmentId: args.assignmentId,
     pushedBy: user._id,
   });
 
@@ -363,6 +650,9 @@ async function createFocus(
     endsAt,
     minutes: Math.round((endsAt - now) / 60_000),
     audienceLabel,
+    block: end.block,
+    lastBell: end.lastBell,
+    timeZone,
   };
 }
 
@@ -373,6 +663,14 @@ export const clearPush = teacherMutation({
   handler: async (ctx, { pushId }) => {
     const push = await ctx.db.get(pushId);
     if (!push) throw new Error("That push no longer exists.");
+    // A schedule row belongs to its assignment's schedule (TRA-13) and is
+    // closed through it, so the schedule's own rules (one row per activity
+    // and mode, cancelling its jobs) hold.
+    if (isScheduleRow(push)) {
+      throw new Error(
+        "That's part of an assignment's schedule; clear it from the assignment.",
+      );
+    }
     if (push.clearedAt !== undefined) return;
 
     const lens = await resolveInstitutionLens(ctx, ctx.user, undefined);
@@ -408,8 +706,11 @@ export const autoClearPush = internalMutation({
     const push = await ctx.db.get(pushId);
     if (!push) return;
     if (push.clearedAt !== undefined) return;
-    if (push.timing.kind !== "focus") return;
-    if (push.timing.endsAt > Date.now()) return;
+    // Only an explicit focus window closes on a clock: an untimed focus's
+    // stored end-of-day is not a window (see `explicitFocusEnd`).
+    const endsAt = explicitFocusEnd(push);
+    if (endsAt === null) return;
+    if (endsAt > Date.now()) return;
     await ctx.db.patch(pushId, {
       clearedAt: Date.now(),
       clearedReason: "expired",
@@ -534,6 +835,10 @@ export type HydratedPush = {
   note?: string;
   blocking: boolean;
   endsAt: number | null;
+  /** Set for an "Open until a date" give: when its window closes. The
+   *  scholar's Now tab draws it under "Open from class" (lib/pushes.ts
+   *  `pushOpenUntil`). */
+  openUntil: number | null;
   dueAt: number | null;
   setAt?: number;
 };
@@ -553,8 +858,9 @@ async function hydratePush(
     // every consumer, on either surface, gets the same answer without having
     // to remember the rule.
     blocking: isPushBlocking(push, clock),
-    endsAt: push.timing.kind === "focus" ? push.timing.endsAt : null,
-    dueAt: push.timing.kind === "homework" ? (push.timing.dueAt ?? null) : null,
+    endsAt: explicitFocusEnd(push),
+    openUntil: pushOpenUntil(push, clock.timeZone),
+    dueAt: homeworkDueAt(push),
     setAt: push.setAt,
   };
 
@@ -635,112 +941,119 @@ async function hydratePush(
 
 // ─────────────────── Staff aide (agent-facing) ───────────────────
 //
-// Backs the class-focus tools in lib/classFocusTools.ts, which every aide
-// transport (in-app · Slack · MCP) assembles from assembleCurriculumTools.
-// Read-before-write, the same split deviceLock.ts uses: the model resolves
-// opaque ids and shows the requester the exact app + group + window before
-// anything lands on a scholar's screen. These internal functions repeat the
-// role and institution checks — prompt confirmation is never treated as the
+// Backs the aide's `give` for an app or a link, `get_schedule`'s live app
+// and link rows, and `clear_activity` by pushId (lib/assignmentTools.ts),
+// which every aide transport (in-app · Slack · MCP) assembles from
+// assembleCurriculumTools. These internal functions repeat the role and
+// institution checks — prompt confirmation is never treated as the
 // authorization boundary.
 
 /**
- * Everything the agent needs to name a target and an audience: the app
- * catalog, this school's groups, and the durations the UI offers.
+ * The aide's `give` for an app or a link (lib/assignmentTools.ts, case 4).
+ * It shows up now, and the teacher's finish answer sets when it leaves, the
+ * same fading choices as the web dialog (`pushEnd`). Written through
+ * `createFocus`, so every check the web dialog gets applies here too.
  */
-export const focusOptionsForAide = internalQuery({
-  args: { callerUserId: v.id("users") },
-  handler: async (ctx, { callerUserId }) => {
-    const caller = await ctx.db.get(callerUserId);
-    if (!caller || !isTeacherRole(caller.role)) {
-      return { ok: false as const, message: "Forbidden: teacher role required" };
-    }
-    const lens = await resolveInstitutionLens(ctx, caller, undefined);
-    if (!lens.institution) {
-      return {
-        ok: false as const,
-        message: "No school context — ask an admin to add your membership.",
-      };
-    }
-
-    const apps = (await ctx.db.query("externalApps").collect())
-      .filter((a) => !a.archived)
-      .map((a) => ({ appId: a._id, name: a.name, webUrl: a.webUrl }));
-
-    const groups = (await ctx.db.query("scholarGroups").collect())
-      .filter((g) => scholarInstitutionReadableInLens(lens, g.institutionId))
-      .map((g) => ({
-        groupId: g._id,
-        name: g.name,
-        scholarCount: g.scholarIds.length,
-      }));
-
-    return {
-      ok: true as const,
-      school: lens.institution.name,
-      apps,
-      groups,
-      allScholarsOption:
-        "Omit group_id to push to every enrolled scholar at this school.",
-      durationChoicesMin: FOCUS_DURATION_CHOICES_MIN,
-      defaultDurationMin: 60,
-    };
-  },
-});
-
-/** Put an app or a link in front of a group for a bounded window. */
-export const makeFocusFromAide = internalMutation({
+export const giveFocusFromAide = internalMutation({
   args: {
     callerUserId: v.id("users"),
-    appId: v.optional(v.id("externalApps")),
+    appName: v.optional(v.string()),
     url: v.optional(v.string()),
     title: v.optional(v.string()),
     media: v.optional(v.union(v.literal("video"), v.literal("page"))),
     groupId: v.optional(v.id("scholarGroups")),
-    durationMin: v.optional(v.number()),
+    scholarIds: v.optional(v.array(v.id("users"))),
+    finish: pushFinishValidator,
     note: v.optional(v.string()),
+    // The aide's institution lens (the school picked in the app).
+    scope: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const caller = await ctx.db.get(args.callerUserId);
     if (!caller || !isTeacherRole(caller.role)) {
       return { ok: false as const, message: "Forbidden: teacher role required" };
     }
+    const lens = await resolveInstitutionLens(ctx, caller, args.scope);
+    if (!lens.institution) {
+      return {
+        ok: false as const,
+        message: "Pick a specific school to give it at. Nothing given.",
+      };
+    }
+    const school = lens.institution;
 
     let target: PushTarget;
-    if (args.appId) {
-      target = { kind: "app", externalAppId: args.appId };
-    } else if (args.url) {
-      target = {
-        kind: "link",
-        url: args.url,
-        title: args.title?.trim() || args.url,
-        media: args.media,
+    let title: string;
+    const appName = args.appName?.trim();
+    if (appName && args.url) {
+      return {
+        ok: false as const,
+        message: "Give either an app or a url, not both. Nothing given.",
       };
+    }
+    if (appName) {
+      // The app catalog is deployment-global (see validateTarget); archived
+      // apps aren't offered.
+      const apps = (await ctx.db.query("externalApps").collect()).filter(
+        (app) => !app.archived,
+      );
+      const wanted = appName.toLowerCase();
+      const exact = apps.filter(
+        (app) => app.name.trim().toLowerCase() === wanted,
+      );
+      if (exact.length > 1) {
+        return {
+          ok: false as const,
+          message: `More than one app in the catalog is named "${appName}" (${exact
+            .map((app) => app.webUrl ?? app.name)
+            .join(", ")}). Rename or archive the duplicate, then try again. Nothing given.`,
+        };
+      }
+      if (exact.length === 0) {
+        const candidates = apps
+          .filter((app) => app.name.toLowerCase().includes(wanted))
+          .map((app) => app.name)
+          .sort();
+        return {
+          ok: false as const,
+          message:
+            candidates.length > 0
+              ? `No app is named exactly "${appName}". Candidates: ${candidates.join(", ")}. Use the exact name. Nothing given.`
+              : `No app named "${appName}" in the catalog. Call list_external_apps to see it. Nothing given.`,
+        };
+      }
+      target = { kind: "app", externalAppId: exact[0]._id };
+      title = exact[0].name;
+    } else if (args.url) {
+      const url = args.url.trim();
+      title = args.title?.trim() || url;
+      target = { kind: "link", url, title, media: args.media };
     } else {
       return {
         ok: false as const,
-        message: "Give either an app_id or a url to make the focus.",
+        message: "Give an appName or a url. Nothing given.",
       };
     }
 
     try {
       const result = await createFocus(ctx, caller, {
+        scope: args.scope,
         target,
         groupId: args.groupId,
-        durationMin: args.durationMin,
+        scholarIds: args.scholarIds,
+        finish: args.finish,
         note: args.note,
       });
-      const title =
-        target.kind === "link"
-          ? target.title
-          : ((await ctx.db.get(target.externalAppId))?.name ?? "App");
       return {
         ok: true as const,
         pushId: result.pushId,
-        message: pushSummaryLine({
-          title,
-          audienceLabel: result.audienceLabel,
-          minutes: result.minutes,
-        }),
+        title,
+        audienceLabel: result.audienceLabel,
+        schoolName: school.name,
+        endsAt: result.endsAt,
+        timeZone: result.timeZone,
+        blockLabel: result.block?.subject ?? null,
+        lastBell: result.lastBell,
       };
     } catch (error) {
       return {
@@ -751,15 +1064,16 @@ export const makeFocusFromAide = internalMutation({
   },
 });
 
-/** What is on scholars' screens right now, so the agent can report or wrap. */
+/** The ad hoc pushes on scholars' screens right now (get_schedule's live app
+ *  and link rows), so the agent can report or end one. */
 export const liveFocusForAide = internalQuery({
-  args: { callerUserId: v.id("users") },
-  handler: async (ctx, { callerUserId }) => {
+  args: { callerUserId: v.id("users"), scope: v.optional(v.string()) },
+  handler: async (ctx, { callerUserId, scope }) => {
     const caller = await ctx.db.get(callerUserId);
     if (!caller || !isTeacherRole(caller.role)) {
       return { ok: false as const, message: "Forbidden: teacher role required" };
     }
-    const lens = await resolveInstitutionLens(ctx, caller, undefined);
+    const lens = await resolveInstitutionLens(ctx, caller, scope);
     if (!lens.institution) return { ok: true as const, pushes: [] };
 
     const now = Date.now();
@@ -789,6 +1103,8 @@ export const liveFocusForAide = internalQuery({
           timeLeft: pushTimeLeftLabel(hydrated.endsAt, now),
           note: hydrated.note ?? null,
           pushedBy: pusher?.name ?? "Someone",
+          setAt: push.setAt ?? null,
+          endsAt: hydrated.endsAt,
         };
       }),
     );
@@ -796,21 +1112,46 @@ export const liveFocusForAide = internalQuery({
   },
 });
 
-/** End a live focus early. */
+/** End a live app or link early (clear_activity with a pushId). */
 export const clearFocusFromAide = internalMutation({
-  args: { callerUserId: v.id("users"), pushId: v.id("pushes") },
-  handler: async (ctx, { callerUserId, pushId }) => {
+  args: {
+    callerUserId: v.id("users"),
+    // A string, not v.id: the model passes it, and a malformed or
+    // wrong-table id must get an answer rather than a validator throw.
+    pushId: v.string(),
+    scope: v.optional(v.string()),
+  },
+  handler: async (ctx, { callerUserId, pushId: rawPushId, scope }) => {
     const caller = await ctx.db.get(callerUserId);
     if (!caller || !isTeacherRole(caller.role)) {
       return { ok: false as const, message: "Forbidden: teacher role required" };
     }
-    const push = await ctx.db.get(pushId);
-    if (!push) return { ok: false as const, message: "No such push." };
-    const lens = await resolveInstitutionLens(ctx, caller, undefined);
-    if (
-      lens.institution?._id !== push.institutionId &&
-      !lens.allowedInstitutionIds.has(push.institutionId)
-    ) {
+    const pushId = ctx.db.normalizeId("pushes", rawPushId.trim());
+    const push = pushId ? await ctx.db.get(pushId) : null;
+    if (!pushId || !push) {
+      return {
+        ok: false as const,
+        message: "No live app or link has that pushId. Call get_schedule for the current ones.",
+      };
+    }
+    // A schedule row belongs to its assignment, with that assignment's
+    // ownership checks: same refusal as the web `clearPush`.
+    if (isScheduleRow(push)) {
+      return {
+        ok: false as const,
+        message:
+          "That's part of an assignment's schedule. Clear it from the assignment (clear_activity).",
+      };
+    }
+    const lens = await resolveInstitutionLens(ctx, caller, scope);
+    // With a school picked, only that school's pushes; otherwise any school
+    // the caller works at.
+    const reachable =
+      scope?.trim() && lens.institution
+        ? lens.institution._id === push.institutionId
+        : lens.institution?._id === push.institutionId ||
+          lens.allowedInstitutionIds.has(push.institutionId);
+    if (!reachable) {
       return {
         ok: false as const,
         message: "Forbidden: that push belongs to another school.",
@@ -829,5 +1170,50 @@ export const clearFocusFromAide = internalMutation({
     // be the one that silently skips it.
     await schedulePushProjectionRefresh(ctx, pushId);
     return { ok: true as const, message: "Wrapped up." };
+  },
+});
+
+/**
+ * Inventory: app pushes that break the app-give invariant (TRA-336), i.e. an
+ * app target whose timing is not a focus with a finite, fading end.
+ *
+ * Read-only, internal, one page per call: `pushes` holds every schedule-mirror
+ * row, so a single full scan could outgrow a query's read limit. Run it from
+ * the CLI until `isDone`, passing back `continueCursor`:
+ *
+ *   npx convex run pushes:inventoryEndlessAppPushes \
+ *     '{"paginationOpts":{"numItems":2000,"cursor":null}}'
+ *
+ * Returns ids and shape only: no names, notes or audience members. `open`
+ * means not yet cleared (the rows a soft-clear would act on); `live` adds a
+ * `setAt` stamp. Since TRA-336 `isPushShowing` grants nothing for any of these
+ * rows, so they are inert, but an open one still belongs cleared.
+ */
+export const inventoryEndlessAppPushes = internalQuery({
+  args: { paginationOpts: paginationOptsValidator },
+  handler: async (ctx, { paginationOpts }) => {
+    const page = await ctx.db.query("pushes").paginate(paginationOpts);
+    const violations = [];
+    for (const push of page.page) {
+      const reason = endlessAppPushReason(push);
+      if (reason === null) continue;
+      violations.push({
+        pushId: push._id,
+        institutionId: push.institutionId,
+        reason,
+        timingKind: push.timing.kind,
+        afterEnd: push.afterEnd,
+        hasEndsAt: push.endsAt !== undefined,
+        open: push.clearedAt === undefined,
+        live: push.setAt !== undefined && push.clearedAt === undefined,
+        fromPlacement: push.schedulePlacementId !== undefined,
+      });
+    }
+    return {
+      scanned: page.page.length,
+      violations,
+      isDone: page.isDone,
+      continueCursor: page.continueCursor,
+    };
   },
 });

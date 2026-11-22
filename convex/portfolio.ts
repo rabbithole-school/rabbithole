@@ -1,3 +1,4 @@
+import { assignmentInstitutionId } from "./lib/assignmentAuthority";
 import { v } from "convex/values";
 import {
   internalMutation,
@@ -14,6 +15,8 @@ import {
 } from "./lib/programGroupAccess";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule } from "./lib/scheduleStore";
+import { isScheduleRow } from "./lib/pushes";
 import {
   assignmentResolved,
   hasBeenFiled,
@@ -21,6 +24,7 @@ import {
   needsReview,
   openFields,
 } from "./lib/portfolioStatus";
+import { deleteMeterTakeRow, markStaffTookOver } from "./lib/decibelMeterTakes";
 import { reconcilePortfolioMaterialization } from "./portfolioMaterialize";
 import { clearScanAssessment } from "./portfolioAssess";
 import { maybeScheduleArtifactAssessment } from "./granuleAssessment";
@@ -29,6 +33,11 @@ import {
   isLiveEntry,
   liveActivityAt,
 } from "./assignments";
+import {
+  firstClassIdByWork,
+  scheduleWorkKey,
+  workSubjectName,
+} from "./lib/homeworkSubject";
 import { isProgramHandoutActivity } from "./lib/programHandoutAccess";
 import { resolveScholarHomework } from "./activityCompletions";
 import { isScholarHomeworkMark } from "./lib/activityCompletionCore";
@@ -38,6 +47,7 @@ import {
 } from "./lib/activityResourceReachability";
 import { candidateGroupsForScholar } from "./lib/scholarGroupMembership";
 import { getFormEntry } from "./lib/formRegistry";
+import { requireCanRunOwnedAssignment } from "./lib/curriculumRun";
 import {
   canUserReadScholarWork,
   requireActiveScholarAccess,
@@ -67,6 +77,7 @@ import {
 // so it lives in shared/ rather than being restated per surface.
 import { LABEL_MAX_LENGTH } from "../shared/portfolioLabel";
 import { effectiveActivityKind } from "../shared/appSurface";
+import { portfolioSubjectSlug } from "../shared/portfolioSubject";
 
 const LABEL_BATCH_MAX = 200;
 const ASSIGNMENT_BATCH_MAX = 200;
@@ -161,29 +172,6 @@ async function scannerInstitutionLens(
     return null;
   }
   return lens;
-}
-
-async function assignmentInstitutionId(
-  ctx: QueryCtx,
-  assignment: Doc<"assignments">,
-): Promise<Id<"institutions"> | null> {
-  if (assignment.scholarGroupId) {
-    const group = await ctx.db.get(assignment.scholarGroupId);
-    if (group?.institutionId) return group.institutionId;
-  }
-  if (assignment.unitId) {
-    const unit = await ctx.db.get(assignment.unitId);
-    if (unit?.institutionId) return unit.institutionId;
-  }
-  const scholars = await Promise.all(
-    assignment.scholarIds.map((scholarId) => ctx.db.get(scholarId)),
-  );
-  const institutionIds = new Set(
-    scholars.flatMap((scholar) =>
-      scholar?.institutionId ? [scholar.institutionId] : [],
-    ),
-  );
-  return institutionIds.size === 1 ? [...institutionIds][0] : null;
 }
 
 async function canManageAssignment(
@@ -395,6 +383,7 @@ async function setAttributionSet(
 ) {
   const item = await ctx.db.get(itemId);
   if (!item) throw new Error("Item not found");
+  await markStaffTookOver(ctx, item);
   const uniqueIds = [...new Set(scholarIds)];
   const scholars = await Promise.all(uniqueIds.map((id) => ctx.db.get(id)));
   if (scholars.some((scholar) => !scholar)) throw new Error("Scholar not found");
@@ -529,6 +518,7 @@ export const setLabels = authedMutation({
 
     const label =
       args.label.trim().slice(0, LABEL_MAX_LENGTH) || undefined;
+    for (const item of items) if (item) await markStaffTookOver(ctx, item);
     for (const itemId of itemIds) {
       await ctx.db.patch(itemId, { label });
     }
@@ -581,6 +571,7 @@ export const setFamilyVisibility = authedMutation({
         throw new Error(eligibility.blocker ?? "Family sharing is unavailable.");
       }
     }
+    await markStaffTookOver(ctx, item);
     await ctx.db.patch(item._id, {
       familyVisibility: args.familyVisibility,
     });
@@ -597,9 +588,28 @@ async function applyPortfolioItemAssignment(
   item: Doc<"portfolioItems">,
   assignment: Doc<"assignments"> | null,
 ) {
+  await markStaffTookOver(ctx, item);
   const attributedIds = await attributedScholarIds(ctx, item);
   for (const scholarId of attributedIds) {
     await requireActiveScholarAccess(ctx, ctx.user, scholarId);
+  }
+  // Moving a filed scan she can't see onto an assignment she runs would open
+  // it to her through canReadAsAssignmentRunner. Refuse that one move; any
+  // other refile is unchanged.
+  if (
+    assignment &&
+    hasBeenFiled(item) &&
+    item.assignmentId !== assignment._id &&
+    !(await canReadItemContent(ctx, item)) &&
+    (await canReadAsAssignmentRunner(
+      ctx,
+      { ...item, assignmentId: assignment._id },
+      attributedIds,
+    ))
+  ) {
+    throw new Error(
+      "Forbidden: only teaching staff can move a filed scan onto your own assignment",
+    );
   }
   if (assignment) {
     // This is evidence filing, not assignment dispatch. Keep the roster intact:
@@ -705,6 +715,7 @@ export const setActivity = authedMutation({
         }
       }
     }
+    await markStaffTookOver(ctx, item);
     await ctx.db.patch(args.itemId, { activityId: args.activityId });
     await reconcilePortfolioMaterialization(ctx, args.itemId);
   },
@@ -765,6 +776,7 @@ export async function deletePortfolioItem(
       )
       .unique();
     if (capture) await ctx.db.delete(capture._id);
+    await deleteMeterTakeRow(ctx, itemId);
     // Tombstone the Drive provenance BEFORE the row goes away: the folder
     // sync + watch webhook treat "file with no portfolioItems row" as unseen
     // and would re-ingest the file, resurrecting the deleted scan in the
@@ -857,6 +869,9 @@ export const listForScholar = authedQuery({
  *    `canUserReadScholarWork`. A filed scan that has since been unfiled (no
  *    attributions left) needs a teaching role — unfiling must not launder it
  *    back into the inbox (the PR #4254 review's round trip).
+ *  - A scan filed to an assignment the caller runs under curriculum:run is a
+ *    hand-in on that assignment, which the capability already lets her read
+ *    (`canReadAsAssignmentRunner`).
  *  - Capture-station items are governed by the captures:review gate in
  *    `requirePortfolioItemAccess` alone.
  */
@@ -869,6 +884,7 @@ async function canReadItemContent(
   if (!hasBeenFiled(item)) return true;
   const scholarIds = await attributedScholarIds(ctx, item);
   if (scholarIds.length === 0) return isTeacherRole(ctx.user.role);
+  if (await canReadAsAssignmentRunner(ctx, item, scholarIds)) return true;
   for (const scholarId of scholarIds) {
     let readable = memo?.get(scholarId);
     if (readable === undefined) {
@@ -878,6 +894,32 @@ async function canReadItemContent(
     if (!readable) return false;
   }
   return true;
+}
+
+/**
+ * The curriculum:run path into a filed scan: the scan is filed to an
+ * assignment the caller OWNS and can still run, and every attributed scholar
+ * is on that assignment's roster. That is a hand-in on her own run, which the
+ * capability already opens (lib/curriculumRun.ts); a scan filed with no
+ * assignment, to someone else's run, or to a scholar off her roster stays
+ * withheld. Teachers never need this — they pass `canUserReadScholarWork`.
+ */
+async function canReadAsAssignmentRunner(
+  ctx: QueryCtx & { user: Doc<"users"> },
+  item: Doc<"portfolioItems">,
+  scholarIds: Id<"users">[],
+): Promise<boolean> {
+  if (!item.assignmentId || isTeacherRole(ctx.user.role)) return false;
+  const assignment = await ctx.db.get(item.assignmentId);
+  if (!assignment || assignment.teacherId !== ctx.user._id) return false;
+  const roster = new Set(assignment.scholarIds.map(String));
+  if (!scholarIds.every((id) => roster.has(String(id)))) return false;
+  try {
+    await requireCanRunOwnedAssignment(ctx, ctx.user, assignment);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -950,6 +992,83 @@ async function courseIdForAssignment(
 }
 
 /**
+ * The SUBJECT a family-visible piece of work that belongs to no course is
+ * grouped under on the Portfolio tab: the give's class, then the unit's
+ * subject (`workSubjectName`, lib/homeworkSubject.ts), never the unit title.
+ * Null when nobody recorded a subject, which is what "Other work" holds.
+ *
+ * Time-independent on purpose: a portfolio is a long-lived archive, so a
+ * piece of work must not change tiles when its give wraps up or the term
+ * ends. The class is read from EVERY schedule row of the assignment, cleared
+ * ones included, and the current-term timetable placement (which the live
+ * Homework tab also consults) is not a source here. A scan doesn't record
+ * which give of its activity it answers, so the class counts only when every
+ * give of the activity names the same one (`firstClassIdByWork`, the rule the
+ * Homework tab labels each give by); otherwise the unit's subject decides.
+ *
+ * Reads are per-id and per-assignment index, and only happen for work that
+ * has no course. Memoized per request.
+ */
+function familyWorkSubjectResolver(ctx: QueryCtx) {
+  const memo = new Map<string, Promise<string | null>>();
+  const classIdsByAssignment = new Map<
+    string,
+    Promise<Map<string, Id<"classes"> | undefined>>
+  >();
+  const classIdsFor = (assignmentId: Id<"assignments">) => {
+    let pending = classIdsByAssignment.get(assignmentId);
+    if (!pending) {
+      pending = ctx.db
+        .query("pushes")
+        .withIndex("by_assignment", (q) => q.eq("assignmentId", assignmentId))
+        .collect()
+        .then((rows) => firstClassIdByWork(rows.filter(isScheduleRow)));
+      classIdsByAssignment.set(assignmentId, pending);
+    }
+    return pending;
+  };
+  const classIdForActivity = async (
+    assignmentId: Id<"assignments">,
+    activityId: Id<"activities">,
+  ): Promise<Id<"classes"> | null> => {
+    const classIds = await classIdsFor(assignmentId);
+    const gives = (["classFocus", "homework"] as const)
+      .map((mode) => scheduleWorkKey(activityId, mode))
+      .filter((key) => classIds.has(key))
+      .map((key) => classIds.get(key));
+    const [first] = gives;
+    return first && gives.every((classId) => classId === first) ? first : null;
+  };
+  const resolve = async (
+    assignmentId: Id<"assignments"> | null,
+    activityId: Id<"activities"> | null,
+  ): Promise<string | null> => {
+    const assignment = assignmentId ? await ctx.db.get(assignmentId) : null;
+    return await workSubjectName(ctx, {
+      classId:
+        assignment && activityId
+          ? await classIdForActivity(assignment._id, activityId)
+          : null,
+      activityId,
+      unitId: assignment?.unitId ?? null,
+    });
+  };
+  return (
+    assignmentId: Id<"assignments"> | null | undefined,
+    activityId: Id<"activities"> | null | undefined,
+  ): Promise<string | null> => {
+    if (!assignmentId && !activityId) return Promise.resolve(null);
+    const key = `${assignmentId ?? ""}::${activityId ?? ""}`;
+    let pending = memo.get(key);
+    if (!pending) {
+      pending = resolve(assignmentId ?? null, activityId ?? null);
+      memo.set(key, pending);
+    }
+    return pending;
+  };
+}
+
+/**
  * Every family-visible item for one child, newest first — the single
  * selection + projection both guardian portfolio surfaces read.
  *
@@ -963,19 +1082,28 @@ async function courseIdForAssignment(
  * provenance alone would otherwise advertise — and open — a group the family
  * has no claim on. Work filed to a foreign course reads as unfiled.
  *
+ * `subject` is stamped only on work filed to no program group
+ * (`familyWorkSubjectResolver`): course work lives behind its course tile,
+ * work misfiled to a foreign program stays Other work, and everything else
+ * groups under the subject it was given in. A course view passes
+ * `subjects: false` — it never shows work outside its course.
+ *
  * `hydrate: false` skips every `ctx.storage.getUrl` and the capture join: the
- * tile pipeline needs only `courseId` + `_creationTime`, and signing URLs for
- * work nobody is about to look at is pure cost.
+ * tile pipeline needs only `courseId`, `subject` + `_creationTime`, and
+ * signing URLs for work nobody is about to look at is pure cost.
  */
 async function guardianWorkEntries(
   ctx: QueryCtx,
   scholarId: Id<"users">,
   options: {
     hydrate?: boolean;
+    subjects?: boolean;
     courseGroups?: Doc<"scholarGroups">[];
   } = {},
 ) {
   const hydrate = options.hydrate ?? true;
+  const subjectFor =
+    options.subjects === false ? null : familyWorkSubjectResolver(ctx);
   const courseGroupIds = new Set(
     (options.courseGroups ?? (await guardianCourseGroups(ctx, scholarId))).map(
       (group) => String(group._id),
@@ -986,6 +1114,18 @@ async function guardianWorkEntries(
   ): Promise<Id<"scholarGroups"> | null> => {
     const courseId = await courseIdForAssignment(ctx, assignmentId);
     return courseId && courseGroupIds.has(String(courseId)) ? courseId : null;
+  };
+  // Work filed to a program the child is NOT in reads as unfiled, never as
+  // that program's subject: its class and unit are the foreign program's.
+  const subjectForItem = async (
+    assignmentId: Id<"assignments"> | undefined,
+    activityId: Id<"activities"> | undefined,
+  ): Promise<string | null> => {
+    if (!subjectFor) return null;
+    if (await courseIdForAssignment(ctx, assignmentId)) return null;
+    const subject = await subjectFor(assignmentId, activityId);
+    // Only an empty subject has no slug; that is Other work.
+    return subject && portfolioSubjectSlug(subject) ? subject : null;
   };
   const legacyRows = await ctx.db
     .query("portfolioItems")
@@ -1022,11 +1162,13 @@ async function guardianWorkEntries(
       // A capture-station video has no image thumbnail (previewUrl returns
       // null for it) — its poster still and duration live on the capture row.
       const capture = hydrate ? await captureForPortfolioItem(ctx, item) : null;
+      const courseId = await courseIdForItem(item.assignmentId);
       return {
         activityId: item.activityId ?? null,
         item: {
           _id: item._id,
-          courseId: await courseIdForItem(item.assignmentId),
+          courseId,
+          subject: await subjectForItem(item.assignmentId, item.activityId),
           _creationTime: item._creationTime,
           kind: "file" as const,
           title: item.title,
@@ -1075,11 +1217,16 @@ async function guardianWorkEntries(
     sharedDeliverables.map(async (deliverable) => {
       const activity = await ctx.db.get(deliverable.activityId);
       const snapshot = deliverable.familySnapshot!;
+      const courseId = await courseIdForItem(deliverable.assignmentId);
       return {
         activityId: deliverable.activityId,
         item: {
           _id: deliverable._id,
-          courseId: await courseIdForItem(deliverable.assignmentId),
+          courseId,
+          subject: await subjectForItem(
+            deliverable.assignmentId,
+            deliverable.activityId,
+          ),
           _creationTime: deliverable.familyPublishedAt!,
           kind: snapshot.kind,
           title: snapshot.title,
@@ -1105,6 +1252,25 @@ async function guardianWorkEntries(
 }
 
 /** A guardian's read-only list of their child's portfolio items. */
+/**
+ * The pieces a family sees in the portfolio — exactly `listForGuardian`'s
+ * list — for other family surfaces that link to them (a published report's
+ * "Work in this report"). The caller does its own guardian or staff check.
+ * `hydrate: false` skips file URLs when only membership is needed.
+ */
+export async function familyPortfolioItems(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+  options: { hydrate?: boolean } = {},
+) {
+  return (
+    await guardianWorkEntries(ctx, scholarId, {
+      hydrate: options.hydrate ?? true,
+      subjects: false,
+    })
+  ).map((entry) => entry.item);
+}
+
 export const listForGuardian = authedQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
@@ -1159,8 +1325,8 @@ async function courseSessionsForScholar(
   const sessions = [];
   for (const assignment of assignments) {
     if (!assignmentTargetsScholar(assignment, group, scholarId)) continue;
-    const schedule = assignment.activitySchedule ?? [];
-    for (const [index, entry] of schedule.entries()) {
+    const schedule = await readSchedule(ctx, assignment);
+    for (const entry of schedule) {
       if (!isLiveEntry(entry, now)) continue;
       if (!entryTargetsScholar(entry, scholarId)) continue;
       const activity = await ctx.db.get(entry.activityId);
@@ -1179,9 +1345,10 @@ async function courseSessionsForScholar(
         : null;
       const unit = unitId ? await ctx.db.get(unitId) : null;
       sessions.push({
-        // The schedule index keeps the key unique when one activity is
-        // scheduled twice in the same assignment.
-        key: `${assignment._id}:${index}:${activity._id}`,
+        // The mode keeps the key unique when one activity is scheduled
+        // twice in the same assignment (the schedule holds one entry per
+        // activity and mode).
+        key: `${assignment._id}:${entry.mode}:${activity._id}`,
         activityId: activity._id,
         // `startsAt` is when the session RUNS; `setAt` is only when a teacher
         // activated it (and `isLiveEntry` already requires it), so reading
@@ -1281,7 +1448,8 @@ async function guardianMediaRelease(ctx: QueryCtx, scholarId: Id<"users">) {
 
 /**
  * The family portal's Portfolio landing: one tile per course this child is
- * part of, plus the count of work that belongs to no course.
+ * part of, one per subject the rest of their work was given in, plus the
+ * count of work with neither (the "Other work" tile).
  */
 export const coursesForGuardian = authedQuery({
   args: { scholarId: v.id("users") },
@@ -1328,9 +1496,37 @@ export const coursesForGuardian = authedQuery({
       }
       return a.name.localeCompare(b.name);
     });
+    // Subjects group case- and punctuation-insensitively (the same slug the
+    // portal links to), named by the most recent work's spelling.
+    const subjectsBySlug = new Map<
+      string,
+      { slug: string; name: string; latestWorkAt: number; workCount: number }
+    >();
+    for (const entry of entries) {
+      if (entry.item.courseId != null || entry.item.subject == null) continue;
+      const slug = portfolioSubjectSlug(entry.item.subject);
+      const existing = subjectsBySlug.get(slug);
+      if (existing) {
+        existing.workCount += 1;
+        continue;
+      }
+      // Entries are newest first, so the first one seen is the latest.
+      subjectsBySlug.set(slug, {
+        slug,
+        name: entry.item.subject,
+        latestWorkAt: entry.item._creationTime,
+        workCount: 1,
+      });
+    }
+    const subjects = [...subjectsBySlug.values()].sort(
+      (a, b) => b.latestWorkAt - a.latestWorkAt || a.name.localeCompare(b.name),
+    );
     return {
       courses,
-      otherWorkCount: entries.filter((entry) => entry.item.courseId == null).length,
+      subjects,
+      otherWorkCount: entries.filter(
+        (entry) => entry.item.courseId == null && entry.item.subject == null,
+      ).length,
       mediaRelease: await guardianMediaRelease(ctx, args.scholarId),
     };
   },
@@ -1366,6 +1562,7 @@ export const courseForGuardian = authedQuery({
     const group = groups.find((candidate) => candidate._id === groupId);
     if (!group) return { course: null, mediaRelease };
     const entries = await guardianWorkEntries(ctx, args.scholarId, {
+      subjects: false,
       courseGroups: groups,
     });
 
@@ -1469,27 +1666,35 @@ export const getFileUrlForGuardian = authedQuery({
 // pedagogy.md). Curation (attribution, deletion, the scanner inbox) stays
 // scholar-admin via the functions above.
 
+/** What a scholar may see of their own portfolio, newest first. */
+export async function visiblePortfolioItems(
+  ctx: Pick<QueryCtx, "db">,
+  scholarId: Id<"users">,
+): Promise<Doc<"portfolioItems">[]> {
+  const legacyRows = await ctx.db
+    .query("portfolioItems")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .order("desc")
+    .collect();
+  const attributedRows = await ctx.db
+    .query("portfolioAttributions")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .collect();
+  const rows = new Map(legacyRows.map((row) => [row._id, row]));
+  for (const attribution of attributedRows) {
+    const item = await ctx.db.get(attribution.portfolioItemId);
+    if (item) rows.set(item._id, item);
+  }
+  return [...rows.values()]
+    .filter(assignmentResolved)
+    .sort((a, b) => b._creationTime - a._creationTime);
+}
+
 /** The current scholar's own portfolio items, read-only, with thumbnails. */
 export const listForSelf = authedQuery({
   args: {},
   handler: async (ctx) => {
-    const legacyRows = await ctx.db
-      .query("portfolioItems")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", ctx.user._id))
-      .order("desc")
-      .collect();
-    const attributedRows = await ctx.db
-      .query("portfolioAttributions")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", ctx.user._id))
-      .collect();
-    const rows = new Map(legacyRows.map((row) => [row._id, row]));
-    for (const attribution of attributedRows) {
-      const item = await ctx.db.get(attribution.portfolioItemId);
-      if (item) rows.set(item._id, item);
-    }
-    const visibleItems = [...rows.values()]
-      .filter(assignmentResolved)
-      .sort((a, b) => b._creationTime - a._creationTime);
+    const visibleItems = await visiblePortfolioItems(ctx, ctx.user._id);
     return await Promise.all(
       visibleItems.map(async (item) => {
           const attributionCount = (await attributedScholarIds(ctx, item)).length;
@@ -2022,6 +2227,15 @@ export const scannerFeed = authedQuery({
         portfolioItemContainsIdentifiableMedia(r),
       );
       const capture = await captureForPortfolioItem(ctx, r);
+      // A Decibel meter take: its poster is the item's thumbnail, and its
+      // length lives on the take row.
+      const meterTake =
+        r.source === "decibel_meter"
+          ? await ctx.db
+              .query("decibelMeterTakes")
+              .withIndex("by_portfolio_item", (q) => q.eq("portfolioItemId", r._id))
+              .unique()
+          : null;
       const enriched = enrich(
         r,
         attributionNames[0] ?? null,
@@ -2045,8 +2259,10 @@ export const scannerFeed = authedQuery({
         videoThumbUrl:
           !withholdImage && capture?.videoThumbStorageId
             ? await ctx.storage.getUrl(capture.videoThumbStorageId)
-            : null,
-        videoDurationMs: capture?.videoDurationMs ?? null,
+            : !withholdImage && meterTake && r.thumbStorageId
+              ? await ctx.storage.getUrl(r.thumbStorageId)
+              : null,
+        videoDurationMs: capture?.videoDurationMs ?? meterTake?.durationMs ?? null,
         // Retagging a capture offers the STATION'S group roster, not the whole
         // school: a program cohort is mostly program guests, who are filtered
         // out of the ordinary scholar picker.
@@ -2296,7 +2512,9 @@ export const offlineSessionView = authedQuery({
       ? await ctx.db.get(session.assignmentId)
       : null;
     const teacher = assignment ? await ctx.db.get(assignment.teacherId) : null;
-    const scheduleEntry = assignment?.activitySchedule?.find(
+    const scheduleEntry = (
+      assignment ? await readSchedule(ctx, assignment) : []
+    ).find(
       (entry) =>
         String(entry.activityId) === String(session.activityId) &&
         entryTargetsScholar(entry, session.userId),

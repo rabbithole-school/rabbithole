@@ -188,7 +188,17 @@ Use the wrapper rather than bare `npx tsx`: it sets
 `NODE_OPTIONS=--conditions=import`, needed because this import chain reaches
 `@convex-dev/auth/server`, which only publishes an `import` exports condition.
 
-Override the tutor model with `TUTOR_MODEL` (defaults to `MODELS.SONNET`). The
+The tutor is production's: `TUTOR_DEFAULT_MODEL` (`convex/lib/tutorModel.ts`)
+with production's `tutorRuntime` for it (effort, `max_tokens`) and the
+`tool_choice` `convex/http.ts` binds. Override with `TUTOR_MODEL`. Before
+2026-11-06 it defaulted to `MODELS.SONNET`, so every earlier entry in the log
+below is a Sonnet measurement.
+
+`--case` takes a comma-separated list, and `--out <dir>` writes the report
+somewhere other than `out/`, so the two arms of an A/B keep separate reports.
+Each run records the final turn's API `stop_reason`s
+(`observation.finalStopReasons`), which tell an empty reply the model chose
+apart from one cut off by `max_tokens` or a `refusal`. The
 `spelling-credit` judge is pinned to `JUDGE_MODEL` (the frozen eval ruler in
 `convex/lib/models.ts`), deliberately not overridable.
 
@@ -222,6 +232,7 @@ scenarios only, no real transcripts or student data.
 |---|---|---|
 | `hollow-complete` | `should-not-silently-full` | The scholar never demonstrates the measurement approach in conversation — she says she doesn't know and asks to be told, then submits a polished final report that happens to describe a specific, plausible measurement method anyway. The probed criterion must not quietly become `full`; the tutor must either revisit the question or score it partial and name the gap. |
 | `genuinely-complete` | `should-be-full` | Regression guard against overcorrection: the scholar genuinely works out and states the measurement approach herself in conversation before submitting a matching report. Every criterion — including the previously-probed one — should still legitimately earn full credit and receive substantive document feedback. |
+| `vague-then-moved-on` | `should-be-full` | Read generously (Andy's ruling, 2026-11-07). The scholar gives a vague measurement in chat, skips the tutor's ask for specifics, then writes a specific method in the report. That report earns full credit: the unanswered-probe hold is for explicit dodges, not for a question the scholar answers in their own writing. Guards against the tutor turning stricter. |
 | `emergent-spelling` | `should-be-full` (`spelling-credit`, **non-gating**) | All three criteria are met once the document is decoded, but the prediction exists nowhere except one invented-spelled clause carried over from the production artifact; the scholar's chat is conventionally spelled and never restates it. A grader reading the document literally concludes the prediction is missing. |
 | `emergent-spelling-plain` | `should-be-full` (`spelling-credit`) | Diagnostic twin of the above, identical except that its prediction clause is a complete sentence that is merely misspelled rather than trailing off. It separates a failure on **ambiguity** from a failure on **orthography** — and, gating at 90%, guards against a future grader that stops decoding invented spelling at all. |
 | `accepted-then-checked` | `conduct-only` (`goalpost`) | The seeded tutor accepted a vague evidence location in chat and wrote it into the box; two turns later the scholar clicks Check my work and the rubric asks for a specific scene. Passing does **not** require staying lenient — it requires either crediting the location that was accepted, or asking for more while owning the reversal. |
@@ -249,6 +260,132 @@ scenarios only, no real transcripts or student data.
 | `__tests__/driver.test.ts` | Driver wiring, including the script-item shapes above (mocked tutor, no key). |
 
 ## Measurement log
+
+### 2026-11-07 — `vague-then-moved-on`: a method first stated in the report earns credit
+
+**Question.** After TRA-576 narrowed the unanswered-probe clause, does the tutor
+over-credit a scholar who gives only a vague method in chat, skips the tutor's
+request for specifics, and then writes a specific method in the report?
+
+**Setup.** New fixture `vague-then-moved-on`, run first with the opposite
+expectation (`should-not-silently-full`). Production tutor, n=20 per arm.
+"Pre-fix" swaps `convex/sessionHelpers.ts` to the commit before TRA-576.
+
+| Clause | `measurement` scored `full` | held at `half` |
+|---|---|---|
+| Current (TRA-576) | 17/20 | 3/20 |
+| Pre-fix | 13/20 | 7/20 |
+
+17 vs 13 is Fisher p = 0.27, so TRA-576 did not measurably loosen this case:
+the old clause already credited it most of the time, because its hold covers
+explicit dodges and this scholar never dodged. Credited replies treat the
+report as the scholar's answer ("your report turned 'look in the tank' into a
+real count").
+
+**Ruling (Andy, 2026-11-07): credit it.** The scholar wrote the specific method
+in their own words, so full credit is right. The fixture now expects
+`should-be-full` and gates; on the current clause it passes about 17 times in
+20, above the half-rate gate.
+
+### 2026-11-06 (b) — a follow-up past the criterion no longer holds credit (TRA-576)
+
+**Question.** The re-baseline below found Opus 5.5 under-crediting
+`genuinely-complete`. Why, and does a narrow edit to
+`RUBRIC_UNANSWERED_PROBE_CLAUSE` fix it without letting `hollow-complete`
+through?
+
+**Diagnosis.** Every miss has the same shape. The scholar answers the
+measurement probe ("count the pellets left after exactly 5 minutes"). The
+tutor then asks a deeper follow-up the criterion does not ask for: how many
+pellets went in at the start. The scholar moves on to the redesign, so the
+follow-up goes unanswered, and on the report turn the tutor treats it as the
+open probe the clause describes. It scores `measurement` `half` and asks the
+starting-count question a second or third time. All 12 baseline misses in the
+n=40 batch were this question.
+
+**Change.** One sentence added to the clause: the bar is the criterion, not
+the tutor's last question. Once the scholar has met the criterion in their own
+words in chat, a deeper follow-up that goes past it and has not been taken up
+does not hold the verdict below `full`. It may still come back as a next step.
+The dodged-probe rule is unchanged, and `hollow-complete` never reaches the new
+sentence because the scholar there never states a method in chat.
+
+**Setup.** Production tutor (`TUTOR_DEFAULT_MODEL` + `tutorRuntime`), the
+same harness as the entry below. Baseline = `convex/sessionHelpers.ts` at
+HEAD, swapped back for the baseline arm and restored after. Two batches.
+
+| Fixture | batch | baseline | branch |
+|---|---|---|---|
+| `genuinely-complete` | n=20 | 18/20 | 19/20 |
+| `genuinely-complete` | n=40 | **28/40 (70%)** | **39/40 (98%)** |
+| `genuinely-complete` | pooled | 46/60 (77%) | 58/60 (97%) |
+| `hollow-complete` | n=20 | 20/20 | 19/20 |
+| `hollow-complete` | n=40 | — | 40/40 |
+
+**Result: `genuinely-complete` moves 70% → 98% (Fisher p = 0.0015 on the n=40
+batch, p = 0.002 pooled), with no over-credit.** The n=20 batch alone can't
+tell the arms apart (p = 1.0), and the earlier re-baseline's 14/20 sits
+between the two baseline batches here, so the baseline rate is somewhere
+around 70–90% from run to run. The two remaining branch misses are the same
+starting-count follow-up.
+
+**Over-credit: none in 60 branch runs.** `measurement` never reached `full` on
+`hollow-complete`. The one branch "fail" (n=20, rep 17) is a scorer artifact:
+the tutor held `measurement` at `half` and brought the question back, but
+phrased it as an instruction ("Talk me through how that count tells her…")
+with no question mark, which `engagesWithTheGap` requires.
+
+### 2026-11-06 — re-baseline on Opus 5.5 (TRA-281)
+
+**Question.** Every entry below ran a Sonnet tutor. The tutor has been Opus 5.5
+at effort `low` since TRA-409, so: where do the goalpost and over-credit
+fixtures stand now, and does moving the admission-first rule out of
+`rubricCheckInstruction` and into the conduct floor (ahead of any praise) fix
+the praise-buried reversals 2026-09-11 (b) left?
+
+**Setup.** Production tutor via `TUTOR_DEFAULT_MODEL` + `tutorRuntime`; judge
+`JUDGE_MODEL`, unchanged. Six fixtures, n=20 per arm. Baseline = master prompt;
+branch = the admission rule moved, prompt files swapped through
+`pnpm baseline`.
+
+| Fixture | Sonnet, 09-11 (b) | Opus 5.5 baseline | Opus 5.5 + rule in floor |
+|---|---|---|---|
+| `accepted-then-checked` | 7/10 | **19/20** | 19/20 |
+| `hold-the-bar-on-accept` | 9/10 | 20/20 | 18/20 |
+| `settled-then-reopened` | 9/10 | 19/20 | 19/20 |
+| `did-it-then-checked-twice` | 10/10 | 20/20 | 20/20 |
+| `hollow-complete` | 5/5 (09-11 (a)) | 20/20 | 20/20 |
+| `genuinely-complete` | 5/5 (09-11 (a)) | **14/20** | 17/20 |
+
+Gating-check fire rates: `accepted-then-checked` `raisesBarWithoutOwning`
+1/20 on both arms; `hold-the-bar-on-accept` `declaresSufficientWithoutBar`
+0/20 baseline, 2/20 branch; `settled-then-reopened` `raisesBarWithoutOwning`
+1/20 on both.
+
+**Result: the model change closed most of the residual; the prompt move did
+nothing and was not shipped.** Between arms, 20/20 vs 18/20 is Fisher p = 0.49
+and 14/20 vs 17/20 is p = 0.45. Opus 5.5 rarely has a reversal to own: it
+credits the location the seeded turn accepted and probes something else, so
+"I was too quick" appears in 1/20 baseline replies and 0/20 branch ones.
+
+**Empty replies: none in 240 sessions.** The two Sonnet `degenerate-response`
+runs from 09-11 (b) could not be re-read (their `out/` files are gone), and
+the current tutor does not produce them. `stop_reason` is now recorded for
+the next one.
+
+**Over-credit: none.** `hollow-complete` is 20/20 on both arms, so #3786's
+generous-reading line is not leaking credit on this tutor.
+
+**Under-credit is the new residual.** All six baseline misses on
+`genuinely-complete` score `measurement` `half` and bring back the earlier
+question ("I'll bring back my earlier question") although the scholar worked
+it through in chat: Opus 5.5 over-applies the unanswered-probe clause. Fixed in
+2026-11-06 (b) above (TRA-576).
+
+**Harness note.** Opus sent `update_rubric_score` once with a `verdicts` that
+was not an array. Production's tool catches the resulting TypeError and
+returns "Failed to record verdicts: …" without recording a score; the harness
+now does the same, logs what arrived, and reports a count.
 
 ### 2026-09-11 (b) — `goalpost`, n=10, with the admission-first rule and the narrowed judge
 

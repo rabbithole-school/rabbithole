@@ -40,6 +40,11 @@ import {
   ALGEBRA_1_SKILLS,
   ALGEBRA_1_EDGES,
 } from "../../seed/algebra1Graph";
+import {
+  ALGEBRA_2_DOMAIN,
+  ALGEBRA_2_SKILLS,
+  ALGEBRA_2_EDGES,
+} from "../../seed/algebra2Graph";
 
 /**
  * No-hard-gate invariant for the cross-domain entrance edges (2026-07-19).
@@ -70,7 +75,17 @@ const GRAPHS = [
   { domain: INTEGERS_COORDINATES_DOMAIN, skills: INTEGERS_COORDINATES_SKILLS, edges: INTEGERS_COORDINATES_EDGES },
   { domain: EARLY_ALGEBRA_DOMAIN, skills: EARLY_ALGEBRA_SKILLS, edges: EARLY_ALGEBRA_EDGES },
   { domain: ALGEBRA_1_DOMAIN, skills: ALGEBRA_1_SKILLS, edges: ALGEBRA_1_EDGES },
+  { domain: ALGEBRA_2_DOMAIN, skills: ALGEBRA_2_SKILLS, edges: ALGEBRA_2_EDGES },
 ];
+
+// Domains whose every entrance is DELIBERATELY gated by another domain, so the
+// Nova no-wall check below does not apply to them. Algebra 2 is a second-year
+// high-school course: an honest graph cannot offer a door into it that skips
+// Algebra 1 (contract 2026-11-20, "prerequisites are honest"). A scholar above
+// the ring reaches it through the new-territory offer once Algebra 1 is mapped,
+// and a deliberate pick still opens it with a prerequisite note. Its own
+// entrance coverage is locked by the "partway through Algebra 1" test instead.
+const GATED_BY_DESIGN = new Set<string>([ALGEBRA_2_DOMAIN]);
 
 const domainByKey = new Map<string, string>();
 const gradeByKey = new Map<string, string>();
@@ -137,6 +152,7 @@ describe("cross-domain entrances — no domain hard-gated for SPIKY-NOVA", () =>
   test("every practice domain still exposes at least one Nova-accessible entrance", () => {
     const blockedDomains: string[] = [];
     for (const g of GRAPHS) {
+      if (GATED_BY_DESIGN.has(g.domain)) continue;
       const entrances = entrancesOf(g.domain);
       const accessible = entrances.filter(novaCanAccess);
       if (accessible.length === 0) {
@@ -175,5 +191,50 @@ describe("cross-domain entrances — no domain hard-gated for SPIKY-NOVA", () =>
     // Every probability entrance is Nova-accessible (all are origins post-audit).
     expect(accessible).toEqual(entrances);
     expect(accessible).toContain("read_picture_graph");
+  });
+});
+
+describe("algebra-2 entrances — open partway through Algebra 1", () => {
+  // A learner who holds everything below Algebra 1, plus Algebra 1's linear
+  // and exponent strands, but NOT its factoring or quadratics strands. The
+  // design intent: real Algebra 2 work is open for her in at least four
+  // strands, while polynomials and rational functions wait on factoring.
+  const EARLY_ALGEBRA_1_STRANDS = new Set([
+    "linear-equations",
+    "linear-functions",
+    "systems",
+    "exponents-exponential",
+  ]);
+  const strandByKey = new Map<string, string>();
+  for (const g of GRAPHS) for (const s of g.skills) strandByKey.set(s.skillKey, s.strand);
+  const partwayKnows = (nodeKey: string): boolean => {
+    const domain = domainByKey.get(nodeKey);
+    if (domain === ALGEBRA_2_DOMAIN) return false;
+    if (domain !== ALGEBRA_1_DOMAIN) return true;
+    return EARLY_ALGEBRA_1_STRANDS.has(strandByKey.get(nodeKey) ?? "");
+  };
+  const openFor = (entranceKey: string) => crossDomainSources(entranceKey).every(partwayKnows);
+
+  test("every algebra-2 entrance is gated only by a lower domain (no ungated door)", () => {
+    for (const key of entrancesOf(ALGEBRA_2_DOMAIN)) {
+      expect(crossDomainSources(key).length, `${key} has no prerequisite`).toBeGreaterThan(0);
+    }
+  });
+
+  test("open entrances span at least four strands; polynomials and rational stay closed", () => {
+    const open = entrancesOf(ALGEBRA_2_DOMAIN).filter(openFor);
+    const strands = new Set(open.map((k) => strandByKey.get(k)));
+    expect(strands.size).toBeGreaterThanOrEqual(4);
+    for (const strand of [
+      "functions",
+      "complex-quadratics",
+      "radicals-rational-exponents",
+      "exponential-logarithmic",
+      "sequences-series",
+    ]) {
+      expect(strands.has(strand), strand).toBe(true);
+    }
+    expect(strands.has("polynomials")).toBe(false);
+    expect(strands.has("rational")).toBe(false);
   });
 });

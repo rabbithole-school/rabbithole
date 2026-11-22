@@ -4,6 +4,8 @@
  * plain `usageEvents` rows (convex/usage.ts writes them) and produces:
  *   - a $ cost + token breakdown by SOURCE bucket (students / teachers /
  *     platform-admin / tutor / observer), INSTITUTION, and MODEL
+ *   - session-attached spend by SESSION TYPE (app builder / chat that built
+ *     an app / chat / simulator / rehearsal)
  *   - the Slack-canvas markdown (the full report)
  *   - a short teaser (the #rabbithole-alerts message body)
  *
@@ -19,7 +21,9 @@ import {
   GEMINI_IMAGE_QUOTA_FALLBACK_MODEL,
   OPENAI_IMAGE_MODEL,
   openaiImageUsageKey,
+  CHARM_MODEL_WRITER,
 } from "./models";
+import { sessionAppContextFor } from "../../shared/appSurface";
 
 // ─── Pricing rate card ($ per 1M tokens) ────────────────────────────────────
 // Verified from Anthropic's pricing page (2026-09-01). Sonnet 5's $2 / $10
@@ -97,6 +101,11 @@ export const PRICING: Record<string, ModelRate> = {
     // https://developers.openai.com/api/docs/pricing
     charactersPerMillion: 18.75,
   },
+  // GPT-6 Astra, the charm_model code writer (lib/openaiResponses.ts). From
+  // OpenAI's pricing page (developers.openai.com/api/docs/pricing, checked
+  // 2026-10-23), standard short-context tier: $10 in, $1 cached in, $12.50
+  // 30-minute cache write, $50 out (reasoning tokens bill as output).
+  [CHARM_MODEL_WRITER]: { label: "GPT-6 Astra", input: 10, cacheWrite: 12.5, cacheRead: 1, output: 50 },
   // Gemini image models (lib/gemini.ts → geminiGenerateImage), priced PER
   // IMAGE. Google bills image output by tokens, but publishes a per-image
   // equivalence for the default (1K/2K) resolution these call sites request —
@@ -245,6 +254,9 @@ const SOURCE_BUCKET: Record<string, UsageBucket> = {
   "quality-pulse": "platform-admin",
   // Scholar-facing image generation → tutor.
   "tutor-image": "tutor",
+  // The builder's charm_model 3D models (GPT-6 Astra), same bucket as its
+  // pictures.
+  "charm-model": "tutor",
   // "Make a picture" in the slides editor. Deliberately NOT bucketed with
   // "tutor": a scholar spends this directly from the editor, and folding it in
   // would inflate the tutor's apparent cost with spend the tutor never made.
@@ -254,7 +266,11 @@ const SOURCE_BUCKET: Record<string, UsageBucket> = {
   "badge-art": "teachers",
   "theme-icon": "teachers",
   "special-delivery-image": "teachers",
+  // Older Marketing Studio illustrations, from the Gemini image model.
   "marketing-image": "other",
+  // Marketing Studio illustrations since 2026-11: Claude draws the SVG
+  // (lib/inkIllustration), billed in tokens, same bucket as the images were.
+  "marketing-illustration": "other",
   "wonder-portrait": "other",
   // OpenAI speech input/output.
   "whisper-transcription": "voice",
@@ -298,6 +314,68 @@ export function bucketFor(source: string, role: string | null | undefined): Usag
   }
   const byRole = bucketFromRole(role);
   return byRole;
+}
+
+// ─── Session types (apps vs chat) ────────────────────────────────────────────
+//
+// The By source table says the tutor is most of the bill; it cannot say what
+// KIND of session the tutor was in. Session-attached rows (tutor, observer,
+// tutor images, voice, …) are summed per session, and the caller classifies each
+// session from the session row itself. One app builder or one runaway chat can
+// be a large share of a week, so each type also shows its busiest session.
+
+export type SessionKind =
+  | "app-builder"
+  | "chat-app"
+  | "chat"
+  | "simulator"
+  | "rehearsal"
+  | "deleted";
+
+export const SESSION_KIND_ORDER: SessionKind[] = [
+  "app-builder",
+  "chat-app",
+  "chat",
+  "simulator",
+  "rehearsal",
+  "deleted",
+];
+
+export const SESSION_KIND_LABEL: Record<SessionKind, string> = {
+  "app-builder": "App builder",
+  "chat-app": "Chat that built an app",
+  chat: "Chat",
+  simulator: "Simulator",
+  rehearsal: "Teacher rehearsal",
+  deleted: "Deleted session",
+};
+
+/** What the classifier reads off a session; null when the session is gone. */
+export interface SessionFacts {
+  sessionMode?: "conversation" | "workbench" | "vibecode" | null;
+  isTestDrive?: boolean | null;
+  /** The session has a code artifact (sessionHelpers' `hasApp`). */
+  hasCodeArtifact: boolean;
+}
+
+/**
+ * The one place a session's type is decided. A teacher's rehearsal is staff
+ * spend whatever it rehearsed, so it wins; then the session's primary view;
+ * then whether a chat ended up building an app beside the conversation. App
+ * facts come from shared/appSurface.ts (`builderPrimary`, `hasApp`), the same
+ * gate the tutor's tools and prompt use. `role` does not affect either field.
+ */
+export function sessionKindOf(facts: SessionFacts | null): SessionKind {
+  if (!facts) return "deleted";
+  if (facts.isTestDrive) return "rehearsal";
+  const app = sessionAppContextFor({
+    sessionMode: facts.sessionMode,
+    role: "work",
+    hasApp: facts.hasCodeArtifact,
+  });
+  if (app.builderPrimary) return "app-builder";
+  if (facts.sessionMode === "workbench") return "simulator";
+  return app.hasApp ? "chat-app" : "chat";
 }
 
 // ─── Aggregation ─────────────────────────────────────────────────────────────
@@ -460,6 +538,17 @@ export interface InstitutionRow {
   calls: number;
 }
 
+export interface SessionKindRow {
+  kind: SessionKind;
+  label: string;
+  cost: number;
+  priorCost: number;
+  deltaPct: number | null; // null when prior is 0 (no baseline)
+  sessions: number; // sessions with spend this window
+  calls: number;
+  busiestSessionCost: number;
+}
+
 export interface UsageReport {
   windowStart: number;
   windowEnd: number;
@@ -474,6 +563,10 @@ export interface UsageReport {
   totalTokens: TokenTotals;
   voice: VoiceTransportSummary; // per-session dictation transport mix
   tutorCacheMisses: TutorCacheMissRow[]; // diagnosed tutor turns, descending cache-write
+  // Session-attached spend by session type, in SESSION_KIND_ORDER. Empty when
+  // the caller supplied no session classification.
+  bySessionKind: SessionKindRow[];
+  sessionCost: number; // all session-attached spend this window
 }
 
 function pct(cur: number, prior: number): number | null {
@@ -510,6 +603,11 @@ export interface UsageAccumulator {
   voiceBySession: Map<string, { realtime: number; whisper: number }>;
   /** cacheMissAt → diagnosed tutor turns (bounded by the small vocabulary). */
   tutorCacheMisses: Map<string, TutorCacheMissRow>;
+  /**
+   * sessionId → spend, for every row that carries a session. Bounded by the
+   * sessions active in the window (a couple hundred a week), like voiceBySession.
+   */
+  sessionSpend: Map<string, { cost: number; calls: number }>;
 }
 
 const UNATTRIBUTED_KEY = "__unattributed__";
@@ -530,6 +628,7 @@ export function createUsageAccumulator(): UsageAccumulator {
     eventCount: 0,
     voiceBySession: new Map(),
     tutorCacheMisses: new Map(),
+    sessionSpend: new Map(),
   };
 }
 
@@ -590,6 +689,16 @@ export function accumulateUsage(acc: UsageAccumulator, rows: UsageEventRow[]): v
       else mix.whisper += 1;
     }
 
+    if (row.sessionId) {
+      const spend = acc.sessionSpend.get(row.sessionId);
+      if (spend) {
+        spend.cost += cost;
+        spend.calls += 1;
+      } else {
+        acc.sessionSpend.set(row.sessionId, { cost, calls: 1 });
+      }
+    }
+
     if (row.cacheMissAt && TUTOR_CACHE_SOURCES.has(row.source)) {
       let miss = acc.tutorCacheMisses.get(row.cacheMissAt);
       if (!miss) {
@@ -615,12 +724,14 @@ export function accumulateUsage(acc: UsageAccumulator, rows: UsageEventRow[]): v
 /** Prior window only contributes cost + counts (for WoW deltas). */
 export interface PriorAccumulator {
   bucketCost: Map<UsageBucket, number>;
+  /** sessionId → cost, so session types get a WoW delta too. */
+  sessionCost: Map<string, number>;
   totalCost: number;
   count: number;
 }
 
 export function createPriorAccumulator(): PriorAccumulator {
-  return { bucketCost: new Map(), totalCost: 0, count: 0 };
+  return { bucketCost: new Map(), sessionCost: new Map(), totalCost: 0, count: 0 };
 }
 
 /** Fold a batch of prior-window rows (repeatable). */
@@ -639,6 +750,9 @@ export function accumulatePrior(acc: PriorAccumulator, rows: UsageEventRow[]): v
       row,
     );
     acc.bucketCost.set(bucket, (acc.bucketCost.get(bucket) ?? 0) + cost);
+    if (row.sessionId) {
+      acc.sessionCost.set(row.sessionId, (acc.sessionCost.get(row.sessionId) ?? 0) + cost);
+    }
     acc.totalCost += cost;
     acc.count += 1;
   }
@@ -687,6 +801,60 @@ function summarizeVoiceTransport(acc: UsageAccumulator): VoiceTransportSummary {
   return summary;
 }
 
+/** Every session either window spent on — what the caller must classify. */
+export function sessionIdsToClassify(
+  acc: UsageAccumulator,
+  prior: PriorAccumulator,
+): string[] {
+  return [...new Set([...acc.sessionSpend.keys(), ...prior.sessionCost.keys()])];
+}
+
+/**
+ * Roll per-session spend up into session types. A session the caller did not
+ * classify counts as deleted, which is what the action's lookup returns for a
+ * session row that no longer exists.
+ */
+export function finalizeSessionKinds(
+  acc: UsageAccumulator,
+  prior: PriorAccumulator,
+  sessionKinds: ReadonlyMap<string, SessionKind>,
+): SessionKindRow[] {
+  const rows = new Map<SessionKind, SessionKindRow>();
+  const rowFor = (kind: SessionKind): SessionKindRow => {
+    let row = rows.get(kind);
+    if (!row) {
+      row = {
+        kind,
+        label: SESSION_KIND_LABEL[kind],
+        cost: 0,
+        priorCost: 0,
+        deltaPct: null,
+        sessions: 0,
+        calls: 0,
+        busiestSessionCost: 0,
+      };
+      rows.set(kind, row);
+    }
+    return row;
+  };
+  for (const [sessionId, spend] of acc.sessionSpend) {
+    const row = rowFor(sessionKinds.get(sessionId) ?? "deleted");
+    row.cost += spend.cost;
+    row.sessions += 1;
+    row.calls += spend.calls;
+    row.busiestSessionCost = Math.max(row.busiestSessionCost, spend.cost);
+  }
+  for (const [sessionId, cost] of prior.sessionCost) {
+    rowFor(sessionKinds.get(sessionId) ?? "deleted").priorCost += cost;
+  }
+  return SESSION_KIND_ORDER.flatMap((kind) => {
+    const row = rows.get(kind);
+    if (!row || (row.cost === 0 && row.priorCost === 0)) return [];
+    row.deltaPct = pct(row.cost, row.priorCost);
+    return [row];
+  });
+}
+
 /** Build the final report shape from folded current + prior accumulators. */
 export function finalizeUsageReport(
   acc: UsageAccumulator,
@@ -694,6 +862,7 @@ export function finalizeUsageReport(
   windowStart: number,
   windowEnd: number,
   institutionLabels: ReadonlyMap<string, string> = new Map(),
+  sessionKinds?: ReadonlyMap<string, SessionKind>,
 ): UsageReport {
   const byBucket: BucketRow[] = [];
   for (const bucket of BUCKET_ORDER) {
@@ -745,6 +914,8 @@ export function finalizeUsageReport(
         b.cacheWriteTokens - a.cacheWriteTokens ||
         a.cacheMissAt.localeCompare(b.cacheMissAt),
     ),
+    bySessionKind: sessionKinds ? finalizeSessionKinds(acc, prior, sessionKinds) : [],
+    sessionCost: [...acc.sessionSpend.values()].reduce((s, x) => s + x.cost, 0),
   };
 }
 
@@ -760,6 +931,7 @@ export function computeUsageReport(args: {
   windowStart: number;
   windowEnd: number;
   institutionLabels?: ReadonlyMap<string, string>;
+  sessionKinds?: ReadonlyMap<string, SessionKind>;
 }): UsageReport {
   const acc = createUsageAccumulator();
   accumulateUsage(acc, args.events);
@@ -771,6 +943,7 @@ export function computeUsageReport(args: {
     args.windowStart,
     args.windowEnd,
     args.institutionLabels,
+    args.sessionKinds,
   );
 }
 
@@ -819,10 +992,22 @@ export function renderUsageTeaser(r: UsageReport): string {
   return [
     `AI spend this week: **${usd(r.totalCost)}**${wowPart} across ${int(r.eventCount)} model calls.`,
     top ? `Top: ${top}.` : "",
+    sessionTeaserLine(r),
     voiceTeaserLine(r.voice),
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** The three most expensive session types, so "apps vs chat" is in the post. */
+function sessionTeaserLine(r: UsageReport): string {
+  const top = [...r.bySessionKind]
+    .sort((a, b) => b.cost - a.cost)
+    .filter((k) => k.cost > 0)
+    .slice(0, 3)
+    .map((k) => `${k.label} ${usd(k.cost)}`)
+    .join(" · ");
+  return top ? `By session type: ${top}.` : "";
 }
 
 /**
@@ -861,6 +1046,34 @@ export function renderUsageReportMarkdown(r: UsageReport): string {
   }
   lines.push(`| **Total** | **${usd(r.totalCost)}** | 100% | ${deltaStr(r.totalDeltaPct)} | ${int(r.eventCount)} |`);
   lines.push("");
+
+  // By session type: what kind of session the session-attached spend was in.
+  if (r.bySessionKind.length > 0) {
+    const sessionShare = (cost: number) =>
+      r.totalCost > 0 ? Math.round((cost / r.totalCost) * 100) : 0;
+    const priorSessionCost = r.bySessionKind.reduce((s, k) => s + k.priorCost, 0);
+    const sessions = r.bySessionKind.reduce((s, k) => s + k.sessions, 0);
+    const calls = r.bySessionKind.reduce((s, k) => s + k.calls, 0);
+    lines.push("## By session type");
+    lines.push("");
+    lines.push("| Session type | Cost | Share | WoW | Sessions | Per session | Busiest session | Calls |");
+    lines.push("| --- | ---: | ---: | :---: | ---: | ---: | ---: | ---: |");
+    for (const k of r.bySessionKind) {
+      const perSession = k.sessions > 0 ? usd(k.cost / k.sessions) : "—";
+      const busiest = k.sessions > 0 ? usd(k.busiestSessionCost) : "—";
+      lines.push(
+        `| ${k.label} | ${usd(k.cost)} | ${sessionShare(k.cost)}% | ${deltaStr(k.deltaPct)} | ${int(k.sessions)} | ${perSession} | ${busiest} | ${int(k.calls)} |`,
+      );
+    }
+    lines.push(
+      `| **All sessions** | **${usd(r.sessionCost)}** | ${sessionShare(r.sessionCost)}% | ${deltaStr(pct(r.sessionCost, priorSessionCost))} | ${int(sessions)} | ${sessions > 0 ? usd(r.sessionCost / sessions) : "—"} | | ${int(calls)} |`,
+    );
+    lines.push("");
+    lines.push(
+      "_Every model call tied to a scholar session (mostly tutor and observer, plus tutor images, voice, an app's own AI, titles and grading); everything else in By source is not tied to one session. **App builder** is a session whose main view is the app builder (an app activity, a build session, free play). **Chat that built an app** is a chat session where the tutor made a live app. A session is typed by what it is now, so a chat that built its app this week moves its prior-week spend into that row too. Share is of the week's total. No session or scholar is named._",
+    );
+    lines.push("");
+  }
 
   // By institution, with the same four token dimensions used by the model table.
   lines.push("## By institution");

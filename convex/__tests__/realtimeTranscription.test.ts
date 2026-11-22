@@ -142,9 +142,6 @@ describe("mintTranscriptionSecret", () => {
             turn_detection: {
               type: "semantic_vad",
             },
-            noise_reduction: {
-              type: "far_field",
-            },
           },
         },
       },

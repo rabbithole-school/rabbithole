@@ -14,12 +14,13 @@ import { ConvexError } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { isAppActivity } from "../../shared/appSurface";
-import { questBuildLockLabel } from "../../shared/missionCopy";
+import {
+  questBuildLockLabel,
+  SCHOLAR_LED_APP_BUILDING,
+} from "../../shared/missionCopy";
 import {
   isQuestUnit,
   isScholarBuildKickoff,
-  lockedQuestBuildTitle,
-  questBuildLock,
   type QuestBuildLock,
 } from "./mission";
 import {
@@ -151,22 +152,12 @@ export async function questBuildLocksFor(
   ctx: LockCtx,
   args: { unit: Doc<"units">; scholarId: Id<"users"> },
 ): Promise<Record<string, { prerequisiteTitle: string; prerequisiteId: string }>> {
-  const { unit, scholarId } = args;
-  if (!isQuestUnit(unit) || unit.authorScholarId !== scholarId) return {};
-  const { ordered, done, started } = await questLockInputs(ctx, unit._id, scholarId);
-  const apps = ordered.filter((a) => isAppActivity(a));
-  if (apps.length === 0) return {};
-  const locks: Record<string, { prerequisiteTitle: string; prerequisiteId: string }> = {};
-  for (const app of apps) {
-    const lock = questBuildLock(unit, ordered, app._id, (id) => done.has(String(id)), (id) => started.has(String(id)));
-    if (lock.locked) {
-      locks[String(app._id)] = {
-        prerequisiteTitle: lock.prerequisiteTitle,
-        prerequisiteId: String(lock.prerequisiteId),
-      };
-    }
-  }
-  return locks;
+  // The learn-first lock is retired: no step of a kid's own Quest is locked.
+  // The shape stays (always empty) until the fleet has left the old builds
+  // that read it; then this module can be deleted.
+  void ctx;
+  void args;
+  return {};
 }
 
 /**
@@ -184,17 +175,10 @@ export async function lockedQuestBuildTitleFor(
     fromActivityId: Id<"activities"> | null;
   },
 ): Promise<string | null> {
-  const { unit, scholarId } = args;
-  if (!isQuestUnit(unit) || unit.authorScholarId !== scholarId) return null;
-  const { ordered, done, started } = await questLockInputs(ctx, unit._id, scholarId);
-  if (!ordered.some((a) => isAppActivity(a))) return null;
-  return lockedQuestBuildTitle(
-    unit,
-    ordered,
-    args.fromActivityId,
-    (id) => done.has(String(id)),
-    (id) => started.has(String(id)),
-  );
+  // Retired with the lock: no build step is ever locked.
+  void ctx;
+  void args;
+  return null;
 }
 
 /**
@@ -223,23 +207,11 @@ export async function questBuildLockFor(
     scholarId: Id<"users">;
   },
 ): Promise<QuestBuildLock> {
-  const { unit, activity, scholarId } = args;
-  if (
-    !unit ||
-    !isQuestUnit(unit) ||
-    unit.authorScholarId !== scholarId ||
-    !isAppActivity(activity)
-  ) {
-    return { locked: false };
-  }
-  const { ordered, done, started } = await questLockInputs(ctx, unit._id, scholarId);
-  return questBuildLock(
-    unit,
-    ordered,
-    activity._id,
-    (id) => done.has(String(id)),
-    (id) => started.has(String(id)),
-  );
+  // Retired: every step of a kid's own Quest opens. Teacher-designed units
+  // never had this lock.
+  void ctx;
+  void args;
+  return { locked: false };
 }
 
 /**
@@ -255,6 +227,8 @@ export async function canUnlockQuestBuild(
   args: { unit: Doc<"units">; scholarId: Id<"users"> },
 ): Promise<boolean> {
   const { unit, scholarId } = args;
+  // No unlock offer while SCHOLAR_LED_APP_BUILDING is off.
+  if (!SCHOLAR_LED_APP_BUILDING) return false;
   if (!isQuestUnit(unit) || unit.authorScholarId !== scholarId) return false;
   const ordered = await orderedQuestActivities(ctx, unit._id, scholarId);
   if (ordered.some((a) => isAppActivity(a))) return false;

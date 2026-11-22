@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 
 import { api, internal } from "../_generated/api";
@@ -95,7 +96,7 @@ describe("games — session lifecycle", () => {
     const targetedScholarId = await seedUser(t, "scholar", "s2");
     const { unitId, activityId } = await seedGameActivity(t, teacherId);
     const assignmentId = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId, targetedScholarId],

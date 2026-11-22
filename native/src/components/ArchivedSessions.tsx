@@ -38,13 +38,15 @@ type ArchivedRow = {
   title: string;
   unitTitle: string | null;
   unitEmoji: string | null;
-  messageCount: number;
   lastMessageAt?: number;
   updatedAt: number;
   // "archived": the scholar explicitly archived it (Unarchive applies).
   // "completed": finished class-focus work the plate has dropped — it was never
   // archived, so there is nothing to unarchive, only "keep working on this".
-  finishedKind: "archived" | "completed";
+  // "ended": unfinished work whose activity ended (its class focus ended or
+  // the teacher replaced it) — also never archived; keep working brings it
+  // back to Home for the day.
+  finishedKind: "archived" | "completed" | "ended";
   // The activity is done (always for "completed"). Finished work is
   // re-entered with "Keep working on this", never unarchived: the plate drops
   // a completed session, so Unarchive would make it vanish.
@@ -52,6 +54,9 @@ type ArchivedRow = {
   // Archived by a teacher (review/teacher-archive-scholar-apps.html): shown
   // labelled, with no Unarchive and no open — a tap only explains.
   teacherArchivedAt?: number;
+  // Work in a quest the teacher retracted. Shown the same way as a
+  // teacher-archived app (isTeacherArchived reads both).
+  questRetracted?: boolean;
 };
 
 function timeAgo(ts: number): string {
@@ -67,7 +72,7 @@ function timeAgo(ts: number): string {
 /**
  * One Home tab's Archived list — the Archived value of Home's Active / Archived
  * filter (review/home-finished-filter.html). The caller hands in the rows this
- * tab lists (filterArchivedRowsForTab). Two kinds of work live here, both
+ * tab lists (filterArchivedRowsForTab). Three kinds of work live here, all
  * re-openable by tap:
  *   - ARCHIVED sessions (the scholar archived them): muted cards, swipe-left or
  *     long-press → Unarchive (api.sessions.unarchive), which puts the work back
@@ -77,6 +82,9 @@ function timeAgo(ts: number): string {
  *     unit has no next activity the plate drops the row and it would otherwise
  *     be unreachable. These were never archived — no Unarchive, labelled
  *     HOME_ARCHIVE_COPY.completedLabel.
+ *   - UNFINISHED work whose activity ended (its class focus ended or the
+ *     teacher replaced it): Home leaves it out, so it lives here labelled
+ *     HOME_ARCHIVE_COPY.unfinishedLabel. Never archived — no Unarchive.
  *
  * Tap any card (or the long-press sheet's "Keep working on this") →
  * api.sessions.reopen re-opens the session (un-archives if needed, stamps
@@ -219,12 +227,15 @@ function ArchivedCard({ row }: { row: ArchivedRow }) {
 
   const when = row.lastMessageAt ?? row.updatedAt;
   // Every card here is archived, so only the exceptions are labelled:
-  // completed work, and an app a teacher archived.
+  // completed work, unfinished work whose activity ended, and an app a
+  // teacher archived.
   const statusLabel = teacherArchived
     ? TEACHER_ARCHIVE_COPY.scholarLabel
     : complete
       ? HOME_ARCHIVE_COPY.completedLabel
-      : null;
+      : row.finishedKind === "ended"
+        ? HOME_ARCHIVE_COPY.unfinishedLabel
+        : null;
   const meta = [row.unitTitle, statusLabel, timeAgo(when)]
     .filter(Boolean)
     .join(" · ");

@@ -1,14 +1,20 @@
 import { convexTest } from "convex-test";
+import { ConvexError } from "convex/values";
+import { isScheduleRow } from "../lib/pushes";
+import { readSchedule } from "../lib/scheduleStore";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { placementStartMs } from "../masterSchedule";
+import { generateAppToken } from "../customApps";
 import { dayKeyForWeekday } from "../../shared/schoolClosures";
 import { scheduleWeekStartMs } from "../../shared/scheduleWeek";
 import { dayKeyForTimezone } from "../../shared/institutionDay";
 import {
   grantInstitutionMembership,
+  grantStaffAccessToScholars,
   seedOperationsStaff,
   seedScholarInInstitution,
   seedStaffWithMembership,
@@ -20,6 +26,9 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+const scheduleOf = (t: ReturnType<typeof convexTest>, id: Id<"assignments">) =>
+  t.run((ctx) => readSchedule(ctx, { _id: id }));
 
 async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   const sessionId = await t.run((ctx) =>
@@ -544,6 +553,7 @@ describe("program publishing", () => {
     const draft = await t.run(async (ctx) => ({
       activity: await ctx.db.get(first.activityId),
       assignment: await ctx.db.get(first.assignmentId),
+      schedule: await readSchedule(ctx, { _id: first.assignmentId }),
     }));
     expect(draft.activity).toMatchObject({
       title: "Servo worksheet",
@@ -554,8 +564,10 @@ describe("program publishing", () => {
       kind: "adHocDispatch",
       scholarGroupId: groupId,
       scholarIds: [],
-      activitySchedule: [{ activityId: first.activityId, mode: "classFocus" }],
     });
+    expect(draft.schedule).toEqual([
+      expect.objectContaining({ activityId: first.activityId, mode: "classFocus" }),
+    ]);
     expect(draft.assignment?.unitId).toBeUndefined();
 
     await expect(
@@ -825,9 +837,7 @@ describe("program publishing", () => {
       assignmentId: homework.assignmentId,
       activityId: homework.activityId,
     });
-    expect(
-      (await t.run((ctx) => ctx.db.get(homework.assignmentId)))?.activitySchedule,
-    ).toContainEqual(
+    expect(await scheduleOf(t, homework.assignmentId)).toContainEqual(
       expect.objectContaining({
         activityId: homework.activityId,
         mode: "homework",
@@ -915,7 +925,7 @@ describe("program publishing", () => {
           kind: "offline",
           order: 0,
         });
-        const assignmentId = await ctx.db.insert("assignments", {
+        const assignmentId = await insertAssignmentWithSchedule(ctx, {
           teacherId: coach,
           scholarGroupId: groupId,
           scholarIds: [scholar],
@@ -964,9 +974,7 @@ describe("program publishing", () => {
         weekStartMs: futureWeekStartMs,
       },
     });
-    expect(
-      (await t.run((ctx) => ctx.db.get(assignmentId)))?.activitySchedule,
-    ).toEqual([
+    expect(await scheduleOf(t, assignmentId)).toEqual([
       expect.objectContaining({
         activityId,
         startsAt: placementStartMs(currentWeekStartMs, 1, "13:00"),
@@ -1010,7 +1018,7 @@ describe("program publishing", () => {
           kind: "offline",
           order: 0,
         });
-        const assignmentId = await ctx.db.insert("assignments", {
+        const assignmentId = await insertAssignmentWithSchedule(ctx, {
           teacherId: teacher,
           scholarGroupId: groupId,
           scholarIds: [scholar],
@@ -1044,9 +1052,9 @@ describe("program publishing", () => {
     await (await asUser(t, teacher)).mutation(api.assignments.archive, { assignmentId });
     expect(await t.run((ctx) => ctx.db.get(linkedPlacementId))).toBeNull();
     expect(await t.run((ctx) => ctx.db.get(shellId))).not.toBeNull();
-    expect((await t.run((ctx) => ctx.db.get(assignmentId)))?.activitySchedule).toEqual([]);
+    expect(await scheduleOf(t, assignmentId)).toEqual([]);
     await t.run((ctx) => ctx.runMutation(internal.masterSchedule.autoMaterializeTick, {}));
-    expect((await t.run((ctx) => ctx.db.get(assignmentId)))?.activitySchedule).toEqual([]);
+    expect(await scheduleOf(t, assignmentId)).toEqual([]);
     expect(
       await t.run(async (ctx) =>
         (await ctx.db
@@ -1055,6 +1063,69 @@ describe("program publishing", () => {
           .collect()).map((placement) => placement._id),
       ),
     ).toEqual([shellId]);
+  });
+
+  test("the program grid shows a class's meetings but no Up next (TRA-582)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-17T19:00:00.000Z")); // Monday, 9 AM HST
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t);
+    const coach = await seedStaffWithMembership(t, { institutionId, role: "teacher" });
+    await giveCurriculumAccess(t, coach, institutionId);
+    const scholar = await seedScholarInInstitution(t, { institutionId });
+    await grantStaffAccessToScholars(t, {
+      staffUserId: coach, scholarIds: [scholar], institutionId,
+    });
+    const { activityId } = await seedActivity(t, coach, institutionId, "Program unit");
+    const { groupId, periodId, blockId, secondId } = await t.run(async (ctx) => {
+      const lessonId = (await ctx.db.get(activityId))!.lessonId!;
+      const secondId = await ctx.db.insert("activities", {
+        lessonId, title: "Second challenge", kind: "online", order: 1,
+      });
+      const groupId = await ctx.db.insert("scholarGroups", {
+        teacherId: coach,
+        institutionId,
+        name: "Up next program",
+        participation: "includes_program_guests",
+        scholarIds: [scholar],
+      });
+      const periodId = await ctx.db.insert("reportingPeriods", {
+        institutionId,
+        label: "Program term",
+        startsAt: Date.now() - 7 * 86_400_000,
+        endsAt: Date.now() + 90 * 86_400_000,
+        status: "open",
+      });
+      const blockId = await ctx.db.insert("scheduleBlocks", {
+        periodId, key: "program", label: "Program", startLocal: "13:00", endLocal: "14:00",
+        weekdays: [1, 2, 3, 4, 5], order: 0,
+      });
+      return { groupId, periodId, blockId, secondId };
+    });
+    await grantProgramPublish(t, { userId: coach, institutionId, groupId });
+    const asCoach = await asUser(t, coach);
+    // A synced class, and a unit give to its Wednesday meeting.
+    await asCoach.mutation(api.masterSchedule.placeClass, {
+      periodId, groupId, weekday: 3, blockId, subject: "Workshop",
+    });
+    const [cls] = await t.run((ctx) =>
+      ctx.db.query("classes").withIndex("by_period_group", (q) =>
+        q.eq("periodId", periodId).eq("groupId", groupId)).collect());
+    await asCoach.mutation(api.gridGiveActions.giveToClass, {
+      classId: cls._id,
+      dayKey: dayKeyForTimezone(Date.now() + 2 * 86_400_000, "Pacific/Honolulu"),
+      work: { kind: "activity", activityId },
+    });
+
+    const teacherGrid = await asCoach.query(api.masterSchedule.grid, { periodId });
+    expect(teacherGrid.classMeetings).toEqual([
+      expect.objectContaining({ classId: cls._id, upNext: expect.objectContaining({ activityId: secondId }) }),
+    ]);
+    const programGrid = await asCoach.query(api.masterSchedule.programGrid, { periodId });
+    expect(programGrid!.classMeetings).toEqual([
+      expect.objectContaining({ classId: cls._id, upNext: null }),
+    ]);
+    vi.useRealTimers();
   });
 
   test("places a material-backed activity into a dated override of an authorized program's recurring slot", async () => {
@@ -1148,14 +1219,15 @@ describe("program publishing", () => {
       scholarIds: [scholar],
       selfPaced: true,
     });
-    expect(assignment?.activitySchedule).toContainEqual(
+    const schedule = await scheduleOf(t, result.assignmentId);
+    expect(schedule).toContainEqual(
       expect.objectContaining({
         activityId,
         mode: "homework",
         startsAt: placementStartMs(homeworkWeekStartMs, 1, "08:00"),
       }),
     );
-    expect(assignment?.activitySchedule?.[0]?.setAt).toBeUndefined();
+    expect(schedule[0]?.setAt).toBeUndefined();
     const grid = await asCoach.query(api.masterSchedule.programGrid, {
       periodId,
       weekStartMs: homeworkWeekStartMs,
@@ -1307,8 +1379,7 @@ describe("program publishing", () => {
       weekStartMs: scheduleWeekStartMs(Date.now()),
       subject: "Workshop",
     });
-    const liveAssignment = await t.run((ctx) => ctx.db.get(today.assignmentId));
-    expect(liveAssignment?.activitySchedule).toContainEqual(
+    expect(await scheduleOf(t, today.assignmentId)).toContainEqual(
       expect.objectContaining({
         activityId,
         mode: "homework",
@@ -1351,7 +1422,19 @@ describe("program publishing", () => {
         activityId,
         scholarGroupId: groupId,
       }),
-    ).rejects.toThrow(/empty offline homework/i);
+    ).rejects.toThrow(/Add instructions or materials first/i);
+    // Production redacts a plain Error's message, so a teacher only reads this
+    // sentence when it travels as ConvexError data.
+    const refusal = await asCoach
+      .mutation(api.assignments.assignProgramActivity, {
+        activityId,
+        scholarGroupId: groupId,
+      })
+      .catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ConvexError);
+    expect((refusal as ConvexError<string>).data).toBe(
+      "Add instructions or materials first, then give it as homework.",
+    );
 
     await t.run((ctx) =>
       ctx.db.patch(activityId, {
@@ -1392,6 +1475,97 @@ describe("program publishing", () => {
     await expect(
       asCoach.mutation(api.assignments.assignProgramActivity, {
         activityId: materialOnlyId,
+        scholarGroupId: groupId,
+      }),
+    ).resolves.toMatchObject({ shared: true });
+  });
+
+  test("rejects an app activity with no app that scholars can't build", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t);
+    const coach = await seedStaffWithMembership(t, { institutionId, role: "teacher" });
+    await giveCurriculumAccess(t, coach, institutionId);
+    const scholar = await seedScholarInInstitution(t, { institutionId });
+    const { activityId } = await seedActivity(t, coach, institutionId);
+    const groupId = await t.run((ctx) =>
+      ctx.db.insert("scholarGroups", {
+        teacherId: coach,
+        institutionId,
+        name: "Clock group",
+        participation: "includes_program_guests",
+        scholarIds: [scholar],
+      }),
+    );
+    await grantProgramPublish(t, { userId: coach, institutionId, groupId });
+    // A Play-only app whose app was never built.
+    await t.run((ctx) =>
+      ctx.db.patch(activityId, {
+        kind: "online",
+        appActivity: true,
+        editAccess: "never",
+        appRequest: "A telling-time game.",
+      }),
+    );
+    const asCoach = await asUser(t, coach);
+    const give = () =>
+      asCoach.mutation(api.assignments.assignProgramActivity, {
+        activityId,
+        scholarGroupId: groupId,
+      });
+
+    await expect(give()).rejects.toThrow(/has no app, and scholars can't build one/);
+    // "afterCompletion" can't open before they finish either.
+    await t.run((ctx) => ctx.db.patch(activityId, { editAccess: "afterCompletion" }));
+    await expect(give()).rejects.toThrow(/has no app/);
+
+    // Once its app exists and scholars start from it, it goes out.
+    const starterAppId = await t.run((ctx) =>
+      ctx.db.insert("customApps", {
+        token: generateAppToken(),
+        name: "Clock app",
+        kind: "static",
+        status: "live",
+        html: "<!doctype html><p>clock</p>",
+        origin: "starter",
+        createdBy: coach,
+        updatedAt: 1_725_000_000_000,
+      }),
+    );
+    await t.run((ctx) =>
+      ctx.db.patch(activityId, { starterAppId, scholarsStartFrom: "starter" }),
+    );
+    await expect(give()).resolves.toMatchObject({ shared: true });
+
+    // Once it is live, losing its app does not block giving it again (an
+    // extend, more scholars): the scholars already have it.
+    await t.run((ctx) => ctx.db.patch(activityId, { scholarsStartFrom: undefined }));
+    await expect(give()).resolves.toMatchObject({ shared: true });
+  });
+
+  test("an app activity scholars build from blank still goes out", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t);
+    const coach = await seedStaffWithMembership(t, { institutionId, role: "teacher" });
+    await giveCurriculumAccess(t, coach, institutionId);
+    const scholar = await seedScholarInInstitution(t, { institutionId });
+    const { activityId } = await seedActivity(t, coach, institutionId);
+    const groupId = await t.run((ctx) =>
+      ctx.db.insert("scholarGroups", {
+        teacherId: coach,
+        institutionId,
+        name: "Builders",
+        participation: "includes_program_guests",
+        scholarIds: [scholar],
+      }),
+    );
+    await grantProgramPublish(t, { userId: coach, institutionId, groupId });
+    await t.run((ctx) =>
+      ctx.db.patch(activityId, { kind: "online", appActivity: true, editAccess: "always" }),
+    );
+    const asCoach = await asUser(t, coach);
+    await expect(
+      asCoach.mutation(api.assignments.assignProgramActivity, {
+        activityId,
         scholarGroupId: groupId,
       }),
     ).resolves.toMatchObject({ shared: true });
@@ -1439,19 +1613,20 @@ describe("program publishing", () => {
       scholarIds: [enrolled, guest],
       selfPaced: true,
     });
-    expect(assignment!.activitySchedule).toHaveLength(1);
-    expect(assignment!.activitySchedule![0]).toMatchObject({
+    const firstSchedule = await scheduleOf(t, first.assignmentId);
+    expect(firstSchedule).toHaveLength(1);
+    expect(firstSchedule[0]).toMatchObject({
       activityId,
       mode: "homework",
     });
-    expect(assignment!.activitySchedule![0].setAt).toBeTypeOf("number");
+    expect(firstSchedule[0].setAt).toBeTypeOf("number");
 
     const second = await asCoach.mutation(
       api.assignments.assignProgramActivity,
       { activityId, scholarGroupId: groupId },
     );
     expect(second).toMatchObject({ assignmentId: first.assignmentId, created: false });
-    expect((await t.run((ctx) => ctx.db.get(first.assignmentId)))!.activitySchedule).toHaveLength(1);
+    expect(await scheduleOf(t, first.assignmentId)).toHaveLength(1);
 
     const laterScholar = await seedScholarInInstitution(t, { institutionId });
     const laterActivityId = await t.run(async (ctx) => {
@@ -1473,13 +1648,14 @@ describe("program publishing", () => {
     const widened = (await t.run((ctx) =>
       ctx.db.get(first.assignmentId),
     ))!;
+    const widenedSchedule = await scheduleOf(t, first.assignmentId);
     expect(widened.scholarIds).toEqual([enrolled, guest, laterScholar]);
     expect(
-      widened.activitySchedule?.find((entry) => entry.activityId === activityId)
+      widenedSchedule.find((entry) => entry.activityId === activityId)
         ?.scholarIds,
     ).toEqual([enrolled, guest]);
     expect(
-      widened.activitySchedule?.find(
+      widenedSchedule.find(
         (entry) => entry.activityId === laterActivityId,
       )?.scholarIds,
     ).toBeUndefined();
@@ -1607,7 +1783,7 @@ describe("program publishing", () => {
           .collect()
       ).filter(
         (p) =>
-          p.scheduleMirror === true &&
+          isScheduleRow(p) &&
           p.clearedAt === undefined &&
           p.target.kind === "activity" &&
           String(p.target.activityId) === String(activityId),
@@ -1681,13 +1857,15 @@ describe("program publishing", () => {
     expect(await t.run((ctx) => ctx.db.get(orphanResourceId))).toBeNull();
     expect(await t.run((ctx) => ctx.db.get(first.assignmentId))).toMatchObject({
       archivedAt: expect.any(Number),
-      activitySchedule: expect.arrayContaining([
+    });
+    expect(await scheduleOf(t, first.assignmentId)).toEqual(
+      expect.arrayContaining([
         expect.objectContaining({
           activityId: laterActivityId,
           endsAt: expect.any(Number),
         }),
       ]),
-    });
+    );
     expect(
       (await t.run((ctx) => ctx.db.get(first.assignmentId)))?.scholarGroupId,
     ).toBeUndefined();
@@ -2124,7 +2302,6 @@ describe("program publishing", () => {
     expect(programGrid!.coverage).toEqual([]);
     expect(programGrid!.conflicts).toEqual([]);
     expect(programGrid!.overloaded).toEqual([]);
-    expect(programGrid!.outOfOrder).toEqual([]);
 
     const teacherGridBefore = await (await asUser(t, roboticsTeacher)).query(
       api.masterSchedule.grid,

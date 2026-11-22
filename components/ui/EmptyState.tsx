@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * EmptyState — the one canonical empty-state primitive for teacher surfaces.
+ * EmptyState — the one canonical empty-state primitive for web surfaces.
  *
  * The rule (Andy, 2026-07): an empty state may freely INCLUDE or OMIT any of
  * its five elements — icon, dashed outline, title, hint, CTA — but there must

@@ -1,14 +1,15 @@
 "use node";
 
 import { v } from "convex/values";
-import { action, internalAction } from "./_generated/server";
+import { internalAction } from "./_generated/server";
 import type { ActionCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import {
   MESSAGE_ATTACHMENT_MAX_BYTES,
   messageAttachmentMediaKind,
 } from "../shared/messageAttachments";
-import { staffAction } from "./lib/customFunctions";
+import { internal } from "./_generated/api";
+import { authedAction, staffAction } from "./lib/customFunctions";
 import { recordUnitUsage } from "./usage";
 
 function transcriptionFileExtension(mimeType: string): string {
@@ -40,6 +41,8 @@ async function transcribeBlob(
   blob: Blob,
   mimeType: string,
   sessionId?: Id<"sessions">,
+  /** Text in the style to expect; Whisper follows it (fillers kept, for instance). */
+  prompt?: string,
 ) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   // iOS records AAC in an .m4a container but labels it audio/mp4. Whisper
@@ -55,6 +58,7 @@ async function transcribeBlob(
   formData.append("model", "whisper-1");
   formData.append("language", "en");
   formData.append("response_format", "verbose_json");
+  if (prompt) formData.append("prompt", prompt);
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -74,7 +78,11 @@ async function transcribeBlob(
     throw new Error("Transcription failed");
   }
 
-  const data = (await res.json()) as { text?: string; duration?: unknown };
+  const data = (await res.json()) as {
+    text?: string;
+    duration?: unknown;
+    segments?: { start?: unknown; end?: unknown; text?: unknown }[];
+  };
   const durationSeconds =
     typeof data.duration === "number" &&
     Number.isFinite(data.duration) &&
@@ -92,17 +100,34 @@ async function transcribeBlob(
     audioSeconds,
     sessionId,
   });
+  const segments: [number, number, string][] = [];
+  for (const segment of data.segments ?? []) {
+    if (
+      typeof segment.start === "number" &&
+      typeof segment.end === "number" &&
+      typeof segment.text === "string" &&
+      segment.text.trim()
+    ) {
+      segments.push([
+        Math.round(segment.start * 1000),
+        Math.round(segment.end * 1000),
+        segment.text.trim(),
+      ]);
+    }
+  }
   return {
     text: data.text,
     durationSeconds,
+    segments,
   };
 }
 
 /**
  * Transcribe audio using OpenAI Whisper API.
- * Called from the frontend via useAction.
+ * Called from the web and native dictation hooks via useAction; any signed-in
+ * user may dictate, anonymous callers are refused (TRA-496).
  */
-export const transcribe = action({
+export const transcribe = authedAction({
   args: {
     // Audio data as base64-encoded string
     audioBase64: v.string(),
@@ -110,6 +135,13 @@ export const transcribe = action({
     sessionId: v.optional(v.id("sessions")),
   },
   handler: async (ctx, args) => {
+    // Usage is recorded against this session and its school, so it must be one
+    // the caller may act in. Sessionless dictation skips the check.
+    if (args.sessionId) {
+      await ctx.runQuery(internal.users.assertActiveCaller, {
+        sessionId: args.sessionId,
+      });
+    }
     const audioBuffer = Buffer.from(args.audioBase64, "base64");
     const mimeType = args.mimeType || "audio/webm";
     const result = await transcribeBlob(
@@ -136,6 +168,59 @@ export const transcribeStored = internalAction({
     const mimeType = blob.type || "audio/mp4";
     const result = await transcribeBlob(ctx, blob, mimeType, args.sessionId);
     return { text: result.text };
+  },
+});
+
+/**
+ * A disfluent sample, so Whisper keeps a speaker's "um"s and "uh"s instead of
+ * tidying them away; counting them is part of what a practice talk is for.
+ */
+const METER_TAKE_RETRIES = 2;
+
+const METER_TAKE_PROMPT =
+  "Um, so, uh, today I'm going to talk about, um, my project. Uh, the first thing is, hmm, how it works.";
+
+/**
+ * Transcribe a Decibel meter take's sound file (decibelMeter.saveTake
+ * schedules this), then hand the words back to be saved on the take.
+ */
+export const transcribeMeterTake = internalAction({
+  args: { portfolioItemId: v.id("portfolioItems"), attempt: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const take = await ctx.runQuery(internal.decibelMeter.takeForTranscription, {
+      portfolioItemId: args.portfolioItemId,
+    });
+    if (!take) return; // discarded, or already done
+    try {
+      const blob = await ctx.storage.get(take.audioStorageId);
+      if (!blob) throw new Error("The take's sound file is gone");
+      const result = await transcribeBlob(
+        ctx,
+        blob,
+        blob.type || "audio/mp4",
+        undefined,
+        METER_TAKE_PROMPT,
+      );
+      await ctx.runMutation(internal.decibelMeter.saveTranscript, {
+        portfolioItemId: args.portfolioItemId,
+        text: result.text ?? "",
+        segments: result.segments,
+      });
+    } catch (error) {
+      console.error("[decibel meter] transcribing a take failed", error);
+      // Whisper is often only busy: try twice more before letting the sound go.
+      const attempt = args.attempt ?? 0;
+      if (attempt < METER_TAKE_RETRIES) {
+        await ctx.scheduler.runAfter((attempt + 1) * 60_000, internal.audioActions.transcribeMeterTake, {
+          portfolioItemId: args.portfolioItemId,
+          attempt: attempt + 1,
+        });
+        return;
+      }
+      await ctx.runMutation(internal.decibelMeter.transcriptFailed, {
+        portfolioItemId: args.portfolioItemId,
+      });
+    }
   },
 });
 

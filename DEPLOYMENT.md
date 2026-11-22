@@ -360,6 +360,14 @@ Set these deployment-specific items before you rely on the related features.
 
 ## Files
 
+### Connector consent: admissions tools
+
+- **Path:** `app/oauth/authorize/useListAdmissionsTools.ts`
+- **What it is:** Which admissions tools the connector sign-in screen lists.
+- **Published as:** A hook that returns an empty list, since this copy ships no admissions toolset.
+- **While unset:** The consent screen lists curriculum and unit-designer tools only.
+- **Set it:** Return your admissions MCP list action from useListAdmissionsTools.
+
 ### Institution seal
 
 - **Path:** `convex/assets/seal/primaryInstitutionSeal.ts`
@@ -367,6 +375,22 @@ Set these deployment-specific items before you rely on the related features.
 - **Published as:** A transparent one-pixel placeholder.
 - **While unset:** Printed documents carry no seal.
 - **Set it:** Replace primaryInstitutionSealPngBase64 with your school's seal as a base64 PNG.
+
+### Chart rasterizer
+
+- **Path:** `convex/lib/chartRaster.ts`
+- **What it is:** Turns the screen-time chart SVGs into PNGs for the Friday check-in thread.
+- **Published as:** A stub that throws, because the original renderer's license (MPL-2.0) is outside the dependency policy.
+- **While unset:** The roundup text posts; its chart images are skipped.
+- **Set it:** Implement rasterizeChartSvg with a renderer that runs in a Convex "use node" action.
+
+### Claude Tag dispatch target
+
+- **Path:** `convex/lib/claudeDispatchTarget.ts`
+- **What it is:** The repository Claude Tag scopes automatic requests in, and who reviews its draft PRs.
+- **Published as:** The public rabbithole-school/rabbithole repository, reviewed by 'A maintainer'.
+- **While unset:** Automatic Claude Tag requests name the public repository and a generic reviewer. Nothing posts until an admin binds a Claude channel.
+- **Set it:** Replace the values in CLAUDE_DISPATCH_TARGET with your repository and reviewer.
 
 ### Institution print identity
 
@@ -384,12 +408,20 @@ Set these deployment-specific items before you rely on the related features.
 - **While unset:** The tutor refers to a generic school and reasons about time in UTC.
 - **Set it:** Replace the values in PRIMARY_INSTITUTION_PROMPT_PROFILE with your school's identity and time zone.
 
+### Test scholar accounts
+
+- **Path:** `convex/lib/testAccounts.ts`
+- **What it is:** Scholar accounts that are staff tests, which staff roundups and the screen-time page leave out.
+- **Published as:** An empty list.
+- **While unset:** Every scholar account counts as a real scholar in roundups and screen time.
+- **Set it:** Add your test scholar account ids to TEST_ACCOUNT_IDS.
+
 ### Institution brand
 
 - **Path:** `lib/primaryInstitutionBrand.ts`
-- **What it is:** Your school's name, logo, tagline, and contact details for printed materials.
+- **What it is:** Your school's name, logo, tagline, website, and contact details for printed materials and the credit line on public tools, plus optional Google Analytics and Vercel Web Analytics for the signed-out public pages.
 - **Published as:** A neutral 'Rabbithole' identity with no logo or contact details.
-- **While unset:** Printed forms and branded surfaces show 'Rabbithole' and omit your logo and contacts.
+- **While unset:** Printed forms and branded surfaces show 'Rabbithole' and omit your logo and contacts; public tools such as the worksheet maker show no school credit; no analytics loads anywhere.
 - **Set it:** Replace the values in PRIMARY_INSTITUTION_BRAND with your school's identity.
 
 ### Native app identity
@@ -476,10 +508,11 @@ Set these deployment-specific items before you rely on the related features.
 - `NOTICE` — Third-party notices for the public repository. Not configurable here.
 - `README.md` — Top-level readme for the public repository. Documentation, not configurable.
 - `SECURITY.md` — Security policy for the public repository. Documentation, not configurable.
+- `app/HomeLanding.tsx` — First-party landing-page branding, biographies, images, and links removed; public links stay neutral. No adopter action required.
 - `app/api/mcp/route.ts` — MCP route with the private admissions tools removed. The remaining tools register as before. No adopter action required.
-- `app/page.tsx` — First-party landing-page branding, biographies, images, and links removed; public links stay neutral. No adopter action required.
 - `app/parent/[[...tab]]/page.tsx` — First-party admissions tab title removed. No adopter action required.
 - `app/school/__tests__/nav.test.ts` — Test file. Published and runnable; not a configuration point.
+- `app/school/devices/page.tsx` — Staff device view with a private status line removed. No adopter action required.
 - `app/school/directory/staff/page.tsx` — Staff-capability description neutralized. No adopter action required.
 - `app/school/layout.tsx` — School-directory layout rebuilt from a neutral template. No deployment-specific value.
 - `app/school/nav.tsx` — School-directory navigation rebuilt from a neutral template. No deployment-specific value.
@@ -512,14 +545,23 @@ Set these deployment-specific items before you rely on the related features.
 - `convex/http.ts` — HTTP routes with private endpoints removed. Optional-integration routes stay off until their environment variables are set.
 - `convex/improvementTraces.ts` — Improvement-trace sources. Private trace sources removed; the rest is published as-is.
 - `convex/institutions.ts` — Default-institution seed neutralized to a generic primary. Create institutions with institutions:ensureDefaults (see the external entry); identity lives in the brand and prompt-profile files.
+- `convex/lib/__tests__/deviceOpsTools.test.ts` — Device-tool gating test without the primary school's admissions check-in link tools. No adopter action required.
 - `convex/lib/aideTools.ts` — Staff-aide tools. Private, deployment-specific tools were removed; the rest is published as-is.
+- `convex/lib/cascade.ts` — Scholar and institution deletion cascades. Private-table entries removed; the rest is published as-is.
 - `convex/lib/customAppTools.ts` — Custom-app tools. Private sections removed; the rest is published as-is.
+- `convex/lib/deviceAppAccess.ts` — Managed-app display names with the primary school's own check-in kiosk app removed. No adopter action required.
+- `convex/lib/deviceOpsTools.ts` — iPad operations tools with the primary school's admissions check-in link tools removed. No adopter action required.
 - `convex/lib/googleDocsCommentTools.ts` — Google Docs comment tools. Published and inert unless the Google OAuth variables are set.
 - `convex/lib/guardianFormTools.ts` — Guardian-form tools. Private sections removed; the rest is published as-is.
 - `convex/lib/scholarCodeTools.ts` — Scholar code-explorer tools. Private sections removed; the rest is published as-is.
 - `convex/lib/slackTools.ts` — Slack bot tools. Published and inert unless the SLACK_* variables are set (see the environment entries).
+- `convex/lib/staticRouteSegments.ts` — Bug-report route words with the primary school's private display route removed. No adopter action required.
+- `convex/lib/storageReferences.ts` — Storage-reference check with the private tables removed. No adopter action required.
+- `convex/lib/toolLabels.ts` — Tool-activity labels with the private signage-panel labels removed. No adopter action required.
+- `convex/managedDeviceClaims.ts` — Managed device roster with private status fields removed. No adopter action required.
 - `convex/mcp.ts` — MCP connector functions with the private admissions tools removed. No adopter action required.
 - `convex/metaPrompts.ts` — Code-explorer repository URL neutralized to the public repository. No adopter action required.
+- `convex/parents.ts` — Parent portal reads. The guardian-forms list is removed from the Records tab query; the rest is published as-is.
 - `convex/practiceDigest.ts` — Practice digest. A private weekly quality-pulse path removed; the rest is published as-is.
 - `convex/schema.ts` — Data-model source of truth with a few private-feature tables removed. No adopter action required.
 - `convex/scholarApps.ts` — Scholar-app wiring. A private-deployment branch removed; the rest is published as-is.
@@ -543,8 +585,14 @@ Set these deployment-specific items before you rely on the related features.
 - `lib/passkeyClient.ts` — A legacy passkey origin specific to the originating school's migration, neutralized to an inert placeholder. Not relevant to a new deployment.
 - `native/metro.config.js` — Metro bundler configuration for the native app. Housekeeping.
 - `native/package.json` — Native app dependency and script manifest, regenerated for the published tree. Housekeeping.
+- `native/src/app/_layout.tsx` — Native app root layout with a private background task removed. No adopter action required.
 - `native/src/app/how-it-works.tsx` — Native explainer copy neutralized. No adopter action required.
+- `native/src/app/index.tsx` — Scholar home with a private status card removed. No adopter action required.
+- `native/src/components/AppLauncher.tsx` — App launcher with the private app-folder status line removed. No adopter action required.
+- `native/src/components/AsamParentGate.tsx` — Device settings modal with a private panel removed. No adopter action required.
 - `native/src/components/ExternalAppHost.tsx` — External-app embedding. Private sections removed; the rest is published as-is.
+- `native/src/contexts/NativeAppLaunchContext.tsx` — Native app launcher with the private app-folder sync hold removed. No adopter action required.
+- `native/src/contexts/__tests__/NativeAppLaunchContext.test.ts` — Test file with the private app-folder sync mocks removed. Published and runnable; not a configuration point.
 - `native/src/lib/externalAppBundledIcons.ts` — External-app icon bundle. Private icons removed; the rest is published as-is.
 - `native/src/lib/externalAppIcon.ts` — External-app icon resolution. Private sections removed; the rest is published as-is.
 - `native/vendor/geomap/historicalBasemaps.ts` — Vendored local-geography overlays neutralized to generic values. No adopter action required.

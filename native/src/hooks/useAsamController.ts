@@ -13,6 +13,10 @@ import {
   isAppReentry,
   shouldUseOfflineRecoveryBypass,
   type AsamReasonInputs,
+  isAsamLockSettled,
+  withSystemUIHolder,
+  type SystemUIOwner,
+  type AsamInputs,
 } from "@/lib/asam/asamDecision";
 import { api } from "@/lib/convex";
 import {
@@ -50,9 +54,13 @@ export type AsamController = {
   deviceSettingsUrl: string | null;
   qrCodeUrl: string | null;
   /** Temporarily release ASAM so system UI such as Control Center can open. */
-  releaseForSystemUI: () => void;
-  /** End a temporary system-UI release and restore the normal ASAM policy. */
-  restoreAfterSystemUI: () => void;
+  releaseForSystemUI: (owner?: SystemUIOwner) => void;
+  /** End this owner's release and restore the normal ASAM policy. */
+  restoreAfterSystemUI: (owner?: SystemUIOwner) => void;
+  /** Runs the lock policy again now, whether or not any input changed. */
+  rearmLock: () => void;
+  /** iOS is locked, or the policy says it shouldn't be. */
+  isLockSettled: () => boolean;
 };
 
 /** Call iOS, then record the lock change it was asked for (TRA-331). */
@@ -93,7 +101,11 @@ export function useAsamController(): AsamController {
   const [inSam, setInSam] = useState(() => isSingleAppModeActive());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [releasedForSystemUI, setReleasedForSystemUI] = useState(false);
+  const [systemUIHolders, setSystemUIHolders] = useState<
+    ReadonlySet<SystemUIOwner>
+  >(() => new Set());
+  const releasedForSystemUI = systemUIHolders.size > 0;
+  const [rearmVersion, setRearmVersion] = useState(0);
   const [appEntryVersion, setAppEntryVersion] = useState(0);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const oneTimeObservedRef = useRef<{
@@ -283,7 +295,7 @@ export function useAsamController(): AsamController {
       mounted = false;
       subscription.remove();
     };
-  }, [isOffline, releasedForSystemUI, remoteState]);
+  }, [isOffline, rearmVersion, releasedForSystemUI, remoteState]);
 
   useEffect(() => {
     if (!deviceId || !remoteState || !isAuthenticated) return;
@@ -326,8 +338,10 @@ export function useAsamController(): AsamController {
   );
   const qrCodeUrl = deviceSettingsUrl ? `${deviceSettingsUrl}/qr` : null;
 
-  const releaseForSystemUI = useCallback(() => {
-    setReleasedForSystemUI(true);
+  const releaseForSystemUI = useCallback((
+    owner: SystemUIOwner = "presentation",
+  ) => {
+    setSystemUIHolders((holders) => withSystemUIHolder(holders, owner, true));
     // Recorded only when there was a lock to release: on an unlocked iPad this
     // call is a no-op, and every slideshow would otherwise log a failed exit.
     if (isSingleAppModeActive()) {
@@ -338,7 +352,39 @@ export function useAsamController(): AsamController {
   }, []);
 
   const restoreAfterSystemUI = useCallback(
-    () => setReleasedForSystemUI(false),
+    (owner: SystemUIOwner = "presentation") =>
+      setSystemUIHolders((holders) => withSystemUIHolder(holders, owner, false)),
+    [],
+  );
+
+  const rearmLock = useCallback(
+    () => setRearmVersion((version) => version + 1),
+    [],
+  );
+
+  // Unknown until the first effect, which is the safe answer: not settled.
+  const lockInputsRef = useRef<Omit<AsamInputs, "inSam">>({
+    isOnline: false,
+    paired: "unknown",
+    armed: false,
+  });
+  const lockPaired =
+    remoteState === undefined ? ("unknown" as const) : remoteState !== null;
+  const lockArmed =
+    remoteState?.desiredState === "armed" && !releasedForSystemUI;
+  useEffect(() => {
+    lockInputsRef.current = {
+      isOnline: !isOffline,
+      paired: lockPaired,
+      armed: lockArmed,
+    };
+  }, [isOffline, lockArmed, lockPaired]);
+  const isLockSettled = useCallback(
+    () =>
+      isAsamLockSettled({
+        ...lockInputsRef.current,
+        inSam: isSingleAppModeActive(),
+      }),
     [],
   );
 
@@ -358,5 +404,7 @@ export function useAsamController(): AsamController {
     qrCodeUrl,
     releaseForSystemUI,
     restoreAfterSystemUI,
+    rearmLock,
+    isLockSettled,
   };
 }

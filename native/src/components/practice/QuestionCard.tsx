@@ -11,9 +11,16 @@
  * text-sized pills, never a 3+1 wrap. See questionCardState.ts.
  *
  * AFTER answering: the prompt and choices collapse. A small recap line, the big
- * emoji / art, the reveal in large bold type, then two full-width, same-size
- * buttons: the primary "Why? ->" (opens a tutor session on the moment's seed)
- * and the secondary "Done for today".
+ * emoji / art, the reveal in large bold type, then one full-width
+ * "Done for today" button.
+ *
+ * NO FOLLOW-UP BUTTON (TRA-472, 2026-11-17): the card used to end in "Why? ->",
+ * which opened a tutor session on the moment's seed. In prod, 20 of the 24 taps
+ * led to a chat where the scholar never typed a word, and 3 of 76 cards led to
+ * a real conversation. A wrong answer goes to the top of the Quests list
+ * ("missed"), and a skipped card stays on it below the misses ("offered",
+ * convex/lib/questionQueue.ts); both rows keep their own follow-up. A right
+ * answer closes the question, and its story star stays in the Sky.
  *
  * VERDICT: reuses the existing PracticeVerdictStamp + the shared stamp / ring
  * styles in practiceShell ("Correct" green, "Not quite" amber; a miss is never
@@ -21,7 +28,7 @@
  * the server — and honours reduced motion exactly as the stamp already does.
  *
  * LEDGER: on mount it records the "offered" event (recordMomentOffered, which
- * also mints the souvenir star and hands back the seedId for a story). The
+ * also mints the souvenir star). The
  * answer is recorded with recordMomentAnswer (first answer wins, idempotent).
  * Feedback-only: nothing here touches mastery or spaced repetition.
  */
@@ -31,7 +38,6 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { LayoutChangeEvent } from "react-native";
 import { Image } from "expo-image";
 import * as Haptics from "expo-haptics";
-import { useRouter } from "expo-router";
 import { useMutation } from "convex/react";
 
 import { api, type Id } from "@/lib/convex";
@@ -53,31 +59,7 @@ import {
   questionCardView,
 } from "./questionCardState";
 
-type Offer = { eventId: Id<"momentEvents">; seedId: Id<"seeds"> | null };
-
-/**
- * Resolve the seed behind this card and start its session; null on any
- * failure (the caller re-enables the button). A plain module function, not
- * inline in the component: a try/catch around conditional expressions makes
- * the React Compiler bail out of the whole component.
- */
-async function followSeed(
-  offer: Promise<Offer | null> | null,
-  fallbackSeedId: Id<"seeds"> | null,
-  recordOutcome: (args: { eventId: Id<"momentEvents">; outcome: "opened" }) => Promise<unknown>,
-  createFromSeed: (args: { seedId: Id<"seeds"> }) => Promise<{ id: Id<"sessions"> } | null | undefined>,
-): Promise<Id<"sessions"> | null> {
-  try {
-    const resolved = await offer;
-    const seedId = resolved?.seedId ?? fallbackSeedId;
-    if (!seedId) return null;
-    if (resolved) void recordOutcome({ eventId: resolved.eventId, outcome: "opened" }).catch(() => {});
-    const res = await createFromSeed({ seedId });
-    return res?.id ?? null;
-  } catch {
-    return null;
-  }
-}
+type Offer = { eventId: Id<"momentEvents"> };
 
 export function QuestionCard({
   scholarId,
@@ -95,15 +77,12 @@ export function QuestionCard({
    *  Done (the card carries "Done for today" itself once answered). */
   onAnswered?: () => void;
 }) {
-  const router = useRouter();
   const colors = useColors();
   const shell = useMemo(() => makePracticeShellStyles(colors), [colors]);
   const styles = useMemo(() => makeStyles(colors), [colors]);
 
   const recordOffered = useMutation(api.practiceMoments.recordMomentOffered);
   const recordAnswer = useMutation(api.practiceMoments.recordMomentAnswer);
-  const recordOutcome = useMutation(api.practiceMoments.recordMomentOutcome);
-  const createFromSeed = useMutation(api.sessions.createFromSeed);
 
   const clientEventId = useMemo(() => makeClientEventId("story-moment"), []);
   const [initialOffer] = useState(() => ({ clientEventId, moment, recordOffered, scholarId }));
@@ -124,10 +103,7 @@ export function QuestionCard({
         clientEventId: initialOffer.clientEventId,
         ...momentArgs,
       })
-      .then((res) => ({
-        eventId: res.eventId,
-        seedId: m.kind === "seed" ? m.seedId : (res.seedId ?? null),
-      }))
+      .then((res) => ({ eventId: res.eventId }))
       .catch(() => null);
   }, [initialOffer]);
 
@@ -149,23 +125,6 @@ export function QuestionCard({
     },
     [onAnswered, picked, recordAnswer],
   );
-
-  // "Why? ->" opens the tutor session on this moment's seed, the same
-  // create-from-seed path the Quests tab uses (StoryInvitations).
-  const [opening, setOpening] = useState(false);
-  const openWhy = useCallback(() => {
-    if (opening) return;
-    setOpening(true);
-    Haptics.selectionAsync().catch(() => {});
-    const fallbackSeedId = moment.kind === "seed" ? moment.seedId : null;
-    void followSeed(offerRef.current, fallbackSeedId, recordOutcome, createFromSeed).then((sessionId) => {
-      if (sessionId) {
-        router.push({ pathname: "/session/[id]", params: { id: sessionId, title: moment.hook } });
-      } else {
-        setOpening(false);
-      }
-    });
-  }, [createFromSeed, moment, opening, recordOutcome, router]);
 
   // One shared height for every choice cell, from each cell's natural content
   // height (see commonCellHeight).
@@ -242,23 +201,11 @@ export function QuestionCard({
           <Text style={styles.reveal}>{question.reveal}</Text>
           <View style={styles.actions}>
             <Pressable
-              onPress={() => void openWhy()}
-              disabled={opening}
-              accessibilityRole="button"
-              style={({ pressed }) => [
-                styles.action,
-                styles.primary,
-                (pressed || opening) && styles.cellPressed,
-              ]}
-            >
-              <Text style={styles.primaryText}>{question.whyLabel ?? QUESTION_CARD_COPY.why}</Text>
-            </Pressable>
-            <Pressable
               onPress={onDone}
               accessibilityRole="button"
-              style={({ pressed }) => [styles.action, styles.secondary, pressed && styles.cellPressed]}
+              style={({ pressed }) => [styles.action, styles.primary, pressed && styles.cellPressed]}
             >
-              <Text style={styles.secondaryText}>{QUESTION_CARD_COPY.done}</Text>
+              <Text style={styles.primaryText}>{QUESTION_CARD_COPY.done}</Text>
             </Pressable>
           </View>
         </>
@@ -334,7 +281,5 @@ function makeStyles(c: Colors) {
     },
     primary: { backgroundColor: c.navy },
     primaryText: { fontFamily: fonts.bold, fontSize: 16, color: c.white },
-    secondary: { borderWidth: 2, borderColor: c.border, backgroundColor: c.bg },
-    secondaryText: { fontFamily: fonts.bold, fontSize: 16, color: c.fg },
   });
 }

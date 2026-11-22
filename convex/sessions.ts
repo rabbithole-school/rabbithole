@@ -1,4 +1,4 @@
-import { v, type ObjectType } from "convex/values";
+import { ConvexError, v, type ObjectType } from "convex/values";
 import {
   isUnitPublished,
   scholarHoldsAssignmentForUnit,
@@ -16,8 +16,8 @@ import { internalAction, internalMutation, internalQuery } from "./_generated/se
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule } from "./lib/scheduleStore";
 import { chosenPathValidator } from "./bakeUnitFromSeed";
-import type { ChosenPath } from "./bakeUnitFromSeed";
 import {
   ROLES,
   isStaffRole,
@@ -28,6 +28,11 @@ import {
   resolveWorkshopPolicy,
   workshopOpeningFor,
 } from "./lib/workshopPolicy";
+import {
+  isTileSession,
+  tileSessionSourceApp,
+  withoutUnstartedTileSessions,
+} from "./lib/tileSessions";
 import { MODELS } from "./lib/models";
 import { requireAnthropicApiKey } from "./lib/anthropic";
 import { normalizeReflectionSections } from "./lib/reflectionSections";
@@ -52,7 +57,11 @@ import {
   resolveActiveMembership,
 } from "./lib/access";
 import { isProgramGuest } from "./lib/enrollmentStanding";
-import { assignedProgramAssignmentForUnit } from "./lib/programGuestWork";
+import {
+  assignedProgramAssignmentForUnit,
+  isOwnQuestUnit,
+  notAssignedProgramWork,
+} from "./lib/programGuestWork";
 import {
   mintIndependentStudyUnit,
   questTitleFromSessionTitle,
@@ -79,6 +88,7 @@ import {
   isLiveEntry,
   resolveScholarWorkSubject,
   scholarTimetableContext,
+  timeZoneForAssignment,
 } from "./assignments";
 import {
   hasReadableOfflineHomeworkContent,
@@ -91,6 +101,7 @@ import {
 import { inputModalityValidator } from "./lib/inputModality";
 import { markSeedMomentFollowed } from "./lib/moments/seedMomentLedger";
 import { rubricStarsEarned } from "../shared/rubricScore";
+import { isOnOwnTime } from "../shared/openUntil";
 import {
   beginnerAlphabet,
   checkDecodable,
@@ -105,11 +116,15 @@ import {
   requireActiveSessionOwnerInstitution,
   requireUnitInLearnerInstitution,
 } from "./lib/scholarEnrollment";
+import { requireUnitAccessForUser } from "./lib/unitAccess";
 import { TIME_LIMIT_WRAP_GUIDANCE } from "./lib/tutorClosingGuidance";
+import { appendWhisper } from "./lib/teacherWhisper";
+import { retireClearedReceipts } from "./whisperReceipts";
 import { assertFreshUpload } from "./lib/freshUpload";
 import {
   APP_SNAPSHOT_MAX_BYTES,
   assertValidAppSnapshotMetadata,
+  sanitizeRenderCheckStateJson,
 } from "./lib/appSnapshot";
 import {
   MAX_APP_TUTOR_MESSAGE_CHARS,
@@ -123,8 +138,8 @@ import {
 } from "./lib/appUpdateTools";
 import { isEmptyAppUpdatePlaceholder, loadSessionLevels } from "./sessionHelpers";
 import {
-  freePlayTitle,
   reorderLotFirst,
+  sessionActivityDone,
   resolveFreePlayEligibility,
 } from "./lib/freePlay";
 import { appRoleFor, isAppActivity } from "../shared/appSurface";
@@ -134,7 +149,14 @@ import {
   scholarBuildKickoffFor,
   sessionBuildStepLock,
 } from "./lib/questBuildLock";
-import { plantParkedIdeaSeed } from "./lib/seeds";
+import {
+  isWonderChat,
+  isWonderSeed,
+  plantParkedIdeaSeed,
+  plantSavedStarterSeed,
+  isScholarsWonderSeed,
+  wonderSeedIdsAmong,
+} from "./lib/seeds";
 import { writeAuditLog } from "./lib/auditLog";
 import {
   assertNotTeacherArchived,
@@ -142,7 +164,23 @@ import {
   sessionHasCodeArtifact,
   unarchivePatch,
 } from "./lib/teacherArchive";
-import { assignedWorkMode, isBuiltAppSession } from "./lib/homeOrigin";
+import { noteSkyTurn, runSkyHook } from "./lib/skyRefresh";
+import {
+  assertNotRetractedQuestSession,
+  isRetractedQuestSession,
+} from "./lib/questLifecycle";
+import {
+  endedWorkMode,
+  isBuiltAppSession,
+  startedWorkMode,
+  type AssignmentWithSchedule,
+} from "./lib/homeOrigin";
+import { rehearsalBuildRequest } from "./lib/appActivity";
+import { missionTitleFromGate } from "./lib/mission";
+import {
+  assertProposalIsOpen,
+  assertProposedQuestIsOwn,
+} from "./lib/questStructure";
 
 /** Parent password for time limit mode (set via PARENT_PASSWORD env var in Convex dashboard). */
 const PARENT_PASSWORD = process.env.PARENT_PASSWORD ?? "";
@@ -409,7 +447,7 @@ async function dispatchCompletionReceiptForSession(
   }
   const assignment = await ctx.db.get(session.assignmentId);
   if (!assignment) return [];
-  const scheduledEntry = assignment.activitySchedule?.find(
+  const scheduledEntry = (await readSchedule(ctx, assignment)).find(
     (entry) =>
       entry.activityId === session.activityId &&
       entry.setAt != null,
@@ -437,6 +475,48 @@ async function dispatchCompletionReceiptForSession(
   return [{ assignmentId: assignment._id, teacherName: teacher.name }];
 }
 
+/**
+ * The assignment covers this unit and activity: its unit is the session's
+ * unit, and the activity is in that unit (a lesson-authored activity) or on
+ * its schedule (a lesson-less, ad-hoc dispatch). Only the anchors: who the
+ * assignment is for and whether it is live are validateAssignmentScope's.
+ * Also run by sessions.update on the tuple a re-scope leaves behind.
+ */
+async function requireAssignmentMatchesAnchors(
+  ctx: Pick<MutationCtx, "db">,
+  assignment: Doc<"assignments">,
+  unitId?: Id<"units">,
+  activityId?: Id<"activities">,
+): Promise<void> {
+  if (unitId && String(assignment.unitId) !== String(unitId)) {
+    throw new Error("Assignment does not match unit");
+  }
+  if (!activityId) return;
+  const activity = await ctx.db.get(activityId);
+  if (!activity) {
+    throw new Error("Assignment activity is not available");
+  }
+  if (activity.lessonId) {
+    // Lesson-authored activity: it must belong to the assignment's unit.
+    const lesson = await ctx.db.get(activity.lessonId);
+    if (!lesson || String(lesson.unitId) !== String(assignment.unitId)) {
+      throw new Error("Assignment does not match activity");
+    }
+  } else {
+    // Lesson-less activity (an ad-hoc dispatch — see assignments.ts
+    // coreDispatchActivity). There's no lesson→unit chain to anchor to, so
+    // the assignment's own activitySchedule IS the authorization anchor:
+    // the activity must be referenced there. Never accept an arbitrary
+    // lesson-less activityId the assignment doesn't schedule.
+    const referenced = (await readSchedule(ctx, assignment)).some(
+      (e) => String(e.activityId) === String(activityId),
+    );
+    if (!referenced) {
+      throw new Error("Assignment does not match activity");
+    }
+  }
+}
+
 async function validateAssignmentScope(
   ctx: Pick<MutationCtx, "db">,
   assignmentId: Id<"assignments"> | undefined,
@@ -452,36 +532,11 @@ async function validateAssignmentScope(
     throw new Error("Assignment does not include scholar");
   }
 
-  if (unitId && String(assignment.unitId) !== String(unitId)) {
-    throw new Error("Assignment does not match unit");
-  }
+  await requireAssignmentMatchesAnchors(ctx, assignment, unitId, activityId);
   if (activityId) {
-    const activity = await ctx.db.get(activityId);
-    if (!activity) {
-      throw new Error("Assignment activity is not available");
-    }
-    if (activity.lessonId) {
-      // Lesson-authored activity: it must belong to the assignment's unit.
-      const lesson = await ctx.db.get(activity.lessonId);
-      if (!lesson || String(lesson.unitId) !== String(assignment.unitId)) {
-        throw new Error("Assignment does not match activity");
-      }
-    } else {
-      // Lesson-less activity (an ad-hoc dispatch — see assignments.ts
-      // coreDispatchActivity). There's no lesson→unit chain to anchor to, so
-      // the assignment's own activitySchedule IS the authorization anchor:
-      // the activity must be referenced there. Never accept an arbitrary
-      // lesson-less activityId the assignment doesn't schedule.
-      const referenced = (assignment.activitySchedule ?? []).some(
-        (e) => String(e.activityId) === String(activityId),
-      );
-      if (!referenced) {
-        throw new Error("Assignment does not match activity");
-      }
-    }
     if (assignment.selfPaced) return assignmentId;
     const now = Date.now();
-    const liveEntry = (assignment.activitySchedule ?? []).find(
+    const liveEntry = (await readSchedule(ctx, assignment)).find(
       (entry) =>
         String(entry.activityId) === String(activityId) &&
         entry.setAt != null &&
@@ -532,10 +587,13 @@ export const openOfflineHomework = authedMutation({
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error("Assignment not found");
     const now = Date.now();
-    const entry = (assignment.activitySchedule ?? []).find(
+    // Homework, or an open-until give: the scholar's own-time work. Offline
+    // work given "In that class" is the teacher's to run.
+    const timeZone = await timeZoneForAssignment(ctx, assignment);
+    const entry = (await readSchedule(ctx, assignment)).find(
       (candidate) =>
         String(candidate.activityId) === String(args.activityId) &&
-        candidate.mode === "homework" &&
+        isOnOwnTime(candidate, timeZone) &&
         isLiveEntry(candidate, now) &&
         entryTargetsScholar(candidate, ownerUserId),
     );
@@ -593,15 +651,41 @@ export const get = authedQuery({
   },
 });
 
+/** How many of a session's messages have this role, reading only those rows. */
+async function countSessionTurns(
+  ctx: Pick<QueryCtx, "db">,
+  sessionId: Id<"sessions">,
+  role: "user" | "assistant",
+): Promise<number> {
+  let count = 0;
+  for await (const _row of ctx.db
+    .query("messages")
+    .withIndex("by_session_role", (q) =>
+      q.eq("sessionId", sessionId).eq("role", role),
+    )) {
+    count++;
+  }
+  return count;
+}
+
 /**
  * Enrich a raw session row into the shape the scholar's session-card surfaces
  * expect: unit title/emoji, a (deprecated, always-null) persona emoji, and a
  * user+assistant message count. Shared by `list` and `finishedForScholar` so
  * both lists render identical cards.
+ *
+ * `messageCount` costs one read per counted message, and a list subscribed to
+ * those rows re-runs on every write to them (a tutor reply patches its row
+ * every few seconds while it streams). So it is computed only for callers who
+ * can see it — staff, on the teacher scholar page (ScholarFeed,
+ * ScholarProfile) — and is `null` otherwise. When counted, only the user and
+ * assistant rows are read, through `by_session_role`, never the tool and system
+ * rows beside them.
  */
 async function enrichSessionForList(
-  ctx: { db: QueryCtx["db"] },
+  ctx: Pick<QueryCtx, "db" | "storage">,
   session: Doc<"sessions">,
+  { countMessages }: { countMessages: boolean },
 ) {
   let unitTitle: string | null = null;
   let unitEmoji: string | null = null;
@@ -615,13 +699,10 @@ async function enrichSessionForList(
     unitTitle = unit?.title ?? null;
     unitEmoji = unit?.emoji ?? null;
   }
-  const messages = await ctx.db
-    .query("messages")
-    .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-    .collect();
-  const messageCount = messages.filter(
-    (m) => m.role === "user" || m.role === "assistant",
-  ).length;
+  const messageCount = countMessages
+    ? (await countSessionTurns(ctx, session._id, "user")) +
+      (await countSessionTurns(ctx, session._id, "assistant"))
+    : null;
 
   return {
     ...session,
@@ -631,6 +712,9 @@ async function enrichSessionForList(
     unitTitle,
     unitEmoji,
     messageCount,
+    // A tile session (lib/tileSessions.ts) names its app, so teacher lists
+    // can show "<app> · free play" with the tile's mark; null otherwise.
+    sourceApp: await tileSessionSourceApp(ctx, session),
   };
 }
 
@@ -697,7 +781,19 @@ export const list = authedQuery({
               canReadUnstampedLearnerSessions)),
       );
 
-    return Promise.all(sessions.map((s) => enrichSessionForList(ctx, s)));
+    // A tile session nobody has used yet (lib/tileSessions.ts) is not a
+    // session to list; once it holds a message or saved work it is.
+    const listed = await withoutUnstartedTileSessions(ctx, sessions);
+    // Message counts are a staff stat: only the teacher scholar page
+    // (ScholarFeed, ScholarProfile) shows them, and only staff open it — for a
+    // scholar, or for themselves when they also hold a learner membership.
+    // A scholar's own lists (Home and the session screens, web and iPad) never
+    // show a count, and they are the lists open while a reply streams, so a
+    // scholar caller reads no messages.
+    const countMessages = isStaffRole(ctx.user.role);
+    return Promise.all(
+      listed.map((s) => enrichSessionForList(ctx, s, { countMessages })),
+    );
   },
 });
 
@@ -721,6 +817,10 @@ export const list = authedQuery({
  *     the caller's surface (so the plate has genuinely dropped the row), the
  *     scholar has NOT re-entered it today (isReopenLive — those are back on
  *     the active plate), and it holds a non-empty artifact.
+ *
+ * A retracted quest's sessions are listed too, archived or not, with
+ * `questRetracted: true`: Home drops them, and only a teacher can bring them
+ * back (isRetractedQuestSession), so they render like a teacher-archived app.
  *
  * Read-only; never touches completion state. Re-entry still goes through
  * sessions.reopen, which stamps reopenedAt and moves the row onto the active
@@ -764,7 +864,7 @@ export const finishedForScholar = authedQuery({
     const nowMs = Date.now();
     const isReopenLive = reopenLiveChecker(ctx, targetUserId, nowMs);
 
-    const all = (
+    const candidates = (
       await ctx.db
         .query("sessions")
         .withIndex("by_user", (q) => q.eq("userId", targetUserId))
@@ -775,19 +875,70 @@ export const finishedForScholar = authedQuery({
         !session.isTestDrive &&
         !session.isOffline &&
         !session.seedExemplar &&
+        // Tile sessions live behind their tile's switcher, never on Home
+        // (lib/tileSessions.ts); its Archived (n) lists their archived ones.
+        !isTileSession(session) &&
         (!learnerInstitutionId ||
           session.institutionId === learnerInstitutionId ||
           (session.institutionId === undefined &&
             canReadUnstampedLearnerSessions)),
     );
+    // A wonder's chat is never a Quest, archived or not (TRA-678).
+    const wonderSeedIds = await wonderSeedIdsAmong(ctx, targetUserId, candidates);
+    const all = candidates.filter((session) => !isWonderChat(session, wonderSeedIds));
 
+    const target = await ctx.db.get(targetUserId);
+    const timetable = target ? await scholarTimetableContext(ctx, target) : null;
+    const unitCache = new Map<string, Doc<"units"> | null>();
+    const assignmentCache = new Map<
+      string,
+      (Doc<"assignments"> & AssignmentWithSchedule) | null
+    >();
+    const unitFor = async (id: Id<"units">) => {
+      if (!unitCache.has(id)) unitCache.set(id, await ctx.db.get(id));
+      return unitCache.get(id) ?? null;
+    };
+    const activityCache = new Map<string, Doc<"activities"> | null>();
+    const activityFor = async (id: Id<"activities">) => {
+      if (!activityCache.has(id)) activityCache.set(id, await ctx.db.get(id));
+      return activityCache.get(id) ?? null;
+    };
+    const assignmentFor = async (id: Id<"assignments">) => {
+      if (!assignmentCache.has(id)) {
+        const doc = await ctx.db.get(id);
+        assignmentCache.set(
+          id,
+          doc ? { ...doc, schedule: await readSchedule(ctx, doc) } : null,
+        );
+
+      }
+      return assignmentCache.get(id) ?? null;
+    };
+    // A finished or ended row must carry a real document worth re-entering,
+    // so a session holding only the tutor's opening hello stays out.
+    const hasRealDocument = async (sessionId: Id<"sessions">) =>
+      !!(await ctx.db
+        .query("artifacts")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .filter((q) => q.neq(q.field("content"), ""))
+        .first());
     const finished: Array<{
       session: Doc<"sessions">;
-      finishedKind: "archived" | "completed";
+      finishedKind: "archived" | "completed" | "ended";
+      questRetracted: boolean;
     }> = [];
     for (const session of all) {
-      if (session.isArchived) {
-        finished.push({ session, finishedKind: "archived" });
+      // A retracted quest's work is the teacher's to bring back, so it lists
+      // as put away by the teacher (isRetractedQuestSession). It lists even
+      // when the session itself isn't archived (a unit deactivated by hand,
+      // or work un-archived before reopen refused it): Home drops a retracted
+      // quest, so this is the one place the scholar can still find it.
+      const questRetracted =
+        session.unitId != null &&
+        session.assignmentId == null &&
+        isRetractedQuestSession(session, await unitFor(session.unitId));
+      if (session.isArchived || questRetracted) {
+        finished.push({ session, finishedKind: "archived", questRetracted });
         continue;
       }
       // Completed-but-not-archived class-focus work. A scholar who chose
@@ -800,7 +951,31 @@ export const finishedForScholar = authedQuery({
         targetUserId,
         session,
       );
-      if (!complete) continue;
+      if (!complete) {
+        // Unfinished work whose activity has ENDED for this scholar: no
+        // pushed entry reaches them any more (the class focus ended and
+        // autoClearActivity removed it, or the teacher replaced the
+        // activity), so Home leaves it out. It lives here as "Not finished".
+        // An archived assignment, or one the scholar is no longer on, is the
+        // teacher retiring the work, so it stays out.
+        if (!session.assignmentId) continue;
+        const assignment = await assignmentFor(session.assignmentId);
+        if (
+          !assignment ||
+          assignment.archivedAt ||
+          !assignment.scholarIds.some((id) => String(id) === String(targetUserId))
+        ) {
+          continue;
+        }
+        if (
+          startedWorkMode(assignment, session.activityId, targetUserId, nowMs)
+        ) {
+          continue; // still on Home
+        }
+        if (!(await hasRealDocument(session._id))) continue;
+        finished.push({ session, finishedKind: "ended", questRetracted: false });
+        continue;
+      }
       // Only when the plate has actually dropped the row (no next incomplete
       // activity in the unit for this caller's surface); otherwise the session
       // is still reachable as a continuation and would double-surface.
@@ -812,13 +987,8 @@ export const finishedForScholar = authedQuery({
       );
       if (nextIncomplete) continue;
       // Must carry a real document worth re-entering.
-      const artifact = await ctx.db
-        .query("artifacts")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-        .filter((q) => q.neq(q.field("content"), ""))
-        .first();
-      if (!artifact) continue;
-      finished.push({ session, finishedKind: "completed" });
+      if (!(await hasRealDocument(session._id))) continue;
+      finished.push({ session, finishedKind: "completed", questRetracted: false });
     }
 
     // The Home tab each row belongs to, decided by the rule scholarPlate uses
@@ -829,30 +999,17 @@ export const finishedForScholar = authedQuery({
     // on this" (sessions.reopen), because the plate drops a completed session.
     // Unit, activity and assignment reads are cached per call; the artifact
     // probe runs only for sessions that could hold an app.
-    const target = await ctx.db.get(targetUserId);
-    const timetable = target ? await scholarTimetableContext(ctx, target) : null;
-    const unitCache = new Map<string, Doc<"units"> | null>();
-    const assignmentCache = new Map<string, Doc<"assignments"> | null>();
-    const unitFor = async (id: Id<"units">) => {
-      if (!unitCache.has(id)) unitCache.set(id, await ctx.db.get(id));
-      return unitCache.get(id) ?? null;
-    };
-    const activityCache = new Map<string, Doc<"activities"> | null>();
-    const activityFor = async (id: Id<"activities">) => {
-      if (!activityCache.has(id)) activityCache.set(id, await ctx.db.get(id));
-      return activityCache.get(id) ?? null;
-    };
-    const assignmentFor = async (id: Id<"assignments">) => {
-      if (!assignmentCache.has(id)) assignmentCache.set(id, await ctx.db.get(id));
-      return assignmentCache.get(id) ?? null;
-    };
     return Promise.all(
-      finished.map(async ({ session, finishedKind }) => {
-        const enriched = await enrichSessionForList(ctx, session);
+      finished.map(async ({ session, finishedKind, questRetracted }) => {
+        // No surface shows a finished row's message count (web Home's
+        // archived list, the iPad's ArchivedSessions), so none is read.
+        const enriched = await enrichSessionForList(ctx, session, {
+          countMessages: false,
+        });
         const unit = session.unitId ? await unitFor(session.unitId) : null;
         const mode =
           session.assignmentId && session.activityId
-            ? assignedWorkMode(
+            ? startedWorkMode(
                 await assignmentFor(session.assignmentId),
                 session.activityId,
                 targetUserId,
@@ -862,7 +1019,18 @@ export const finishedForScholar = authedQuery({
         return {
           ...enriched,
           finishedKind,
-          origin: mode ?? ("is" as const),
+          // Read through isTeacherArchived (shared/teacherArchive.ts), so web
+          // and the iPad label the row and refuse to reopen it.
+          questRetracted,
+          origin:
+            mode ??
+            (finishedKind === "ended"
+              ? await endedWorkMode(
+                  ctx,
+                  session.assignmentId,
+                  session.activityId,
+                )
+              : ("is" as const)),
           subject: timetable
             ? resolveScholarWorkSubject(
                 timetable,
@@ -942,10 +1110,12 @@ export const getWithMessages = authedQuery({
     const activity = session.activityId
       ? await ctx.db.get(session.activityId)
       : null;
-    // A test drive with a hand-off appRequest: still what gates the
-    // server-clock saved-at readout below.
-    const isAppRequestTestDrive =
-      session.isTestDrive === true && activity?.appRequest != null;
+    // A rehearsal's build request: the stored hand-off appRequest, or the
+    // brief of a play-only app this rehearsal is building (lib/appActivity.ts
+    // rehearsalBuildRequest). It gates the saved-at readout below; scholars
+    // key on the stored field alone.
+    const buildRequest = await rehearsalBuildRequest(ctx, activity, session);
+    const isAppRequestTestDrive = buildRequest != null;
     // The activity's app brief (`appRequest`) is the pedagogical target the
     // activity is meant to elicit, so it must NEVER reach a scholar. It leaves
     // the server ONLY for the teacher build hand-off — the rehearsal owner (a
@@ -957,7 +1127,7 @@ export const getWithMessages = authedQuery({
       session.isTestDrive === true &&
       session.userId === ctx.user._id &&
       isTeacher
-        ? (activity?.appRequest ?? null)
+        ? buildRequest
         : null;
     // The saved-at readout in the Workshop's Edit bar comes from the SERVER
     // (customApps.updatedAt), never a client clock, so it can never claim a
@@ -983,7 +1153,11 @@ export const getWithMessages = authedQuery({
       callerRole: ctx.user.role,
       editAccess: workshopPolicy.editAccess,
       openedOnStarter: session.vibecodeStarterUsedAt != null,
-      hasAppRequest: activity?.appRequest != null,
+      hasAppRequest:
+        session.isTestDrive === true
+          ? buildRequest != null
+          : activity?.appRequest != null,
+      tileSession: isTileSession(session),
     });
     const teacherBuildKickoff = opening.teacherBuildKickoff;
     // BUILD FIRST: the scholar's own Quest that starts at its build step opens
@@ -1010,8 +1184,8 @@ export const getWithMessages = authedQuery({
         activity,
       });
     }
-    // Whether sessions.startFreePlay would succeed for THIS caller (TRA-489):
-    // the Workshop shows "Start free play" beside the parking lot only then.
+    // Whether sessions.startFreePlay ("Build it now") would succeed for THIS
+    // caller: the done state shows Build it now on each parked idea only then.
     // Short-circuits before any read unless this is the owner's vibecode
     // session with parked ideas.
     const freePlayEligible =
@@ -1039,11 +1213,22 @@ export const getWithMessages = authedQuery({
     // the derived set only, never the level.
     let beginnerSpellings: { letters: string; teams: string[] } | null = null;
 
+    // A wonder's chat (TRA-678): the chat header names it as the kid's own
+    // question, never as a Quest. A boolean older clients simply ignore.
+    // The same rule the plate uses (isScholarsWonderSeed): the session's own
+    // seed, and only when it is the session owner's wonder.
+    const isWonder = session.seedId
+      ? isScholarsWonderSeed(await ctx.db.get(session.seedId), session.userId)
+      : false;
+
     return {
       session: {
         ...session,
         id: session._id,
+        isWonder,
         appRequest,
+        // Scholar-facing: the stored hand-off only (the rehearsal's opening
+        // above already folded in rehearsalBuildRequest).
         hasAppRequest: activity?.appRequest != null,
         starterSavedAt,
         editAccess: workshopPolicy.editAccess,
@@ -1051,11 +1236,25 @@ export const getWithMessages = authedQuery({
         defaultWorkshopMode: opening.defaultMode,
         teacherEditOverride: opening.teacherEditOverride,
         freePlayEligible,
+        // The teacher's mission as the chat drawer's title shows it
+        // (lib/mission.ts missionTitleFromGate); null when the mission line
+        // is long with no short title before a colon, or there is none.
+        missionTitle:
+          activity && isAppActivity(activity)
+            ? missionTitleFromGate(activity.buildContract?.gate)
+            : null,
+        // The one "finished" answer (lib/freePlay.ts sessionActivityDone): the
+        // Workshop's done state, which carries Build it now on parked ideas.
+        activityDone: await sessionActivityDone(ctx, session),
         // TRA-519: the app role (work | side) depends only on the activity;
         // clients combine it with their own artifacts subscription to get
         // hasApp (shared/appSurface.ts sessionAppContextFor).
         appRole: appRoleFor(activity),
         builderPrimary: session.sessionMode === "vibecode",
+        // A first-party tile opened this session (lib/tileSessions.ts): the
+        // Workshop shows the app's session switcher and keeps the chat closed
+        // on open (shared/workshopMode.ts defaultChatOpen).
+        tileSession: isTileSession(session),
         readLevel: sessionReadLevel,
         beginnerSpellings,
         ...(session.isTestDrive === true ? { teacherBuildKickoff } : {}),
@@ -1553,6 +1752,44 @@ const createSessionArgs = {
  * runner's `localRunner:startTopicChat` creates a scholar's Custom Quest
  * session through exactly this path rather than a copy of it.
  */
+/**
+ * The supplied session anchors agree: the activity's lesson is `lessonId`
+ * (when given) and its unit is `unitId` (when given); a lesson given without
+ * an activity is in `unitId`. A lesson-less activity (an ad-hoc dispatch) has
+ * no lesson-to-unit chain: its anchor is the assignment that schedules it
+ * (validateAssignmentScope), so it never comes with a lesson, and without an
+ * assignment it may not come with a unit either. Used by session creation
+ * and by `update` on the session's whole resulting tuple.
+ */
+async function requireConsistentSessionAnchors(
+  ctx: MutationCtx,
+  anchors: {
+    unitId?: Id<"units">;
+    lessonId?: Id<"lessons">;
+    activityId?: Id<"activities">;
+    assignmentId?: Id<"assignments">;
+  },
+): Promise<void> {
+  const mismatch = () =>
+    new Error("That activity isn't part of this unit or lesson");
+  let lessonId = anchors.lessonId;
+  if (anchors.activityId) {
+    const activity = await ctx.db.get(anchors.activityId);
+    if (!activity) throw new Error("Activity not found");
+    if (!activity.lessonId) {
+      if (anchors.lessonId) throw mismatch();
+      if (!anchors.assignmentId && anchors.unitId) throw mismatch();
+      return;
+    }
+    if (lessonId && lessonId !== activity.lessonId) throw mismatch();
+    lessonId = activity.lessonId;
+  }
+  if (lessonId && anchors.unitId) {
+    const lesson = await ctx.db.get(lessonId);
+    if (!lesson || lesson.unitId !== anchors.unitId) throw mismatch();
+  }
+}
+
 export async function createSessionAs(
   ctx: MutationCtx & { user: Doc<"users"> },
   args: ObjectType<typeof createSessionArgs>,
@@ -1634,6 +1871,33 @@ export async function createSessionAs(
         }
       }
     }
+    // A lesson given without its unit: the lesson's own unit is the session's,
+    // and is authorized below like any unit. Otherwise a foreign lesson would
+    // ride along on a freshly minted Quest of the caller's.
+    if (lessonId && !unitId) {
+      const lesson = await ctx.db.get(lessonId);
+      if (!lesson) throw new Error("Lesson not found");
+      unitId = lesson.unitId;
+    }
+    // Every anchor the caller supplied must be the activity's own: an activity
+    // sits in its lesson, and the lesson in the unit. Otherwise a foreign
+    // activity could ride in on a unitId the caller may open, and every check
+    // below would run against the wrong unit. Applies to everyone.
+    await requireConsistentSessionAnchors(ctx, {
+      unitId,
+      lessonId,
+      activityId: args.activityId,
+      assignmentId: args.assignmentId,
+    });
+    // A Quest proposal still waiting (or declined) has no activity to open,
+    // and an approved one opens only for its proposer. A teacher's rehearsal
+    // (a session the teacher owns) may open it.
+    if (unitId) {
+      const anchoredUnit = await ctx.db.get(unitId);
+      assertProposalIsOpen(anchoredUnit);
+      if (!isTestDrive) assertProposedQuestIsOwn(anchoredUnit, ownerUserId);
+    }
+    let scopedUnit: Doc<"units"> | null = null;
     if (!isTestDrive && unitId) {
       const unit = await ctx.db.get(unitId);
       if (!unit || !unit.isActive) throw new Error("Unit not found");
@@ -1643,10 +1907,28 @@ export async function createSessionAs(
         learnerInstitutionId,
         unit,
       );
+      scopedUnit = unit;
     }
 
+    // A program guest's own Quest — an existing one, or the free-form session
+    // that mints one below — is never program work, so it skips that gate.
+    // The lesson/activity must sit inside that Quest, or a foreign activity
+    // could ride in on the scholar's own unitId.
+    let isOwnQuest = unitId
+      ? isOwnQuestUnit(scopedUnit, ownerUserId)
+      : !args.activityId && !args.assignmentId;
+    if (isOwnQuest && unitId && (lessonId || args.activityId)) {
+      const activity = args.activityId ? await ctx.db.get(args.activityId) : null;
+      const lessonIds = [lessonId, activity?.lessonId];
+      if (args.activityId && !activity?.lessonId) isOwnQuest = false;
+      for (const id of lessonIds) {
+        if (!id) continue;
+        const lesson = await ctx.db.get(id);
+        if (!lesson || String(lesson.unitId) !== String(unitId)) isOwnQuest = false;
+      }
+    }
     const isDirectProgramGuest =
-      !isTestDrive && !isTeacher && isProgramGuest(ctx.user);
+      !isTestDrive && !isTeacher && isProgramGuest(ctx.user) && !isOwnQuest;
     const programAssignment = isDirectProgramGuest && unitId && args.activityId
       ? await assignedProgramAssignmentForUnit(
           ctx,
@@ -1656,7 +1938,7 @@ export async function createSessionAs(
         )
       : null;
     if (isDirectProgramGuest && !programAssignment) {
-      throw new Error("Unit activity is not assigned program work");
+      throw notAssignedProgramWork();
     }
     if (
       programAssignment &&
@@ -1862,17 +2144,22 @@ export async function createSessionFromSeedCore(
   ctx: MutationCtx,
   userId: Id<"users">,
   seedId: Id<"seeds">,
-  // The scholar's chosen bake shape (deep / wide / build) from the
-  // "choose your path" menu. Only meaningful for topic seeds (which bake).
-  bakePath?: ChosenPath,
-  // The scholar picked "Endless chat" in that menu — an explicit choice, not
-  // merely an absent bakePath (callers that never show the menu omit both).
-  endlessChat = false,
 ): Promise<{ id: Id<"sessions"> }> {
   const institutionId = await requireActiveLearnerInstitution(ctx, userId);
   const seed = await ctx.db.get(seedId);
   if (!seed) throw new Error("Seed not found");
   if (seed.scholarId !== userId) throw new Error("Forbidden");
+  // A wonder is one chat (TRA-669): opening it again lands on that chat,
+  // whatever its seed's status, rather than starting a second one.
+  if (isWonderSeed(seed)) {
+    const chat = await ctx.db
+      .query("sessions")
+      .withIndex("by_user_seed", (q) =>
+        q.eq("userId", userId).eq("seedId", seed._id),
+      )
+      .first();
+    if (chat) return { id: chat._id };
+  }
   if (seed.status === "completed") throw new Error("Seed already completed");
 
   let unitId: Id<"units"> | undefined;
@@ -1886,6 +2173,8 @@ export async function createSessionFromSeedCore(
     if (!unit || !unit.isActive) {
       throw new Error("This quest isn't available right now.");
     }
+    assertProposalIsOpen(unit);
+    assertProposedQuestIsOwn(unit, userId);
     await requireUnitInLearnerInstitution(
       ctx,
       userId,
@@ -1933,19 +2222,6 @@ export async function createSessionFromSeedCore(
     }
   }
 
-  // Topic-seed launch (no structured unit behind the star) normally bakes a
-  // real unit in the background. Story threads and cross-domain previews stay
-  // direct, and so does "Endless chat": its whole promise is "No plan — just
-  // start talking", and a bake would either hold the chat behind a spinner or
-  // swap it into the baked unit's first activity mid-conversation. Decided
-  // before the insert so a bake-bound session is born already marked as
-  // waiting — the client must never observe it in the un-marked state.
-  const willBake =
-    !seed.unitId &&
-    !endlessChat &&
-    seed.origin !== "story" &&
-    seed.suggestionType !== "cross_domain";
-
   const id = await ctx.db.insert("sessions", {
     userId,
     ...(institutionId ? { institutionId } : {}),
@@ -1958,7 +2234,6 @@ export async function createSessionFromSeedCore(
     ...(unitId ? { unitId } : {}),
     ...(lessonId ? { lessonId } : {}),
     ...(activityId ? { activityId } : {}),
-    ...(willBake ? { questBakeStatus: "pending" as const } : {}),
   });
   if (activityForSetup) {
     await ensureSessionActivitySetup(ctx, {
@@ -1976,41 +2251,19 @@ export async function createSessionFromSeedCore(
   // card, Quests, the Sky — see lib/moments/seedMomentLedger.
   await markSeedMomentFollowed(ctx, userId, seed);
 
-  // Design a small real unit in the BACKGROUND and upgrade this session in
-  // place once it lands. The client shows a "building your quest" state for the
-  // ~1-2 min this takes (questBakeStatus above) instead of opening an ad-lib
-  // conversation it would have to abandon. Structured seeds already start their
-  // unit's activity, so skip them. Story seeds stay as durable grounded threads,
-  // and cross-domain seeds stay short previews rather than becoming generic
-  // multi-activity quests mid-conversation. See review/seed-to-unit-bake-plan.md.
-  if (willBake) {
-    await ctx.scheduler.runAfter(
-      0,
-      internal.bakeUnitFromSeed.bakeUnitFromSeed,
-      { seedId, sessionId: id, path: bakePath },
-    );
-  }
-
   return { id };
 }
 
 export const createFromSeed = authedMutation({
   args: {
     seedId: v.id("seeds"),
-    // The scholar's chosen bake shape (deep / wide / build) from the
-    // "choose your path" menu. Only meaningful for topic seeds (which bake).
+    // The scholar's chosen path from the "choose your path" menu.
     bakePath: v.optional(chosenPathValidator),
-    // "Endless chat" from that menu: open a plain exploration, never bake.
+    // "Endless chat" from that menu. Both are still accepted from older
+    // clients and ignored: a topic star opens a plain chat either way.
     endlessChat: v.optional(v.boolean()),
   },
-  handler: async (ctx, args) =>
-    createSessionFromSeedCore(
-      ctx,
-      ctx.user._id,
-      args.seedId,
-      args.bakePath,
-      args.endlessChat === true,
-    ),
+  handler: async (ctx, args) => createSessionFromSeedCore(ctx, ctx.user._id, args.seedId),
 });
 
 /**
@@ -2040,6 +2293,8 @@ export const startUnit = authedMutation({
 
     const unit = await ctx.db.get(args.unitId);
     if (!unit || !unit.isActive) throw new Error("Unit not found");
+    assertProposalIsOpen(unit);
+    assertProposedQuestIsOwn(unit, ownerUserId);
     await requireUnitInLearnerInstitution(
       ctx,
       ownerUserId,
@@ -2051,11 +2306,14 @@ export const startUnit = authedMutation({
     }
     const owner =
       ownerUserId === ctx.user._id ? ctx.user : await ctx.db.get(ownerUserId);
-    let programAssignment = isProgramGuest(owner)
+    // A program guest's own Quest is never program work (lib/programGuestWork).
+    const gatedProgramGuest =
+      isProgramGuest(owner) && !isOwnQuestUnit(unit, ownerUserId);
+    let programAssignment = gatedProgramGuest
       ? await assignedProgramAssignmentForUnit(ctx, ownerUserId, unit._id)
       : null;
-    if (isProgramGuest(owner) && !programAssignment) {
-      throw new Error("Unit is not assigned program work");
+    if (gatedProgramGuest && !programAssignment) {
+      throw notAssignedProgramWork();
     }
 
     const nextIncomplete = await firstIncompleteSessionActivityInUnit(
@@ -2074,7 +2332,7 @@ export const startUnit = authedMutation({
         scholarId: ownerUserId,
       });
     }
-    if (isProgramGuest(owner)) {
+    if (gatedProgramGuest) {
       programAssignment = activityId
         ? await assignedProgramAssignmentForUnit(
             ctx,
@@ -2084,7 +2342,7 @@ export const startUnit = authedMutation({
           )
         : null;
       if (!programAssignment) {
-        throw new Error("Unit activity is not assigned program work");
+        throw notAssignedProgramWork();
       }
     }
 
@@ -2195,7 +2453,6 @@ export const update = authedMutation({
     title: v.optional(v.string()),
     unitId: v.optional(v.union(v.id("units"), v.null())),
     assignmentId: v.optional(v.union(v.id("assignments"), v.null())),
-    teacherWhisper: v.optional(v.union(v.string(), v.null())),
     pendingWhisper: v.optional(v.union(v.string(), v.null())),
     readingLevelOverride: v.optional(v.union(v.string(), v.null())),
     readLevelOverride: v.optional(v.union(readLevelValidator, v.null())),
@@ -2221,8 +2478,23 @@ export const update = authedMutation({
 
     // Both scholars and teachers can update these
     if (args.title !== undefined) updates.title = args.title;
-    if (args.unitId !== undefined)
+    if (args.unitId !== undefined) {
+      if (args.unitId) {
+        // The unit's prompt and design load into this session's tutor, so it
+        // must be one the session's own learner may read (the rule
+        // `units.get` uses): their own Quest or their school's unit, never
+        // another scholar's Quest or another school's unit. The caller must
+        // reach it too, which for a scholar is the same check. Staff edits
+        // inside the scholar's school are unchanged.
+        await requireUnitAccessForUser(ctx, ctx.user, args.unitId);
+        if (session.userId !== ctx.user._id) {
+          const owner = await ctx.db.get(session.userId);
+          if (!owner) throw new Error("Session owner not found");
+          await requireUnitAccessForUser(ctx, owner, args.unitId);
+        }
+      }
       updates.unitId = args.unitId ?? undefined;
+    }
     if (args.assignmentId !== undefined) {
       if (!isTeacher) {
         throw new Error("Only teachers can change assignment scope");
@@ -2236,13 +2508,73 @@ export const update = authedMutation({
       );
       updates.assignmentId = args.assignmentId ?? undefined;
     }
+    // Re-scoping keeps the session's activity and lesson, so the tuple it
+    // leaves behind must hang together the way a new session's must: the
+    // activity in its lesson, the lesson in the unit. And no session is
+    // pointed at a Quest proposal still waiting or declined (TRA-685).
+    if (args.unitId !== undefined || args.assignmentId !== undefined) {
+      const nextUnitId =
+        args.unitId !== undefined ? (args.unitId ?? undefined) : session.unitId;
+      const nextAssignmentId =
+        args.assignmentId !== undefined
+          ? (args.assignmentId ?? undefined)
+          : session.assignmentId;
+      await requireConsistentSessionAnchors(ctx, {
+        unitId: nextUnitId,
+        lessonId: session.lessonId,
+        activityId: session.activityId,
+        assignmentId: nextAssignmentId,
+      });
+      // The assignment the session keeps must cover the unit and activity
+      // it now has (an ad-hoc assignment has no unit, so a unit-only re-scope
+      // under one is refused).
+      if (nextAssignmentId) {
+        const assignment = await ctx.db.get(nextAssignmentId);
+        if (!assignment) throw new Error("Assignment not found");
+        await requireAssignmentMatchesAnchors(
+          ctx,
+          assignment,
+          nextUnitId,
+          session.activityId,
+        );
+      }
+      if (nextUnitId) {
+        const nextUnit = await ctx.db.get(nextUnitId);
+        assertProposalIsOpen(nextUnit);
+        // A proposed Quest is its proposer's: no one else's session moves in.
+        if (!session.isTestDrive) {
+          assertProposedQuestIsOwn(nextUnit, session.userId);
+        }
+      }
+    }
+
+    // A scholar must not set their own reading level. Refuse loudly: a silent
+    // no-op reads as success to the caller (TRA-499).
+    if (
+      !isTeacher &&
+      (args.readingLevelOverride !== undefined ||
+        args.readLevelOverride !== undefined)
+    ) {
+      throw new ConvexError("Only staff can set a reading-level override");
+    }
 
     // Only teachers can update these
     if (isTeacher) {
-      if (args.teacherWhisper !== undefined)
-        updates.teacherWhisper = args.teacherWhisper ?? undefined;
-      if (args.pendingWhisper !== undefined)
-        updates.pendingWhisper = args.pendingWhisper ?? undefined;
+      // A new whisper goes after one already waiting (a Slack whisper, say),
+      // never over it; null is the box's explicit clear (lib/teacherWhisper.ts).
+      if (args.pendingWhisper !== undefined) {
+        updates.pendingWhisper =
+          args.pendingWhisper === null
+            ? undefined
+            : appendWhisper(session.pendingWhisper, args.pendingWhisper);
+        // A Slack whisper the box just cleared must never be reported
+        // delivered; its thread hears it won't be (whisperReceipts.ts).
+        await retireClearedReceipts(
+          ctx,
+          session._id,
+          updates.pendingWhisper as string | undefined,
+        );
+      }
       if (args.readingLevelOverride !== undefined)
         updates.readingLevelOverride = args.readingLevelOverride ?? undefined;
       if (args.readLevelOverride !== undefined)
@@ -2353,8 +2685,10 @@ export const unarchive = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
-    // A teacher archive is lifted only by sessions.restoreApp.
+    // A teacher archive is lifted only by sessions.restoreApp, a retracted
+    // quest only by quests.reopen.
     assertNotTeacherArchived(session);
+    await assertNotRetractedQuestSession(ctx, session);
 
     await ctx.db.patch(args.id, { isArchived: false });
   },
@@ -2387,8 +2721,10 @@ export const reopen = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
-    // A teacher archive is lifted only by sessions.restoreApp.
+    // A teacher archive is lifted only by sessions.restoreApp, a retracted
+    // quest only by quests.reopen.
     assertNotTeacherArchived(session);
+    await assertNotRetractedQuestSession(ctx, session);
 
     // Only ever touches session visibility. Completion + badge records are
     // deliberately never read or written here, so re-entry can never regress
@@ -2445,19 +2781,11 @@ const FREE_PLAY_LINEAGE_MAX_SESSIONS = 200;
  * the same app playable in its source (or vice versa), so archive/restore
  * always act on all of them.
  */
-async function freePlayLineage(
-  ctx: Pick<MutationCtx, "db">,
+export async function freePlayLineage(
+  ctx: { db: QueryCtx["db"] },
   session: Doc<"sessions">,
 ): Promise<Doc<"sessions">[]> {
-  let root = session;
-  const seen = new Set<string>([String(root._id)]);
-  for (let hop = 0; hop < FREE_PLAY_LINEAGE_MAX_HOPS && root.freePlayOf; hop++) {
-    const parent = await ctx.db.get(root.freePlayOf);
-    if (!parent || parent.userId !== session.userId) break;
-    if (seen.has(String(parent._id))) break;
-    seen.add(String(parent._id));
-    root = parent;
-  }
+  const root = await freePlayRoot(ctx, session);
   const lineage: Doc<"sessions">[] = [root];
   const inLineage = new Set<string>([String(root._id)]);
   for (
@@ -2477,6 +2805,24 @@ async function freePlayLineage(
     }
   }
   return lineage;
+}
+
+/** The root of `session`'s free-play lineage: `freePlayOf` walked up while it
+ *  stays the same scholar's. */
+export async function freePlayRoot(
+  ctx: { db: QueryCtx["db"] },
+  session: Doc<"sessions">,
+): Promise<Doc<"sessions">> {
+  let root = session;
+  const seen = new Set<string>([String(root._id)]);
+  for (let hop = 0; hop < FREE_PLAY_LINEAGE_MAX_HOPS && root.freePlayOf; hop++) {
+    const parent = await ctx.db.get(root.freePlayOf);
+    if (!parent || parent.userId !== session.userId) break;
+    if (seen.has(String(parent._id))) break;
+    seen.add(String(parent._id));
+    root = parent;
+  }
+  return root;
 }
 
 async function setTeacherArchive(
@@ -2546,6 +2892,7 @@ export const reopenableForUnit = authedQuery({
   args: { unitId: v.id("units") },
   handler: async (ctx, { unitId }) => {
     await requireActiveLearnerInstitution(ctx, ctx.user._id);
+    const unit = await ctx.db.get(unitId);
     const sessions = (
       await ctx.db
         .query("sessions")
@@ -2559,8 +2906,10 @@ export const reopenableForUnit = authedQuery({
         !s.isOffline &&
         !s.seedExemplar &&
         !s.freePlay &&
-        // Put away by a teacher: "Keep working" would offer a dead action.
-        s.teacherArchivedAt == null,
+        // Put away by a teacher (an archived app or a retracted quest):
+        // "Keep working" would offer a dead action.
+        s.teacherArchivedAt == null &&
+        !isRetractedQuestSession(s, unit),
     );
     if (sessions.length === 0) return null;
 
@@ -2767,7 +3116,7 @@ async function persistUserTurnMessage(
     /** Who pressed send — a staff member in the scholar's session is stamped `byStaff`. */
     senderId: Id<"users">;
   },
-): Promise<Id<"messages">> {
+): Promise<{ messageId: Id<"messages">; unit: Doc<"units"> | null }> {
   const message =
     args.inputModality === "app"
       ? args.message.slice(0, MAX_APP_TUTOR_MESSAGE_CHARS)
@@ -2814,7 +3163,7 @@ async function persistUserTurnMessage(
           lastMessagePreview: message.slice(0, 120) || undefined,
         }),
   });
-  return messageId;
+  return { messageId, unit };
 }
 
 /**
@@ -3163,14 +3512,30 @@ export const sendMessage = authedMutation({
       }
     }
 
-    const userMessageId = await persistUserTurnMessage(ctx, session, {
-      message: args.message,
-      imageId: args.imageId,
-      inputModality: args.inputModality,
-      thread: turnThread,
-      readAloudOf,
-      senderId: ctx.user._id,
-    });
+    const { messageId: userMessageId, unit: turnUnit } = await persistUserTurnMessage(
+      ctx,
+      session,
+      {
+        message: args.message,
+        imageId: args.imageId,
+        inputModality: args.inputModality,
+        thread: turnThread,
+        readAloudOf,
+        senderId: ctx.user._id,
+      },
+    );
+
+    // The kid's turn in a seed chat or their own Quest may earn a star on
+    // their Sky (TRA-699): one indexed read once the star exists, none in any
+    // other chat. Isolated: nothing the hook does can cost the kid this turn.
+    await runSkyHook("sessions.sendMessage", () =>
+      noteSkyTurn(ctx, {
+        session,
+        sender: ctx.user,
+        unit: turnUnit,
+        turn: { content: args.message, inputModality: args.inputModality },
+      }),
+    );
 
     // Both clients (web SessionInterface, native session/[id]) send the
     // read-aloud through this mutation, so this one write covers both. Only
@@ -3348,7 +3713,7 @@ export const setAppAutosaveFailed = internalMutation({
 
 /**
  * The App designer's park_idea tool (lib/designerTools.ts): append one idea to
- * the scholar's parking lot for their Free play version. Caps and de-duping
+ * the scholar's parking lot for after the gate. Caps and de-duping
  * live in `appendParkingLotEntry`; the Workshop renders the lot reactively
  * from getWithMessages.
  */
@@ -3375,6 +3740,76 @@ export const parkIdea = internalMutation({
       await ctx.db.patch(args.sessionId, { parkingLot: result.lot });
     }
     return result.kind;
+  },
+});
+
+/**
+ * The save_question and save_follow_up tools (TRA-682): save a starter for
+ * the session's scholar, which they find in "Things to wonder about" on the
+ * Quests tab (questionQueue.startersForSelf).
+ *
+ *   - `saved_question`: a question about the world the scholar asked while
+ *     building, saved to ask later. Its meta line names what they were
+ *     building: their own Quest's title, else the activity's, else the
+ *     session's.
+ *   - `follow_up`: one next question or thing to try from the scholar's OWN
+ *     Quest (a unit they authored), at most one per session. Anywhere else
+ *     it is refused.
+ *
+ * A rehearsal (`isTestDrive`) saves nothing, so a teacher's dry run never
+ * plants a starter on a real scholar. The seed is the scholar's, whoever is
+ * typing (a teacher in remote view included), like a parked idea.
+ */
+export const saveStarterFromSession = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    origin: v.union(v.literal("saved_question"), v.literal("follow_up")),
+    text: v.string(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<"saved" | "duplicate" | "empty" | "notHere" | "alreadySaved"> => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.isTestDrive === true) return "notHere";
+    const unit = session.unitId ? await ctx.db.get(session.unitId) : null;
+    const ownQuest =
+      unit && unit.authorScholarId === session.userId ? unit : null;
+    if (args.origin === "follow_up") {
+      if (!ownQuest) return "notHere";
+      const earlier = await ctx.db
+        .query("seeds")
+        .withIndex("by_scholar_origin", (q) =>
+          q.eq("scholarId", session.userId).eq("origin", "follow_up"),
+        )
+        .filter((q) => q.eq(q.field("sessionId"), session._id))
+        .first();
+      if (earlier) return "alreadySaved";
+    }
+    const activity = session.activityId
+      ? await ctx.db.get(session.activityId)
+      : null;
+    const questTitle = ownQuest?.title ?? activity?.title ?? session.title;
+    const result = await plantSavedStarterSeed(ctx, {
+      scholarId: session.userId,
+      origin: args.origin,
+      text: args.text,
+      questTitle,
+      sessionId: session._id,
+    });
+    if (!result) return "empty";
+    return result.existed ? "duplicate" : "saved";
+  },
+});
+
+/** The builder's set_provocation tool: the one "Something to figure out"
+ *  question on the scholar's Flair tab. Each call replaces it; empty clears. */
+export const setProvocation = internalMutation({
+  args: { sessionId: v.id("sessions"), text: v.string() },
+  handler: async (ctx, args): Promise<"set" | "cleared"> => {
+    const text = args.text.trim().slice(0, 300);
+    await ctx.db.patch(args.sessionId, { provocation: text || undefined });
+    return text ? "set" : "cleared";
   },
 });
 
@@ -3453,21 +3888,18 @@ export const questFromParkedIdea = authedMutation({
 });
 
 /**
- * FREE PLAY / "Build it now" (TRA-489; TRA-519 B2): open the scholar's own,
- * contract-free version of an APP activity once it is done — where the ideas
- * parked "for later" get built. Owner only; eligibility is the one
- * derivation in lib/freePlay.ts (an app activity, a non-empty parking lot,
- * editAccess not `never`, the activity completed under the session's
- * assignment), which getWithMessages also exposes as `freePlayEligible`.
+ * "Build it now" (TRA-519 B2): keep building a finished APP activity's app,
+ * starting from a parked idea. One session, one app: the scholar carries on in
+ * the assignment session itself, where the builder's contract steering treats
+ * the gate as met and the scholar makes the rules (prompts.ts
+ * buildDesignerContractSteering, SCHOLAR_RULES_STEERING). Owner only;
+ * eligibility is the one derivation in lib/freePlay.ts, which getWithMessages
+ * also exposes as `freePlayEligible`. `idea` moves to the front of the lot.
  *
- * Creates a new builder-primary session (`sessionMode: "vibecode"`,
- * `freePlay: true`, `freePlayOf`) for the same scholar and activity, copying
- * the parking lot and the newest code artifact (the way the starter clone
- * seeds one). NO assignmentId: free-play work
- * belongs to no cohort run and counts toward nothing. `idea` (an entry of the
- * lot) moves to the front so the opener offers it first. Idempotent per
- * (scholar, source): a second call returns the existing free-play session,
- * re-ordered to `idea`.
+ * Returns the session to open. A scholar who already has a free-play copy from
+ * before one-session building (TRA-489's `freePlay` rows) gets that copy, so
+ * their newer app is never hidden behind the older one. Older native builds
+ * navigate to whatever id comes back, so they keep working unchanged.
  */
 export const startFreePlay = authedMutation({
   args: { sessionId: v.id("sessions"), idea: v.optional(v.string()) },
@@ -3476,90 +3908,30 @@ export const startFreePlay = authedMutation({
     if (!source) throw new Error("Session not found");
     if (source.userId !== ctx.user._id) throw new Error("Forbidden");
     await requireActiveSessionOwnerAccess(ctx, source);
-    // A put-away app can't be copied out (nor its existing copy reopened).
+    // A put-away app can't be reopened for building.
     assertNotTeacherArchived(source);
 
     const existing = await ctx.db
       .query("sessions")
-      .withIndex("by_user", (q) => q.eq("userId", source.userId))
-      .filter((q) => q.eq(q.field("freePlayOf"), source._id))
+      .withIndex("by_free_play_of", (q) => q.eq("freePlayOf", source._id))
+      .filter((q) => q.eq(q.field("userId"), source.userId))
       .first();
-    if (existing) {
-      if (args.idea && (existing.parkingLot ?? []).length > 0) {
-        await ctx.db.patch(existing._id, {
-          parkingLot: reorderLotFirst(existing.parkingLot, args.idea),
-        });
+    const target = existing ?? source;
+    if (!existing) {
+      const eligibility = await resolveFreePlayEligibility(ctx, {
+        session: source,
+        caller: ctx.user,
+      });
+      if (!eligibility.eligible) {
+        throw new Error(`Free play is not open yet (${eligibility.reason})`);
       }
-      return { sessionId: existing._id };
     }
-
-    const eligibility = await resolveFreePlayEligibility(ctx, {
-      session: source,
-      caller: ctx.user,
-    });
-    if (!eligibility.eligible) {
-      throw new Error(`Free play is not open yet (${eligibility.reason})`);
-    }
-    // Eligibility already requires an app activity; refuse anything else here
-    // too, so this mutation can never open an app-less builder.
-    const { activity } = eligibility;
-    if (!isAppActivity(activity)) {
-      throw new Error("Free play is not open yet (notApp)");
-    }
-
-    const sessionId = await ctx.db.insert("sessions", {
-      userId: source.userId,
-      ...(source.institutionId ? { institutionId: source.institutionId } : {}),
-      unitId: source.unitId,
-      lessonId: source.lessonId,
-      activityId: activity._id,
-      sessionMode: "vibecode",
-      title: freePlayTitle(activity.title),
-      isArchived: false,
-      freePlay: true,
-      freePlayOf: source._id,
-      parkingLot: reorderLotFirst(source.parkingLot, args.idea),
-    });
-
-    // The app as it stands now: the newest code artifact (the same pick the
-    // turn recorder versions), with every image it can already load carried as
-    // inherited assets (the artifact's own, the source session's uploads, and
-    // any chat image the HTML references) so the copy renders identically.
-    const sourceArtifacts = await ctx.db
-      .query("artifacts")
-      .withIndex("by_session", (q) => q.eq("sessionId", source._id))
-      .collect();
-    const app = sourceArtifacts
-      .filter((a) => a.type === "code")
-      .sort((a, b) => b._creationTime - a._creationTime)[0];
-    if (app) {
-      const messages = await ctx.db
-        .query("messages")
-        .withIndex("by_session", (q) => q.eq("sessionId", source._id))
-        .collect();
-      const referencedImages = messages.flatMap((m) =>
-        m.imageId && app.content.includes(String(m.imageId)) ? [m.imageId] : [],
-      );
-      const assetIds = [
-        ...new Set([
-          ...(app.appAssetIds ?? []),
-          ...(source.appAssetIds ?? []),
-          ...referencedImages,
-        ]),
-      ];
-      await ctx.db.insert("artifacts", {
-        sessionId,
-        title: app.title,
-        content: app.content,
-        lastEditedBy: app.lastEditedBy,
-        revision: 0,
-        type: "code",
-        language: app.language ?? "html",
-        ...(assetIds.length > 0 ? { appAssetIds: assetIds } : {}),
-        ...(app.appAi ? { appAi: app.appAi } : {}),
+    if (args.idea && (target.parkingLot ?? []).length > 0) {
+      await ctx.db.patch(target._id, {
+        parkingLot: reorderLotFirst(target.parkingLot, args.idea),
       });
     }
-    return { sessionId };
+    return { sessionId: target._id };
   },
 });
 
@@ -3688,7 +4060,7 @@ export const answerRenderCheck = authedMutation({
         answeredAt,
         snapshotStorageId: args.snapshotStorageId,
         consoleLines: args.consoleLines,
-        stateJson: args.stateJson,
+        stateJson: sanitizeRenderCheckStateJson(args.stateJson),
       },
       lastStreamActivityAt: answeredAt,
     });
@@ -4196,6 +4568,9 @@ export const setTimeLimit = authedMutation({
   },
 });
 
+/** The nudge a near-expiry session timer leaves for the tutor. */
+const TIME_LIMIT_WHISPER = `The session time is almost up. Please wrap up the current topic naturally within the next minute. ${TIME_LIMIT_WRAP_GUIDANCE}`;
+
 /**
  * Clear the session time limit (parent password required).
  */
@@ -4215,7 +4590,10 @@ export const clearTimeLimit = authedMutation({
     await ctx.db.patch(args.sessionId, {
       sessionTimeLimit: undefined,
       sessionStartTime: undefined,
-      pendingWhisper: undefined,
+      // Drop only the time-limit nudge; a teacher's whisper stays.
+      ...(session.pendingWhisper === TIME_LIMIT_WHISPER
+        ? { pendingWhisper: undefined }
+        : {}),
     });
   },
 });
@@ -4236,10 +4614,7 @@ export const injectTimeLimitWhisper = authedMutation({
     if (!session.sessionTimeLimit || !session.sessionStartTime) return;
     if (session.pendingWhisper) return;
 
-    await ctx.db.patch(args.sessionId, {
-      pendingWhisper:
-        `The session time is almost up. Please wrap up the current topic naturally within the next minute. ${TIME_LIMIT_WRAP_GUIDANCE}`,
-    });
+    await ctx.db.patch(args.sessionId, { pendingWhisper: TIME_LIMIT_WHISPER });
   },
 });
 

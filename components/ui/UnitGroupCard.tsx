@@ -16,13 +16,14 @@
  *
  *   <UnitGroupCard>
  *     <UnitGroupBand emoji title completedCount activityCount ... />
- *     <UnitGroupRow status showDivider href cta>…</UnitGroupRow>
- *     <UnitGroupRow status showDivider … />
+ *     <UnitGroupRow emoji showDivider href cta>…</UnitGroupRow>
+ *     <UnitGroupRow emoji showDivider … />
  *   </UnitGroupCard>
  *
- * Rows lead with an 18px status dot at the same x as the band's 18px emoji
- * box, so every text line (band name + row titles + descriptions) shares
- * one left grid line.
+ * Rows lead with the activity's emoji in an 18px column at the same x as the
+ * band's 18px emoji box, the same lead column Homework rows use, so every
+ * text line (band name + row titles + descriptions) shares one left grid
+ * line. Status lives in the row's button (Start / Continue), not a glyph.
  */
 
 import NextLink from "next/link";
@@ -39,74 +40,17 @@ import {
 } from "@chakra-ui/react";
 import { Surface } from "@/components/ui/Surface";
 
-/** Plate row status. (Completed activities don't appear on the plate, but
- *  "done" is supported for reuse in unit-outline contexts.) */
-export type RowStatus = "here" | "todo" | "done";
-
 const FOCUS_RING = {
   outline: "2px solid",
   outlineColor: "violet.400",
   outlineOffset: "-2px",
 } as const;
 
-// Shared lead-column geometry: an 18px leading glyph (status dot / emoji
-// box) + this gap means the band name and the row titles align on one grid.
+// Shared lead-column geometry: an 18px leading glyph (the row's emoji / the
+// band's emoji box) + this gap means the band name and the row titles align on
+// one grid.
 const LEAD_W = "18px";
 const LEAD_GAP = 2.5; // 10px
-
-export function ActivityStatusDot({ status }: { status: RowStatus }) {
-  if (status === "done") {
-    return (
-      <Flex
-        w={LEAD_W}
-        h={LEAD_W}
-        flexShrink={0}
-        mt="2px"
-        rounded="full"
-        bg="green.500"
-        color="white"
-        align="center"
-        justify="center"
-        fontSize="10px"
-        fontWeight="bold"
-        aria-hidden
-      >
-        ✓
-      </Flex>
-    );
-  }
-  if (status === "here") {
-    return (
-      <Flex
-        w={LEAD_W}
-        h={LEAD_W}
-        flexShrink={0}
-        mt="2px"
-        rounded="full"
-        borderWidth="2px"
-        borderColor="violet.500"
-        align="center"
-        justify="center"
-        aria-hidden
-      >
-        <Box w="6px" h="6px" rounded="full" bg="violet.500" />
-      </Flex>
-    );
-  }
-  return (
-    <Box
-      w={LEAD_W}
-      h={LEAD_W}
-      flexShrink={0}
-      mt="2px"
-      rounded="full"
-      borderWidth="1.5px"
-      borderStyle="dashed"
-      borderColor="gray.300"
-      aria-hidden
-    />
-  );
-}
 
 export function UnitGroupCard({
   children,
@@ -228,7 +172,7 @@ export function UnitGroupBand({
       userSelect="none"
     >
       {/* Emoji in an 18px box so its NAME aligns with the row titles below
-          (rows lead with an 18px status dot + the same gap). */}
+          (rows lead with an 18px emoji column + the same gap). */}
       <Flex
         w={LEAD_W}
         justify="center"
@@ -276,7 +220,7 @@ export function UnitGroupBand({
 }
 
 export function UnitGroupRow({
-  status,
+  emoji,
   showDivider,
   href,
   onClick,
@@ -289,7 +233,8 @@ export function UnitGroupRow({
   onMouseLeave,
   children,
 }: {
-  status: RowStatus;
+  /** The activity's emoji, in the fixed lead column (blank keeps the column). */
+  emoji?: string | null;
   showDivider: boolean;
   href?: string;
   onClick?: () => void;
@@ -321,7 +266,16 @@ export function UnitGroupRow({
       onMouseLeave={onMouseLeave}
     >
       <Flex align="flex-start" gap={LEAD_GAP}>
-        <ActivityStatusDot status={status} />
+        <Text
+          w={LEAD_W}
+          flexShrink={0}
+          fontSize="sm"
+          lineHeight="1.43"
+          textAlign="center"
+          aria-hidden
+        >
+          {emoji ?? ""}
+        </Text>
         <Stack gap={1} flex={1} minW={0}>
           {children}
         </Stack>

@@ -1,5 +1,7 @@
 import { v } from "convex/values";
+import { withoutUnstartedTileSessions } from "./lib/tileSessions";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule, type ScheduleCache } from "./lib/scheduleStore";
 import type { QueryCtx } from "./_generated/server";
 import { activityCounts, digestWatermarkTrails } from "./classDigests";
 import { coreGrid, closureForInstitutionOnDay, currentWeekStartMs } from "./masterSchedule";
@@ -27,11 +29,7 @@ import {
   QUEST_STALLED_MS,
   questsForScholar,
 } from "./lib/questLifecycle";
-import {
-  ERROR_FLAG_MIN_COUNT,
-  ERROR_FLAG_WINDOW_MS,
-  openErrorPatterns,
-} from "./lib/practice/errorFlags";
+import { openPracticeFlags } from "./lib/practiceFlags";
 import { STRUGGLING_MISS_THRESHOLD } from "./lib/practice/scheduler";
 import type { ScholarPulse } from "./lib/rosterPulse";
 import { scholarSlug } from "./lib/channels";
@@ -216,14 +214,18 @@ async function needsALookRows(
         .query("sessions")
         .withIndex("by_user", (q) => q.eq("userId", scholar._id))
         .collect();
-      const latest = sessions
-        .filter(
-          (session) =>
-            !session.isArchived &&
-            !session.isTestDrive &&
-            !session.isOffline &&
-            session.unitId === stalledQuest.unitId,
+      const latest = (
+        await withoutUnstartedTileSessions(
+          ctx,
+          sessions.filter(
+            (session) =>
+              !session.isArchived &&
+              !session.isTestDrive &&
+              !session.isOffline &&
+              session.unitId === stalledQuest.unitId,
+          ),
         )
+      )
         .sort(
           (a, b) =>
             (b.lastMessageAt ?? b._creationTime) -
@@ -516,7 +518,7 @@ async function todaysPlanRows(
       assignment._id,
       placement.activityId,
     );
-    const scheduleEntry = (assignment.activitySchedule ?? []).find(
+    const scheduleEntry = (await readSchedule(ctx, assignment)).find(
       (entry) => entry.activityId === placement.activityId,
     );
     const totalCount =
@@ -799,35 +801,13 @@ async function overnightRows(
   let misconceptionLatestAt = 0;
   const flagScholarIds = new Set<string>();
   for (const scholar of scholars) {
-    const errors = await ctx.db
-      .query("practiceErrorEvents")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
-      .collect();
-    const recent = errors.filter(
-      (event) => event.createdAt >= now - ERROR_FLAG_WINDOW_MS,
-    );
-    const byNode = new Map<string, typeof recent>();
-    for (const event of recent) {
-      const list = byNode.get(event.nodeKey);
-      if (list) list.push(event);
-      else byNode.set(event.nodeKey, [event]);
-    }
-    for (const events of byNode.values()) {
-      for (const open of openErrorPatterns(events, now)) {
-        const matching = events
-          .filter((event) => event.pattern === open.pattern)
-          .sort((a, b) => a.createdAt - b.createdAt);
-        if (
-          matching.length >= ERROR_FLAG_MIN_COUNT &&
-          matching[ERROR_FLAG_MIN_COUNT - 1].createdAt >= since
-        ) {
-          newlyOpened += 1;
-          flagScholarIds.add(String(scholar._id));
-          misconceptionLatestAt = Math.max(
-            misconceptionLatestAt,
-            matching[ERROR_FLAG_MIN_COUNT - 1].createdAt,
-          );
-        }
+    const flags = await openPracticeFlags(ctx, scholar._id, {}, now);
+    for (const { patterns } of flags) {
+      for (const open of patterns) {
+        if (open.openedAt < since) continue;
+        newlyOpened += 1;
+        flagScholarIds.add(String(scholar._id));
+        misconceptionLatestAt = Math.max(misconceptionLatestAt, open.openedAt);
       }
     }
   }
@@ -908,12 +888,14 @@ async function homeworkOutcomeRows(
     allAssignments,
     scholars.map((s) => s._id),
   );
+  const scheduleCache: ScheduleCache = new Map();
   for (const scholar of scholars) {
     const homework = await homeworkForScholarFromAssignments(
       ctx,
       scholar._id,
       byScholar.get(String(scholar._id)) ?? [],
       now,
+      scheduleCache,
     );
     for (const item of homework) {
       if (

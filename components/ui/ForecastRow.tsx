@@ -43,8 +43,17 @@ export function ForecastRow({
   return (
     <HStack justify="space-between" align="flex-start" gap={3}>
       <HStack gap={2} align="flex-start" flex={1} minW={0}>
+        {/* A fixed 18px glyph column, so title and meta share one left
+            edge on every row and line up with the Homework rows' text column. */}
         {glyph ? (
-          <Text fontSize="md" flexShrink={0} lineHeight="1.4" aria-hidden>
+          <Text
+            w="18px"
+            fontSize="md"
+            flexShrink={0}
+            lineHeight="1.4"
+            textAlign="center"
+            aria-hidden
+          >
             {glyph}
           </Text>
         ) : null}

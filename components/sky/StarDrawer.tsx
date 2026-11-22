@@ -14,6 +14,7 @@
  * scholars) — you see what a star *is* before you commit to it.
  */
 
+import { useEffect, useRef, type ReactNode } from "react";
 import NextLink from "next/link";
 import { Box, Button, Drawer, Flex, IconButton, Image, Portal, Text, VStack } from "@chakra-ui/react";
 import { X } from "@phosphor-icons/react";
@@ -31,6 +32,9 @@ export type StarDrawerAction = {
 };
 
 export type StarDrawerContent = {
+  /** which star this is: a different one opens at the top (falls back to
+   *  the title) */
+  id?: string;
   /** small kicker above the title — a domain, "Convergence", a lens name… */
   eyebrow?: string;
   title: string;
@@ -42,23 +46,48 @@ export type StarDrawerContent = {
   scholarName?: string;
   /** little fact chips (reach, scholar count, last visited…) */
   meta?: { label: string; value: string }[];
+  /** drawn in place of the accent dot (a Quest's badge art, say) */
+  leading?: ReactNode;
+  /** more of the body, after the meta chips (links to other stars, say) */
+  extra?: ReactNode;
   actions: StarDrawerAction[];
 };
 
 export function StarDrawer({
   content,
   onClose,
+  sheetMaxHeight,
 }: {
   content: StarDrawerContent | null;
   onClose: () => void;
+  /** On a narrow screen: open from the bottom as a sheet at most this many px
+   *  tall, so the map above it stays in view while a tap moves it. Without
+   *  it the drawer opens from the side. */
+  sheetMaxHeight?: number;
 }) {
   const accent = content?.color ?? "#e9e6ff";
+  const sheet = sheetMaxHeight !== undefined;
+  // A sheet can be short (a phone on its side), so its header and body
+  // scroll together above the actions, which stay outside the scroll: every
+  // action is in reach at any height, and a control scrolled into view (by
+  // Tab, say) is never under them. The side drawer keeps its own scrolling
+  // body; there the wrapper takes no box.
+  const scroller = sheet
+    ? { flex: "1 1 auto", minH: 0, overflowY: "auto" as const }
+    : { display: "contents" };
+  const sheetBody = sheet ? { flex: "none", overflow: "visible" } : {};
+  // A different star opens at its top, not where the last one was scrolled.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const shownStar = content ? content.id ?? content.title : null;
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [shownStar]);
 
   return (
     <Drawer.Root
       open={!!content}
       onOpenChange={(d) => !d.open && onClose()}
-      placement="end"
+      placement={sheet ? "bottom" : "end"}
       size="sm"
     >
       <Portal>
@@ -67,125 +96,140 @@ export function StarDrawer({
           <Drawer.Content
             bg="white"
             color="charcoal.500"
-            borderLeft="1px solid"
             borderColor="gray.200"
-            pt="env(safe-area-inset-top)"
+            {...(sheet
+              ? { maxH: `${sheetMaxHeight}px`, borderTop: "1px solid", borderTopRadius: "2xl" }
+              : { borderLeft: "1px solid", pt: "env(safe-area-inset-top)" })}
             pb="env(safe-area-inset-bottom)"
           >
             {content && (
               <>
-                <Drawer.Header borderBottom="1px solid" borderColor="gray.100" px={6} py={5}>
-                  <Flex align="flex-start" gap={3}>
-                    <Box
-                      mt="6px"
-                      w="12px"
-                      h="12px"
-                      flexShrink={0}
-                      rounded="full"
-                      bg={accent}
-                      boxShadow={`0 0 12px 2px ${accent}`}
-                    />
-                    <Box minW={0} flex={1}>
-                      {content.eyebrow && (
-                        <Text
-                          fontSize="11px"
-                          fontWeight="700"
-                          letterSpacing="0.08em"
-                          textTransform="uppercase"
-                          color="violet.500"
-                          mb={1}
+                <Box
+                  ref={scrollRef}
+                  {...scroller}
+                  // Focus moved without a scroll (Tab wrapping round, focus
+                  // coming back) still lands in view.
+                  onFocus={sheet ? (e) => e.target.scrollIntoView({ block: "nearest" }) : undefined}
+                >
+                  <Drawer.Header borderBottom="1px solid" borderColor="gray.100" px={6} py={5}>
+                    <Flex align="flex-start" gap={3}>
+                      {content.leading ? (
+                        <Box flexShrink={0}>{content.leading}</Box>
+                      ) : (
+                        <Box
+                          mt="6px"
+                          w="12px"
+                          h="12px"
+                          flexShrink={0}
+                          rounded="full"
+                          bg={accent}
+                          boxShadow={`0 0 12px 2px ${accent}`}
+                        />
+                      )}
+                      <Box minW={0} flex={1}>
+                        {content.eyebrow && (
+                          <Text
+                            fontSize="11px"
+                            fontWeight="700"
+                            letterSpacing="0.08em"
+                            textTransform="uppercase"
+                            color="violet.500"
+                            mb={1}
+                          >
+                            {content.eyebrow}
+                          </Text>
+                        )}
+                        <Drawer.Title asChild>
+                          <Text fontFamily="heading" fontWeight="800" fontSize="xl" lineHeight="1.2" color="navy.500">
+                            {content.title}
+                          </Text>
+                        </Drawer.Title>
+                      </Box>
+                      <Drawer.CloseTrigger asChild>
+                        <IconButton
+                          aria-label="Close"
+                          size="sm"
+                          variant="ghost"
+                          flexShrink={0}
+                          mt="-4px"
+                          mr="-8px"
+                          color="charcoal.400"
+                          _hover={{ bg: "gray.100", color: "charcoal.500" }}
                         >
-                          {content.eyebrow}
+                          <X size={18} />
+                        </IconButton>
+                      </Drawer.CloseTrigger>
+                    </Flex>
+                  </Drawer.Header>
+
+                  <Drawer.Body px={6} py={5} {...sheetBody}>
+                    <VStack align="stretch" gap={4}>
+                      {content.scholarName && (
+                        <Flex align="center" gap={2}>
+                          {content.avatarUrl ? (
+                            <Image
+                              src={content.avatarUrl}
+                              alt={content.scholarName}
+                              boxSize="26px"
+                              rounded="full"
+                              objectFit="cover"
+                            />
+                          ) : (
+                            <Flex
+                              boxSize="26px"
+                              rounded="full"
+                              bg={accent}
+                              align="center"
+                              justify="center"
+                              fontSize="12px"
+                              fontWeight="800"
+                              color="navy.500"
+                            >
+                              {content.scholarName.trim()[0]?.toUpperCase() ?? "?"}
+                            </Flex>
+                          )}
+                          <Text fontSize="sm" fontWeight="700" color="charcoal.500">
+                            {content.scholarName}
+                          </Text>
+                        </Flex>
+                      )}
+
+                      {content.body && (
+                        <Text fontSize="sm" color="charcoal.500" lineHeight="1.55">
+                          {content.body}
                         </Text>
                       )}
-                      <Drawer.Title asChild>
-                        <Text fontFamily="heading" fontWeight="800" fontSize="xl" lineHeight="1.2" color="navy.500">
-                          {content.title}
-                        </Text>
-                      </Drawer.Title>
-                    </Box>
-                    <Drawer.CloseTrigger asChild>
-                      <IconButton
-                        aria-label="Close"
-                        size="sm"
-                        variant="ghost"
-                        flexShrink={0}
-                        mt="-4px"
-                        mr="-8px"
-                        color="charcoal.400"
-                        _hover={{ bg: "gray.100", color: "charcoal.500" }}
-                      >
-                        <X size={18} />
-                      </IconButton>
-                    </Drawer.CloseTrigger>
-                  </Flex>
-                </Drawer.Header>
 
-                <Drawer.Body px={6} py={5}>
-                  <VStack align="stretch" gap={4}>
-                    {content.scholarName && (
-                      <Flex align="center" gap={2}>
-                        {content.avatarUrl ? (
-                          <Image
-                            src={content.avatarUrl}
-                            alt={content.scholarName}
-                            boxSize="26px"
-                            rounded="full"
-                            objectFit="cover"
-                          />
-                        ) : (
-                          <Flex
-                            boxSize="26px"
-                            rounded="full"
-                            bg={accent}
-                            align="center"
-                            justify="center"
-                            fontSize="12px"
-                            fontWeight="800"
-                            color="navy.500"
-                          >
-                            {content.scholarName.trim()[0]?.toUpperCase() ?? "?"}
-                          </Flex>
-                        )}
-                        <Text fontSize="sm" fontWeight="700" color="charcoal.500">
-                          {content.scholarName}
-                        </Text>
-                      </Flex>
-                    )}
+                      {content.meta && content.meta.length > 0 && (
+                        <Flex gap={5} wrap="wrap" align="baseline">
+                          {content.meta.map((m) => (
+                            <Text key={m.label} fontSize="xs" color="charcoal.400">
+                              <Box
+                                as="span"
+                                textTransform="uppercase"
+                                letterSpacing="0.06em"
+                                fontSize="10px"
+                                fontWeight="700"
+                                color="charcoal.300"
+                                mr={1.5}
+                              >
+                                {m.label}
+                              </Box>
+                              <Box as="span" fontWeight="700" color="charcoal.500">
+                                {m.value}
+                              </Box>
+                            </Text>
+                          ))}
+                        </Flex>
+                      )}
 
-                    {content.body && (
-                      <Text fontSize="sm" color="charcoal.500" lineHeight="1.55">
-                        {content.body}
-                      </Text>
-                    )}
-
-                    {content.meta && content.meta.length > 0 && (
-                      <Flex gap={5} wrap="wrap" align="baseline">
-                        {content.meta.map((m) => (
-                          <Text key={m.label} fontSize="xs" color="charcoal.400">
-                            <Box
-                              as="span"
-                              textTransform="uppercase"
-                              letterSpacing="0.06em"
-                              fontSize="10px"
-                              fontWeight="700"
-                              color="charcoal.300"
-                              mr={1.5}
-                            >
-                              {m.label}
-                            </Box>
-                            <Box as="span" fontWeight="700" color="charcoal.500">
-                              {m.value}
-                            </Box>
-                          </Text>
-                        ))}
-                      </Flex>
-                    )}
-                  </VStack>
-                </Drawer.Body>
+                      {content.extra}
+                    </VStack>
+                  </Drawer.Body>
+                </Box>
 
                 {content.actions.length > 0 && (
-                  <Drawer.Footer borderTop="1px solid" borderColor="gray.100" px={6} py={5}>
+                  <Drawer.Footer borderTop="1px solid" borderColor="gray.100" px={6} py={5} flexShrink={0}>
                     <VStack align="stretch" gap={2} w="full">
                       {content.actions.map((a) => {
                         const variant = a.primary ? ("solid" as const) : ("outline" as const);

@@ -94,6 +94,17 @@ export type WorkshopModeSession = {
    * where the scholar does (TRA-477).
    */
   serverDefault?: WorkshopMode | null;
+  /**
+   * The session was seeded from the activity's starter app
+   * (`sessions.vibecodeStarterUsedAt`), an app the scholar did not build.
+   * `false`: no app was handed to them, so the app gets built here. Set when
+   * the session is made and never changes, so the mode does not flip once
+   * the first build lands. Absent = unknown, which keeps the coached default.
+   */
+  openedOnStarter?: boolean;
+  /** An app with a character is on screen (only the scholar-facing artifact
+   *  read carries it): the scholar plays it with the tutor. */
+  hasAppCharacter?: boolean;
 };
 
 /**
@@ -101,14 +112,22 @@ export type WorkshopModeSession = {
  *  - the server said Play (`serverDefault`) → Play;
  *  - a teacher build session (`teacherBuildKickoff`) opens in Edit — the build
  *    is already running and the teacher is shaping the app;
+ *  - an app with a character opens in Play — in Edit the tutor hears none of
+ *    the exchanges;
  *  - a scholar coached session (an `appRequest` app they did not build) opens
- *    in Play — they use the app with the tutor;
+ *    in Play — they use the app with the tutor — but only when it was handed
+ *    one: a session that did not open on the starter has nothing to play
+ *    yet, and opens in Edit, where its app gets built (a scholar who may not
+ *    edit is clamped back to Play by the caller, and the Play tutor says how
+ *    to get an app). A Gecko opened four app activities in Play with nothing
+ *    in them (prod, Nov 2026);
  *  - a scholar vibecode / blank session opens in Edit — building is the point.
  */
 export function defaultWorkshopMode(session: WorkshopModeSession): WorkshopMode {
   if (session.serverDefault === "play") return "play";
   if (session.teacherBuildKickoff) return "edit";
-  if (session.hasAppRequest) return "play";
+  if (session.hasAppCharacter) return "play";
+  if (session.hasAppRequest && session.openedOnStarter !== false) return "play";
   return "edit";
 }
 
@@ -124,19 +143,31 @@ export function defaultWorkshopMode(session: WorkshopModeSession): WorkshopMode 
  * (`always`) or not-yet-unlocked (`locked`) app keeps the closed default.
  * Callers apply this once, as the initial value, and only where the chat is a
  * side column: a narrow screen's bottom drawer would cover the app.
+ *
+ * A tile session (`getWithMessages` → `tileSession`) never opens it, even for
+ * an app with a character: a tile is somewhere the scholar goes to make
+ * something, and the tutor appears when asked.
  */
 export function defaultChatOpen({
   access,
   hasAppCharacter,
   isSessionOwner,
   isTestDrive,
+  tileSession = false,
 }: {
   access: EffectiveEditAccess;
   hasAppCharacter: boolean;
   isSessionOwner: boolean;
   isTestDrive: boolean;
+  tileSession?: boolean;
 }): boolean {
-  return access === "hidden" && hasAppCharacter && isSessionOwner && !isTestDrive;
+  return (
+    access === "hidden" &&
+    hasAppCharacter &&
+    isSessionOwner &&
+    !isTestDrive &&
+    !tileSession
+  );
 }
 
 /**
@@ -261,11 +292,30 @@ export function playSurfaceFor({
   isStaff: boolean;
   isSessionOwner: boolean;
 }): { showResetAppState: boolean; showViewerChrome: boolean } {
-  const buildsThisApp = isStaff || access === "allowed";
   return {
-    showResetAppState: mode === "play" && isSessionOwner && buildsThisApp,
-    showViewerChrome: mode === "edit" || buildsThisApp,
+    showResetAppState:
+      mode === "play" && canResetAppState({ access, isStaff, isSessionOwner }),
+    showViewerChrome: mode === "edit" || isStaff || access === "allowed",
   };
+}
+
+/**
+ * Who may reset an app's saved state, whatever the mode: its owner, when they
+ * build it (staff, or a scholar with Edit live). The rules of playSurfaceFor
+ * above minus its Play-only check. The native builder calls this directly: its
+ * Allow edits switch only decides what the next chat message may do, so Reset
+ * belongs to the app on screen and shows with the switch on or off.
+ */
+export function canResetAppState({
+  access,
+  isStaff,
+  isSessionOwner,
+}: {
+  access: EffectiveEditAccess;
+  isStaff: boolean;
+  isSessionOwner: boolean;
+}): boolean {
+  return isSessionOwner && (isStaff || access === "allowed");
 }
 
 /**

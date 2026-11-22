@@ -188,15 +188,15 @@ describe("buildLevelsSection", () => {
 // ── Wiring: the assembled prompt carries the slot, cached ────────────
 
 describe("buildSystemPrompt — the levels slot", () => {
-  // `readWrite` is the trailing positional param; everything between the six
+  // `readWrite` is the trailing positional param; everything between the five
   // required leading args and it takes its default (undefined).
-  const READ_WRITE_INDEX = 54;
+  const READ_WRITE_INDEX = 52;
   const parts = (
     readingLevel: string | null,
     readWrite: { read: ReadLevel; write: WriteMode } | null,
   ) => {
     const args: unknown[] = new Array(READ_WRITE_INDEX + 1).fill(undefined);
-    args.splice(0, 6, null, readingLevel, "Kai", null, null, null);
+    args.splice(0, 5, readingLevel, "Kai", null, null, null);
     args[READ_WRITE_INDEX] = readWrite;
     return (
       buildSystemPromptParts as unknown as (
@@ -218,7 +218,7 @@ describe("buildSystemPrompt — the levels slot", () => {
 
   test("only the levels slot differs between scholars", () => {
     const build = (readingLevel: string | null) =>
-      buildSystemPrompt(null, readingLevel, "Kai", null, null, null);
+      buildSystemPrompt(readingLevel, "Kai", null, null, null);
     const SLOT = "<<LEVELS_SLOT>>";
     const graded = build("5");
     const pre = build(PRE_READER_LEVEL);

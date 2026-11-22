@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -22,6 +22,10 @@ import {
   useFamilyMessageAttachments,
 } from "./MessageAttachmentPicker";
 import { pasteKeepingLinks } from "./pasteKeepingLinks";
+import { aboutLine } from "@/shared/messageAbout";
+import { flavorOf } from "@/shared/scholarThreadFlavor";
+import { QuestProposalAnswer } from "./QuestProposalAnswer";
+import { QuestSeenIt } from "./QuestSeenIt";
 
 /**
  * Shared thread views. ONE layout, row, body and composer render every kind
@@ -391,6 +395,16 @@ export function ScholarMessageThread({
   const threadAttachments = useQuery(api.scholarMessages.getThreadAttachments, {
     threadId,
   });
+  // A Quest thread's proposal, for the teachers who may answer it. The read
+  // is null for everyone else, so no one else gets buttons.
+  const questUnitId =
+    thread?.viewer === "staff" && thread.about?.type === "quest"
+      ? thread.about.unitId
+      : null;
+  const proposal = useQuery(
+    api.questProposals.forStaff,
+    questUnitId ? { unitId: questUnitId } : "skip",
+  );
   const reply = useMutation(api.scholarMessages.reply);
   const markRead = useMutation(api.scholarMessages.markRead);
   const editMessage = useMutation(api.scholarMessages.editMessage);
@@ -419,8 +433,13 @@ export function ScholarMessageThread({
   if (thread === undefined) return <ThreadLoading />;
   if (thread === null) return <ThreadGone />;
 
+  const flavor = flavorOf(thread);
   const subject =
-    thread.kind === "workshop" ? thread.suggestion?.title ?? null : null;
+    flavor === "workshop"
+      ? thread.suggestion?.title ?? null
+      : flavor === "about"
+        ? aboutLine(thread.about, thread.aboutTitle, thread.viewer)
+        : null;
   const withLine = staffWithLine(thread.staffParticipants, viewerId);
 
   const header =
@@ -429,7 +448,7 @@ export function ScholarMessageThread({
         <Avatar
           name={thread.title}
           src={
-            thread.kind === "mentor"
+            flavor === "general"
               ? thread.staffParticipants[0]?.image ?? undefined
               : undefined
           }
@@ -458,13 +477,15 @@ export function ScholarMessageThread({
           {thread.scholarName}
         </Text>
         <Text fontFamily="body" color="charcoal.400" fontSize="xs" truncate>
-          {thread.kind === "mentor"
+          {flavor === "general"
             ? withLine ?? "Conversation"
-            : subject
-              ? `Workshop · ${subject}`
-              : "Workshop"}
+            : flavor === "about"
+              ? subject ?? "About a wonder or Quest"
+              : subject
+                ? `Workshop · ${subject}`
+                : "Workshop"}
         </Text>
-        {thread.kind === "mentor" && thread.canReply && (
+        {flavor === "general" && thread.canReply && (
           // A failure in the add-people picker must never take down the thread.
           <ErrorBoundary fallback={null}>
           <AddStaffToThread
@@ -514,26 +535,37 @@ export function ScholarMessageThread({
       }
     >
       {thread.messages.map((m) => (
-        <MessageRow
-          key={m._id}
-          message={m}
-          // Each side reads as one voice: the scholar's bubbles sit on the
-          // scholar's right, the whole staff side on staff's right.
-          mine={
-            thread.viewer === "scholar"
-              ? m.authorType === "scholar"
-              : m.authorType === "teacher"
-          }
-          authorLabel={m.mine ? null : m.authorName}
-          tombstoneLabel={m.mine ? "You" : m.authorName}
-          attachments={
-            threadAttachments?.filter(
-              (attachment) => attachment.messageId === m._id,
-            ) ?? []
-          }
-          actions={actions}
-          now={now}
-        />
+        <Fragment key={m._id}>
+          <MessageRow
+            message={m}
+            // Each side reads as one voice: the scholar's bubbles sit on the
+            // scholar's right, the whole staff side on staff's right.
+            mine={
+              thread.viewer === "scholar"
+                ? m.authorType === "scholar"
+                : m.authorType === "teacher"
+            }
+            authorLabel={m.mine ? null : m.authorName}
+            tombstoneLabel={m.mine ? "You" : m.authorName}
+            attachments={
+              threadAttachments?.filter(
+                (attachment) => attachment.messageId === m._id,
+              ) ?? []
+            }
+            actions={actions}
+            now={now}
+          />
+          {questUnitId && proposal && proposal.proposalMessageId === m._id && (
+            <Box px={4} pb={2}>
+              <QuestProposalAnswer unitId={questUnitId} proposal={proposal} />
+            </Box>
+          )}
+          {questUnitId && proposal?.readyToShow?.messageId === m._id && (
+            <Box px={4} pb={2}>
+              <QuestSeenIt unitId={questUnitId} title={proposal.readyToShow.title} />
+            </Box>
+          )}
+        </Fragment>
       ))}
     </ThreadLayout>
   );

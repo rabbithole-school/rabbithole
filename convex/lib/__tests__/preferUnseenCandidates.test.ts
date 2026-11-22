@@ -19,11 +19,21 @@ import {
 type Cand = { itemId: string; tag?: string };
 const c = (itemId: string, tag?: string): Cand => ({ itemId, tag });
 
-// add_within_5 renders identity off its stem (no visual) and seeds 2 & 3
-// deterministically render the SAME question — a real template stem collision.
+// add_within_5 renders identity off its stem (no visual), and its fact space is
+// small, so two seeds soon render the SAME question — a real template stem
+// collision. Found here rather than hardcoded, so a generator change can't
+// silently make the pair stop colliding.
 const TEMPLATE_SKILL = "add_within_5";
-const COLLIDING_SEED_A = 2;
-const COLLIDING_SEED_B = 3;
+const [COLLIDING_SEED_A, COLLIDING_SEED_B] = (() => {
+  const firstSeedByIdentity = new Map<string, number>();
+  for (let seed = 0; seed < 100; seed++) {
+    const identity = canonicalItemIdentity(makeItemId(TEMPLATE_SKILL, seed));
+    const earlier = firstSeedByIdentity.get(identity);
+    if (earlier !== undefined) return [earlier, seed];
+    firstSeedByIdentity.set(identity, seed);
+  }
+  throw new Error(`no two ${TEMPLATE_SKILL} seeds below 100 collide`);
+})();
 
 describe("canonicalItemIdentity", () => {
   test("a stored/manipulative gen# id is its own identity", () => {

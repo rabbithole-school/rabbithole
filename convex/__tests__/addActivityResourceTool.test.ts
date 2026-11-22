@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import type { ActionCtx } from "../_generated/server";
@@ -100,7 +101,7 @@ async function seedWorld(t: ReturnType<typeof convexTest>) {
       kind: "online",
       order: 2,
     });
-    const assignmentId = await ctx.db.insert("assignments", {
+    const assignmentId = await insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds: [scholarId],

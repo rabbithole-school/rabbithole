@@ -35,6 +35,7 @@ describe("custom app OG route", () => {
       origin: null,
       thumbnailUrl: null,
       appAssets: [],
+      credit: null,
     });
 
     const response = await GET(
@@ -60,6 +61,7 @@ describe("custom app OG route", () => {
       origin: "starter",
       thumbnailUrl,
       appAssets: [],
+      credit: null,
     });
     fetchMock.mockImplementation((input, init) =>
       input === thumbnailUrl
@@ -98,6 +100,7 @@ describe("custom app OG route", () => {
       origin: "starter",
       thumbnailUrl,
       appAssets: [],
+      credit: null,
     });
     fetchMock.mockImplementation((input, init) =>
       input === thumbnailUrl
@@ -136,6 +139,7 @@ describe("custom app OG route", () => {
       origin: "starter",
       thumbnailUrl,
       appAssets: [],
+      credit: null,
     });
     fetchMock.mockImplementation((input, init) =>
       input === thumbnailUrl

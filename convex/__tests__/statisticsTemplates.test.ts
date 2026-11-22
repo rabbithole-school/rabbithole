@@ -303,8 +303,8 @@ describe("probability statistics-strand deterministic templates", () => {
       expect(statistical.choices?.[statistical.answer.choiceIndex]).toMatch(
         /students in our class|sunflower plants in our garden/,
       );
-      expect(collection.choices?.[collection.answer.choiceIndex]).toBe(
-        "Measure every pencil end to end in centimeters.",
+      expect(collection.choices?.[collection.answer.choiceIndex]).toMatch(
+        /^Measure every \w+ .+ in (centimeters|meters|inches)\.$/,
       );
     }
   });
@@ -326,7 +326,7 @@ describe("probability statistics-strand deterministic templates", () => {
       ) return "justified";
       if (
         choice.includes("population must have changed")
-        || choice.includes("population changed")
+        || choice.includes("population itself changed")
         || choice.includes("population could not have stayed the same")
       ) return "population-change";
       if (choice.includes("largest") || choice.includes("greatest percentage")) {
@@ -335,7 +335,7 @@ describe("probability statistics-strand deterministic templates", () => {
       if (
         choice.includes("Random sampling failed")
         || choice.includes("proper random sample")
-        || choice.includes("none of the samples was random")
+        || choice.includes("none of the four samples could have been random")
       ) return "random-failed";
       throw new Error(`Unknown sampling-variability choice: ${choice}`);
     };

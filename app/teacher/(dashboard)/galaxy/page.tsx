@@ -10,6 +10,8 @@ import { Box, Heading, Text } from "@chakra-ui/react";
 // meaning, with three lenses: the Full atlas, a scholar's Sky, and the Class
 // Galaxy. Backed by convex/concepts.ts. This is the single unified surface;
 // /teacher/atlas (and /atlas) redirect here. Deep-link a lens via ?lens=.
+// The full screen button stands in for the retired /teacher/galaxy-wall kiosk,
+// which redirects here.
 const ConceptAtlasView = dynamic(
   () => import("@/components/ConceptAtlasView").then((m) => m.ConceptAtlasView),
   { ssr: false },
@@ -38,7 +40,7 @@ function GalaxyInner() {
           scholar&apos;s <b>Sky</b>, or the <b>Class Galaxy</b> (every scholar&apos;s
           Sky overlaid — where the cohort converges).
         </Text>
-        <ConceptAtlasView initialMode={initialMode} groupId={groupId} height="clamp(420px, calc(100dvh - 260px), 880px)" />
+        <ConceptAtlasView initialMode={initialMode} groupId={groupId} allowFullscreen height="clamp(420px, calc(100dvh - 260px), 880px)" />
       </Box>
     </Box>
   );

@@ -1,4 +1,5 @@
 import { convexTest, type TestConvex } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -102,7 +103,6 @@ describe("curriculum node duplication", () => {
           processId,
           durationMinutes: 35,
           hasScholarAngles: true,
-          defaultMode: "classFocus",
           deliverable: {
             kind: "text",
             prompt: "Explain the strongest design.",
@@ -161,7 +161,6 @@ describe("curriculum node duplication", () => {
       processId,
       durationMinutes: 35,
       hasScholarAngles: true,
-      defaultMode: "classFocus",
       recipe: "baseline",
       order: 2,
     });
@@ -591,7 +590,7 @@ describe("curriculum node duplication", () => {
         order: 0,
       });
 
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId],

@@ -199,6 +199,17 @@ describe("mcpServiceAccounts", () => {
       ctx.db.insert("users", { name: "A Person", username: `svc-${institution!.slug}-teacher`, role: "teacher" }),
     );
     const as = await withUser(t, admin);
+    await expect(
+      as.mutation(api.mcpServiceAccounts.issueToken, { kind: "teacher", readOnly: false }),
+    ).rejects.toThrow(/belongs to a person/);
+    // The read-only service user has its own username, guarded the same way.
+    await t.run((ctx) =>
+      ctx.db.insert("users", {
+        name: "Another Person",
+        username: `svc-${institution!.slug}-teacher-readonly`,
+        role: "teacher",
+      }),
+    );
     await expect(as.mutation(api.mcpServiceAccounts.issueToken, { kind: "teacher" })).rejects.toThrow(
       /belongs to a person/,
     );

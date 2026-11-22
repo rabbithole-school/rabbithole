@@ -18,11 +18,13 @@ import { internal } from "./_generated/api";
 import { authedQuery, authedMutation, teacherQuery } from "./lib/customFunctions";
 import { requireTeacherOrSelf } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
+import { withoutWonders } from "./lib/seeds";
 import {
   hasScholarMembership,
   requireActiveLearnerInstitution,
 } from "./lib/scholarEnrollment";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule } from "./lib/scheduleStore";
 import {
   applyAttempt,
   computeFrontier,
@@ -71,6 +73,7 @@ import {
   PLACEMENT_POLICY,
   GRADE_ONLY_POLICY,
   STORY_THREAD_POLICY,
+  type FormOutcome,
   type ServableItem,
   type Submission,
 } from "./lib/practice/servable";
@@ -79,6 +82,7 @@ import {
   serveItems,
   servedItemFromServable,
   SESSION_POLICY,
+  STORED_FETCH_LIMIT,
 } from "./lib/practice/serve";
 import { STRETCH_DIALOGUE_EVIDENCE_TYPE } from "./lib/practice/dialogueStretch";
 import {
@@ -135,6 +139,7 @@ import {
 import type { ManipulativeSpec } from "../lib/manipulative/types";
 import { isCurrentManipulativeKind } from "../lib/manipulative/types";
 import { assertGradableManipulative } from "../lib/manipulative/authoring";
+import { FUNCTION_GRAPH_EXAMPLES } from "../lib/manipulative/functionGraphExamples";
 import { parseManipulativeSpec, redactManipulativeSpecForClient } from "../lib/manipulative/grade";
 import { goalText as manipulativeGoalText, describeState as describeManipulativeState } from "../lib/manipulative/logic";
 import { MATH_CROSS_DOMAIN_SEEDS } from "./lib/practice/crossDomainSeeds";
@@ -174,10 +179,15 @@ import {
   formatAnswerForDisplay,
   formatUnit,
   parseAnswer,
+  type AnswerForm,
 } from "./lib/practice/answers";
-import { expressionAnswerSignals } from "./lib/practice/answerShape";
 import { buildPlacementRevealLine, verifyRevealLine, extractNumbers } from "./lib/practice/revealLine";
-import { makeItemId, parseItemId, canonicalItemIdentity } from "./lib/practice/session";
+import {
+  makeItemId,
+  parseItemId,
+  canonicalItemIdentity,
+  templateInputHints,
+} from "./lib/practice/session";
 import { promptVisualValidator } from "./lib/practice/promptVisual";
 import { classifyError } from "./lib/practice/errorPatterns";
 import type { ErrorPattern } from "./lib/practice/errorPatterns";
@@ -191,12 +201,12 @@ import {
   shouldSkipImplicitCredit,
   type ImplicitCreditAttemptSignal,
 } from "./lib/practice/implicitCredit";
-import { pickFlaggedNode, pickRemediationTarget } from "./lib/practice/remediation";
+import { pickRemediationTarget } from "./lib/practice/remediation";
 import {
-  openErrorPatterns,
   type OpenErrorPattern,
   PATTERN_PHRASING,
 } from "./lib/practice/errorFlags";
+import { openPracticeFlags } from "./lib/practiceFlags";
 import {
   WHOLE_NUMBER_ARITHMETIC_DOMAIN,
 } from "./seed/wholeNumberArithmeticGraph";
@@ -205,6 +215,7 @@ import { PROBABILITY_DOMAIN } from "./seed/probabilityGraph";
 import { GEOMETRY_MEASUREMENT_DOMAIN } from "./seed/geometryMeasurementGraph";
 import { RATIO_PROPORTION_PERCENT_DOMAIN } from "./seed/ratioProportionPercentGraph";
 import { EARLY_ALGEBRA_DOMAIN } from "./seed/earlyAlgebraGraph";
+import { ALGEBRA_2_MANIPULATIVE_TARGETS } from "./seed/algebra2Manipulatives";
 import { INTEGERS_COORDINATES_DOMAIN } from "./seed/integersCoordinatesGraph";
 import { ALGEBRA_1_DOMAIN } from "./seed/algebra1Graph";
 import { DISCRETE_MATH_DOMAIN } from "./seed/discreteMathGraph";
@@ -219,7 +230,10 @@ import { practicePrereqConcept } from "../shared/practiceDomainLabels";
 import { FAST_MATH_NAME } from "../shared/fastMathName";
 import { pickStartingSkillLabel } from "../shared/placementResultCopy";
 import { dayKeyForTimezone } from "../shared/institutionDay";
-import { timeZoneForScholar } from "./lib/institutionTime";
+import {
+  institutionDayForRequest,
+  timeZoneForScholar,
+} from "./lib/institutionTime";
 import { mergeDomainQueues, roundRobin } from "./lib/practice/mixedQueue";
 import {
   planMappingBand,
@@ -507,6 +521,9 @@ export const startQuickFactsPractice = authedQuery({
       // tracks the real institution-local calendar day.
       scopeKey: QUICK_FACTS_SCOPE_KEY,
       dayKey: dayKeyForTimezone(
+        // t11-ok: stamps the day a run was served. Runs are fetched once with
+        // convex.query; the web page's subscribed probe reads only `available`
+        // and `domain`, never this.
         Date.now(),
         await timeZoneForScholar(ctx, args.scholarId),
       ),
@@ -593,13 +610,9 @@ async function computeRemediationSkillKey(
   edges: GraphEdge[],
 ): Promise<string | undefined> {
   const now = Date.now();
-  const events = await ctx.db
-    .query("practiceErrorEvents")
-    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-    .collect();
-  const inDomain = events.filter((e) => e.domain === domain);
-  const flaggedNode = pickFlaggedNode(inDomain, now);
-  if (flaggedNode === null) return undefined;
+  const flaggedNode = (await openPracticeFlags(ctx, scholarId, { domain }, now))[0]
+    ?.nodeKey;
+  if (flaggedNode === undefined) return undefined;
   const target = pickRemediationTarget(
     flaggedNode,
     edges,
@@ -1476,6 +1489,8 @@ export const summaryForScholar = authedQuery({
     const loaded = scopeLoadedDomain(practiceScope, domain, await loadDomain(ctx, domain));
     const { skills, edges } = loaded;
     const mastery = await loadMastery(ctx, args.scholarId, domain);
+    // t11-ok: a teacher panel's due count. Retention decays on a days-scale
+    // half-life and every attempt re-runs this, so hours of lag change little.
     const now = Date.now();
     const keys = skills.map((s) => s.skillKey);
     const graphEdges: GraphEdge[] = edges.map((e) => ({
@@ -1823,6 +1838,8 @@ export const nextForScholar = authedQuery({
       skills.map((s) => s.skillKey),
       edges,
       stateOf,
+      // t11-ok: a teacher report's up-next list. Due-ness decays on a days-scale
+      // half-life and every attempt re-runs this, so hours of lag change little.
       Date.now(),
       args.limit ?? 5,
       { ...buildStrandScheduling(skills, edges, mastery, gradeLevel, args.strandHint, args.excludedStrands, firstBlock), applyMixFloor: true, remediationSkillKey },
@@ -1858,7 +1875,12 @@ export const playlistForScholar = authedQuery({
   args: {
     scholarId: v.optional(v.id("users")),
     domain: v.optional(v.string()),
-    // Subscription cache-buster changed by clients at institution-local midnight.
+    // The institution-local day for `practicedToday`, from the client's
+    // useInstitutionDay (re-armed at institution midnight). The Home cards on
+    // web and native send it. The in-run doneness reads omit it and get the
+    // server's day, which goes stale only for a run that crosses institution
+    // midnight: attempts in the read's own domain re-run it, a mixed run's
+    // other domains don't.
     dayKey: v.optional(v.string()),
     // Optional scholar choice (You Pick, select-and-recompose): when its domain
     // matches the resolved `domain` below, its strand is force-activated +
@@ -1948,11 +1970,14 @@ export const playlistForScholar = authedQuery({
     const gradeLevel = await scholarGradeLevel(ctx, scholarId);
     const labelOf = new Map(skills.map((s) => [s.skillKey, s.label]));
 
-    // `dayKey` is intentionally not trusted for semantics: it only invalidates
-    // the mounted subscription at local midnight. The server resolves the
-    // scholar's institution and current local day authoritatively.
+    // Answer for the client's institution day when it sent one (T11): the
+    // subscription then depends on its args, not on when the server last ran.
     const timeZone = await timeZoneForScholar(ctx, scholarId);
-    const currentDayKey = dayKeyForTimezone(Date.now(), timeZone);
+    const currentDayKey =
+      args.dayKey !== undefined
+        ? institutionDayForRequest(args.dayKey, timeZone).dayKey
+        // t11-ok: in-run doneness reads only; see the dayKey arg above.
+        : dayKeyForTimezone(Date.now(), timeZone);
     const practicedTodayKeys = new Set<string>();
     for (const row of mastery.values()) {
       if (
@@ -1978,6 +2003,9 @@ export const playlistForScholar = authedQuery({
       skills.map((s) => s.skillKey),
       edges.map((e) => ({ fromKey: e.fromKey, toKey: e.toKey })),
       stateOf,
+      // t11-ok: due-ness decays on a days-scale half-life, and this re-runs at
+      // midnight and on every attempt. At worst the preview misses a review
+      // that came due since; Start (a one-shot practiceSession) serves it.
       Date.now(),
       5,
       {
@@ -2192,16 +2220,31 @@ export const playlistForScholar = authedQuery({
 });
 
 /** The subset of a mastery row the never-attempted test reads. */
-type AttemptEvidence = { source?: string; lastAttemptAt?: number };
+type AttemptEvidence = {
+  source?: string;
+  lastAttemptAt?: number;
+  lastPracticedAt?: number;
+  repetition?: number;
+};
 
 /** True when the scholar has ACTUALLY ATTEMPTED this skill: a recorded practice
  *  attempt (`lastAttemptAt`, stamped only by `recordAttemptCore`) or a
  *  demonstrated `source` (covers rows that predate `lastAttemptAt`). Inferred
  *  placement/reprobe credit alone is NOT an attempt — the exact complement of
  *  the confirmation lane's `inferredDueCredit`, never `lastPracticedAt`
- *  (placement inflates it). */
+ *  (placement inflates it). One exception: credit a "haven't learned this yet"
+ *  just dropped (inferred source, zero reps, no SR clock) is new ground again
+ *  despite its attempt stamp. An ordinary miss on a frontier seed starts the SR
+ *  clock, so it still reads as attempted. */
 export function skillAttempted(row: AttemptEvidence | undefined): boolean {
   if (!row) return false;
+  if (
+    row.repetition === 0 &&
+    row.lastPracticedAt === undefined &&
+    !isDemonstratedSource(row.source)
+  ) {
+    return false;
+  }
   return row.lastAttemptAt !== undefined || isDemonstratedSource(row.source);
 }
 
@@ -2236,10 +2279,6 @@ async function resolveRunLaunchpad(
     /** skillKey → the scholar's mastery row, if any (read through
      *  `skillAttempted` for the never-attempted trigger). */
     masteryByKey: Map<string, AttemptEvidence>;
-    /** The client renders the question frame (`practiceSession`'s
-     *  `questionFraming`). False = an older build: no `item_steps` frames (its
-     *  card would render no atoms) and the ≤1/day cap stays on. */
-    questionFraming: boolean;
   },
 ): Promise<{ at: number; entry: InstructionEntry } | undefined> {
   if (!isSelf) return undefined;
@@ -2263,17 +2302,11 @@ async function resolveRunLaunchpad(
     };
     runItems.push(runItem);
     if (!isFrameableLane(it.lane) || !runItem.strand || nodeAttempted(it.skillKey)) continue;
-    if (!opts.questionFraming) {
-      // An older client can only render content atoms, so an item's own
-      // teaching step is never its move.
+    try {
+      const servable = await resolveServableItem(ctx, it.itemId, runItem.domain);
+      runItem.hasTeachingStep = hasTeachingStep(servable.prompt.workedSteps);
+    } catch {
       runItem.hasTeachingStep = false;
-    } else {
-      try {
-        const servable = await resolveServableItem(ctx, it.itemId, runItem.domain);
-        runItem.hasTeachingStep = hasTeachingStep(servable.prompt.workedSteps);
-      } catch {
-        runItem.hasTeachingStep = false;
-      }
     }
     if (!runItem.hasTeachingStep && !nodeContent.has(it.skillKey)) {
       const rows = await ctx.db
@@ -2298,29 +2331,17 @@ async function resolveRunLaunchpad(
     .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
     .collect();
   const eventByKey = new Map<string, InstructionEventLike>(events.map((e) => [e.key, e]));
-  const timeZone = await timeZoneForScholar(ctx, scholarId);
-  const dayBucket = dayKeyForTimezone(Date.now(), timeZone);
 
   const chosen = selectRunLaunchpad({
     items: runItems,
     hasAttemptOnNode: nodeAttempted,
     hasNodeContent: (skillKey) => nodeContent.get(skillKey) != null,
     eventByKey,
-    dayBucket,
-    // A question-framing client renders the entry as the "Can you already do
-    // this?" pill, which is exempt from the cross-key ≤1/day governor (see the
-    // selector's `dailyCap`). An older installed iPad build (no
-    // `questionFraming`) still mounts the standalone card, so it keeps the cap
-    // here as well as in `claimInstructionShown` (its claim carries no
-    // `framing`).
-    dailyCap: !opts.questionFraming,
   });
   if (!chosen) return undefined;
 
   const content = chosen.move === "node_content" ? nodeContent.get(chosen.nodeKey) ?? null : null;
   if (chosen.move === "node_content" && !content) return undefined;
-  // Never hand an older client a frame it cannot render (no atoms).
-  if (!opts.questionFraming && chosen.move !== "node_content") return undefined;
   const label = items[chosen.at]?.skillLabel ?? chosen.nodeKey;
   return {
     at: chosen.at,
@@ -2478,6 +2499,8 @@ async function resolveRunGameBeat(
 export const practiceSet = authedQuery({
   args: { skillKey: v.string(), count: v.optional(v.number()), seed: v.optional(v.number()) },
   handler: async (_ctx, args) => {
+    // t11-ok: the clock is only a seed for an unseeded call, not a time; a
+    // subscription that keeps one seed keeps one stable set.
     return generateSet(args.skillKey, args.count ?? 8, args.seed ?? Date.now() >>> 0);
   },
 });
@@ -3087,6 +3110,40 @@ async function recentServedIdentities(
   return identities;
 }
 
+/**
+ * Review rotation: for each queued REVIEW skill, the stored (`gen#`) item ids of
+ * this scholar's latest attempts on it, newest first. Serving orders that
+ * skill's stored pool least-recently-seen first, so a review never repeats the
+ * item last seen — the one just missed included — while the pool has another.
+ * The recent-serve window above cannot do this: a review typically comes back
+ * days after its last serve, past the window, and the pool order alone then
+ * picks the same first row every time. Bounded: one indexed `take` per review
+ * skill (four times the stored fetch limit). A skill with no stored attempts is left out and serves as before.
+ */
+async function reviewItemHistory(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+  reviewSkillKeys: Iterable<string>,
+): Promise<Map<string, string[]>> {
+  const history = new Map<string, string[]>();
+  for (const skillKey of new Set(reviewSkillKeys)) {
+    const rows = await ctx.db
+      .query("practiceAttempts")
+      .withIndex("by_scholar_node_createdAt", (q) =>
+        q.eq("scholarId", scholarId).eq("nodeKey", skillKey),
+      )
+      .order("desc")
+      // Template attempts on the same skill outnumber stored ones, so read a
+      // wider bounded window and keep the newest stored ids from it.
+      .take(STORED_FETCH_LIMIT * 4);
+    const itemIds = rows
+      .flatMap((row) => (row.itemId?.startsWith("gen#") ? [row.itemId] : []))
+      .slice(0, STORED_FETCH_LIMIT);
+    if (itemIds.length > 0) history.set(skillKey, itemIds);
+  }
+  return history;
+}
+
 // Teach-before-re-serve window: how far back serving looks for the MISS that
 // arms the cold gate below. Bounded on `by_scholar_createdAt` exactly like
 // `recentServedIdentities` above, rather than collecting a scholar's whole
@@ -3267,18 +3324,28 @@ async function verifiedProblemSetKeys(
   if (!lesson) return null;
   const now = Date.now();
   const assignments = await ctx.db.query("assignments").collect();
-  const live = assignments.some((assignment) =>
-    !assignment.archivedAt &&
-    assignment.unitId === lesson.unitId &&
-    assignment.scholarIds.some((id) => id === scholarId) &&
-    (assignment.selfPaced ||
-      (assignment.activitySchedule ?? []).some(
+  let live = false;
+  for (const assignment of assignments) {
+    if (
+      assignment.archivedAt ||
+      assignment.unitId !== lesson.unitId ||
+      !assignment.scholarIds.some((id) => id === scholarId)
+    ) {
+      continue;
+    }
+    if (
+      assignment.selfPaced ||
+      (await readSchedule(ctx, assignment)).some(
         (entry) =>
           entry.activityId === activityId &&
           entry.setAt !== undefined &&
           (entry.endsAt === undefined || entry.endsAt > now),
-      )),
-  );
+      )
+    ) {
+      live = true;
+      break;
+    }
+  }
   return live ? { keys: requested, domain } : null;
 }
 
@@ -3346,11 +3413,10 @@ export const practiceSession = authedQuery({
     // (`instructionContent.platforms`) never surfaces on the other. Absent →
     // "web" (every pre-existing caller).
     platform: v.optional(v.union(v.literal("web"), v.literal("native"))),
-    // Capability flag: this client renders the run's entry as the "Can you
-    // already do this?" frame on a real item (any `move`, including
-    // `item_steps` with no atoms). Absent = an older installed iPad build whose
-    // standalone LaunchpadCard renders `atoms` and claims under the ≤1/day cap
-    // — it is only ever served a `node_content` frame, under that cap.
+    // Sent as `true` by the run clients since the "Can you already do this?"
+    // frame replaced the standalone Launchpad card (PR #4124). No longer read:
+    // that card has left the fleet (TRA-475), so every run gets the question
+    // frame. Still accepted, because the installed iPad build sends it.
     questionFraming: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
@@ -3364,7 +3430,11 @@ export const practiceSession = authedQuery({
     // resolution the run is built from, so the stamp can't race a scope edit
     // between serving and saving.
     const scopeKey = practiceScopeKey(practiceScope);
+    // Every clock read in practiceSession is safe for one reason: both clients
+    // fetch a run once with convex.query (never a subscription) and keep it as
+    // the run, so "now" is the moment it was served (T11).
     const dayKey = dayKeyForTimezone(
+      // t11-ok: one-shot serve; see above.
       Date.now(),
       await timeZoneForScholar(ctx, args.scholarId),
     );
@@ -3465,6 +3535,7 @@ export const practiceSession = authedQuery({
     const recentIdentities = await recentServedIdentities(
       ctx,
       args.scholarId,
+      // t11-ok: one-shot serve; see the dayKey stamp above.
       Date.now(),
     );
 
@@ -3578,6 +3649,7 @@ export const practiceSession = authedQuery({
             strand: skill.strand,
           })),
         ),
+        // t11-ok: one-shot serve; see the dayKey stamp above.
         Date.now(),
       );
       const firstPostPlacementBlock = perDomain.some(
@@ -3601,6 +3673,11 @@ export const practiceSession = authedQuery({
           ),
           recentIdentities,
           coldFailedSkillKeys,
+          reviewHistoryBySkill: await reviewItemHistory(
+            ctx,
+            args.scholarId,
+            merged.filter((e) => mixedLaneByKey.get(e.key) === "review").map((e) => e.key),
+          ),
         },
         SESSION_POLICY,
       );
@@ -3648,7 +3725,6 @@ export const practiceSession = authedQuery({
             fallbackDomain: domainSet[0],
             platform: args.platform ?? "web",
             masteryByKey,
-            questionFraming: args.questionFraming === true,
           });
       const blendGameBeat = requestedSkillKeys?.length
         ? undefined
@@ -3752,6 +3828,7 @@ export const practiceSession = authedQuery({
         domain,
         strand: skill.strand,
       })),
+      // t11-ok: one-shot serve; see the dayKey stamp above.
       Date.now(),
     );
 
@@ -3762,6 +3839,7 @@ export const practiceSession = authedQuery({
     let challengeQueueKeys: string[] = [];
     let firstPostPlacementBlock = false;
     let calibrationSkillKeys: readonly string[] = [];
+    // t11-ok: one-shot serve; see the dayKey stamp above.
     const now = Date.now();
     if (requestedSkillKeys && requestedSkillKeys.length > 0) {
       // Scoped: only the activity's target skills, most-decayed first.
@@ -3859,6 +3937,11 @@ export const practiceSession = authedQuery({
         calibrationSkillKeys,
         recentIdentities,
         coldFailedSkillKeys,
+        reviewHistoryBySkill: await reviewItemHistory(
+          ctx,
+          args.scholarId,
+          queueKeys.filter((k) => laneByKey.get(k) === "review"),
+        ),
       },
       SESSION_POLICY,
     );
@@ -3971,7 +4054,6 @@ export const practiceSession = authedQuery({
             fallbackDomain: domain,
             platform: args.platform ?? "web",
             masteryByKey: mastery,
-            questionFraming: args.questionFraming === true,
           });
     const singleGameBeat =
       requestedSkillKeys?.length || args.stretchHint
@@ -4053,10 +4135,14 @@ async function maybeFireSeeds(
     .collect();
   const signalSet = new Set(signalRows.map((s) => s.signalType));
 
-  const seedRows = await ctx.db
-    .query("seeds")
-    .withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId))
-    .collect();
+  // Topics already suggested to the scholar; their own wonders are not
+  // suggestions (isWonderSeed).
+  const seedRows = withoutWonders(
+    await ctx.db
+      .query("seeds")
+      .withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId))
+      .collect(),
+  );
   const surfacedTopics = new Set(seedRows.map((s) => s.topic));
   const existingMathTopics = new Set(
     seedRows.filter((s) => s.sourceLens === "math-practice").map((s) => s.topic),
@@ -4462,6 +4548,26 @@ async function stampPracticeReveals(
   }
 }
 
+/** True when the scholar has ever answered this node correctly WITHOUT help:
+ *  a correct attempt row (any lane, placement probes included) that is neither a
+ *  grade-only retry nor scaffolded. Gates the don't-know credit drop in
+ *  `recordAttemptCore`. */
+async function hasUnassistedCorrectAttempt(
+  ctx: MutationCtx,
+  scholarId: Id<"users">,
+  nodeKey: string,
+): Promise<boolean> {
+  const rows = ctx.db
+    .query("practiceAttempts")
+    .withIndex("by_scholar_node_createdAt", (q) =>
+      q.eq("scholarId", scholarId).eq("nodeKey", nodeKey),
+    );
+  for await (const r of rows) {
+    if (r.correct && r.retry !== true && r.scaffolded !== true) return true;
+  }
+  return false;
+}
+
 async function recordAttemptCore(
   ctx: MutationCtx,
   scholarId: Id<"users">,
@@ -4548,11 +4654,36 @@ async function recordAttemptCore(
     isFast,
   });
 
+  // ── "I haven't learned this yet" drops never-demonstrated credit (Andy,
+  //    2026-11-21). A don't-know on a node whose credit came from PLACEMENT or a
+  //    REPROBE and that the scholar has never once
+  //    answered correctly unassisted removes that credit: the row returns to the
+  //    placement frontier-seed shape (0 reps, 0 half-life, no SR clock), so it
+  //    stops being scheduled as review and comes back as new frontier work. Any
+  //    correct answer on record keeps the credit. Only the first such tap can
+  //    fire: afterwards repetition is 0, so there is no credit left to drop. No
+  //    cascade to prerequisites or dependents. ──
+  const demoteCredit =
+    !correct &&
+    meta.explanationReason === "dont_know" &&
+    existing !== null &&
+    existing.repetition > 0 &&
+    // Credit she earned by answering with help is hers; it also carries a
+    // set-once frontier stamp a drop would have to rewrite.
+    (existing.source === "placement" || existing.source === REPROBE_SOURCE) &&
+    // A reprobe can relabel credit she earned with help; its frontier stamp
+    // marks that, and it is set once.
+    existing.frontierAdvancedAt === undefined &&
+    !(await hasUnassistedCorrectAttempt(ctx, scholarId, skillKey));
+
   // The state actually written: a jump credits fluent on the placement-length
-  // (4-day) leash with source "accelerated"; otherwise the ordinary applyAttempt.
+  // (4-day) leash with source "accelerated"; a credit drop writes the unstarted
+  // seed shape; otherwise the ordinary applyAttempt.
   const written = accelerate
     ? { repetition: FLUENT_REPS, halfLifeDays: ACCEL_HALFLIFE_DAYS, lastPracticedAt: now }
-    : next;
+    : demoteCredit
+      ? { repetition: 0, halfLifeDays: 0, lastPracticedAt: undefined }
+      : next;
 
   // The source a CORRECT attempt lands: an assisted (scaffold-visible)
   // completion records the INFERRED SCAFFOLDED_SOURCE — access/reps still bump
@@ -4799,6 +4930,41 @@ async function recordAttemptCore(
     if (row.frontier !== shouldBe) await ctx.db.patch(row._id, { frontier: shouldBe });
   }
 
+  // A dropped credit is the one write that can LOCK a dependent. Dependents in
+  // this domain were just recomputed; a dependent in another domain keeps a
+  // stale `frontier: true` (read by chat practice and the tutor's context)
+  // unless its domain is recomputed too.
+  if (demoteCredit) {
+    const foreignDomains = new Set(
+      (
+        await ctx.db
+          .query("knowledgeNodeEdges")
+          .withIndex("by_from", (q) => q.eq("fromKey", skillKey))
+          .collect()
+      )
+        .filter((e) => e.kind === "buildsOn" && e.domain !== domain)
+        .map((e) => e.domain),
+    );
+    for (const other of foreignDomains) {
+      const otherMastery = await loadMastery(ctx, scholarId, other);
+      if (otherMastery.size === 0) continue;
+      const { skills: otherSkills, edges: otherEdges } = await loadDomain(ctx, other);
+      const otherKeys = otherSkills.map((s) => s.skillKey);
+      const otherStateOf = await buildFrontierStateOf(ctx, scholarId, otherKeys, otherEdges, otherMastery);
+      const otherFrontier = new Set(
+        computeFrontier(
+          otherKeys,
+          otherEdges.map((e) => ({ fromKey: e.fromKey, toKey: e.toKey })),
+          otherStateOf,
+        ),
+      );
+      for (const row of otherMastery.values()) {
+        const shouldBe = otherFrontier.has(row.skillKey);
+        if (row.frontier !== shouldBe) await ctx.db.patch(row._id, { frontier: shouldBe });
+      }
+    }
+  }
+
   // Fire any mastery-gated cross-domain seeds now that this skill advanced.
   await maybeFireSeeds(ctx, scholarId, skillKey);
 
@@ -4989,6 +5155,8 @@ export const practiceScopeSnapshotKey = authedQuery({
     return {
       scopeKey: practiceScopeKey(practiceScope),
       dayKey: dayKeyForTimezone(
+        // t11-ok: both clients read this once with convex.query when deciding
+        // whether to resume a snapshot, so it is the day at that moment.
         Date.now(),
         await timeZoneForScholar(ctx, args.scholarId),
       ),
@@ -6230,12 +6398,15 @@ export const teachingStep = authedQuery({
     // this reveal from a self-owned itemId (TEMPLATE items included, which the
     // serve path never scaffolds) and submit it for clean mastery. This is a
     // query, so it only READS Date.now() (no side effect) for the recency check.
+    // t11-ok: the dont_know write that mounts this step re-runs it; a reveal the
+    // scholar already earned staying up past the 15-minute window is harmless.
     if (!(await hasRecentDontKnow(ctx, args.scholarId, args.itemId, Date.now()))) {
       return {
         steps: null as ReturnType<typeof applyFade> | null,
         answer: null as string | null,
         answerType,
         hint: null as string | null,
+        answerForm: null as AnswerForm | null,
       };
     }
 
@@ -6275,7 +6446,12 @@ export const teachingStep = authedQuery({
         hint = derived && derived !== blankText ? derived : null;
       }
     }
-    return { steps, answer, answerType: revealAnswerType, hint };
+    // The blank's expected value IS the item answer, so it must carry the
+    // representation the real grader requires (a "simplest form" item rejects
+    // 12/15 even though it equals 4/5). Not a secret: the stem says it.
+    const answerForm =
+      !manipQuestion && item.kind === "template" ? (item.verifier.requiredForm ?? null) : null;
+    return { steps, answer, answerType: revealAnswerType, hint, answerForm };
   },
 });
 
@@ -6352,6 +6528,14 @@ type SubmitAnswerResult = {
    *  signal a unit-bearing item earns. The attempt is still incorrect and is
    *  recorded exactly like any other miss. */
   unitOutcome?: "missing" | "wrong";
+  /** The same signal for a required representation (lowest terms, decimal
+   *  notation) — see `GradeResult.formOutcome`. Recorded as an ordinary miss. */
+  formOutcome?: FormOutcome;
+  /** "Right value, not yet in the form asked" (`GradeResult.formNudge`): NOT a
+   *  miss. Nothing was recorded — no attempt row, no mastery, no error event —
+   *  and the client keeps the item open for the scholar to rewrite, sending
+   *  `formNudgesUsed` + 1 on the next submit. */
+  formNudge?: { form: string; message: string };
   skillKey: string;
   skillLabel: string;
   repetition: number;
@@ -6475,6 +6659,7 @@ export const submitStoryThreadApplication = authedMutation({
     correct: v.boolean(),
     correctAnswer: v.optional(v.string()),
     unitOutcome: v.optional(v.union(v.literal("missing"), v.literal("wrong"))),
+    formOutcome: v.optional(v.union(v.literal("notLowestTerms"), v.literal("notDecimal"))),
     skillKey: v.string(),
     skillLabel: v.string(),
     repetition: v.number(),
@@ -6609,6 +6794,7 @@ export const submitStoryThreadApplication = authedMutation({
         ? { correctAnswer: grade.revealedAnswer }
         : {}),
       ...(grade.unitOutcome ? { unitOutcome: grade.unitOutcome } : {}),
+      ...(grade.formOutcome ? { formOutcome: grade.formOutcome } : {}),
       skillKey: item.skillKey,
       skillLabel: item.skillLabel,
       repetition,
@@ -6689,12 +6875,22 @@ export const submitAnswer = authedMutation({
     // inferAttemptLane. Not part of the replay fingerprint: it is fixed per
     // item, like timings.
     servedLane: v.optional(v.union(v.literal("challenge"), v.literal("required"))),
+    // How many "right value, not yet in the form asked" nudges this item has
+    // already returned (Algebra 2 contract §3). Client-carried because a nudge
+    // writes nothing server-side; see `GradeOptions.formNudgesUsed` for why an
+    // untrusted count is harmless. Absent = an installed client that predates
+    // nudges: it is never nudged and grades exactly as before (new clients
+    // send 0 on an item's first submit). Not part of the replay
+    // fingerprint: a nudge records no row, so it never has a receipt to replay.
+    formNudgesUsed: v.optional(v.number()),
   },
   returns: v.object({
     correct: v.boolean(),
     attemptId: v.optional(v.id("practiceAttempts")),
     correctAnswer: v.optional(v.string()),
     unitOutcome: v.optional(v.union(v.literal("missing"), v.literal("wrong"))),
+    formOutcome: v.optional(v.union(v.literal("notLowestTerms"), v.literal("notDecimal"))),
+    formNudge: v.optional(v.object({ form: v.string(), message: v.string() })),
     skillKey: v.string(),
     skillLabel: v.string(),
     repetition: v.number(),
@@ -6877,7 +7073,33 @@ export const submitAnswer = authedMutation({
         ? { kind: "manipulativeState", stateJson: args.answer }
         : { kind: "typed", raw: args.answer };
 
-    const grade = gradeSubmission(item, submission, PRACTICE_POLICY);
+    const grade = gradeSubmission(item, submission, PRACTICE_POLICY, {
+      formNudgesUsed: args.formNudgesUsed,
+    });
+
+    // "Right value, not yet in the form asked": hand back the nudge and STOP.
+    // No attempt row (so no receipt, no breaker, no latency), no mastery, no
+    // error event — the scholar rewrites the same item and resubmits.
+    if (grade.formNudge) {
+      const existing = await ctx.db
+        .query("practiceMastery")
+        .withIndex("by_scholar_skill", (q) =>
+          q.eq("scholarId", args.scholarId).eq("skillKey", item.skillKey),
+        )
+        .first();
+      const repetition = existing?.repetition ?? 0;
+      return {
+        correct: false,
+        formNudge: grade.formNudge,
+        skillKey: item.skillKey,
+        skillLabel: item.skillLabel,
+        repetition,
+        proficiency: proficiencyFromReps(repetition),
+        accelerated: false,
+        turnedFluent: false,
+        dispatchCompleted: [],
+      };
+    }
     const elapsedMs = validElapsedMs(args.elapsedMs);
 
     // Store the teacher-visible answer, not a multiple-choice button's wire index.
@@ -7029,6 +7251,7 @@ export const submitAnswer = authedMutation({
         correct: grade.correct,
         correctAnswer: grade.revealedAnswer,
         ...(grade.unitOutcome ? { unitOutcome: grade.unitOutcome } : {}),
+        ...(grade.formOutcome ? { formOutcome: grade.formOutcome } : {}),
         skillKey: item.skillKey,
         skillLabel: item.skillLabel,
         repetition,
@@ -7212,6 +7435,7 @@ export const submitAnswer = authedMutation({
         correct: false,
         correctAnswer: grade.revealedAnswer,
         ...(grade.unitOutcome ? { unitOutcome: grade.unitOutcome } : {}),
+        ...(grade.formOutcome ? { formOutcome: grade.formOutcome } : {}),
         skillKey: item.skillKey,
         skillLabel: item.skillLabel,
         repetition,
@@ -7433,6 +7657,7 @@ export const submitAnswer = authedMutation({
       attemptId: rec.attemptId,
       correctAnswer: grade.revealedAnswer,
       ...(grade.unitOutcome ? { unitOutcome: grade.unitOutcome } : {}),
+      ...(grade.formOutcome ? { formOutcome: grade.formOutcome } : {}),
       skillKey: item.skillKey,
       skillLabel: item.skillLabel,
       repetition: rec.repetition,
@@ -7489,13 +7714,16 @@ export const practiceErrorFlagsForNode = authedQuery({
     if (!isTeacher) return { patterns: [] as OpenErrorPattern[] };
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
 
-    const events = await ctx.db
-      .query("practiceErrorEvents")
-      .withIndex("by_scholar_node", (q) =>
-        q.eq("scholarId", args.scholarId).eq("nodeKey", args.nodeKey),
-      )
-      .collect();
-    return { patterns: openErrorPatterns(events, Date.now()) };
+    // t11-ok: a 14-day flag window in a teacher drawer; minutes of lag can't
+    // matter, and a new classified miss re-runs it.
+    const now = Date.now();
+    const [flag] = await openPracticeFlags(
+      ctx,
+      args.scholarId,
+      { nodeKey: args.nodeKey },
+      now,
+    );
+    return { patterns: flag?.patterns ?? [] };
   },
 });
 
@@ -7932,14 +8160,17 @@ export const autoRemediationTargetForNode = authedQuery({
     );
     const mastery = await loadMastery(ctx, args.scholarId, domain);
 
+    // t11-ok: a teacher drawer reading a 14-day flag window and days-scale
+    // retention; new misses and attempts re-run it, so hours of lag are moot.
     const now = Date.now();
-    const events = await ctx.db
-      .query("practiceErrorEvents")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
-      .collect();
-    const inDomain = events.filter((e) => e.domain === domain);
+    const [currentFlag] = await openPracticeFlags(
+      ctx,
+      args.scholarId,
+      { domain },
+      now,
+    );
     // Only surface on the node that actually owns the current flag.
-    if (pickFlaggedNode(inDomain, now) !== args.nodeKey) return null;
+    if (currentFlag?.nodeKey !== args.nodeKey) return null;
 
     const target = pickRemediationTarget(
       args.nodeKey,
@@ -8360,6 +8591,8 @@ function gradeOutcomes(answers: { itemId: string; answer: string }[]): ProbeOutc
   for (const a of answers) {
     const item = buildTemplateServable(a.itemId, null, "");
     if (!item) continue;
+    // A batch has no turn to nudge on and its client sends no nudge counts,
+    // so it takes the legacy form path: a form miss is a miss, as before.
     const grade = gradeSubmission(item, { kind: "typed", raw: a.answer }, GRADE_ONLY_POLICY);
     out.push(probeOutcomeFromKind(grade.skillKey, grade.correct ? "correct" : "incorrect"));
   }
@@ -8674,6 +8907,9 @@ type PlacementProbeWire = {
    *  glyph keys) instead of a plain field — the SAME non-leaky derivation the
    *  session runs. Absent ⇒ a flat typed answer. */
   answerShape?: string;
+  /** The algebra-pad key set and the required form, as on `ServedItem`. */
+  answerPalette?: ServedItem["answerPalette"];
+  answerForm?: ServedItem["answerForm"];
 };
 
 /** The mixed check-in probe wire shape — a placement probe tagged with its
@@ -8740,6 +8976,10 @@ async function resolvePlacementProbe(
     ...(item.prompt.promptVisual ? { promptVisual: item.prompt.promptVisual } : {}),
     ...(item.prompt.manipulativeSpec ? { manipulativeSpec: item.prompt.manipulativeSpec } : {}),
     ...(servedItem.answerShape ? { answerShape: servedItem.answerShape } : {}),
+    // Algebra-pad palette + required form, so a typed algebra probe gets the
+    // same pad and form hint as the drill (never an answer).
+    ...(servedItem.answerPalette ? { answerPalette: servedItem.answerPalette } : {}),
+    ...(servedItem.answerForm ? { answerForm: servedItem.answerForm } : {}),
   };
 }
 
@@ -8856,7 +9096,7 @@ async function buildServedProbe(
     .withIndex("by_skill", (q) => q.eq("skillKey", selected.probeKey))
     .filter((q) => q.eq(q.field("verifierKind"), MANIPULATIVE_VERIFIER_KIND))
     .take(8);
-  const manip = manipCandidates.find((row) => {
+  const eligible = manipCandidates.filter((row) => {
     const spec = parseManipulativeSpec(row.manipulativeSpec);
     return (
       !spec ||
@@ -8864,6 +9104,11 @@ async function buildServedProbe(
         !isRetiredManipulativeSpecId(spec.id))
     );
   });
+  // A first probe always uses the node's first board (the same measurement
+  // for every scholar). A CONFIRM must not repeat the board the scholar just
+  // slipped on — the same rule the template seed follows above — so attempt n
+  // takes the node's (n+1)th board when it has one.
+  const manip = eligible.length > 0 ? eligible[attempt % eligible.length] : undefined;
   if (!manip) return templateProbe;
   return {
     nodeKey: selected.probeKey,
@@ -8985,6 +9230,10 @@ export const submitPlacementAnswer = authedMutation({
     itemId: v.optional(v.string()),
     answer: v.optional(v.string()),
     dontKnow: v.optional(v.boolean()),
+    // Form nudges this probe has already returned (Algebra 2 contract §3) —
+    // client-carried, see `GradeOptions.formNudgesUsed`. After the cap a
+    // form failure is graded as a miss, exactly as on the drill.
+    formNudgesUsed: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
@@ -9251,7 +9500,22 @@ export const submitPlacementAnswer = authedMutation({
       : item.kind === "manipulative"
         ? { kind: "manipulativeState", stateJson: args.answer ?? "" }
         : { kind: "typed", raw: rawAnswer ?? "" };
-    const grade = gradeSubmission(item, submission, PLACEMENT_POLICY);
+    const grade = gradeSubmission(item, submission, PLACEMENT_POLICY, {
+      formNudgesUsed: args.formNudgesUsed,
+    });
+    // Right value, not yet in the form asked: echo the SAME probe with the
+    // nudge, logging and grading nothing (like the stale-submit echo above).
+    if (grade.formNudge) {
+      return {
+        alreadyPlaced: false,
+        done: false,
+        graded: null,
+        probe: servedWire,
+        placedThroughGrade: null as string | null,
+        startingSkillLabel: null as string | null,
+        formNudge: grade.formNudge,
+      };
+    }
     const correctAnswer = grade.revealedAnswer;
     const kind: PlacementOutcomeKind = grade.isDontKnow
       ? "unknown"
@@ -10066,6 +10330,10 @@ export const submitMixedPlacementAnswer = authedMutation({
     itemId: v.optional(v.string()),
     answer: v.optional(v.string()),
     dontKnow: v.optional(v.boolean()),
+    // Form nudges this probe has already returned (Algebra 2 contract §3) —
+    // client-carried, see `GradeOptions.formNudgesUsed`. After the cap a
+    // form failure is graded as a miss, exactly as on the drill.
+    formNudgesUsed: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
@@ -10395,7 +10663,22 @@ export const submitMixedPlacementAnswer = authedMutation({
       : item.kind === "manipulative"
         ? { kind: "manipulativeState", stateJson: args.answer ?? "" }
         : { kind: "typed", raw: rawAnswer ?? "" };
-    const grade = gradeSubmission(item, submission, PLACEMENT_POLICY);
+    const grade = gradeSubmission(item, submission, PLACEMENT_POLICY, {
+      formNudgesUsed: args.formNudgesUsed,
+    });
+    // Right value, not yet in the form asked: re-serve the SAME parked probe
+    // with the nudge, logging and grading nothing.
+    if (grade.formNudge) {
+      const parked = await currentServed();
+      return {
+        done: false,
+        paused: sittingBudgetReached(),
+        graded: null,
+        probe: parked?.probe ?? null,
+        perDomain: [],
+        formNudge: grade.formNudge,
+      };
+    }
     const correctAnswer = grade.revealedAnswer;
     const kind: PlacementOutcomeKind = grade.isDontKnow
       ? "unknown"
@@ -10768,6 +11051,8 @@ function mappingServedItem(item: ServableItem, domain: string): ServedItem {
     ...(item.prompt.promptVisual ? { promptVisual: item.prompt.promptVisual } : {}),
     ...(item.prompt.manipulativeSpec ? { manipulativeSpec: item.prompt.manipulativeSpec } : {}),
     ...(wire.answerShape ? { answerShape: wire.answerShape } : {}),
+    ...(wire.answerPalette ? { answerPalette: wire.answerPalette } : {}),
+    ...(wire.answerForm ? { answerForm: wire.answerForm } : {}),
     lane: "mapping" as const,
   };
 }
@@ -11282,6 +11567,10 @@ export const submitMappingAnswer = authedMutation({
     seed: v.number(),
     answer: v.optional(v.string()),
     dontKnow: v.optional(v.boolean()),
+    // Form nudges this mapping item has already returned (Algebra 2 contract
+    // §3) — client-carried, see `GradeOptions.formNudgesUsed`. After the cap a
+    // form failure is graded as a miss, exactly as on the drill.
+    formNudgesUsed: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
@@ -11321,6 +11610,8 @@ export const submitMappingAnswer = authedMutation({
           : item.kind === "manipulative"
             ? { kind: "manipulativeState", stateJson: args.answer ?? "" }
             : { kind: "typed", raw: rawAnswer ?? "" };
+        // Read-only, nothing to rewrite into: the legacy form path (no count),
+        // so this acknowledgement grades exactly as it always has.
         const grade = gradeSubmission(item, submission, PLACEMENT_POLICY);
         const kind: PlacementOutcomeKind = grade.isDontKnow
           ? "unknown"
@@ -11332,6 +11623,7 @@ export const submitMappingAnswer = authedMutation({
           outcome: kind as PlacementOutcomeKind | null,
           correctAnswer: (grade.revealedAnswer ?? null) as string | null,
           unitOutcome: grade.unitOutcome,
+          formOutcome: grade.formOutcome,
           domainJustMapped: false,
           domainLabel: practiceDomainLabel(domain),
           feedback: placementFeedback(kind, grade.revealedAnswer ?? undefined),
@@ -11342,6 +11634,7 @@ export const submitMappingAnswer = authedMutation({
         outcome: null as PlacementOutcomeKind | null,
         correctAnswer: null as string | null,
         unitOutcome: undefined as "missing" | "wrong" | undefined,
+        formOutcome: undefined as FormOutcome | undefined,
         domainJustMapped: false,
         domainLabel: practiceDomainLabel(domain),
         feedback: null as ReturnType<typeof placementFeedback> | null,
@@ -11357,6 +11650,7 @@ export const submitMappingAnswer = authedMutation({
         outcome: null as PlacementOutcomeKind | null,
         correctAnswer: null as string | null,
         unitOutcome: undefined as "missing" | "wrong" | undefined,
+        formOutcome: undefined as FormOutcome | undefined,
         domainJustMapped: false,
         domainLabel: practiceDomainLabel(domain),
         feedback: null as ReturnType<typeof placementFeedback> | null,
@@ -11389,6 +11683,7 @@ export const submitMappingAnswer = authedMutation({
         outcome: priorKind,
         correctAnswer: null as string | null,
         unitOutcome: undefined as "missing" | "wrong" | undefined,
+        formOutcome: undefined as FormOutcome | undefined,
         domainJustMapped: false,
         domainLabel: practiceDomainLabel(domain),
         feedback: placementFeedback(priorKind),
@@ -11412,7 +11707,24 @@ export const submitMappingAnswer = authedMutation({
       : item.kind === "manipulative"
         ? { kind: "manipulativeState", stateJson: args.answer ?? "" }
         : { kind: "typed", raw: rawAnswer ?? "" };
-    const grade = gradeSubmission(item, submission, PLACEMENT_POLICY);
+    const grade = gradeSubmission(item, submission, PLACEMENT_POLICY, {
+      formNudgesUsed: args.formNudgesUsed,
+    });
+    // Right value, not yet in the form asked: no outcome, nothing logged — the
+    // scholar rewrites this same mapping item and resubmits.
+    if (grade.formNudge) {
+      return {
+        alreadyMapped: false,
+        outcome: null as PlacementOutcomeKind | null,
+        correctAnswer: null as string | null,
+        unitOutcome: undefined as "missing" | "wrong" | undefined,
+        formOutcome: undefined as FormOutcome | undefined,
+        domainJustMapped: false,
+        domainLabel: practiceDomainLabel(domain),
+        feedback: null as ReturnType<typeof placementFeedback> | null,
+        formNudge: grade.formNudge,
+      };
+    }
     const correctAnswer = grade.revealedAnswer;
     const kind: PlacementOutcomeKind = grade.isDontKnow
       ? "unknown"
@@ -11565,6 +11877,7 @@ export const submitMappingAnswer = authedMutation({
       outcome: kind,
       correctAnswer: correctAnswer ?? null,
       unitOutcome: grade.unitOutcome,
+      formOutcome: grade.formOutcome,
       domainJustMapped,
       domainLabel: practiceDomainLabel(domain),
       probeLogIndex: log.length - 1,
@@ -11708,7 +12021,7 @@ export const reprobeProbes = authedQuery({
     const seed = probeSeed(args.seed, args.strand, next.index);
     const item = generateItem(next.probeKey, seed);
     if (!item) return { probe: null, done: true };
-    const answerShape = expressionAnswerSignals(item.answerType, item.answer).answerShape;
+    const { answerShape, answerPalette, answerForm } = templateInputHints(item);
     return {
       probe: {
         itemId: makeItemId(next.probeKey, seed),
@@ -11722,6 +12035,8 @@ export const reprobeProbes = authedQuery({
         choices: item.choices,
         promptVisual: item.promptVisual,
         ...(answerShape ? { answerShape } : {}),
+        ...(answerPalette ? { answerPalette } : {}),
+        ...(answerForm ? { answerForm } : {}),
       },
       done: false,
     };
@@ -11763,6 +12078,14 @@ export const submitReprobe = authedMutation({
     const newlyCredited = front.creditedKeys.slice(oldFloor);
     for (const key of newlyCredited) {
       const existing = mastery.get(key);
+      // A dropped credit ("haven't learned this yet") can open a hole below
+      // rows the scholar already holds, pulling the floor under them. Leave
+      // those alone: the wholesale write below would downgrade earned credit.
+      // Clearing a higher node still supersedes their earlier misses.
+      if (existing && accessProven(existing)) {
+        if (existing.missStreak) await ctx.db.patch(existing._id, { missStreak: 0, updatedAt: now });
+        continue;
+      }
       const rowFields = {
         scholarId: args.scholarId,
         skillKey: key,
@@ -12001,7 +12324,7 @@ export const createProblemSetActivity = internalMutation({
   },
 });
 
-const GRADE_RANK = (g: string) => ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"].indexOf(g);
+const GRADE_RANK = (g: string) => ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"].indexOf(g);
 
 /**
  * Each skill's DAG depth: the length of its longest prerequisite chain from a
@@ -12339,12 +12662,22 @@ export const devClearPlacements = internalMutation({
  * Idempotent — re-running replaces any manipulative rows already seeded for
  * this skill.
  *
+ * `specSet: "functionGraph"` seeds the six `functionGraph` demo specs
+ * (lib/manipulative/functionGraphExamples.ts) instead, by default onto the
+ * existing Algebra 1 node `quad_graph_features` — dev-only, so the graph
+ * manipulative can be driven end to end before any Algebra 2 node exists.
+ *
  *   npx convex run practiceSkills:devSeedManipulativePractice
+ *   npx convex run practiceSkills:devSeedManipulativePractice '{"specSet":"functionGraph"}'
  */
 export const devSeedManipulativePractice = internalMutation({
-  args: { skillKey: v.optional(v.string()) },
+  args: {
+    skillKey: v.optional(v.string()),
+    specSet: v.optional(v.union(v.literal("partition"), v.literal("functionGraph"))),
+  },
   handler: async (ctx, args) => {
-    const skillKey = args.skillKey ?? "partition_shapes";
+    const functionGraph = args.specSet === "functionGraph";
+    const skillKey = args.skillKey ?? (functionGraph ? "quad_graph_features" : "partition_shapes");
     const node = await ctx.db
       .query("knowledgeNodes")
       .withIndex("by_nodeKey", (q) => q.eq("nodeKey", skillKey))
@@ -12359,7 +12692,7 @@ export const devSeedManipulativePractice = internalMutation({
       if (p.verifierKind === MANIPULATIVE_VERIFIER_KIND) await ctx.db.delete(p._id);
     }
 
-    const specs: ManipulativeSpec[] = [
+    const specs: ManipulativeSpec[] = functionGraph ? FUNCTION_GRAPH_EXAMPLES : [
       {
         kind: "partition",
         id: "make-half",
@@ -15986,6 +16319,9 @@ export const seedDefaultManipulativePractice = internalMutation({
           source: "Clock (a mod-12 dial)",
         },
       },
+      // Algebra 2: the graph-shaping and complex-plane items (data file, so the
+      // specs live beside their own comments rather than in this long list).
+      ...ALGEBRA_2_MANIPULATIVE_TARGETS,
     ];
 
     const now = Date.now();

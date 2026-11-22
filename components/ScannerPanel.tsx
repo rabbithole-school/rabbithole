@@ -80,7 +80,7 @@ type FeedItem = {
   _id: Id<"portfolioItems">;
   _creationTime: number;
   title: string;
-  source: "google_drive" | "manual" | "upload" | "photo" | "capture_station";
+  source: "google_drive" | "manual" | "upload" | "photo" | "capture_station" | "decibel_meter";
   aiCaption?: string;
   documentHeading?: string;
   label?: string;
@@ -377,7 +377,9 @@ function ScholarDialog({ item, open, onClose }: { item: FeedItem; open: boolean;
                   </Dialog.Title>
                   <Text fontSize="xs" color="charcoal.400" fontFamily="body" lineClamp={2}>
                     {item.title}
-                    {item.detectedName ? ` · name on page: “${item.detectedName}”` : ""}
+                    {item.detectedName
+                      ? ` · ${item.source === "decibel_meter" ? "name heard" : "name on page"}: “${item.detectedName}”`
+                      : ""}
                   </Text>
                 </VStack>
                 <IconButton aria-label="Close" size="sm" variant="ghost" color="charcoal.400" _hover={{ bg: "gray.100" }} flexShrink={0} onClick={() => onClose()}>

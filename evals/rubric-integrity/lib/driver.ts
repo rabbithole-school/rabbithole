@@ -85,6 +85,7 @@ export async function runRubricSession(
    */
   let documentOverride: string | null = null;
   let finalDocumentContent: string | null = null;
+  let finalStopReasons: string[] = [];
 
   const steps = testCase.script.map(normalizeStep);
 
@@ -150,6 +151,7 @@ export async function runRubricSession(
     // a seeded turn, and an all-strings script's last step always generates,
     // so this is identical to the old "text on the final turn" for them.
     finalTurnText = tutor.text;
+    finalStopReasons = tutor.stopReasons ?? [];
     finalDocumentContent = documentContent;
   }
 
@@ -196,6 +198,7 @@ export async function runRubricSession(
     allCriteriaFull: summary.allCriteriaFull,
     finalDocumentContent,
     finalTurnText,
+    finalStopReasons,
     finalTextIsSubstantive: finalTurnText.trim().length >= 20,
   };
 }

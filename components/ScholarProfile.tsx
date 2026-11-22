@@ -1,6 +1,7 @@
 "use client";
 
 import { useNow } from "@/hooks/useNow";
+import { withoutAppStateDefaults } from "@/shared/appStateDefaults";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useAction } from "convex/react";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -22,6 +23,7 @@ import { toaster } from "@/lib/toaster";
 import type { Id } from "@/convex/_generated/dataModel";
 import { EXTENDED_EDUCATION_LABEL } from "@/shared/scholarGroupRouting";
 import { serverErrorMessage } from "@/lib/serverErrorMessage";
+import { ScholarWithdrawalControl } from "./ScholarWithdrawalControl";
 import { TEACHER_ARCHIVE_COPY } from "@/shared/teacherArchive";
 import {
   Box,
@@ -66,6 +68,7 @@ import {
   RocketLaunch,
   TreeStructure,
   BracketsCurly,
+  MoonStars,
 } from "@phosphor-icons/react";
 import { ParentsManager } from "@/components/ParentsManager";
 import {
@@ -103,6 +106,7 @@ import { SubNav } from "@/components/ui/SubNav";
 import { MathSkillsPortrait } from "@/components/practice/MathSkillsPortrait";
 import { useAideDockOptional } from "@/components/aide/AideDockProvider";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { AppTileIcon } from "@/components/ui/AppTileIcon";
 import { GenericBodySkeleton } from "@/app/teacher/(dashboard)/_components/Skeletons";
 import { useSmoothedQuery, useSmoothedQueryWithPending } from "@/hooks/useSmoothedQuery";
 import {
@@ -321,6 +325,20 @@ function formatInterestDate(ms: number): string {
   return new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
+// "last played Sun, Oct 25, 7:12 AM for 29 min" — the start clock time is the
+// point (when did they pick it up?), in the viewer's own time zone.
+function formatLatestPlay(play: { startedAt: number; durationMs: number }): string {
+  const started = new Date(play.startedAt).toLocaleString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const minutes = Math.round(play.durationMs / 60_000);
+  return `last played ${started} for ${minutes < 1 ? "under a minute" : `${minutes} min`}`;
+}
+
 function InterestRow({
   interest,
   onToggle,
@@ -449,6 +467,11 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   // Passkey recovery: scholars' passwords always keep working, so removing
   // a lost passkey instantly restores password sign-in (no token dance).
   const resetPasskeys = useMutation(api.passkeys.resetForScholar);
+  // The child's BunnyPad bedtime (TRA-625), null where bedtime doesn't apply.
+  const bedtime = useQuery(
+    api.scholarBedtimes.forScholar,
+    activeTab === "settings" ? { scholarId: scholarId as Id<"users"> } : "skip",
+  );
   const passkeyCount =
     useQuery(api.passkeys.countForScholar, {
       scholarId: scholarId as Id<"users">,
@@ -534,6 +557,9 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
     shouldLoadReadingLevelInsights
       ? { scholarId: scholarId as Id<"users">, now: minuteNow }
       : "skip",
+    // The profile and Reading tab survive a scholar switch; without the key,
+    // A's evidence and growth chart would show under B while B's loads.
+    { resetKey: scholarId },
   );
   const adminUpdateScholarProfile = useMutation(api.users.adminUpdateScholarProfile);
   const institutions = useQuery(api.institutions.list, {}) ?? [];
@@ -555,7 +581,7 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   const setObservationType = useMutation(api.observations.setType);
   const { scholar, stats } = profile ?? {
     scholar: null,
-    stats: { sessionCount: 0, messageCount: 0, observationCount: 0 },
+    stats: { sessionCount: 0, observationCount: 0 },
   };
 
   const isLoading = profile === undefined;
@@ -907,10 +933,6 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                     <HStack justify="space-between">
                       <Text fontSize="xs" color="charcoal.400" fontFamily="heading">Sessions</Text>
                       <Text fontSize="xs" color="charcoal.600" fontFamily="heading" fontWeight="600">{stats.sessionCount}</Text>
-                    </HStack>
-                    <HStack justify="space-between">
-                      <Text fontSize="xs" color="charcoal.400" fontFamily="heading">Messages</Text>
-                      <Text fontSize="xs" color="charcoal.600" fontFamily="heading" fontWeight="600">{stats.messageCount}</Text>
                     </HStack>
                     {!isOperationsMode && stats.observationCount > 0 && (
                       <HStack justify="space-between">
@@ -1485,7 +1507,25 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                           <Text fontFamily="heading" fontSize="sm" fontWeight="600" color="navy.500" lineClamp={1}>
                             {session.title}
                           </Text>
-                          {session.unitTitle && (
+                          {session.sourceApp ? (
+                            // A tile session: the scholar opened this app
+                            // themselves, so it carries the app's own mark.
+                            <HStack gap={1.5} mt={0.5}>
+                              <AppTileIcon
+                                name={session.sourceApp.name}
+                                iconUrl={session.sourceApp.iconUrl}
+                                iconEmoji={session.sourceApp.iconEmoji}
+                                color={session.sourceApp.color}
+                                boxSize="16px"
+                                markFontSize="9px"
+                                boxShadow="none"
+                                decorative
+                              />
+                              <Text fontSize="xs" color="violet.500" fontFamily="heading">
+                                {session.sourceApp.name} · free play
+                              </Text>
+                            </HStack>
+                          ) : session.unitTitle && (
                             <Text fontSize="xs" color="violet.500" fontFamily="heading" mt={0.5}>
                               {session.unitEmoji ? `${session.unitEmoji} ` : ""}{session.unitTitle}
                             </Text>
@@ -1515,14 +1555,19 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   <Box mt={5}>
                     <CardHeading
                       icon={<BracketsCurly />}
-                      title="App state"
-                      hint="Final saved values and recent console output from scholars' apps."
+                      title="Apps"
+                      hint="When scholars last played their apps, plus each app's saved values and recent console output."
                     />
                     <VStack gap={2} align="stretch">
                       {scholarAppStates.map((state) => {
                         let prettyDoc = "";
                         try {
-                          prettyDoc = JSON.stringify(state.doc, null, 2) ?? "";
+                          prettyDoc =
+                            JSON.stringify(
+                              withoutAppStateDefaults(state.doc),
+                              null,
+                              2,
+                            ) ?? "";
                         } catch {
                           prettyDoc = "";
                         }
@@ -1573,8 +1618,11 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                                 fontSize="xs"
                                 color="charcoal.400"
                               >
-                                {state.artifactTitle} · updated{" "}
-                                {formatTimeAgo(state.updatedAt)}
+                                {state.artifactTitle}
+                                {state.latestPlay &&
+                                  ` · ${formatLatestPlay(state.latestPlay)}`}
+                                {state.version > 0 &&
+                                  ` · updated ${formatTimeAgo(state.updatedAt)}`}
                               </Text>
                             </Box>
                             <VStack
@@ -1620,7 +1668,9 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                                   fontSize="xs"
                                   color="charcoal.600"
                                 >
-                                  {prettyDoc || "{}"}
+                                  {state.version === 0
+                                    ? "Nothing saved."
+                                    : prettyDoc || "{}"}
                                 </Box>
                               </Box>
                               <Box>
@@ -1863,7 +1913,7 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                     ))}
                   </FieldSelect>
                   <Text fontSize="2xs" color="charcoal.300" fontFamily="body" mt={1}>
-                    Which school this scholar belongs to. Guests are hidden from the default roster. Admin-only — moving a scholar grants access.
+                    Which school this scholar belongs to. Friends are hidden from the default roster. Admin-only — moving a scholar grants access.
                   </Text>
                 </Box>
                 )}
@@ -1901,6 +1951,12 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                     {EXTENDED_EDUCATION_LABEL} scholars stay out of enrolled-only rosters and school workflows. Admin-only.
                   </Text>
                 </Box>
+                )}
+                {scholar && (
+                  <ScholarWithdrawalControl
+                    scholarId={scholarId as Id<"users">}
+                    withdrawnOn={scholar.withdrawnOn ?? null}
+                  />
                 )}
                 {detailsError && (
                   <Text fontSize="xs" color="red.500" fontFamily="body">
@@ -2051,6 +2107,17 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                 )}
               </VStack>
             </Surface>
+            {/* BunnyPad bedtime: read-only here; the family sets it. */}
+            {bedtime && (
+              <Surface p={5}>
+                <CardHeading icon={<MoonStars />} title="BunnyPad bedtime" />
+                <Text fontSize="sm" color="charcoal.500" fontFamily="body">
+                  {bedtime.setByFamily
+                    ? `Sleeps from ${bedtime.text} every night, set by the family.`
+                    : `Sleeps from ${bedtime.text} every night, the school's bedtime.`}
+                </Text>
+              </Surface>
+            )}
             {/* Parents */}
             <ParentsManager scholarId={scholarId as Id<"users">} />
           </VStack>

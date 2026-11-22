@@ -16,7 +16,7 @@ import { haptic } from "@/lib/native";
 import { superscriptExponents } from "@/shared/mathNotation";
 import { computeTiming } from "@/shared/practiceLoop";
 import { hasUnitToken } from "@/convex/lib/practice/answers";
-import { UNIT_MISSING_NUDGE, unitOutcomeNudge } from "@/components/practice/unitAnswerCopy";
+import { UNIT_MISSING_NUDGE, nearMissNudge } from "@/components/practice/unitAnswerCopy";
 import { useExpressionTemplate } from "@/hooks/useExpressionTemplate";
 import { useExpressionTemplateKeyboard } from "@/hooks/useExpressionTemplateKeyboard";
 
@@ -66,9 +66,9 @@ export function ChatPracticeItem({
   const [status, setStatus] = useState<"idle" | "correct" | "miss">("idle");
   const [attempts, setAttempts] = useState(0);
   // Two different lifetimes: the pre-submit gate clears on the next edit; the
-  // graded unit verdict persists with `status`, like any other miss line.
+  // graded unit/form verdict persists with `status`, like any other miss line.
   const [unitGateNudge, setUnitGateNudge] = useState(false);
-  const [unitOutcome, setUnitOutcome] = useState<"missing" | "wrong" | undefined>();
+  const [nearMiss, setNearMiss] = useState<string | null>(null);
   // A rejected mutation (e.g. an invalid story card or a transient failure)
   // shows a visible line rather than silently un-spinning —
   // matching the native widget.
@@ -166,7 +166,7 @@ export function ChatPracticeItem({
               }),
             });
         setAttempts((n) => n + 1);
-        setUnitOutcome(res.unitOutcome);
+        setNearMiss(nearMissNudge(res));
         if (res.correct) {
           setStatus("correct");
           haptic("medium");
@@ -388,15 +388,16 @@ export function ChatPracticeItem({
                 </Button>
               </Flex>
             )}
-            {/* A unit slip names itself; the value was right, so the generic
-                "take another look" would send the kid back over correct work. */}
+            {/* A unit or form slip names itself; the value was right, so the
+                generic "take another look" would send the kid back over correct
+                work. */}
             {(status === "miss" || unitGateNudge) && (
               <Flex align="center" gap={1.5} mt={2} color="amber.700">
                 <ArrowClockwise size={15} weight="bold" />
                 <Text fontSize="xs" fontFamily="body">
                   {unitGateNudge
                     ? UNIT_MISSING_NUDGE
-                    : (unitOutcomeNudge(unitOutcome) ??
+                    : (nearMiss ??
                       "Not quite — take another look and try again.")}
                 </Text>
               </Flex>

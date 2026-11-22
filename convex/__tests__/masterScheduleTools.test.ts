@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import type { ActionCtx } from "../_generated/server";
@@ -8,8 +9,12 @@ import {
   makeMasterScheduleTools,
   parseSchoolDate,
 } from "../lib/masterScheduleTools";
+import { makeAssignmentTools } from "../lib/assignmentTools";
 import { internal } from "../_generated/api";
 import { scheduleWeekStartMs } from "../../shared/scheduleWeek";
+import { dayKeyForTimezone } from "../../shared/institutionDay";
+import { schoolDayEndAt } from "../lib/schoolDays";
+import { readSchedule } from "../lib/scheduleStore";
 import {
   grantInstitutionMembership,
   seedScholarInInstitution,
@@ -33,9 +38,17 @@ const modules = (
 ).glob("../**/*.ts");
 
 const DAY = 86_400_000;
+const TIME_ZONE = "Pacific/Honolulu";
 
 // A minimal ActionCtx that routes the only two methods the tools use to the
 // harness. convex-test's top-level query/mutation accept internal refs.
+async function sched(
+  t: { run: <R>(fn: (ctx: any) => Promise<R>) => Promise<R> },
+  doc: { _id: Id<"assignments"> } | null | undefined,
+) {
+  return t.run((ctx) => readSchedule(ctx, { _id: doc!._id }));
+}
+
 function actionCtxFor(t: ReturnType<typeof convexTest>): ActionCtx {
   return {
     runQuery: (ref: unknown, args: unknown) =>
@@ -51,6 +64,15 @@ async function seedUser(t: ReturnType<typeof convexTest>, role = "teacher", name
   return role === "teacher"
     ? seedStaffWithMembership(t, { institutionId, name: name ?? `Test ${role}`, username })
     : seedScholarInInstitution(t, { institutionId, name: name ?? `Test ${role}`, username });
+}
+
+// The bell schedule is school-admin-only (2026-11-08). A test whose teacher
+// also builds blocks makes them a school admin of the same (primary) school.
+async function alsoSchoolAdmin(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+  await t.run(async (ctx) => {
+    const primary = (await ctx.db.query("institutions").collect()).find((i) => i.isPrimary);
+    await ctx.db.insert("memberships", { userId, role: "school_admin", institutionId: primary!._id });
+  });
 }
 
 async function seedPeriod(
@@ -82,12 +104,20 @@ async function toolsFor(
   allowedScholarIds?: Set<Id<"users">>,
   scholarLensResolved?: boolean,
 ) {
-  const tools = await makeMasterScheduleTools(actionCtxFor(t), emit, {
-    role,
-    callerUserId,
-    allowedScholarIds,
-    scholarLensResolved,
-  });
+  const tools = [
+    ...(await makeMasterScheduleTools(actionCtxFor(t), emit, {
+      role,
+      callerUserId,
+    })),
+    // The one-off activity give (formerly dispatch_activity) lives in the
+    // assignment group now; the in-app aide spreads both groups.
+    ...(await makeAssignmentTools(actionCtxFor(t), emit, {
+      role,
+      callerUserId,
+      allowedScholarIds,
+      scholarLensResolved,
+    })),
+  ];
   return Object.fromEntries(tools.map((tl) => [tl.name, tl])) as Record<
     string,
     { run: (input: unknown) => Promise<string> }
@@ -110,6 +140,7 @@ describe("master-schedule aide tools (end-to-end)", () => {
   test("full bot flow: list term → build a block → place classes → read grid", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", "Lehua");
+    await alsoSchoolAdmin(t, teacher);
     const periodId = await seedPeriod(t);
     const groupId = await seedGroup(t, teacher);
     const tools = await toolsFor(t, teacher);
@@ -132,17 +163,18 @@ describe("master-schedule aide tools (end-to-end)", () => {
       termId, groupId, subject: "Math", teacherId: teacher, weekday: 1, blockId,
     }));
     expect(placed.ok).toBe(true);
-    expect(placed.shelved).toBe(false);
+    expect(placed.noDayYet).toBe(false);
     const shelved = parse(await tools.place_class.run({
       termId, groupId, subject: "Guest (some week)",
     }));
-    expect(shelved.shelved).toBe(true);
+    expect(shelved.noDayYet).toBe(true);
 
     // 4. Read the grid back.
     const grid = parse(await tools.get_master_schedule.run({ termId }));
     expect((grid.blocks as unknown[]).length).toBe(1);
     expect((grid.placements as unknown[]).length).toBe(2);
-    expect((grid.shelf as unknown[]).length).toBe(1);
+    expect((grid.classesWithoutADay as unknown[]).length).toBe(1);
+    expect(grid.shelf).toBeUndefined();
     expect((grid.teachers as { name: string }[]).some((x) => x.name === "Lehua")).toBe(true);
     expect(grid.header).toMatchObject({
       today: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
@@ -153,6 +185,7 @@ describe("master-schedule aide tools (end-to-end)", () => {
   test("reassign_teacher covers an out-sick teacher's whole week in one call", async () => {
     const t = convexTest(schema, modules);
     const lehua = await seedUser(t, "teacher", "Lehua");
+    await alsoSchoolAdmin(t, lehua);
     const sub = await seedUser(t, "teacher", "Sub");
     const periodId = await seedPeriod(t);
     const groupId = await seedGroup(t, lehua);
@@ -187,6 +220,7 @@ describe("master-schedule aide tools (end-to-end)", () => {
   test("shift_class teleports a placed class; refuses on a shelf item", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
+    await alsoSchoolAdmin(t, teacher);
     const periodId = await seedPeriod(t);
     const groupId = await seedGroup(t, teacher);
     const tools = await toolsFor(t, teacher);
@@ -208,12 +242,13 @@ describe("master-schedule aide tools (end-to-end)", () => {
     const noShift = await tools.shift_class.run({
       placementId: shelf.placementId, deltaDays: 1,
     });
-    expect(noShift).toMatch(/shelf/i);
+    expect(noShift).toMatch(/no day yet/i);
   });
 
-  test("move_class needs both coords or toShelf; moving a linked class onto a day auto-materializes it", async () => {
+  test("move_class needs both coords or toShelf; linked work never loses its day (TRA-582)", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
+    await alsoSchoolAdmin(t, teacher);
     const periodId = await seedPeriod(t);
     const groupId = await seedGroup(t, teacher);
     const tools = await toolsFor(t, teacher);
@@ -229,41 +264,58 @@ describe("master-schedule aide tools (end-to-end)", () => {
       const actId = await ctx.db.insert("activities", {
         lessonId, title: "Act", kind: "online", systemPrompt: "...", order: 0,
       });
-      const aId = await ctx.db.insert("assignments", {
+      const aId = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [],
       });
       return { assignmentId: aId, activityId: actId };
     });
 
-    // Shelf it first (no auto-materialize while shelved), then move onto a day.
-    const p = parse(await tools.place_class.run({
+    // Work is given to a class on a date, never placed (TRA-582): without
+    // a date there's nothing to give to.
+    const noDay = await tools.place_class.run({
       termId: periodId, groupId, subject: "Math",
-      assignmentId, activityId, mode: "classFocus",
-    }));
-    const placementId = p.placementId as string;
-
-    // Still shelved → nothing materialized yet.
+      activityId, finish: "inClass",
+    });
+    expect(noDay).toMatch(/NOT GIVEN/);
+    // A cell where the group has no class that day gives nothing either.
+    const noClass = await tools.place_class.run({
+      termId: periodId, groupId, subject: "Math", date: "2026-11-16", blockId,
+      activityId, finish: "inClass",
+    });
+    expect(noClass).toMatch(/Could not give it to the class: That class doesn't meet that day/);
     let a = await t.run(async (ctx) => ctx.db.get(assignmentId as Id<"assignments">));
-    expect((a as Doc<"assignments">).activitySchedule).toHaveLength(0);
+    expect((await sched(t, a))).toHaveLength(0);
+    expect(
+      (await t.run((ctx) => ctx.db.query("schedulePlacements").collect()))
+        .some((row) => row.activityId !== undefined),
+    ).toBe(false);
 
-    const badMove = await tools.move_class.run({ placementId, weekday: 1 });
-    expect(badMove).toMatch(/both weekday AND blockId|toShelf/i);
+    // A card placed before TRA-582 keeps its day.
+    const placementId = await t.run(async (ctx) => {
+      await setSchedule(ctx, assignmentId as Id<"assignments">, [
+        { activityId: activityId as Id<"activities">, mode: "classFocus" },
+      ]);
+      return ctx.db.insert("schedulePlacements", {
+        periodId: periodId as Id<"reportingPeriods">,
+        groupId: groupId as Id<"scholarGroups">,
+        subject: "Math",
+        assignmentId: assignmentId as Id<"assignments">,
+        activityId: activityId as Id<"activities">,
+        weekday: 1,
+        blockId: blockId as Id<"scheduleBlocks">,
+      });
+    });
+    const badMove = await tools.move_class.run({ placementId, weekday: 2 });
+    expect(badMove).toMatch(/both weekday \(or date\) AND blockId|toShelf/i);
 
-    await tools.move_class.run({ placementId, weekday: 1, blockId });
-
-    // Moving onto a day auto-materializes the linked activity PLANNED (setAt null).
+    // Taking it off its day is refused, and the planned entry stays.
+    const offDay = await tools.move_class.run({ placementId, toShelf: true });
+    expect(offDay).toMatch(/only a class can wait without a day/i);
     a = await t.run(async (ctx) => ctx.db.get(assignmentId as Id<"assignments">));
-    expect((a as Doc<"assignments">).activitySchedule).toHaveLength(1);
-    expect((a as Doc<"assignments">).activitySchedule![0].activityId).toBe(activityId);
-    expect((a as Doc<"assignments">).activitySchedule![0].setAt).toBeUndefined(); // planned
-
-    // Shelving it again un-materializes the planned entry.
-    await tools.move_class.run({ placementId, toShelf: true });
-    a = await t.run(async (ctx) => ctx.db.get(assignmentId as Id<"assignments">));
-    expect((a as Doc<"assignments">).activitySchedule).toHaveLength(0);
+    expect((await sched(t, a))).toHaveLength(1);
   });
 
-  test("dispatch_activity gives one scholar a live ad-hoc activity", async () => {
+  test("give (new one-off activity) gives one scholar a live ad-hoc activity", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar", "Oliver");
@@ -272,17 +324,21 @@ describe("master-schedule aide tools (end-to-end)", () => {
       emitted.push(event);
     });
 
-    const res = parse(await tools.dispatch_activity.run({
+    const res = parse(await tools.give.run({
+      newActivity: {
+        title: "Copenhagen taxation exploration",
+        systemPrompt: "Guide the scholar Socratically through how cities fund themselves.",
+      },
       scholarId: scholar,
-      title: "Copenhagen taxation exploration",
-      systemPrompt: "Guide the scholar Socratically through how cities fund themselves.",
+      startsNow: true,
+      finish: "inClass",
     }));
     expect(res.ok).toBe(true);
-    expect(res.confirmation).toBe(
-      'Live now · fades from their screen after today. Say "make it homework" or give a lifetime to keep it.',
-    );
+    // The one-line window summary the aide repeats to the teacher is the
+    // same line the toolComplete chip carries.
+    expect(typeof res.finish).toBe("string");
     expect(emitted.at(-1)?.toolComplete?.result).toContain(
-      res.confirmation as string,
+      res.finish as string,
     );
     const assignmentId = res.assignmentId as Id<"assignments">;
 
@@ -290,35 +346,39 @@ describe("master-schedule aide tools (end-to-end)", () => {
     expect((a as Doc<"assignments">).kind).toBe("adHocDispatch");
     expect((a as Doc<"assignments">).scholarIds).toEqual([scholar]);
     // Live-now → one materialized entry with a real setAt.
-    expect((a as Doc<"assignments">).activitySchedule).toHaveLength(1);
-    expect((a as Doc<"assignments">).activitySchedule![0].setAt).toBeTypeOf("number");
+    expect((await sched(t, a))).toHaveLength(1);
+    expect((await sched(t, a))[0].setAt).toBeTypeOf("number");
 
-    // Queue variant: live:false → planned (setAt null).
+    // Later variant: startsAtMs → planned (setAt null). "In that class" with
+    // no bell schedule ends with that school day.
     const startsAt = Date.now() + DAY;
-    const endsAtMs = startsAt + 2 * 60 * 60_000;
-    const queued = parse(await tools.dispatch_activity.run({
+    const queued = parse(await tools.give.run({
+      newActivity: {
+        title: "Later reading",
+      },
       scholarId: scholar,
-      title: "Later reading",
-      live: false,
-      startsAt,
-      endsAtMs,
+      startsAtMs: startsAt,
+      finish: "inClass",
     }));
     const qa = await t.run(async (ctx) => ctx.db.get(queued.assignmentId as Id<"assignments">));
-    expect((qa as Doc<"assignments">).activitySchedule![0].setAt).toBeUndefined();
-    expect((qa as Doc<"assignments">).activitySchedule![0].endsAt).toBe(
-      endsAtMs,
+    expect((await sched(t, qa))[0].setAt).toBeUndefined();
+    expect((await sched(t, qa))[0].mode).toBe("classFocus");
+    expect((await sched(t, qa))[0].endsAt).toBe(
+      schoolDayEndAt(dayKeyForTimezone(startsAt, TIME_ZONE), TIME_ZONE),
     );
-    expect(queued.confirmation).toMatch(/^Queued · stays until /);
 
-    const dueAt = Date.now() + DAY;
+    const dueDayKey = dayKeyForTimezone(Date.now() + DAY, TIME_ZONE);
+    const dueAt = schoolDayEndAt(dueDayKey, TIME_ZONE);
     const instructions = "Read the passage twice.\n\nOn paper, sketch the pattern you notice.";
-    const offline = parse(await tools.dispatch_activity.run({
+    const offline = parse(await tools.give.run({
+      newActivity: {
+        title: "Pattern field notes",
+        activityKind: "offline",
+        description: instructions,
+      },
       scholarId: scholar,
-      title: "Pattern field notes",
-      activityKind: "offline",
-      description: instructions,
-      mode: "homework",
-      dueAt,
+      startsNow: true,
+      finish: dueDayKey,
     }));
     expect(offline.ok).toBe(true);
     const offlineActivity = await t.run(async (ctx) =>
@@ -334,7 +394,7 @@ describe("master-schedule aide tools (end-to-end)", () => {
     const offlineAssignment = await t.run(async (ctx) =>
       ctx.db.get(offline.assignmentId as Id<"assignments">),
     );
-    expect((offlineAssignment as Doc<"assignments">).activitySchedule?.[0]).toMatchObject({
+    expect((await sched(t, offlineAssignment))[0]).toMatchObject({
       mode: "homework",
       dueAt,
     });
@@ -357,7 +417,7 @@ describe("master-schedule aide tools (end-to-end)", () => {
     expect(completion?.activityId).toBe(offline.activityId);
   });
 
-  test("dispatch_activity resolves a scholar name and creates web or practice work", async () => {
+  test("give (new one-off activity) resolves a scholar name and creates web or practice work", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar", "Milo Kealoha");
@@ -371,11 +431,15 @@ describe("master-schedule aide tools (end-to-end)", () => {
     });
     const tools = await toolsFor(t, teacher);
 
-    const reading = parse(await tools.dispatch_activity.run({
-      scholarName: "Milo Kealoha",
-      title: "Triangle angle reading",
-      activityKind: "web",
-      webUrl: "https://example.com/triangle-angles",
+    const reading = parse(await tools.give.run({
+      newActivity: {
+        title: "Triangle angle reading",
+        activityKind: "web",
+        webUrl: "https://example.com/triangle-angles",
+      },
+      scholarNames: ["Milo Kealoha"],
+      startsNow: true,
+      finish: "inClass",
     }));
     expect(reading.ok).toBe(true);
     expect(reading.scholarId).toBe(scholar);
@@ -385,12 +449,16 @@ describe("master-schedule aide tools (end-to-end)", () => {
     );
     expect((readingActivity as Doc<"activities">).kind).toBe("web");
 
-    const practice = parse(await tools.dispatch_activity.run({
-      scholarName: "Milo",
-      title: "Triangle angle tune-up",
-      activityKind: "problem_set",
-      targetSkillKeys: ["angle_sum_triangle"],
-      itemCount: 6,
+    const practice = parse(await tools.give.run({
+      newActivity: {
+        title: "Triangle angle tune-up",
+        activityKind: "problem_set",
+        targetSkillKeys: ["angle_sum_triangle"],
+        itemCount: 6,
+      },
+      scholarNames: ["Milo"],
+      startsNow: true,
+      finish: "inClass",
     }));
     const practiceActivity = await t.run(async (ctx) =>
       ctx.db.get(practice.activityId as Id<"activities">),
@@ -402,18 +470,22 @@ describe("master-schedule aide tools (end-to-end)", () => {
     });
   });
 
-  test("dispatch_activity rewrites a YouTube web URL into an online activity with a sandboxed video resource", async () => {
+  test("give (new one-off activity) rewrites a YouTube web URL into an online activity with a sandboxed video resource", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar", "Nalu");
     const tools = await toolsFor(t, teacher);
 
     const res = parse(
-      await tools.dispatch_activity.run({
-        scholarName: "Nalu",
-        title: "Watch: how tide pools work",
-        activityKind: "web",
-        webUrl: "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+      await tools.give.run({
+        newActivity: {
+          title: "Watch: how tide pools work",
+          activityKind: "web",
+          webUrl: "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+        },
+        scholarNames: ["Nalu"],
+        startsNow: true,
+        finish: "inClass",
       }),
     );
     // The tool response must tell the aide it created an ONLINE activity with
@@ -448,7 +520,7 @@ describe("master-schedule aide tools (end-to-end)", () => {
     expect(resources[0].uploadedBy).toBe(teacher);
   });
 
-  test("dispatch_activity name matching cannot see scholars outside the institution lens", async () => {
+  test("give (new one-off activity) name matching cannot see scholars outside the institution lens", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const visible = await seedUser(t, "scholar", "Milo Kealoha");
@@ -461,22 +533,30 @@ describe("master-schedule aide tools (end-to-end)", () => {
       new Set([visible]),
     );
 
-    const visibleResult = parse(await tools.dispatch_activity.run({
-      scholarName: "Milo",
-      title: "Visible scholar work",
+    const visibleResult = parse(await tools.give.run({
+      newActivity: {
+        title: "Visible scholar work",
+      },
+      scholarNames: ["Milo"],
+      startsNow: true,
+      finish: "inClass",
     }));
     expect(visibleResult.ok).toBe(true);
     expect(visibleResult.scholarId).toBe(visible);
 
-    const hiddenResult = await tools.dispatch_activity.run({
-      scholarName: "Milo Kapono",
-      title: "Hidden scholar work",
+    const hiddenResult = await tools.give.run({
+      newActivity: {
+        title: "Hidden scholar work",
+      },
+      scholarNames: ["Milo Kapono"],
+      startsNow: true,
+      finish: "inClass",
     });
     expect(hiddenResult).toContain('No scholar matched "Milo Kapono"');
     expect(hiddenResult).not.toContain(String(hidden));
   });
 
-  test("dispatch_activity preserves an explicitly resolved unrestricted admin lens", async () => {
+  test("give (new one-off activity) preserves an explicitly resolved unrestricted admin lens", async () => {
     const t = convexTest(schema, modules);
     const admin = await t.run(async (ctx) =>
       ctx.db.insert("users", {
@@ -495,130 +575,16 @@ describe("master-schedule aide tools (end-to-end)", () => {
       true,
     );
 
-    const result = parse(await tools.dispatch_activity.run({
-      scholarName: "Milo Across Schools",
-      title: "Cross-school admin assignment",
+    const result = parse(await tools.give.run({
+      newActivity: {
+        title: "Cross-school admin assignment",
+      },
+      scholarNames: ["Milo Across Schools"],
+      startsNow: true,
+      finish: "inClass",
     }));
     expect(result.ok).toBe(true);
     expect(result.scholarId).toBe(scholar);
-  });
-
-  test("cascade_unit lays a whole unit out, then move_sequence bulk-shifts it", async () => {
-    const t = convexTest(schema, modules);
-    const teacher = await seedUser(t, "teacher");
-    const periodId = await seedPeriod(t);
-    const groupId = await seedGroup(t, teacher);
-    const tools = await toolsFor(t, teacher);
-    const blk = parse(await tools.create_schedule_block.run({
-      termId: periodId, label: "A", startLocal: "08:30", endLocal: "09:40",
-    }));
-    const blockId = blk.blockId as string;
-
-    // A unit with 3 activities + an assignment on it.
-    const assignmentId = await t.run(async (ctx) => {
-      const unitId = await ctx.db.insert("units", { teacherId: teacher, title: "U", isActive: true });
-      const lessonId = await ctx.db.insert("lessons", { unitId, title: "L", order: 0 });
-      for (let i = 0; i < 3; i++) {
-        await ctx.db.insert("activities", {
-          lessonId, title: `Act ${i}`, kind: "online", systemPrompt: "...", order: i,
-        });
-      }
-      return ctx.db.insert("assignments", {
-        teacherId: teacher, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [],
-      });
-    });
-
-    const casc = parse(await tools.cascade_unit.run({
-      termId: periodId, groupId, assignmentId,
-      startWeekday: 1, startBlockId: blockId,
-    }));
-    expect((casc.placementIds as unknown[]).length).toBe(3);
-    expect(casc.strategy).toBe("classMeetings");
-
-    const grid1 = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    const placed = (grid1.placements as { sequenceId?: string; weekday: number }[])
-      .filter((p) => p.sequenceId === casc.sequenceId);
-    expect(placed).toHaveLength(3);
-    // No class structure at the target → single weekly meeting: one per week at
-    // the clicked slot (all weekday 1, different weeks).
-    expect(placed.map((p) => p.weekday).sort()).toEqual([1, 1, 1]);
-
-    // Bulk-shift the whole sequence one weekday later.
-    const moved = parse(await tools.move_sequence.run({
-      sequenceId: casc.sequenceId, deltaDays: 1,
-    }));
-    expect(moved.count).toBe(3);
-    expect(moved.merged).toBe(0);
-    const grid2 = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    const placed2 = (grid2.placements as { sequenceId?: string; weekday: number }[])
-      .filter((p) => p.sequenceId === casc.sequenceId);
-    expect(placed2.map((p) => p.weekday).sort()).toEqual([2, 2, 2]);
-
-    // Guard: no delta → guidance.
-    const guard = await tools.move_sequence.run({ sequenceId: casc.sequenceId });
-    expect(guard).toMatch(/delta/i);
-  });
-
-  test("cascade_unit startDate anchors a future school-local week", async () => {
-    const t = convexTest(schema, modules);
-    const teacher = await seedUser(t, "teacher");
-    const periodId = await seedPeriod(t);
-    const groupId = await seedGroup(t, teacher);
-    const tools = await toolsFor(t, teacher);
-    const blk = parse(await tools.create_schedule_block.run({
-      termId: periodId, label: "A", startLocal: "08:30", endLocal: "09:40",
-    }));
-    const blockId = blk.blockId as string;
-    const assignmentId = await t.run(async (ctx) => {
-      const unitId = await ctx.db.insert("units", {
-        teacherId: teacher, title: "Future Unit", isActive: true,
-      });
-      const lessonId = await ctx.db.insert("lessons", {
-        unitId, title: "L", order: 0,
-      });
-      for (let i = 0; i < 2; i++) {
-        await ctx.db.insert("activities", {
-          lessonId,
-          title: `Act ${i}`,
-          kind: "online",
-          systemPrompt: "...",
-          order: i,
-        });
-      }
-      return ctx.db.insert("assignments", {
-        teacherId: teacher,
-        unitId,
-        scholarIds: [],
-        startedAt: Date.now(),
-        activitySchedule: [],
-      });
-    });
-    const startDate = "2032-06-16"; // Wednesday
-    const requestedWeek = scheduleWeekStartMs(
-      Date.parse(`${startDate}T12:00:00-10:00`),
-    );
-
-    const cascade = parse(await tools.cascade_unit.run({
-      termId: periodId,
-      groupId,
-      assignmentId,
-      startWeekday: 1,
-      startDate,
-      startBlockId: blockId,
-      layout: "sameDay",
-    }));
-    const placements = await t.run((ctx) =>
-      ctx.db
-        .query("schedulePlacements")
-        .withIndex("by_sequence", (q) =>
-          q.eq("sequenceId", cascade.sequenceId as string),
-        )
-        .collect(),
-    );
-    expect(placements).toHaveLength(2);
-    expect(placements.every((placement) =>
-      placement.weekStartMs === requestedWeek)).toBe(true);
-    expect(placements.every((placement) => placement.weekday === 3)).toBe(true);
   });
 
   test("caught tool errors emit toolComplete", async () => {
@@ -706,104 +672,22 @@ describe("master-schedule aide tools (end-to-end)", () => {
     ).toEqual(before);
   });
 
-  test("accept_reorder silences a sequence's out-of-order flag", async () => {
+  test("a teacher's create_schedule_block is refused in words: the bell schedule is school-admin-only", async () => {
     const t = convexTest(schema, modules);
-    const teacher = await seedUser(t, "teacher");
+    const teacher = await seedUser(t, "teacher", "Lehua");
     const periodId = await seedPeriod(t);
-    const groupId = await seedGroup(t, teacher);
     const tools = await toolsFor(t, teacher);
-    const blk = parse(await tools.create_schedule_block.run({
-      termId: periodId, label: "A", startLocal: "08:30", endLocal: "09:40",
-    }));
-    const blockId = blk.blockId as string;
-    // A class meeting Mon/Tue/Wed in block A (recurring structure), so the
-    // cascade lays the unit across weekdays within one week — then teleporting
-    // activity 0 to Friday is a genuine reorder.
-    let monSlot = "";
-    const assignmentId = await t.run(async (ctx) => {
-      const unitId = await ctx.db.insert("units", { teacherId: teacher, title: "U", isActive: true });
-      const lessonId = await ctx.db.insert("lessons", { unitId, title: "L", order: 0 });
-      for (let i = 0; i < 3; i++) {
-        await ctx.db.insert("activities", {
-          lessonId, title: `Act ${i}`, kind: "online", systemPrompt: "...", order: i,
-        });
-      }
-      for (const weekday of [1, 2, 3]) {
-        const id = await ctx.db.insert("schedulePlacements", {
-          periodId, groupId, subject: "Humanities", weekday,
-          blockId: blockId as Id<"scheduleBlocks">,
-        });
-        if (weekday === 1) monSlot = id;
-      }
-      return ctx.db.insert("assignments", {
-        teacherId: teacher, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [],
-      });
+    const result = await tools.create_schedule_block.run({
+      termId: periodId, label: "Block A", startLocal: "08:30", endLocal: "09:40",
     });
-    const casc = parse(await tools.cascade_unit.run({
-      termId: periodId, groupId, assignmentId,
-      startWeekday: 1, startBlockId: blockId, anchorPlacementId: monSlot,
-    }));
-
-    // Scramble: teleport the FIRST activity (weekday 1) to Friday → out of order.
-    const grid1 = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    const first = (grid1.placements as { _id: string; sequenceId?: string; sequenceIndex?: number; weekday: number }[])
-      .find((p) => p.sequenceId === casc.sequenceId && p.sequenceIndex === 0)!;
-    await tools.shift_class.run({ placementId: first._id, deltaDays: 4 }); // Mon → Fri
-
-    const grid2 = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    expect((grid2.outOfOrder as { sequenceId: string }[]).some((f) => f.sequenceId === casc.sequenceId)).toBe(true);
-
-    // Accept it as intentional → flag gone.
-    const acc = parse(await tools.accept_reorder.run({ sequenceId: casc.sequenceId }));
-    expect(acc.ok).toBe(true);
-    const grid3 = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    expect((grid3.outOfOrder as { sequenceId: string }[]).some((f) => f.sequenceId === casc.sequenceId)).toBe(false);
+    expect(result).toMatch(/Only a school admin can change the bell schedule/);
+    expect(await t.run((ctx) => ctx.db.query("scheduleBlocks").collect())).toHaveLength(0);
   });
 
-  test("place_homework lands on the due rail (virtual homework block), or the shelf", async () => {
-    const t = convexTest(schema, modules);
-    const teacher = await seedUser(t, "teacher");
-    const periodId = await seedPeriod(t);
-    const groupId = await seedGroup(t, teacher);
-    const tools = await toolsFor(t, teacher);
-
-    const due = parse(await tools.place_homework.run({
-      termId: periodId, groupId, subject: "Fractions set", dueWeekday: 3,
-    }));
-    expect(due.ok).toBe(true);
-
-    const grid = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    const hwBlock = (grid.blocks as { _id: string; kind?: string }[]).find((b) => b.kind === "homework");
-    expect(hwBlock).toBeTruthy();
-    const hwPlacement = (grid.placements as { blockId?: string; weekday?: number; mode?: string }[])
-      .find((p) => p.blockId === hwBlock!._id);
-    expect(hwPlacement?.weekday).toBe(3);
-    expect(hwPlacement?.mode).toBe("homework");
-    // Not flagged overloaded even if several land on the same day.
-    await tools.place_homework.run({ termId: periodId, groupId, subject: "Reading log", dueWeekday: 3 });
-    const grid2 = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    expect((grid2.overloaded as unknown[]).length).toBe(0);
-
-    // Shelf variant (no dueWeekday).
-    const shelved = parse(await tools.place_homework.run({
-      termId: periodId, groupId, subject: "Someday HW",
-    }));
-    expect(shelved.ok).toBe(true);
-    const grid3 = parse(await tools.get_master_schedule.run({ termId: periodId }));
-    expect((grid3.shelf as { subject?: string }[]).some((s) => s.subject === "Someday HW")).toBe(true);
-  });
-
-  /**
-   * A catalog app placed on a block is the only clock-bounded way to grant a
-   * managed app: the push goes live at the block's start and clears
-   * APP_PLACEMENT_GRACE_MS after it ends. The aide could not reach it at all
-   * before — its only app verb was a standing `appAudiences` grant, which has
-   * no clock (the 2026-09-15 Stop Motion incident). These cover the whole
-   * round trip the bot uses: attach, read back, detach.
-   */
   test("place_class + update_class carry a catalog app target", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", "Serena");
+    await alsoSchoolAdmin(t, teacher);
     const periodId = await seedPeriod(t);
     const groupId = await seedGroup(t, teacher, "Robotics");
     const tools = await toolsFor(t, teacher);
@@ -860,6 +744,7 @@ describe("master-schedule aide tools (end-to-end)", () => {
   test("an app target and a curriculum activity are mutually exclusive", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", "Serena");
+    await alsoSchoolAdmin(t, teacher);
     const periodId = await seedPeriod(t);
     const groupId = await seedGroup(t, teacher, "Robotics");
     const tools = await toolsFor(t, teacher);
@@ -876,8 +761,9 @@ describe("master-schedule aide tools (end-to-end)", () => {
     const both = await tools.place_class.run({
       termId: periodId, groupId, subject: "Robotics", weekday: 1,
       blockId: blk.blockId as string, externalAppId: appId, activityId,
+      finish: "endOfThatDay",
     });
-    expect(both).toMatch(/activity or a catalog app, not both/i);
+    expect(both).toMatch(/an app or work, not both/i);
   });
 
   test("update_class refuses to attach and detach an app in one call", async () => {

@@ -255,11 +255,35 @@ describe("appInstall.installAppAsActivity", () => {
       allowSilence: true,
       editAccess: "afterCompletion",
     });
+    expect(row?.deliverable?.mode).toBe("auto");
     await t.mutation(internal.appInstall.installAppAsActivity, baseArgs(teacherId));
     row = await t.run((ctx) => ctx.db.get(activityId));
     expect(row?.buildContract).toBeUndefined();
     expect(row?.allowSilence).toBeUndefined();
     expect(row?.editAccess).toBe("never");
+    expect(row?.deliverable?.mode).toBe("none");
+
+    await t.mutation(internal.appInstall.installAppAsActivity, {
+      ...baseArgs(teacherId),
+      buildContract: contract,
+      scholarDescription: "Try a new rule.",
+    });
+    expect((await t.run((ctx) => ctx.db.get(activityId)))?.deliverable).toEqual({
+      kind: "artifact", mode: "auto", criteria: [], prompt: "Try a new rule.",
+    });
+
+    const customized = {
+      kind: "artifact" as const, mode: "auto" as const, criteria: [],
+      prompt: "Try a new rule.", notes: "An authored quality bar",
+    };
+    await t.run((ctx) => ctx.db.patch(activityId, { deliverable: customized }));
+    await t.mutation(internal.appInstall.installAppAsActivity, baseArgs(teacherId));
+    expect((await t.run((ctx) => ctx.db.get(activityId)))?.deliverable).toEqual(customized);
+
+    const authoredAuto = { ...customized, notes: undefined };
+    await t.run((ctx) => ctx.db.patch(activityId, { deliverable: authoredAuto }));
+    await t.mutation(internal.appInstall.installAppAsActivity, baseArgs(teacherId));
+    expect((await t.run((ctx) => ctx.db.get(activityId)))?.deliverable).toEqual(authoredAuto);
   });
 
   test("rejects oversized html, asset references, and non-HTML", async () => {

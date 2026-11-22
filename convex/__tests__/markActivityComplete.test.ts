@@ -5,6 +5,7 @@ import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { buildTutorSystemPrompt } from "../sessionStreamHelpers";
+import { MARK_ACTIVITY_COMPLETE_TOOL_DESCRIPTION } from "../lib/activityCompletionTool";
 import {
   seedScholarInInstitution,
   seedStaffWithMembership,
@@ -19,7 +20,7 @@ const modules = (
 
 type TC = TestConvex<typeof schema>;
 
-// ── Fixtures (copied from focusLockCompletion.test.ts / advanceRubric.test.ts) ──
+// ── Fixtures (copied from classFocusCompletion.test.ts / advanceRubric.test.ts) ──
 
 async function seedUser(
   t: TC,
@@ -409,9 +410,9 @@ describe("markCompleteFromTool — refuses (structured, non-throwing) when the g
   });
 });
 
-// ── Focus lock lifts once the conversation activity is completed ──────
+// ── Class focus clears once the conversation activity is completed ──
 
-describe("markCompleteFromTool — lifts the class-focus lock", () => {
+describe("markCompleteFromTool — clears the class focus", () => {
   test("currentClassFocusForMe drops the focused activity after the tool completes it", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
@@ -455,7 +456,7 @@ describe("markCompleteFromTool — lifts the class-focus lock", () => {
     const res = await callTool(t, sessionId, "Worked through it.");
     expect(res.ok).toBe(true);
 
-    // After: the lock lifts (the completion counts for this assignment).
+    // After: the focus clears (the completion counts for this assignment).
     expect(
       await asScholar.query(api.assignments.currentClassFocusForMe, {}),
     ).toHaveLength(0);
@@ -467,6 +468,17 @@ describe("markCompleteFromTool — lifts the class-focus lock", () => {
 });
 
 // ── Prompt section: appears iff conversation-only, gated by getSessionContext ──
+
+describe("mark_activity_complete tool description", () => {
+  // The hard gate stays hard: the tutor may answer after the tool (TRA-703),
+  // but that is a fallback, never a reason to complete on an open question.
+  test("never completes on a turn that asks a real question", () => {
+    expect(MARK_ACTIVITY_COMPLETE_TOOL_DESCRIPTION).toContain(
+      "NEVER call on a turn where the scholar's latest message asks a real question or raises new confusion",
+    );
+    expect(MARK_ACTIVITY_COMPLETE_TOOL_DESCRIPTION).not.toContain("Prefer not to");
+  });
+});
 
 describe("conversation-completion prompt section", () => {
   async function promptFor(
@@ -490,14 +502,16 @@ describe("conversation-completion prompt section", () => {
     expect(prompt).toContain('Wrapping up "Chat activity"');
     expect(prompt).toContain("mark_activity_complete");
     expect(prompt).toContain("do not manufacture another prerequisite");
-    expect(prompt).toContain("one `tool_use` block");
-    expect(prompt).toContain("ZERO `text` blocks");
+    expect(prompt).toContain("ZERO `text` blocks before the `tool_use` block");
+    expect(prompt).toContain(
+      "Never call it on a turn where the scholar's latest message asks a real question",
+    );
     expect(prompt).toContain("Put that assessment only in the tool's `summary`");
     expect(prompt).toContain(
-      "The app writes the scholar-facing completion close",
+      "The app adds a short note after your reply saying the activity is done",
     );
     expect(prompt).toContain(
-      "must not add a preface, assessment, recap, praise, question, task, or second closing",
+      "Do not write your own closing, completion announcement, recap, praise, assessment, question, or new task",
     );
     expect(prompt).toContain("Completion does not close the chat");
   });

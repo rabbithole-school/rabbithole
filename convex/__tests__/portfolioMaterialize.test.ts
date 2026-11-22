@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { setSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
@@ -327,16 +328,14 @@ describe("portfolio materialization → offline project + deliverable", () => {
       targetedScholarId,
     ]);
     await t.run((ctx) =>
-      ctx.db.patch(assignmentId, {
-        activitySchedule: [
+      setSchedule(ctx, assignmentId, [
           {
             activityId,
             mode: "homework",
             setAt: Date.now() - 60_000,
             scholarIds: [targetedScholarId],
           },
-        ],
-      }),
+        ]),
     );
     const itemId = await seedReadyItem(t, scholarId, assignmentId);
 

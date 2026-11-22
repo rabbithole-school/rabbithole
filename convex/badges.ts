@@ -17,6 +17,11 @@ import { internal } from "./_generated/api";
 import { authedMutation, teacherMutation } from "./lib/customFunctions";
 import { requireActiveScholarAccess } from "./lib/access";
 import { ROLES } from "./lib/roles";
+import { assertProposalIsOpen } from "./lib/questStructure";
+import { insertBadgeAndMintArt } from "./lib/badgeAward";
+import { aboutThreadInstitutionId } from "./lib/scholarThreadAccess";
+import { awardQuestBadgeAs } from "./questShowing";
+import { noteSkyStar, runSkyHook } from "./lib/skyRefresh";
 import {
   isBadgeColorway,
   isBadgeStyle,
@@ -41,7 +46,10 @@ export const getBadgeForArt = internalQuery({
       colorway: (badge.colorway ?? DEFAULT_BADGE_COLORWAY) as BadgeColorway,
       previousImageStorageId: badge.imageStorageId ?? null,
       unitTitle: unit?.title ?? badge.badgeSnapshot.title,
-      description: unit?.description ?? badge.badgeSnapshot.description ?? null,
+      // The badge's own snapshot, never `unit.description`: that is the
+      // teacher-facing copy (on a Quest, notes about the child), and the art
+      // is something the scholar sees.
+      description: badge.badgeSnapshot.description ?? null,
       subject: unit?.subject ?? null,
     };
   },
@@ -163,6 +171,19 @@ export const customizeBadge = authedMutation({
   },
 });
 
+/** A generated badge name, clipped with an ellipsis to the Quest limit. */
+const GENERATED_NAME_MAX = 60;
+function fitBadgeName(name: string): string {
+  const clean = name.trim().replace(/\s+/g, " ");
+  if (clean.length <= GENERATED_NAME_MAX) return clean;
+  const suffix = " — completed";
+  if (clean.endsWith(suffix)) {
+    const room = GENERATED_NAME_MAX - suffix.length - 1;
+    return `${clean.slice(0, clean.length - suffix.length).slice(0, room).trimEnd()}…${suffix}`;
+  }
+  return `${clean.slice(0, GENERATED_NAME_MAX - 1).trimEnd()}…`;
+}
+
 // ── Teacher-facing: manually award a unit badge ───────────────────────
 //
 // Escape hatch for when a scholar earned a badge in spirit but the
@@ -199,7 +220,34 @@ export const awardUnitBadge = teacherMutation({
 
     if (args.unitId) {
       const unit = await ctx.db.get(args.unitId);
-      if (!unit) throw new Error("Unit not found");
+      if (!unit || !unit.isActive) throw new Error("Unit not found");
+      // A scholar's own Quest is theirs alone; a curriculum unit, if stamped
+      // with a school, is one this scholar is at now.
+      if (unit.authorScholarId && unit.authorScholarId !== args.scholarId) {
+        throw new Error("Unit not found");
+      }
+      const schoolId = await aboutThreadInstitutionId(ctx, scholar);
+      if (unit.institutionId && unit.institutionId !== schoolId) {
+        throw new Error("Unit not found");
+      }
+      // A proposal or offer Quest earns its badge only through the Quest
+      // core, so the two paths can't drift (questShowing.ts).
+      if (unit.questApproval) {
+        const outcome = await awardQuestBadgeAs(ctx, ctx.user, {
+          unitId: unit._id,
+          // A name the teacher typed is checked against the Quest limit; the
+          // generated default is trimmed to fit it instead.
+          badgeName: args.title ?? fitBadgeName(unit.badgeOnCompletion?.title ?? unit.title),
+          style: args.style,
+          colorway: args.colorway,
+        });
+        return {
+          badgeId: outcome.badgeId,
+          alreadyEarned: outcome.alreadyAwarded,
+        };
+      }
+      // A Quest proposal still waiting (or declined) earns nothing yet.
+      assertProposalIsOpen(unit);
 
       // Idempotent — never double-award the same (scholar, unit).
       const existing = await ctx.db
@@ -214,10 +262,15 @@ export const awardUnitBadge = teacherMutation({
 
       badgeSnapshot = {
         title: args.title ?? unit.badgeOnCompletion?.title ?? unit.title,
+        // The scholar reads this in their trophy case, so the fallback is
+        // the unit's scholar-facing copy, never its teacher-facing
+        // `description` (on a Quest a teacher offered one scholar, that is
+        // the teacher's notes about the child). With neither, no
+        // description, which every badge reader already handles.
         description:
           args.description ??
           unit.badgeOnCompletion?.description ??
-          unit.description ??
+          unit.scholarDescription ??
           undefined,
         icon: args.icon ?? unit.badgeOnCompletion?.icon ?? unit.emoji ?? undefined,
       };
@@ -239,20 +292,22 @@ export const awardUnitBadge = teacherMutation({
         ? args.colorway
         : DEFAULT_BADGE_COLORWAY;
 
-    const badgeId = await ctx.db.insert("scholarUnitBadges", {
+    const badgeId = await insertBadgeAndMintArt(ctx, {
       scholarId: args.scholarId,
-      ...(args.unitId ? { unitId: args.unitId } : {}),
-      earnedAt: Date.now(),
+      unitId: args.unitId,
       badgeSnapshot,
       style,
       colorway,
-      artStatus: "generating",
-      rerollsUsed: 0,
     });
-    // Mint the generative art async, exactly like the auto-award path.
-    await ctx.scheduler.runAfter(0, internal.badgeArtActions.generateBadgeArt, {
-      badgeId,
-    });
+    // A badge on the kid's own older Quest shows it: its bright star on
+    // their Sky (TRA-699). Any other unit is not theirs and adds nothing.
+    // A local, so the check carries into the hook's closure.
+    const unitId = args.unitId;
+    if (unitId) {
+      await runSkyHook("badges.awardUnitBadge", () =>
+        noteSkyStar(ctx, args.scholarId, { unitId }),
+      );
+    }
 
     return { badgeId, alreadyEarned: false };
   },

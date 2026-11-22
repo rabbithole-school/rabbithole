@@ -6,6 +6,9 @@ import type { Doc, Id } from "../_generated/dataModel";
 import { FLUENT_REPS } from "../lib/practice/scheduler";
 import { DOMAIN_REACHABILITY_STATIC } from "../knowledgeNodes";
 import { domainHasAffectSafeEntry } from "../lib/practice/placement";
+import { summarizeDomainMap } from "../lib/practice/domainMapStatus";
+import { hasTemplate } from "../lib/practice/templates";
+import { ALGEBRA_2_SKILLS } from "../seed/algebra2Graph";
 
 // "New territory" tiles (raise-the-ceiling consolidation, f7): the fold-in of
 // the old standalone "Explore a new territory" pills into the "Today's Math
@@ -236,14 +239,14 @@ describe("practiceSkills — newTerritoryCards offers reachable above-ring domai
     });
   }
 
-  test("Henry-shaped (grade 4, every Algebra 1 prereq domain converged) gets an algebra-1 card with a real mapping-probe sample", async () => {
+  test("A grade-4 scholar (every Algebra 1 prereq domain converged) gets an algebra-1 card with a real mapping-probe sample", async () => {
     const t = sharedSeeded();
-    const henry = await seedScholar(t, "henry_ceiling");
-    await t.run(async (ctx) => ctx.db.patch(henry, { gradeLevel: "4" }));
-    const asHenry = await asUser(t, henry);
-    await convergeDomains(t, henry, A1_PREREQS);
+    const grade4 = await seedScholar(t, "grade4_ceiling");
+    await t.run(async (ctx) => ctx.db.patch(grade4, { gradeLevel: "4" }));
+    const asGrade4 = await asUser(t, grade4);
+    await convergeDomains(t, grade4, A1_PREREQS);
 
-    const cards = await asHenry.query(api.practiceSkills.newTerritoryCards, {});
+    const cards = await asGrade4.query(api.practiceSkills.newTerritoryCards, {});
     const a1Card = cards.find((c) => c.domain === ALGEBRA1);
     expect(a1Card).toBeTruthy();
     expect(a1Card?.strand).toBeTruthy();
@@ -252,21 +255,21 @@ describe("practiceSkills — newTerritoryCards offers reachable above-ring domai
 
     // The map still classifies it `ineligible` — the offer never flips the
     // classification the automatic breadth-first check-in reads.
-    const map = await asHenry.query(api.practiceSkills.domainMapForScholar, {
-      scholarId: henry,
+    const map = await asGrade4.query(api.practiceSkills.domainMapForScholar, {
+      scholarId: grade4,
     });
     const a1Map = map.find((d) => d.domain === ALGEBRA1);
     expect(a1Map?.status).toBe("ineligible");
     expect(a1Map?.eligible).toBe(false);
   });
 
-  test("Asha-shaped (grade K, nothing converged anywhere) gets NO algebra-1 card", async () => {
+  test("A kindergartner (nothing converged anywhere) gets NO algebra-1 card", async () => {
     const t = sharedSeeded();
-    const asha = await seedScholar(t, "asha_ceiling");
-    await t.run(async (ctx) => ctx.db.patch(asha, { gradeLevel: "K" }));
-    const asAsha = await asUser(t, asha);
+    const gradeK = await seedScholar(t, "gradek_ceiling");
+    await t.run(async (ctx) => ctx.db.patch(gradeK, { gradeLevel: "K" }));
+    const asGradeK = await asUser(t, gradeK);
 
-    const cards = await asAsha.query(api.practiceSkills.newTerritoryCards, {});
+    const cards = await asGradeK.query(api.practiceSkills.newTerritoryCards, {});
     expect(cards.some((c) => c.domain === ALGEBRA1)).toBe(false);
   });
 
@@ -337,12 +340,136 @@ describe("DOMAIN_REACHABILITY_STATIC drift", () => {
       expect(new Set(m.prereqDomains), `${m.domain} prereqs`).toEqual(new Set(d.prereqs));
       // The ring check consumes only the grade multiset — compare the verdict at
       // every grade a scholar can hold rather than node identity.
-      for (const g of ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"]) {
+      for (const g of ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]) {
         expect(
           domainHasAffectSafeEntry(m.nodeGrades, g),
           `${m.domain} ring verdict at grade ${g}`,
         ).toBe(domainHasAffectSafeEntry(d.grades, g));
       }
     }
+  });
+});
+
+// ── Algebra 2 and the two-digit grade ceiling (2026-11-20) ─────────────────
+// algebra-2's nodes are grades "10" and "11". `domainHasAffectSafeEntry` treats
+// an UNRANKED grade as in-ring (rank < 0 → true), so if "10"/"11" ever fell out
+// of `gradeRank` the whole domain would silently become grade-eligible — and
+// auto-probed in the check-in — for every scholar. Pin the ring verdicts, and
+// pin that an above-ring scholar still reaches it the deliberate way.
+describe("algebra-2 — grade ring and the new-territory path", () => {
+  const ALGEBRA2 = "algebra-2";
+  const A2_PREREQ_DOMAINS = ["algebra-1", "early-algebra", "geometry-measurement"];
+  const A1_AND_ITS_PREREQS = [
+    "whole-number-arithmetic",
+    "fraction-arithmetic",
+    "geometry-measurement",
+    "ratio-proportion-percent",
+    "integers-coordinates",
+    "early-algebra",
+    "algebra-1",
+  ];
+  const a2Static = () => DOMAIN_REACHABILITY_STATIC.find((m) => m.domain === ALGEBRA2)!;
+
+  test("the static ring verdict: closed through grade 7, open from grade 8 (grade + 2 reaches 10)", () => {
+    const { nodeGrades, prereqDomains, elective } = a2Static();
+    expect(elective).toBe(false);
+    expect(new Set(prereqDomains)).toEqual(new Set(A2_PREREQ_DOMAINS));
+    for (const g of ["K", "1", "2", "3", "4", "5", "6", "7"]) {
+      expect(domainHasAffectSafeEntry(nodeGrades, g), `grade ${g}`).toBe(false);
+    }
+    for (const g of ["8", "9", "10", "11"]) {
+      expect(domainHasAffectSafeEntry(nodeGrades, g), `grade ${g}`).toBe(true);
+    }
+  });
+
+  test("the scholar map: ineligible for grade 4 and grade 6, eligible for grade 8", async () => {
+    const t = sharedSeeded();
+    for (const [grade, eligible] of [["4", false], ["6", false], ["8", true]] as const) {
+      const scholar = await seedScholar(t, `alg2_ring_${grade}`);
+      await t.run(async (ctx) => ctx.db.patch(scholar, { gradeLevel: grade }));
+      const as = await asUser(t, scholar);
+      const map = await as.query(api.practiceSkills.domainMapForScholar, { scholarId: scholar });
+      const a2 = map.find((d) => d.domain === ALGEBRA2);
+      expect(a2, `grade ${grade}`).toBeDefined();
+      expect(a2!.eligible, `grade ${grade}`).toBe(eligible);
+      if (!eligible) expect(a2!.status).toBe("ineligible");
+    }
+  });
+
+  test("an above-ring scholar's algebra-2 becomes REACHABLE once algebra-1 and its own prereq domains converge", () => {
+    const { prereqDomains } = a2Static();
+    const inputs = (converged: Set<string>) =>
+      DOMAIN_REACHABILITY_STATIC.map((m) => ({
+        domain: m.domain,
+        prereqDomains: m.prereqDomains,
+        gradeEligible: !m.elective && domainHasAffectSafeEntry(m.nodeGrades, "4"),
+        placementStatus: converged.has(m.domain) ? "complete" : null,
+        answeredProbes: converged.has(m.domain) ? 1 : 0,
+        hasMastery: converged.has(m.domain),
+      }));
+    // Everything below Algebra 1 mapped, Algebra 1 not yet: still closed.
+    const before = summarizeDomainMap(
+      inputs(new Set(A1_AND_ITS_PREREQS.filter((d) => d !== "algebra-1"))),
+      { gradeOnFile: true },
+    ).perDomain.find((d) => d.domain === ALGEBRA2)!;
+    expect(before.status).toBe("ineligible");
+    expect(before.reachable).toBe(false);
+    // Algebra 1 mapped too: offered, but still never auto-probed.
+    const after = summarizeDomainMap(inputs(new Set(A1_AND_ITS_PREREQS)), {
+      gradeOnFile: true,
+    }).perDomain.find((d) => d.domain === ALGEBRA2)!;
+    expect(prereqDomains.every((p) => A1_AND_ITS_PREREQS.includes(p))).toBe(true);
+    expect(after.status).toBe("ineligible");
+    expect(after.eligible).toBe(false);
+    expect(after.reachable).toBe(true);
+  });
+
+  // End to end through the real offer path: the card samples a probeable
+  // strand via `mappingCandidatesForDomain`, so it also proves the templates
+  // reach the deliberate-pick serve path.
+  test("end to end: a grade-4 scholar with algebra-1 mapped gets an algebra-2 new-territory card", async () => {
+      const t = sharedSeeded();
+      const scholar = await seedScholar(t, "alg2_reach_card");
+      await t.run(async (ctx) => ctx.db.patch(scholar, { gradeLevel: "4" }));
+      await t.run(async (ctx) => {
+        const nodes = await ctx.db.query("knowledgeNodes").collect();
+        for (const domain of A1_AND_ITS_PREREQS) {
+          const own = nodes.filter((n) => n.domain === domain);
+          for (const node of own) {
+            await ctx.db.insert("practiceMastery", {
+              scholarId: scholar,
+              skillKey: node.nodeKey,
+              domain,
+              strand: node.strand,
+              repetition: 3,
+              halfLifeDays: 30,
+              lastPracticedAt: Date.now(),
+              frontier: false,
+              source: "placement",
+              updatedAt: Date.now(),
+            });
+          }
+          await ctx.db.insert("practicePlacements", {
+            scholarId: scholar,
+            domain,
+            status: "complete",
+            probesAnswered: 1,
+            probeLog: [
+              { nodeKey: own[0].nodeKey, strand: own[0].strand ?? "", outcome: "correct", at: Date.now() },
+            ],
+            updatedAt: Date.now(),
+          });
+        }
+      });
+      const as = await asUser(t, scholar);
+      const cards = await as.query(api.practiceSkills.newTerritoryCards, {});
+      const card = cards.find((c) => c.domain === ALGEBRA2);
+      expect(card).toBeTruthy();
+      expect(card!.sampleSkillKey).toBeTruthy();
+      expect(ALGEBRA_2_SKILLS.some((s) => s.skillKey === card!.sampleSkillKey)).toBe(true);
+      expect(hasTemplate(card!.sampleSkillKey)).toBe(true);
+      // Offered, never auto-probed: the map still reads ineligible.
+      const map = await as.query(api.practiceSkills.domainMapForScholar, { scholarId: scholar });
+      expect(map.find((d) => d.domain === ALGEBRA2)?.status).toBe("ineligible");
   });
 });

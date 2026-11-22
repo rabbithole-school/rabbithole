@@ -18,8 +18,14 @@ import {
   applyUnitKey,
   unitKeyFamily,
   UNIT_MISSING_NUDGE,
-  UNIT_WRONG_NUDGE,
+  nearMissNudge,
+  type PadAnswerType,
 } from "@/lib/practicePad";
+import {
+  formNudgeOf,
+  isAnswerPalette,
+  usesAlgebraEditor,
+} from "../../../vendor/shared/practiceAnswerForm";
 import { fonts, type Colors, useColors } from "@/theme";
 import { hasUnitToken } from "../../../vendor/practice/answers";
 import type { ManipulativeSpec } from "../../../vendor/manipulative/types";
@@ -68,13 +74,15 @@ export function ChatPracticeItem({
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<"idle" | "correct" | "miss">("idle");
   const [error, setError] = useState<string | null>(null);
-  // The unit half of the last attempt: "gate" is our own pre-submit refusal (no
-  // attempt spent), the other two are the server's verdict. Cleared on the next
+  // The "so close" line for the last attempt: our own pre-submit unit refusal
+  // (no attempt spent) or the server's unit/form verdict. Cleared on the next
   // input change.
-  const [unitNote, setUnitNote] = useState<"gate" | "missing" | "wrong" | null>(null);
+  const [nearMiss, setNearMiss] = useState<string | null>(null);
   const itemRenderAtRef = useRef(0);
   const firstKeyAtRef = useRef<number | null>(null);
   const clientEventIdRef = useRef<{ answer: string; id: string } | null>(null);
+  // Form nudges this item has had ("right value, not yet in the form asked").
+  const formNudgesUsedRef = useRef(0);
   const spec = useMemo(
     () => (item.kind === "manipulative" ? parseSpec(item.manipulativeSpec) : null),
     [item],
@@ -126,11 +134,20 @@ export function ChatPracticeItem({
                         id: makeClientEventId("practice-answer"),
                       }).id,
                 ...timing,
+                formNudgesUsed: formNudgesUsedRef.current,
               });
         clientEventIdRef.current = null;
+        // Right value, not yet in the form asked: nothing was recorded. Keep
+        // the answer for an edit and say what form is wanted.
+        const nudge = formNudgeOf(result);
+        if (nudge) {
+          formNudgesUsedRef.current += 1;
+          setNearMiss(nudge);
+          return;
+        }
         setAttempts((count) => count + 1);
         setStatus(result.correct ? "correct" : "miss");
-        setUnitNote(result.unitOutcome ?? null);
+        setNearMiss(nearMissNudge(result));
         if (!result.correct) setValue("");
       } catch (e) {
         setError(e instanceof Error ? e.message : "Couldn't check that — try again.");
@@ -151,25 +168,25 @@ export function ChatPracticeItem({
       : undefined;
   const onChangeValue = useCallback((next: string) => {
     if (firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
-    setUnitNote(null);
+    setNearMiss(null);
     setValue(next);
   }, []);
   const onPadKey = useCallback((key: string) => {
     if (firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
-    setUnitNote(null);
+    setNearMiss(null);
     setValue((previous) => applyKey(previous, key));
   }, []);
   // A tapped unit key REPLACES any trailing unit, so cm² → cm³ is one tap.
   const onPickUnit = useCallback((unit: string) => {
     if (firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
-    setUnitNote(null);
+    setNearMiss(null);
     setValue((prev) => applyUnitKey(prev, unit));
   }, []);
   const submitTyped = useCallback(() => {
     // Nudge instead of spending the attempt on a formatting slip. Any trailing
     // unit token passes — a WRONG unit is the grader's call, not ours.
     if (answerUnit && value.trim() && !hasUnitToken(value.trim())) {
-      setUnitNote("gate");
+      setNearMiss(UNIT_MISSING_NUDGE);
       return;
     }
     void submit(value);
@@ -186,11 +203,18 @@ export function ChatPracticeItem({
     item.kind === "typed" &&
     !answerUnit &&
     (item.answerType === "integer" || item.answerType === "decimal");
-  const templatePadType =
+  // An algebra item (served with an answer palette, or a set of solutions)
+  // is typed on the algebra pad. Read defensively: older payloads lack it.
+  const rawPalette = item.kind === "typed" ? (item as { answerPalette?: unknown }).answerPalette : undefined;
+  const answerPalette = isAnswerPalette(rawPalette) ? rawPalette : undefined;
+  const algebraItem =
+    item.kind === "typed" && usesAlgebraEditor({ answerType: item.answerType, answerPalette });
+  const templatePadType: PadAnswerType | null =
     item.kind === "typed" &&
-    item.answerShape === "twoD" &&
-    (item.answerType === "fraction" || item.answerType === "expression")
-      ? item.answerType
+    (algebraItem ||
+      (item.answerShape === "twoD" &&
+        (item.answerType === "fraction" || item.answerType === "expression")))
+      ? (item.answerType as PadAnswerType)
       : null;
 
   return (
@@ -274,7 +298,8 @@ export function ChatPracticeItem({
             <View style={styles.answerStack}>
               <PracticePadAnswer
                 answerType={templatePadType}
-                answerShape="twoD"
+                answerShape={algebraItem ? undefined : "twoD"}
+                answerPalette={answerPalette}
                 value={value}
                 enabled={!busy}
                 focusKey={`${item.itemId}:${attempts}:answering`}
@@ -353,16 +378,12 @@ export function ChatPracticeItem({
               </View>
             </View>
           )}
-          {/* A unit slip names itself and REPLACES the generic miss line: the
+          {/* A unit or form slip names itself and REPLACES the generic miss line: the
               value was right, so "take another look" would send the scholar
               back over correct work. */}
-          {unitNote || status === "miss" ? (
+          {nearMiss || status === "miss" ? (
             <Text style={styles.miss}>
-              {unitNote === "wrong"
-                ? UNIT_WRONG_NUDGE
-                : unitNote
-                  ? UNIT_MISSING_NUDGE
-                  : "Not quite — take another look and try again."}
+              {nearMiss ?? "Not quite — take another look and try again."}
             </Text>
           ) : null}
           {error ? <Text style={styles.error}>{error}</Text> : null}

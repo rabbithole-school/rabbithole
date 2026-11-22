@@ -41,3 +41,23 @@ export function initialAnchorMs(
   }
   return clampToWeekday((currentTerm ?? terms?.[0])?.startsAt ?? today);
 }
+
+/** The term a date falls in, or null between terms. */
+export function termForMs<T extends ReportingPeriodBounds>(terms: T[], ms: number): T | null {
+  return terms.find((term) => ms >= term.startsAt && ms <= term.endsAt) ?? null;
+}
+
+/** The term the Schedule grid opens on (its first-load anchor's term, else the
+ *  current term, else the newest), so School › Classes & times opens on the
+ *  same one. */
+export function defaultTerm<T extends ReportingPeriodBounds>(
+  terms: T[] | undefined,
+  currentTerm: T | null | undefined,
+): T | null {
+  return (
+    (terms ? termForMs(terms, initialAnchorMs(terms, currentTerm)) : null) ??
+    currentTerm ??
+    terms?.[0] ??
+    null
+  );
+}

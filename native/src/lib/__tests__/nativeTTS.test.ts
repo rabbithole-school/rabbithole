@@ -161,6 +161,71 @@ describe("NativeTTSEngine state machine", () => {
   });
 });
 
+// TRA-706: the raw iPad mic hears whatever the engine plays, so the live mic
+// blanks its buffers while the tutor is audible and for a short echo tail.
+describe("NativeTTSEngine.audibleWithin (the mic's echo gate)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is false before the engine has ever spoken", () => {
+    const engine = getNativeTTS();
+    engine.stop();
+    // A fresh singleton may have spoken in an earlier test; only the state
+    // matters here when nothing plays and the tail long since passed.
+    expect(engine.audibleWithin(Date.now() + 60_000, 500)).toBe(false);
+  });
+
+  it("is true while speaking and through the tail after it stops", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const engine = getNativeTTS();
+    await speakAndSettle("Today the sun is warm.");
+    expect(engine.audibleWithin(Date.now(), 500)).toBe(true);
+    hoisted.state.last?.finish();
+    expect(engine.state).toBe("idle");
+    expect(engine.audibleWithin(1_000_499, 500)).toBe(true);
+    expect(engine.audibleWithin(1_000_500, 500)).toBe(false);
+  });
+
+  it("a paused utterance starts the tail (a paused player makes no sound)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(2_000_000);
+    const engine = getNativeTTS();
+    await speakAndSettle("What was your favorite part?");
+    engine.pause();
+    expect(engine.audibleWithin(2_000_100, 500)).toBe(true);
+    expect(engine.audibleWithin(2_000_600, 500)).toBe(false);
+  });
+
+  it("loading the first sentence is not audible", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(3_000_000);
+    const engine = getNativeTTS();
+    engine.stop();
+    vi.setSystemTime(3_010_000);
+    let release: () => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve({
+                ok: true,
+                status: 200,
+                arrayBuffer: async () => new Uint8Array([1]).buffer,
+              });
+          }),
+      ),
+    );
+    engine.enqueue("Hello.");
+    expect(engine.state).toBe("loading");
+    expect(engine.audibleWithin(Date.now(), 500)).toBe(false);
+    release();
+  });
+});
+
 /** Let queued fetch/write promises settle. */
 async function flush(): Promise<void> {
   for (let i = 0; i < 20; i++) await Promise.resolve();

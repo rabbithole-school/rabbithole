@@ -31,6 +31,8 @@ type LauncherTile = {
   iconUrl: string | null;
   iconEmoji: string | null;
   color: string | null;
+  /** A tap opens the scholar's session of this app in the Workshop. */
+  opensAsSession: boolean;
 };
 
 export function AppLauncher({

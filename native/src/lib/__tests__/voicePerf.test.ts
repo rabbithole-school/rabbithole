@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { voiceMark } from "../voicePerf";
+import { voiceMark, voiceStartMark } from "../voicePerf";
 
 beforeEach(() => {
   delete process.env.EXPO_PUBLIC_VOICE_DEBUG;
@@ -99,5 +99,35 @@ describe("voiceMark", () => {
     expect(line).toContain("speechEnd→firstAudio");
     expect(line).not.toContain("micClosed");
     expect(line).not.toContain("transcript");
+  });
+});
+
+describe("voiceStartMark", () => {
+  test("reports offsets from micOpen, in time order, once listening and the session are both up", () => {
+    enable();
+    vi.spyOn(performance, "now")
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(1640)
+      .mockReturnValueOnce(1700)
+      .mockReturnValueOnce(1180);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    voiceStartMark("micOpen");
+    voiceStartMark("transport");
+    voiceStartMark("sessionReady");
+    expect(log).not.toHaveBeenCalled();
+    voiceStartMark("listening");
+
+    expect(log).toHaveBeenCalledWith(
+      "[voice-start] listening +180ms | transport +640ms | sessionReady +700ms",
+    );
+  });
+
+  test("ignores marks before a take is armed", () => {
+    enable();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    voiceStartMark("listening");
+    voiceStartMark("sessionReady");
+    expect(log).not.toHaveBeenCalled();
   });
 });

@@ -1,11 +1,37 @@
 import { v } from "convex/values";
-import { internalMutation } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 
 const SUCCESS_TTL_MS = 60 * 60 * 1000;
 const FAILURE_TTL_MS = 5 * 60 * 1000;
 const PENDING_TTL_MS = 10 * 1000;
 const RATE_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT = 6;
+
+/**
+ * The cached preview for a URL, if a fresh one exists — a pure read, with none
+ * of `claim`'s expiry sweep, rate-limit bucket or pending row. The read-only
+ * path of messageLinkPreviews.previewForMessage uses it so a read-only
+ * identity (users.readOnly) sees what is cached and never writes.
+ */
+export const cached = internalQuery({
+  args: { url: v.string() },
+  handler: async (ctx, args) => {
+    const row = await ctx.db
+      .query("messageLinkPreviewCache")
+      .withIndex("by_url", (q) => q.eq("url", args.url))
+      .unique();
+    // t11-ok: internal query called only from an action, never subscribed.
+    if (!row || row.expiresAt <= Date.now() || row.state !== "ready" || !row.title) {
+      return null;
+    }
+    return {
+      url: row.url,
+      hostname: row.hostname,
+      title: row.title,
+      description: row.description ?? null,
+    };
+  },
+});
 
 export const claim = internalMutation({
   args: {

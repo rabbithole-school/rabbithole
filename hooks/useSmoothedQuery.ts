@@ -33,9 +33,29 @@ import type { FunctionReference, FunctionReturnType } from "convex/server";
 export function useSmoothedQuery<Query extends FunctionReference<"query">>(
   query: Query,
   args: Parameters<typeof useQuery<Query>>[1],
+  options?: SmoothedQueryOptions,
 ): FunctionReturnType<Query> | undefined {
-  return useSmoothedQueryWithPending(query, args).data;
+  return useSmoothedQueryWithPending(query, args, options).data;
 }
+
+/** Optional controls for `useSmoothedQuery` / `useSmoothedQueryWithPending`. */
+export type SmoothedQueryOptions = {
+  /**
+   * Scope what may be retained. Retaining across ANY arg change is only safe
+   * when the arg that changed is a clock (`now: minuteNow`): the old result
+   * still describes the same subject, a minute staler. When another arg names
+   * the SUBJECT — an institution lens, an assignment id — showing the previous
+   * subject's data while the new one loads would put one school's devices (or
+   * one cohort's run budget) under another's heading.
+   *
+   * Pass that subject as `resetKey`. Retention then spans only renders where
+   * the key is unchanged; the render the key changes on behaves like a fresh
+   * `useQuery` (`undefined` until the new subject's data arrives, `isPending`
+   * false — nothing stale is on screen to dim). Omitted, the hook retains
+   * across every arg change, as before.
+   */
+  resetKey?: string | number | null;
+};
 
 /**
  * Like `useSmoothedQuery`, but also reports whether the value currently on
@@ -53,20 +73,46 @@ export function useSmoothedQueryWithPending<
 >(
   query: Query,
   args: Parameters<typeof useQuery<Query>>[1],
+  options?: SmoothedQueryOptions,
 ): { data: FunctionReturnType<Query> | undefined; isPending: boolean } {
   const live = useQuery(query, args);
   const skipped = args === "skip";
+  const resetKey = options?.resetKey;
   // Keep-previous via React's "adjust state during render" pattern: when a new
   // defined result arrives we store it and re-render immediately (no commit, no
   // effect). `live` is a stable reference between renders until the underlying
-  // data actually changes, so the `!== last` guard prevents a render loop.
-  const [last, setLast] = useState<FunctionReturnType<Query> | undefined>(
-    skipped ? undefined : live,
-  );
-  const retained = nextRetained(live, last, skipped);
-  if (retained !== last) setLast(retained);
+  // data actually changes, so the identity guard prevents a render loop.
+  const [held, setHeld] = useState<Held<FunctionReturnType<Query>>>(() => ({
+    key: resetKey,
+    value: skipped ? undefined : live,
+  }));
+  const next = nextHeld(live, held, resetKey, skipped);
+  if (!Object.is(next.key, held.key) || next.value !== held.value) setHeld(next);
   if (skipped) return { data: undefined, isPending: false };
-  return resolveSmoothed(live, retained);
+  return resolveSmoothed(live, next.value);
+}
+
+/** What the hook holds between renders: the retained value and the
+ *  `resetKey` it was retained under. */
+export type Held<T> = {
+  key: SmoothedQueryOptions["resetKey"];
+  value: T | undefined;
+};
+
+/**
+ * The retention step with a reset key: a changed key discards what was held
+ * (it belonged to another subject) before the ordinary keep-previous rule
+ * runs, so the first render under a new key shows only the live value.
+ * Pure, for the same testability reason as `resolveSmoothed`.
+ */
+export function nextHeld<T>(
+  live: T | undefined,
+  held: Held<T>,
+  resetKey: SmoothedQueryOptions["resetKey"],
+  skipped: boolean,
+): Held<T> {
+  const last = Object.is(held.key, resetKey) ? held.value : undefined;
+  return { key: resetKey, value: nextRetained(live, last, skipped) };
 }
 
 /**

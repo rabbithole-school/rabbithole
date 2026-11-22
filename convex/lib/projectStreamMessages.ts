@@ -13,6 +13,10 @@ export type ProjectStreamHistoryMessage = {
   role: "user" | "assistant";
   content: string;
   imageId: string | null;
+  /** The app-usable copy of a scholar photo (messages.appAssetId): the only
+   *  id the builder may put in an app. null = not prepared (too large, or
+   *  normalization failed), so the photo cannot be placed in the app. */
+  appAssetId?: string | null;
   generatedImage?: boolean;
   /** A Magic Corners redraw of the scholar's upload, not a generate_image call. */
   magicRedraw?: boolean;
@@ -141,11 +145,19 @@ export const IMAGE_UNAVAILABLE_LABEL =
  * Tells the builder how to put a scholar's photo into their app. The model
  * sees the pixels but not the storage id, and `/app-assets/<id>` is the only
  * way an app may show a picture (appAssets.ts authorizes the session's chat
- * images). Builder sessions only: elsewhere no app can use the path.
+ * images). The id is the photo's app-usable copy (messages.appAssetId), never
+ * the raw upload: a chat photo is sized for the model, and the app host
+ * refuses anything over the asset cap. Builder sessions only: elsewhere no
+ * app can use the path.
  */
-export function scholarPhotoAppAssetLabel(imageId: string): string {
-  return `[To show this photo itself in the app, use /app-assets/${imageId}; if it is an example to copy, match its look instead.]`;
+export function scholarPhotoAppAssetLabel(appAssetId: string): string {
+  return `[To show this photo itself in the app, use /app-assets/${appAssetId}; if it is an example to copy, match its look instead.]`;
 }
+
+/** A scholar photo with no app-usable copy: the builder must not reference
+ *  it, or the app will fail to load. */
+export const SCHOLAR_PHOTO_NOT_APP_ASSET_LABEL =
+  "[This photo could not be prepared for the app, so the app cannot show it and has no asset path for it; if it is an example to copy, match its look instead.]";
 
 function generatedImagePromptMetadata(
   imagePrompt: string | null | undefined,
@@ -339,7 +351,9 @@ export async function assembleProjectStreamApiMessages({
         if (appAssetPhotos && !message.generatedImage) {
           contentParts.push({
             type: "text",
-            text: scholarPhotoAppAssetLabel(message.imageId),
+            text: message.appAssetId
+              ? scholarPhotoAppAssetLabel(message.appAssetId)
+              : SCHOLAR_PHOTO_NOT_APP_ASSET_LABEL,
           });
         }
         if (modelVisibleContent) {

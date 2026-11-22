@@ -129,10 +129,9 @@ export const create = teacherMutation({
         excludedStrands: isBlend ? undefined : args.excludedStrands,
       },
       startedAt: Date.now(),
-      // Standing assignments never populate activitySchedule — they have
+      // Standing assignments never carry a schedule — they have
       // no unit-scoped activities to push. This is the invariant every
       // unitId-widen read site in assignments.ts relies on.
-      activitySchedule: [],
     });
   },
 });
@@ -416,14 +415,16 @@ async function activeStandingForScholarCore(
   ctx: { db: QueryCtx["db"] },
   scholarId: Id<"users">,
 ) {
-  // No index for "assignments targeting scholar X" (same scan pattern as
-  // assignments.currentClassFocusForMe / homeworkForMe).
-  const rows = await ctx.db.query("assignments").collect();
+  // No index for "assignments targeting scholar X" (assignments.
+  // currentClassFocusForMe / homeworkForMe scan the table), but only standing
+  // assignments can match here, and `by_practice_mode` reads just those, in the
+  // same creation order as a full scan.
+  const rows = await ctx.db
+    .query("assignments")
+    .withIndex("by_practice_mode", (q) => q.eq("practiceMode", "standing"))
+    .collect();
   const match = rows.find(
-    (a) =>
-      !a.archivedAt &&
-      a.practiceMode === "standing" &&
-      targetsScholar(a, scholarId),
+    (a) => !a.archivedAt && targetsScholar(a, scholarId),
   );
   if (!match) return null;
   return {

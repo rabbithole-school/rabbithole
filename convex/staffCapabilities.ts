@@ -1,13 +1,18 @@
 import { v } from "convex/values";
+import { internalQuery } from "./_generated/server";
 import { schoolAdminMutation, schoolAdminQuery } from "./lib/customFunctions";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import {
   isCurriculumRole,
   isPlatformAdminRole,
+  isScholarAdminRole,
   isSchoolAdminRole,
   ROLES,
+  SCHOOL_STANDING_ROLES,
 } from "./lib/roles";
+import { curatableInstitutionIds } from "./lib/access";
+import { resolveInstitutionLens } from "./lib/institutionLens";
 import {
   admissionsCapabilityForTier,
   admissionsTierAtInstitution,
@@ -18,6 +23,8 @@ import {
   hasHealthAccessAtInstitution,
   hasSchoolOperationsAccessAtInstitution,
   hasActiveStaffMembershipAtInstitution,
+  hasValidScope,
+  schoolOperationsInstitutionIds,
   STAFF_CAPABILITIES,
   type StaffCapability,
 } from "./lib/staffCapabilities";
@@ -443,6 +450,9 @@ export const updateForStaff = schoolAdminMutation({
             ? groupId === undefined
             : groupId === undefined &&
                 admissionsCapabilityForTier(args.admissionsTier) === capability;
+        case "finance:read":
+          // Not on this editor: finance.setAccess owns it, and a save here keeps it.
+          return true;
         default:
           return assertNever(capability);
       }
@@ -549,5 +559,162 @@ export const updateForStaff = schoolAdminMutation({
     }
 
     return null;
+  },
+});
+
+// Bounds the reply; the result says when it was hit.
+const STAFF_LOOKUP_MAX_MATCHES = 10;
+
+/**
+ * Internal: the reader behind the `find_staff_account` aide tool — does this
+ * person have a staff account at my school, under what username and role, is
+ * it linked to Slack, and which capability grants (`staffCapabilityGrants`)
+ * does it hold? Before this the aide had no way to see a staff account at all
+ * and told a school admin to "check /admin" for a colleague who did exist.
+ *
+ * Audience: a scholar-admin ROLE or school-operations standing admits the
+ * caller. Schools searched are narrower than the staff directory's lens: only
+ * those where the caller has SCHOLAR-READ standing (`scholarReadInstitutionIds`
+ * — teacher / school_admin membership, or staff with institution-wide
+ * school:operations), because grants are more than the directory shows and a
+ * narrow grant such as health:manage at a second school is not authority to
+ * read its staff's access. The scope set comes from `curatableInstitutionIds` /
+ * `schoolOperationsInstitutionIds`, whose "all" has no liveness filter, so it
+ * is only ever intersected with `resolveInstitutionLens` plus a `disabledAt`
+ * check below. Candidates are SCHOOL_STANDING_ROLES memberships there; MCP
+ * service accounts are not people.
+ *
+ * Grants are reported only when they would actually take effect: active, at a
+ * searched school where the grantee holds staff standing, and validly scoped
+ * (`hasValidScope`) — so "can they do Y" is never overstated. No email,
+ * phone, ids, or scholar data is returned.
+ */
+export const aideFindStaffAccounts = internalQuery({
+  args: {
+    callerUserId: v.id("users"),
+    institutionScope: v.optional(v.string()),
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) throw new Error("Staff lookup requires a staff account");
+    const allowed = isScholarAdminRole(caller.role)
+      ? await curatableInstitutionIds(ctx, caller)
+      : await schoolOperationsInstitutionIds(ctx, caller);
+    if (allowed !== "all" && allowed.size === 0) {
+      throw new Error("Staff lookup requires scholar-admin or school-operations access");
+    }
+    const lens = await resolveInstitutionLens(ctx, caller, args.institutionScope ?? "");
+    const lensIds =
+      lens.scope === "institution"
+        ? lens.institution
+          ? [lens.institution._id]
+          : []
+        : [...lens.allowedInstitutionIds];
+    const institutions: Doc<"institutions">[] = [];
+    for (const id of lensIds) {
+      if (allowed !== "all" && !allowed.has(id)) continue;
+      if (!lens.scholarReadInstitutionIds.has(id)) continue;
+      const inst = await ctx.db.get(id);
+      if (inst && !inst.disabledAt) institutions.push(inst);
+    }
+    if (institutions.length === 0) {
+      throw new Error(
+        "Staff lookup is scoped to your school, and no school where you manage scholars is in your current view.",
+      );
+    }
+    const institutionById = new Map(institutions.map((i) => [i._id, i]));
+
+    const needle = args.name.trim().toLowerCase();
+    if (!needle) throw new Error("Give a name or username to look up");
+    const nameMatches = (u: Doc<"users">) =>
+      [u.name, u.username].some((s) => !!s && s.toLowerCase().includes(needle));
+
+    type Match = {
+      userId: Id<"users">;
+      name: string | null;
+      username: string | null;
+      linkedToSlack: boolean;
+      // Every staff role held at each school (a school_admin who is also a
+      // teacher is both), keyed by institution so same-named schools stay apart.
+      schools: Map<Id<"institutions">, { school: string; roles: string[] }>;
+    };
+    const matches = new Map<Id<"users">, Match>();
+    for (const institution of institutions) {
+      for (const role of SCHOOL_STANDING_ROLES) {
+        const memberships = await ctx.db
+          .query("memberships")
+          .withIndex("by_institution_role", (q) =>
+            q.eq("institutionId", institution._id).eq("role", role),
+          )
+          .collect();
+        for (const m of memberships) {
+          let match = matches.get(m.userId);
+          if (!match) {
+            const u = await ctx.db.get(m.userId);
+            if (!u || u.isSystem === true || !nameMatches(u)) continue;
+            match = {
+              userId: u._id,
+              name: u.name ?? null,
+              username: u.username ?? null,
+              linkedToSlack: !!u.slackUserId,
+              schools: new Map(),
+            };
+            matches.set(u._id, match);
+          }
+          const atSchool = match.schools.get(institution._id) ?? {
+            school: institution.name,
+            roles: [],
+          };
+          if (!atSchool.roles.includes(m.role)) atSchool.roles.push(m.role);
+          match.schools.set(institution._id, atSchool);
+        }
+      }
+    }
+
+    const all = [...matches.values()].sort((a, b) =>
+      (a.name ?? a.username ?? "").localeCompare(b.name ?? b.username ?? ""),
+    );
+    const staff = [];
+    for (const match of all.slice(0, STAFF_LOOKUP_MAX_MATCHES)) {
+      const grants = (
+        await ctx.db
+          .query("staffCapabilityGrants")
+          .withIndex("by_grantee_capability", (q) =>
+            q.eq("granteeUserId", match.userId),
+          )
+          .collect()
+      ).filter(
+        (g) =>
+          g.revokedAt === undefined &&
+          match.schools.has(g.institutionId) &&
+          hasValidScope(g.capability, g.scholarGroupId),
+      );
+      const capabilityGrants = [];
+      for (const grant of grants) {
+        const group = grant.scholarGroupId ? await ctx.db.get(grant.scholarGroupId) : null;
+        // A group grant covers nothing once its group is gone or belongs to
+        // another school (`mentorCoversScholar` / `authorizedGroupIds`).
+        if (grant.scholarGroupId && group?.institutionId !== grant.institutionId) continue;
+        capabilityGrants.push({
+          capability: grant.capability,
+          school: institutionById.get(grant.institutionId)!.name,
+          // Absent group = the whole school.
+          group: group?.name ?? null,
+        });
+      }
+      staff.push({
+        name: match.name,
+        username: match.username,
+        linkedToSlack: match.linkedToSlack,
+        schools: [...match.schools.values()],
+        capabilityGrants,
+      });
+    }
+    return {
+      schoolsSearched: institutions.map((i) => i.name),
+      staff,
+      more: all.length > STAFF_LOOKUP_MAX_MATCHES,
+    };
   },
 });

@@ -1,6 +1,8 @@
 "use client";
 
+import { homeworkDueStatus } from "@/shared/homeworkWeek";
 import { memo, useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { resolveVoiceHydration } from "./sessionVoiceDefault";
 import {
   Box,
   Button,
@@ -19,6 +21,7 @@ import {
 import { ThumbsUp, ThumbsDown, ArrowRight, ArrowUp, CheckSquare, Clock, PencilSimple, House, Lock, Microphone, Square, SpeakerHigh, Pause, Play, Waveform, X } from "@phosphor-icons/react";
 import { RemoteLink } from "./RemoteLink";
 import { DispatchCompletionReceipt } from "./DispatchCompletionReceipt";
+import { useComposeKeyTarget } from "@/hooks/useComposeKey";
 import { useStreamingDictation, type DictationState } from "@/hooks/useStreamingDictation";
 import { DICTATION_CONNECTING_LABEL } from "@/lib/realtimeTranscriptionProtocol";
 import { usePendingImage } from "@/hooks/usePendingImage";
@@ -31,6 +34,8 @@ import { useCachedQuery } from "@/hooks/useCachedQuery";
 import type { DispatchCompletionReceipt as DispatchCompletionReceiptData } from "@/shared/dispatchCompletionReceipt";
 import { getTTSEngine, useTTSQueue } from "@/hooks/useTTSQueue";
 import { composerMicButtonStyle, composerStopRecordingStyle } from "@/components/composerMicStyles";
+import { takeWonderFirstTurn } from "@/lib/wonderFirstTurn";
+import { WONDER_COPY } from "@/shared/wonderRows";
 import {
   SentenceAccumulator,
   stripMarkdownForSpeech,
@@ -63,6 +68,8 @@ import {
   useReconciledSessionMessages,
 } from "@/components/SessionTranscript";
 import { SessionHeader } from "./SessionHeader";
+import { HomeworkDoneButton } from "./HomeworkDoneButton";
+import { QuestReadyToShowButton } from "./QuestShowing";
 import {
   useSessionActivityNav,
   ProjectTitleMenu,
@@ -82,12 +89,12 @@ import { ReflectionDrawer } from "./ReflectionDrawer";
 import { ManualRehearsalBanner } from "./ManualRehearsalBanner";
 import { OfflineSessionView } from "./OfflineSessionView";
 import { BadgeCelebration } from "./BadgeCelebration";
-import { QuestBuildUnlockOffer } from "./QuestBuildUnlockOffer";
 import { SavedForLaterBlock } from "./SavedForLaterBlock";
 import type { ParkedIdea } from "./ParkedIdeaList";
 import { SessionRecapCard } from "./SessionRecapCard";
 import { toaster } from "@/lib/toaster";
 import { haptic, keepAwake, isLikelyMuted } from "@/lib/native";
+import { useIsBedtime } from "@/components/BedtimeGate";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { ComposerAttachMenu } from "@/components/ComposerAttachMenu";
 import {
@@ -99,15 +106,16 @@ import {
   type InstructionHandbackStart,
   type InstructionChatPayload,
 } from "@/components/practice/InstructionChatCard";
+import {
+  QuestProposalCard,
+  type QuestProposalCardData,
+} from "@/components/QuestProposalCard";
 import { useSwipeDismiss } from "@/hooks/useSwipeGesture";
 import { MAX_FLAG_SNIPPET_LEN } from "@/lib/manualRehearsalFlags";
 import { pickAdmonishment } from "@/lib/admonishments";
 import { useNow } from "@/hooks/useNow";
-import { dueStatus } from "@/shared/institutionDay";
 import {
   HOMEWORK_DONE_CONFIRMED,
-  HOMEWORK_DONE_LABEL,
-  HOMEWORK_DONE_UNDO,
   homeworkEyebrow,
 } from "@/shared/homeworkFraming";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -155,7 +163,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { convexSiteUrl } from "@/lib/convexUrls";
 import { GraphemeText } from "@/components/GraphemeText";
 import { buildStageMap } from "@/lib/graphemeStageMap";
-import { pickLockingFocus } from "@/lib/focusLock";
+import { pickLiveFocus } from "@/lib/classFocus";
 import { useSessionDeliverable } from "@/hooks/useSessionDeliverable";
 import { newestHtmlArtifact } from "@/lib/vibecode/helpers";
 import { composerAfterPersistedSend } from "@/lib/composerAfterSend";
@@ -208,6 +216,7 @@ export function SessionInterface({
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useComposeKeyTarget(() => textareaRef.current?.focus());
   const welcomeSentRef = useRef<string | null>(null);
   const kickoffPendingRef = useRef(false);
   const kickoffRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -238,6 +247,12 @@ export function SessionInterface({
   // voiceModeRef mirrors the state for the stream-event callback.
   const [voiceMode, setVoiceModeState] = useState(false);
   const voiceModeRef = useRef(false);
+  // Bedtime (BedtimeGate) covers this page without unmounting it, so the
+  // voice loop has to stand down itself: no mic, no voice, no wake lock.
+  const isBedtime = useIsBedtime();
+  const isBedtimeRef = useRef(isBedtime);
+  // eslint-disable-next-line react-hooks/refs -- mirror for the stream + engine callbacks
+  isBedtimeRef.current = isBedtime;
   const voiceAccRef = useRef(new SentenceAccumulator());
   // A beginner's "your turn" line (TRA-504) is for the child to read, so the
   // voice never speaks it.
@@ -283,7 +298,7 @@ export function SessionInterface({
       voiceMark("firstText"); // no-op unless rh.voiceDebug=1 + cycle armed
     }
     // Voice mode: speak completed sentences as the reply streams in.
-    if (data.text && voiceModeRef.current) {
+    if (data.text && voiceModeRef.current && !isBedtimeRef.current) {
       const engine = getTTSEngine();
       const speakable = voiceTurnFilterRef.current.push(data.text);
       for (const s of voiceAccRef.current.push(speakable)) {
@@ -291,7 +306,9 @@ export function SessionInterface({
       }
     }
     if (data.done) {
-      if (voiceModeRef.current) {
+      // Drop what bedtime silenced, so it can't open tomorrow's first reply.
+      if (isBedtimeRef.current) voiceAccRef.current.flush();
+      if (voiceModeRef.current && !isBedtimeRef.current) {
         const engine = getTTSEngine();
         const tail = voiceAccRef.current.push(
           voiceTurnFilterRef.current.flush(),
@@ -366,10 +383,10 @@ export function SessionInterface({
   );
   const personas = useMemo(() => personasRaw ?? [], [personasRaw]);
 
-  // Focus lock from teacher — array of per-activity classFocus pushes; take the
-  // first SOLO-STARTABLE one as the headline. A focus the scholar can't
-  // complete on their own (e.g. a card-sort done together in class) must NOT
-  // drive the read-only wall (policy b, PR #707).
+  // Class focus from teacher — array of per-activity classFocus pushes; take
+  // the first SOLO-STARTABLE one as the headline. A focus the scholar can't
+  // complete on their own (e.g. a card-sort done together in class) is never
+  // headlined (policy b, PR #707).
   const currentFocus = useQuery(api.assignments.currentClassFocusForMe, {
     asLearner: !isTestMode,
   });
@@ -384,8 +401,8 @@ export function SessionInterface({
     [graphemeInventory],
   );
   const hasGraphemeStages = Object.keys(graphemeStages).length > 0;
-  const firstFocus = pickLockingFocus(currentFocus);
-  const focusLock = firstFocus
+  const firstFocus = pickLiveFocus(currentFocus);
+  const liveFocus = firstFocus
     ? {
         unitId: firstFocus.unitId ? String(firstFocus.unitId) : null,
         lessonId: firstFocus.lessonId ? String(firstFocus.lessonId) : null,
@@ -439,8 +456,10 @@ export function SessionInterface({
   // EFFECTIVE read level (server-resolved the way the tutor prompt resolves it
   // — a teacher's per-session read override counts, TRA-492; the iPad keys on
   // the same field) rather than localStorage. Never for a teacher watching a
-  // scholar's session remotely. An explicit "off" ("0") still wins; an
-  // explicit "on" ("1") still forces it for anyone.
+  // scholar's session remotely. Like the iPad (usePreReaderVoice), a
+  // pre-reader's toggle lasts for this session only and is never persisted,
+  // so an old "off" on a shared browser can't silently take voice away
+  // (TRA-497). For everyone else a stored "on" ("1") still opts in.
   const isListenerSession =
     sessionData?.session?.readLevel === "listener" && !isRemoteMode;
   // Beginner readers (TRA-504) are read to by default too, but the mic does
@@ -474,19 +493,28 @@ export function SessionInterface({
     isBeginnerSessionRef.current = isBeginnerSession;
     beginnerCueAlphabetRef.current = isBeginnerSession ? decodableAlphabet : null;
   }, [isBeginnerSession, decodableAlphabet]);
+  const isPreReaderSession = isListenerSession || isBeginnerSession;
+  // The pre-reader ON default is applied once per session, the first time it
+  // turns eligible, so a later flicker of the read level can't snap a manual
+  // toggle-off back on (same guard as native's `defaultAppliedForRef`).
+  const voiceDefaultAppliedForRef = useRef<string | null>(null);
   useEffect(() => {
-    // Hydrate the persisted preference (deferred past SSR).
-    const stored = localStorage.getItem("rabbithole.voiceMode");
-    const defaultOn =
-      ttsEnabled &&
-      (stored === "1" ||
-        (stored !== "0" && (isListenerSession || isBeginnerSession)));
-    if (defaultOn) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only preference hydration
+    if (!ttsEnabled) return;
+    // Once this session's pre-reader default has applied, nothing (a read-level
+    // flicker, a persisted "1") may overwrite the scholar's in-session choice.
+    const { on, appliedFor } = resolveVoiceHydration({
+      isPreReaderSession,
+      sessionId,
+      appliedFor: voiceDefaultAppliedForRef.current,
+      // Hydrate the persisted opt-in (deferred past SSR).
+      storedOn: localStorage.getItem("rabbithole.voiceMode") === "1",
+    });
+    voiceDefaultAppliedForRef.current = appliedFor;
+    if (on) {
       setVoiceModeState(true);
       voiceModeRef.current = true;
     }
-  }, [ttsEnabled, isListenerSession, isBeginnerSession]);
+  }, [ttsEnabled, isPreReaderSession, sessionId]);
 
   const messages = useMemo(
     () => sessionData?.messages ?? [],
@@ -562,10 +590,13 @@ export function SessionInterface({
   const nowMs = useNow(60_000);
   const homeworkEyebrowText = homeworkForThisSession
     ? homeworkEyebrow(
-        dueStatus(
+        homeworkDueStatus(
           homeworkForThisSession.dueAt,
           nowMs,
           homeworkForThisSession.timeZone,
+          // The "this week" rule: `?? undefined` keeps an older backend's
+          // row (no closures) on the plain date.
+          homeworkForThisSession.dueWeekClosures ?? undefined,
         )?.phrase,
         homeworkForThisSession.teacherName,
       )
@@ -1025,6 +1056,7 @@ export function SessionInterface({
   isStreamingRef.current = isStreaming;
   const maybeAutoListen = useCallback(() => {
     if (!voiceModeRef.current || !sttEnabled) return;
+    if (isBedtimeRef.current) return;
     if (isBeginnerSessionRef.current) return; // read to, answers by tap-to-talk
     if (isStreamingRef.current) return; // more sentences may still arrive
     if (document.visibilityState === "hidden") return;
@@ -1060,14 +1092,28 @@ export function SessionInterface({
     return () => document.removeEventListener("visibilitychange", onHidden);
   }, [cancelRecording]);
 
+  // Bedtime falls mid-conversation: stop now; the wake lock returns at 6 am.
+  useEffect(() => {
+    if (!isBedtime) return;
+    cancelRecording();
+    getTTSEngine()?.stop();
+    keepAwake(false);
+    return () => keepAwake(voiceModeRef.current);
+  }, [isBedtime, cancelRecording]);
+
   const setVoiceMode = useCallback(
     (on: boolean) => {
       setVoiceModeState(on);
       voiceModeRef.current = on;
-      try {
-        localStorage.setItem("rabbithole.voiceMode", on ? "1" : "0");
-      } catch {
-        // private mode etc. — preference just won't persist
+      // A pre-reader's toggle is session-scoped (TRA-497): persisting it would
+      // either override the next session's ON default or force voice on for
+      // whoever uses this browser next.
+      if (!isPreReaderSession) {
+        try {
+          localStorage.setItem("rabbithole.voiceMode", on ? "1" : "0");
+        } catch {
+          // private mode etc. — preference just won't persist
+        }
       }
       const engine = getTTSEngine();
       // Hold the screen-sleep lock while voice mode is on — a kid listening
@@ -1082,7 +1128,7 @@ export function SessionInterface({
         cancelRecording();
       }
     },
-    [cancelRecording],
+    [cancelRecording, isPreReaderSession],
   );
 
   // Time limit mode
@@ -1164,14 +1210,14 @@ export function SessionInterface({
 
   // Focus mismatch: the class is on a different unit/lesson than this session.
   // INFORMATIONAL ONLY since the hard focus gate was removed (shared/
-  // focusLock.ts) — teachers found the read-only wall too rigid, so this now
+  // classFocus.ts) — teachers found the read-only wall too rigid, so this now
   // drives a soft "right now your class is with X" banner and nothing else.
   // Homework sessions never show it (policy a, PR #707): required,
   // independently-scheduled work isn't "off the class's focus".
-  const isFocusMismatch = !isTestMode && !isHomeworkSession && focusLock?.unitId != null && (
-    String(sessionData?.session?.unitId ?? "") !== focusLock.unitId ||
-    (focusLock.lessonId != null &&
-      String(sessionData?.session?.lessonId ?? "") !== focusLock.lessonId)
+  const isFocusMismatch = !isTestMode && !isHomeworkSession && liveFocus?.unitId != null && (
+    String(sessionData?.session?.unitId ?? "") !== liveFocus.unitId ||
+    (liveFocus.lessonId != null &&
+      String(sessionData?.session?.lessonId ?? "") !== liveFocus.lessonId)
   );
 
   // "The turn, not the bell": the scholar is INSIDE the live class-focus
@@ -1179,16 +1225,16 @@ export function SessionInterface({
   // that gets the winding-down cue (item 2) and the at-the-turn choice
   // (item 3), never a lock.
   const isFocusMatch =
-    !isTestMode && !isHomeworkSession && focusLock?.unitId != null && !isFocusMismatch;
+    !isTestMode && !isHomeworkSession && liveFocus?.unitId != null && !isFocusMismatch;
   // A lifetime ("through Friday") is not the room's clock: no "your class is
   // elsewhere" banner and no turn memory for it — only the plate line below.
-  const focusHasRoomClock = focusLock?.lifetimeEndsAt == null;
-  const roomPhase = useRoomTurnPhase(focusLock?.endsAt ?? null);
+  const focusHasRoomClock = liveFocus?.lifetimeEndsAt == null;
+  const roomPhase = useRoomTurnPhase(liveFocus?.endsAt ?? null);
   const { showTurnBanner } = useRoomTurnAwareness(
     isFocusMatch && focusHasRoomClock,
     roomPhase,
-    focusLock?.label ?? null,
-    focusLock?.endsAt ?? null,
+    liveFocus?.label ?? null,
+    liveFocus?.endsAt ?? null,
   );
   // Current activity done with NO forward next: this session is over, so the
   // card hands off to Home. What it deliberately does NOT claim is that the
@@ -1216,8 +1262,8 @@ export function SessionInterface({
     activityNav.unitCompletedOnlineCount < activityNav.unitOnlineActivityCount;
   const completionHandoffOwnsNavigation = completionHandsOffToHome;
   const focusTimeLabel =
-    focusLock?.endsAt != null && focusLock.timeZone
-      ? formatRoomTurnTime(focusLock.endsAt, focusLock.timeZone)
+    liveFocus?.endsAt != null && liveFocus.timeZone
+      ? formatRoomTurnTime(liveFocus.endsAt, liveFocus.timeZone)
       : null;
 
   // Pending whisper from project data (reactive)
@@ -1444,6 +1490,8 @@ export function SessionInterface({
         streamId: prepared.streamId,
         assistantMsgId: prepared.assistantMsgId,
         platform: "web",
+        supportsAppScripts: true,
+        supportsQuestProposalCard: true,
         ...(appSnapshot
           ? { appSnapshotStorageId: appSnapshot.storageId }
           : {}),
@@ -1532,6 +1580,8 @@ export function SessionInterface({
         streamId: prepared.streamId,
         assistantMsgId: prepared.assistantMsgId,
         platform: "web",
+        supportsAppScripts: true,
+        supportsQuestProposalCard: true,
       },
       prepared.assistantMsgId,
     );
@@ -1556,6 +1606,8 @@ export function SessionInterface({
           streamId: handback.streamId,
           assistantMsgId: handback.assistantMsgId,
           platform: "web",
+          supportsAppScripts: true,
+          supportsQuestProposalCard: true,
         },
         handback.assistantMsgId,
       );
@@ -1599,6 +1651,8 @@ export function SessionInterface({
         streamId: prepared.streamId,
         assistantMsgId: prepared.assistantMsgId,
         platform: "web",
+        supportsAppScripts: true,
+        supportsQuestProposalCard: true,
         rubricCheck: { artifactTitle },
       },
       prepared.assistantMsgId,
@@ -1719,6 +1773,8 @@ export function SessionInterface({
               streamId: result.streamId,
               assistantMsgId: result.assistantMsgId,
               platform: "web",
+              supportsAppScripts: true,
+              supportsQuestProposalCard: true,
               kickoff: true,
             },
             result.assistantMsgId,
@@ -1752,6 +1808,13 @@ export function SessionInterface({
     if (questBakeHolding) return;
 
     welcomeSentRef.current = sessionId;
+    // A chat the "I wonder…" box just opened sends the kid's words first, in
+    // place of the opener (TRA-676; the words are handed over in memory).
+    const wonderTurn = takeWonderFirstTurn(sessionId);
+    if (wonderTurn) {
+      void handleSend(wonderTurn.text, wonderTurn.inputModality);
+      return;
+    }
     void handleSend("<start>");
   }, [sessionData, isStreaming, sessionId, currentUser, activeKickoffPlaceholder, questBakeHolding, kickoffHeldForKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1820,6 +1883,15 @@ export function SessionInterface({
   }
 
   const isManualRehearsalSession = !!sessionData?.session?.isTestDrive;
+  // Homework only, and only where mark-complete already applies (online
+  // activities) — the same state the Big picture drawer toggles, no second
+  // completion mechanism.
+  const setHomeworkDone =
+    isHomeworkSession &&
+    !isManualRehearsalSession &&
+    activityNav.activity?.kind === "online"
+      ? activityNav.setComplete
+      : undefined;
 
   return (
     <Flex flex={1} flexDir="column" overflow="hidden" bg="white">
@@ -1909,10 +1981,29 @@ export function SessionInterface({
             : activityNav.activity && activityNav.unit
               ? `${activityNav.unit.emoji ? `${activityNav.unit.emoji} ` : ""}${activityNav.unit.title}`
               : isSeedExploration
-                ? "Quest · you started this"
+                ? // A wonder's chat is the kid's own question, never a Quest
+                  // (sessions.getWithMessages `isWonder`, TRA-678).
+                  sessionData?.session?.isWonder
+                  ? WONDER_COPY.chatEyebrow
+                  : "Quest · you started this"
                 : null
         }
         isSynced={hasArtifacts ? artifactSynced : undefined}
+        // "I'm done with this" sits top right, like the iPad app builder's
+        // Send to teacher. A Quest's session has "I'm ready to show" in the
+        // same pill (TRA-720), first when the Quest is also homework; off a
+        // Quest it draws nothing.
+        rightSlot={
+          <>
+            <QuestReadyToShowButton sessionId={sessionId as Id<"sessions">} />
+            {setHomeworkDone ? (
+              <HomeworkDoneButton
+                done={activityNav.isCurrentDone}
+                onSetDone={setHomeworkDone}
+              />
+            ) : null}
+          </>
+        }
         isTestMode={isTestMode}
         onSignOut={onSignOut}
         showRightPanel={showRightPanel}
@@ -1979,15 +2070,15 @@ export function SessionInterface({
         )}
 
       {/* "Your class is elsewhere" notice — informational only. The hard focus
-          gate is gone (shared/focusLock.ts), so this session stays fully
+          gate is gone (shared/classFocus.ts), so this session stays fully
           usable; the banner just says where the room is, with a shortcut home
           for a scholar who wants to join it. */}
       {isFocusMismatch && focusHasRoomClock && (() => {
-        const focusUnit = units.find((u) => String(u._id) === focusLock?.unitId);
+        const focusUnit = units.find((u) => String(u._id) === liveFocus?.unitId);
         const focusName =
-          focusLock?.label ??
+          liveFocus?.label ??
           (focusUnit
-            ? `${focusUnit.emoji ? `${focusUnit.emoji} ` : ""}${focusUnit.title}${focusLock?.lessonTitle ? ` — ${focusLock.lessonTitle}` : ""}`
+            ? `${focusUnit.emoji ? `${focusUnit.emoji} ` : ""}${focusUnit.title}${liveFocus?.lessonTitle ? ` — ${liveFocus.lessonTitle}` : ""}`
             : null);
         return (
           <Flex
@@ -2047,7 +2138,7 @@ export function SessionInterface({
         >
           <Clock size={14} color="var(--chakra-colors-violet-400)" />
           <Text fontSize="xs" fontFamily="heading" color="violet.600" flex={1}>
-            {liveFocusLine(roomPhase, focusLock ?? {})}
+            {liveFocusLine(roomPhase, liveFocus ?? {})}
           </Text>
         </Flex>
       )}
@@ -2200,16 +2291,8 @@ export function SessionInterface({
           sessionActivityId:
             sessionData?.session?.activityId ?? undefined,
           admonishmentIsHomework: isHomeworkSession,
-          // Homework only, and only where mark-complete already applies
-          // (online activities) — the same state the Big picture drawer
-          // toggles, no second completion mechanism.
-          homeworkDone: activityNav.isCurrentDone,
-          onToggleHomeworkDone:
-            isHomeworkSession &&
-            !isManualRehearsalSession &&
-            activityNav.activity?.kind === "online"
-              ? activityNav.toggleComplete
-              : undefined,
+          // The header's "I'm done with this" receipt, read on the caption.
+          homeworkDone: !!setHomeworkDone && activityNav.isCurrentDone,
           isTouchDevice,
           onStopStream: handleStopStream,
           toolActivity,
@@ -2596,11 +2679,10 @@ interface ChatColumnProps {
   /** When true, this session is a homework push — surfaces the
    *  homework-only "your teacher can read this" admonishment line. */
   admonishmentIsHomework?: boolean;
-  /** Homework only: the same `activityCompletions` state the Big picture
-   *  drawer toggles, surfaced where the scholar can actually see it. Undefined
-   *  (or a non-online activity) hides the control entirely. */
+  /** Homework only: the scholar marked it done with the header's "I'm done
+   *  with this" (the same `activityCompletions` state the Big picture drawer
+   *  toggles), so the caption shows the receipt. */
   homeworkDone?: boolean;
-  onToggleHomeworkDone?: () => void | Promise<void>;
   isTouchDevice?: boolean;
   onStopStream?: () => void;
   toolActivity?: import("@/hooks/useAgentStream").ToolActivity[];
@@ -2697,9 +2779,6 @@ function CompletionMilestone({
            so remounting discards exactly what the effect used to clear. */}
       <SessionRecapCard key={sessionId} sessionId={sessionId} isComplete />
       {completedUnitId && <BadgeCelebration unitId={completedUnitId} />}
-      {/* B6 badge moment: a finished Quest with no build step offers one.
-          Renders nothing unless units.get says canUnlockBuild. */}
-      {completedUnitId && <QuestBuildUnlockOffer unitId={completedUnitId} />}
       <Box
         as="section"
         aria-label="Activity complete"
@@ -2861,7 +2940,6 @@ function ChatColumn({
   sessionActivityId,
   admonishmentIsHomework = false,
   homeworkDone = false,
-  onToggleHomeworkDone,
   isTouchDevice = false,
   onStopStream,
   toolActivity = [],
@@ -2894,23 +2972,6 @@ function ChatColumn({
   const micBtnRef = useRef<HTMLButtonElement>(null);
   const tabHeldRef = useRef(false);
   const tabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // "I'm done with this" (homework). The mutation can legitimately reject
-  // (offline, a lesson-less activity), and this button is CHILD-facing — an
-  // unhandled rejection is exactly the raw-error-to-a-nine-year-old failure
-  // this change exists to remove. Swallow to the console and leave the button
-  // in its previous state; the Big picture drawer remains the fallback.
-  const [homeworkDoneSaving, setHomeworkDoneSaving] = useState(false);
-  const handleToggleHomeworkDone = async () => {
-    if (!onToggleHomeworkDone || homeworkDoneSaving) return;
-    setHomeworkDoneSaving(true);
-    try {
-      await onToggleHomeworkDone();
-    } catch (error) {
-      console.warn("[session] homework completion change failed", error);
-    } finally {
-      setHomeworkDoneSaving(false);
-    }
-  };
   // Engine state for the voice-mode toggle's "speaking" pulse.
   const { state: ttsState } = useTTSQueue();
 
@@ -3533,6 +3594,20 @@ function ChatColumn({
                       scholarId={practiceScholarId as Id<"users">}
                       instruction={message.instruction}
                       onHandback={onInstructionHandback}
+                      interactive={!isRemoteMode}
+                    />
+                  );
+                }
+                if (message.questProposalCard) {
+                  // The tutor's proposal card (TRA-694): Propose sends it to a
+                  // teacher. Only the chat's owner can tap; a teacher reading
+                  // remotely sees it read-only.
+                  return (
+                    <QuestProposalCard
+                      key={message.id}
+                      messageId={message.id as Id<"messages">}
+                      sessionId={sessionId as Id<"sessions">}
+                      card={message.questProposalCard}
                       interactive={!isRemoteMode}
                     />
                   );
@@ -4236,41 +4311,22 @@ function ChatColumn({
             the third-person, tool-framed relational line; homework precedence
             lives in lib/admonishments.ts.
 
-            On homework the "I'm done with this" control sits on this same
-            line: the caption already establishes that a teacher is on the
-            other end, so this is where "tell them I've finished" belongs.
-            It is the SAME `activityCompletions` toggle the Big picture drawer
-            offers — given a place a child can see, not a second way to
-            finish (review/homework-flow-plan.html barred that). */}
+            On homework marked done (the header's "I'm done with this") the
+            line becomes the receipt: the caption already establishes that a
+            teacher is on the other end. */}
         <Box mt={2}>
-          <Flex align="center" justify="center" gap={2} wrap="wrap">
-            <Text
-              fontSize="xs"
-              color="fg.muted"
-              textAlign="center"
-              fontFamily="heading"
-            >
-              {onToggleHomeworkDone && homeworkDone
-                ? HOMEWORK_DONE_CONFIRMED
-                : pickAdmonishment({
-                    isHomework: admonishmentIsHomework,
-                  })}
-            </Text>
-            {onToggleHomeworkDone && (
-              <Button
-                size="xs"
-                variant={homeworkDone ? "ghost" : "outline"}
-                fontFamily="heading"
-                fontWeight="600"
-                color={homeworkDone ? "charcoal.400" : "navy.500"}
-                borderColor="gray.300"
-                loading={homeworkDoneSaving}
-                onClick={handleToggleHomeworkDone}
-              >
-                {homeworkDone ? HOMEWORK_DONE_UNDO : HOMEWORK_DONE_LABEL}
-              </Button>
-            )}
-          </Flex>
+          <Text
+            fontSize="xs"
+            color="fg.muted"
+            textAlign="center"
+            fontFamily="heading"
+          >
+            {homeworkDone
+              ? HOMEWORK_DONE_CONFIRMED
+              : pickAdmonishment({
+                  isHomework: admonishmentIsHomework,
+                })}
+          </Text>
         </Box>
         </Box>
       </Box>
@@ -4296,6 +4352,8 @@ interface MessageData {
   appSnapshotUrl?: string | null;
   chatPractice?: ChatPracticePayload | null;
   instruction?: InstructionChatPayload | null;
+  // The tutor's proposal card (convex/lib/questProposalCard.ts, TRA-690).
+  questProposalCard?: QuestProposalCardData | null;
   resourceShare?: ResourceShare | null;
   inputModality?: MessageInputModality;
   gotItWrong?: boolean;

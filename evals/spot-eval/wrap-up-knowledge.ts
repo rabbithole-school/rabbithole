@@ -52,7 +52,6 @@ const { maxTokens, effort } = tutorRuntime(MODEL);
 
 function baseContext(): TutorPromptContext {
   return {
-    teacherWhisper: null,
     readingLevel: "4th grade",
     scholarName: "Rowan Test",
     unitContext: null,

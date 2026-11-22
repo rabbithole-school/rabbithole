@@ -4,19 +4,26 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { Flex, Input, Textarea, VStack } from "@chakra-ui/react";
+import { Flex, Textarea, VStack } from "@chakra-ui/react";
 import { AddRow, Field, PillRow, Scroll, SectionHeader } from "./shared";
 import { granuleTexts } from "@/convex/lib/granules";
-import { SubjectInput } from "./SubjectInput";
+import { SubjectInput, SubjectPicker } from "./SubjectInput";
+import { GradePicker } from "./GradePicker";
 import { NodeEditorSkeleton } from "./NodeEditorSkeleton";
+import { useSchoolSubjectOptions } from "@/hooks/useSchoolSubjectOptions";
 
 export function UnitFields({ unitId }: { unitId: Id<"units"> }) {
   const unit = useQuery(api.units.get, { id: unitId });
-  const subjectSuggestions = useQuery(api.units.subjects, {}) ?? [];
+  // A unit's subject is one of its school's classes (TRA-723). The picker
+  // shows (disabled) while they load; only an answered empty list (no classes
+  // on that timetable, or a scholar's own unit) keeps the free-text subject.
+  const subjectOptions = useSchoolSubjectOptions(unitId);
+  const freeTextSubject = subjectOptions !== undefined && subjectOptions.length === 0;
+  const subjectSuggestions =
+    useQuery(api.units.subjects, freeTextSubject ? {} : "skip") ?? [];
   const updateUnit = useMutation(api.units.update);
 
   const [subject, setSubject] = useState("");
-  const [gradeLevel, setGradeLevel] = useState("");
   const [bigIdea, setBigIdea] = useState("");
   const [newEQ, setNewEQ] = useState("");
   const [newEU, setNewEU] = useState("");
@@ -26,11 +33,6 @@ export function UnitFields({ unitId }: { unitId: Id<"units"> }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSubject(unit?.subject ?? "");
   }, [unit?.subject]);
-  useEffect(() => {
-    // Reset local draft when remote unit value changes.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setGradeLevel(unit?.gradeLevel ?? "");
-  }, [unit?.gradeLevel]);
   useEffect(() => {
     // Reset local draft when remote unit value changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -48,7 +50,7 @@ export function UnitFields({ unitId }: { unitId: Id<"units"> }) {
   const eus = granuleTexts(unit.enduringUnderstandings);
 
   const blur =
-    (key: "subject" | "gradeLevel" | "bigIdea", value: string) => () => {
+    (key: "subject" | "bigIdea", value: string) => () => {
       if (value !== ((unit[key] as string | undefined) ?? "")) {
         updateUnit({ id: unit._id, [key]: value || null });
       }
@@ -97,25 +99,27 @@ export function UnitFields({ unitId }: { unitId: Id<"units"> }) {
       />
       <Flex gap={3}>
         <Field label="Subject" flex={1}>
-          <SubjectInput
-            value={subject}
-            onChange={setSubject}
-            onCommit={commitSubject}
-            suggestions={subjectSuggestions}
-            placeholder="e.g., Science"
-          />
+          {!freeTextSubject ? (
+            <SubjectPicker
+              subject={unit.subject}
+              options={subjectOptions}
+              onPick={(next) => updateUnit({ id: unit._id, subject: next })}
+            />
+          ) : (
+            <SubjectInput
+              value={subject}
+              onChange={setSubject}
+              onCommit={commitSubject}
+              suggestions={subjectSuggestions}
+              placeholder="e.g., Science"
+            />
+          )}
         </Field>
         <Field label="Grade" flex={1}>
-          <Input
-            size="sm"
-            value={gradeLevel}
-            onChange={(e) => setGradeLevel(e.target.value)}
-            onBlur={blur("gradeLevel", gradeLevel)}
-            placeholder="e.g., 3rd-5th"
-            fontFamily="heading"
-            fontSize="sm"
-            borderColor="gray.200"
-            _focus={{ borderColor: "violet.400", boxShadow: "none" }}
+          <GradePicker
+            gradeLevel={unit.gradeLevel}
+            onPick={(next) => updateUnit({ id: unit._id, gradeLevel: next })}
+            hint={!unit.authorScholarId}
           />
         </Field>
       </Flex>

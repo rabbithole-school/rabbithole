@@ -52,6 +52,23 @@ export type LaunchJournal = {
   everActive?: boolean;
   /** Set when a js_crash was already filed for this launch. */
   fatalAt?: number;
+  /** Set when the app reloaded itself on purpose (a stuck connection). */
+  reloadedAt?: number;
+  /**
+   * Last touch that reached the React root view. Long before a restart while
+   * JS kept running, touches stopped reaching the app: something above the
+   * React tree (a system veil, a stuck native transition) swallowed them.
+   */
+  lastTouchAt?: number;
+  /** Last Rabbithole Lock (Single App Mode) request and whether iOS took it. */
+  lastLockChange?: JournalLockChange;
+};
+
+export type JournalLockChange = {
+  kind: "asam_enter" | "asam_exit";
+  reason: string;
+  ok: boolean;
+  at: number;
 };
 
 export type PendingHealthReport = {
@@ -119,6 +136,32 @@ function contextLines(
 }
 
 /**
+ * When touches last reached the app and the lock last changed, relative to the
+ * last JS tick: a frozen screen with JS alive and touches stopping long before
+ * points above the React tree; a lock change seconds before points at it.
+ */
+function lastSignalLines(journal: LaunchJournal): string[] {
+  const lines: string[] = [];
+  if (journal.lastTouchAt !== undefined) {
+    const before = Math.max(0, journal.lastAliveAt - journal.lastTouchAt);
+    lines.push(
+      `Last touch reached the app: ${formatHst(journal.lastTouchAt)} (${formatDuration(before)} before JS last responded)`,
+    );
+  } else if (journal.everActive) {
+    lines.push("Last touch reached the app: none this launch");
+  }
+  const lock = journal.lastLockChange;
+  if (lock) {
+    const verb = lock.kind === "asam_enter" ? "enter" : "exit";
+    const before = Math.max(0, journal.lastAliveAt - lock.at);
+    lines.push(
+      `Last Rabbithole Lock change: ${verb} (${lock.reason}, ${lock.ok ? "accepted" : "refused"}) at ${formatHst(lock.at)} (${formatDuration(before)} before JS last responded)`,
+    );
+  }
+  return lines;
+}
+
+/**
  * Judge the previous launch. Returns the report to file, or null when it ended
  * cleanly, was already reported as a JS crash, or was replaced by an update.
  * `currentUptimeMs` is the device uptime now (null if unknown).
@@ -129,7 +172,7 @@ export function classifyPreviousLaunch(
   currentBuild: string,
   currentUptimeMs: number | null,
 ): PendingHealthReport | null {
-  if (!previous || previous.fatalAt) return null;
+  if (!previous || previous.fatalAt || previous.reloadedAt) return null;
   // An MDM install of a new build kills the running app; that is not a crash.
   if (previous.build !== currentBuild) return null;
   if (previous.appState === "background") return null;
@@ -184,6 +227,7 @@ export function classifyPreviousLaunch(
       `The app had been in iOS's "inactive" state for ${formatDuration(inactiveFor)} with JS still running: a system overlay or alert left up, or the frozen launch-zoom veil (TRA-331), where the screen looks alive but swallows touches.`,
     );
   }
+  lines.push(...lastSignalLines(previous));
   lines.push("", ...contextLines(previous));
   return {
     id: `${previous.launchId}:unclean_exit`,

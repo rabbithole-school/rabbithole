@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -63,7 +64,7 @@ async function seedHomework(
     scholarDescription?: string;
   },
 ) {
-  return t.run(async (ctx) => {
+  const __mirrored = await t.run(async (ctx) => {
     const unitId = await ctx.db.insert("units", {
       teacherId,
       title: "Ocean systems",
@@ -82,7 +83,7 @@ async function seedHomework(
       kind,
       order: 0,
     } as Doc<"activities">);
-    const assignmentId = await ctx.db.insert("assignments", {
+    const assignmentId = await insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds,
@@ -100,6 +101,7 @@ async function seedHomework(
     });
     return { unitId, lessonId, activityId, assignmentId };
   });
+  return __mirrored;
 }
 
 describe("sessions.openOfflineHomework", () => {

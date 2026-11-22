@@ -6,17 +6,25 @@ import {
   seedOriginValidator,
   seedStatusValidator,
   seedSuggestionTypeValidator,
+  wonderAskedOnValidator,
 } from "./lib/seeds";
 import { promptVisualValidator } from "./lib/practice/promptVisual";
 import type { ErrorPattern } from "./lib/practice/errorPatterns";
 import { healthRecordSchemaFields } from "./lib/healthRecord";
 import { inputModalityValidator } from "./lib/inputModality";
+import { threadAboutValidator } from "./lib/threadAbout";
+import { questApprovalValidator } from "./lib/questApproval";
+import { questProposalCardValidator } from "./lib/questProposalCard";
 import {
   levelDimensionValidator,
   readLevelValidator,
   writeModeValidator,
 } from "./lib/readingLevels";
-import { asamTransitionReasonValidator } from "./lib/deviceActivityValidators";
+import {
+  asamTransitionReasonValidator,
+  kindMinutesValidator,
+  screenTimeDayUsageValidator,
+} from "./lib/deviceActivityValidators";
 import { policyIRValidator } from "../lib/simulator/policyIR";
 import { preflightResultValidator } from "./lib/curriculumPreflightResult";
 import {
@@ -86,7 +94,7 @@ const guardianFormAnswersValidator = v.union(
   v.object({
     kind: v.literal("molii_gardens_field_trip_permission_slip"),
     studentFullName: v.string(),
-    teacherClassroom: v.string(),
+    teacherClassroom: v.optional(v.string()),
     parentFullName: v.string(),
     transportation: v.optional(
       v.union(
@@ -97,9 +105,10 @@ const guardianFormAnswersValidator = v.union(
         v.literal("decline"),
       ),
     ),
+    emergencyContactName: v.optional(v.string()),
     emergencyContactPhone: v.string(),
     signatureDate: v.string(),
-    kualoaReleaseAgreed: v.boolean(),
+    kualoaReleaseAgreed: v.optional(v.boolean()),
   }),
   v.object({
     kind: v.literal("extended_education_visiting_student"),
@@ -282,6 +291,7 @@ const instructionAtomValidator = v.union(
         v.literal("fraction"),
         v.literal("expression"),
         v.literal("multipleChoice"),
+        v.literal("solutionSet"),
       ),
     ),
   }),
@@ -369,6 +379,10 @@ const sessionTableFields = {
     // activity starter failed on the last designer turn; the Workshop surfaces
     // a toast and clears it on the next successful save (F4).
     appAutosaveFailedAt: v.optional(v.number()),
+    // Vibecode only: the builder's one open question for the scholar, written
+    // at the end of a build (set_provocation). Shown in the Flair tab under
+    // "Something to figure out"; each call replaces it, empty clears it.
+    provocation: v.optional(v.string()),
     // Vibecode only: the scholar's PARKING LOT. Feature requests the designer
     // declined to build in the assignment version (no domain twin, or asked
     // before the contract's gate was met) are parked here, never refused, so
@@ -389,6 +403,20 @@ const sessionTableFields = {
         }),
       ),
     ),
+    // RETIRED: the app GATE VERDICT, recorded when the scholar's running app
+    // showed an app mission's gate met. An app mission no longer holds a
+    // build, so nothing writes or reads this; existing rows stay for history.
+    missionGate: v.optional(
+      v.object({
+        metAt: v.number(),
+        artifactId: v.id("artifacts"),
+        kind: v.union(v.literal("loop"), v.literal("run")),
+        choice: v.optional(v.string()),
+        stat: v.optional(v.string()),
+        from: v.optional(v.number()),
+        to: v.optional(v.number()),
+      }),
+    ),
     // Vibecode only: this session is the scholar's FREE PLAY version — their
     // own copy of the app after the assignment version is done, where the
     // parked ideas get built. Created by sessions.startFreePlay from the
@@ -398,10 +426,19 @@ const sessionTableFields = {
     // the designer runs with no model contract (lib/freePlay.ts).
     freePlay: v.optional(v.boolean()),
     freePlayOf: v.optional(v.id("sessions")),
+    // A TILE SESSION: a scholar opened a first-party app from their Apps
+    // launcher, and the tile opened this session (vibecode.openTileForSelf;
+    // lib/tileSessions.ts). Provenance on an ordinary session, not a second
+    // concept: the app is the session's code artifact and its saved work is
+    // session-scoped app state, so the tutor sees it. Play-only for the scholar
+    // (lib/workshopPolicy.ts), never a Quest, never on Home, and hidden from
+    // teacher and parent lists until it holds a message or saved work.
+    sourceCustomAppId: v.optional(v.id("customApps")),
+    // The launcher tile (catalog row) it was opened from.
+    sourceExternalAppId: v.optional(v.id("externalApps")),
     title: v.string(),
     analysisSummary: v.optional(v.string()),
     pulseScore: v.optional(v.number()),
-    teacherWhisper: v.optional(v.string()),
     pendingWhisper: v.optional(v.string()),
     // Per-session TALK level override (teacher-only, `sessions.update`). A
     // legacy "pre-reader" value here reads as talk K + read listener until
@@ -496,6 +533,30 @@ const sessionTableFields = {
       ),
     ),
     deliverableCriteriaError: v.optional(v.string()),
+    // Spotted flair: flair the OBSERVER awarded for an idea no listed goal
+    // asked for (convex/lib/spottedFlair.ts). Kept here, apart from
+    // `deliverableCriteria`, so the rubric check never grades against it and
+    // the tutor never steers toward it; it is about the session's thinking,
+    // not a submitted artifact, so it does not need a deliverables row either.
+    // `id` is `spotted:<scholar message id>`, so a re-reading observer cannot
+    // award the same moment twice. A teacher's removal stamps `removedAt`
+    // rather than deleting, so the observer cannot re-award the moment and a
+    // removed award still spends the session's cap.
+    spottedFlair: v.optional(
+      v.array(
+        v.object({
+          id: v.string(),
+          label: v.string(),
+          note: v.string(),
+          // The scholar's own words that earned it (teacher-facing evidence).
+          excerpt: v.string(),
+          sourceMessageId: v.string(),
+          earnedAt: v.number(),
+          removedAt: v.optional(v.number()),
+          removedBy: v.optional(v.id("users")),
+        }),
+      ),
+    ),
     // "Big picture" reflection — AI-generated narrative that
     // situates this activity in the unit theme + scholar's arc.
     // Surfaced via the compass button in the project header (the
@@ -1108,6 +1169,7 @@ export default defineSchema({
       // at most one. Neither confers a roster lens.
       v.literal("admissions:full"),
       v.literal("admissions:scheduling"),
+      v.literal("finance:read"),
     ),
     scholarGroupId: v.optional(v.id("scholarGroups")),
     grantedBy: v.id("users"),
@@ -1228,6 +1290,13 @@ export default defineSchema({
     enrollmentStanding: v.optional(
       v.union(v.literal("enrolled"), v.literal("program_guest")),
     ),
+    // Withdrawn: the scholar has left the school. Set (an ISO date, e.g.
+    // "2026-11-14") on the day they left; absent = a current scholar. A
+    // withdrawn scholar keeps every record and stays readable by staff, but
+    // leaves current-scholar lists (rosters, form dashboards, attendance, the
+    // marketing media-release question). Staff set and undo it from the
+    // scholar's profile (scholars.setWithdrawal). See lib/enrollmentStanding.ts.
+    withdrawnOn: v.optional(v.string()),
     // Postal address (freeform, single string). Mainly a PARENT contact field
     // — Rabbithole is the school's system of record for parent contact info
     // (email/phone/address). Staff-only PII: a parent must NEVER see another
@@ -1249,16 +1318,19 @@ export default defineSchema({
     // is precisely the population this field exists for.
     //
     // STAFF-ONLY, and deliberately narrow in three ways:
-    //  1. Never parent- or scholar-visible. `scholars.getProfile` returns it
+    //  1. The field itself is never parent- or scholar-visible. `scholars.getProfile` returns it
     //     only to a scholar-admin caller (null on a self-read), it is not in
     //     the shared aide read-tool layer that parents also reach, and it is in
     //     no export, one-sheet, or printed form.
-    //  2. Consumed ONLY by staff-facing generators (end-of-day check-in, class
-    //     digest, staff aide, observer). Peer- and family-visible prose — the
-    //     share-back digest a teacher reads to the class, the parent aide —
-    //     stays on the universal they/them default ON PURPOSE: with pronouns
-    //     recorded for some scholars and not others, gendering those surfaces
-    //     would mark the scholars who differ. See lib/scholarPronouns.ts.
+    //  2. Consumed by staff-facing generators (end-of-day check-in, class
+    //     digest, staff aide, observer) and by parent-report DRAFTS
+    //     (parentReports.ts), which a teacher who knows the family reads and
+    //     edits before anything is published (Andy, 2026-11-18). Other peer-
+    //     and family-visible prose — the share-back digest a teacher reads to
+    //     the class, the parent aide — stays on the universal they/them
+    //     default ON PURPOSE: with pronouns recorded for some scholars and not
+    //     others, gendering those surfaces would mark the scholars who differ,
+    //     and nobody reviews them first. See lib/scholarPronouns.ts.
     //  3. No history table (unlike readingLevel/readingLevelHistory). A durable
     //     audit trail of a child's pronoun changes is exactly the artifact that
     //     could out them years later. Last write wins; nothing is logged.
@@ -1330,6 +1402,19 @@ export default defineSchema({
     // normal account.
     isSystem: v.optional(v.boolean()),
     preferredFont: v.optional(v.string()), // "andika" | "opendyslexic" | undefined (system default)
+    // "Coding challenges" switched on: "Code it" missions unlock for this
+    // scholar on their own (lib/codeItUnlock.ts). Off unless set: the scholar
+    // turns it on (users.setCodeItEnabled), or staff do from the CLI
+    // (users.setCodeItEnabledForUser). A teacher's offer reaches them either
+    // way. Absent = off.
+    codeItEnabled: v.optional(v.boolean()),
+    // The "Code it" missions (skill keys, lib/practice/codeItMissions.ts) the
+    // scholar dismissed one at a time with the × on its Quests row
+    // (questProposals.dismissUnlockedCodeIt): each stops unlocking on its own,
+    // so the next one earned takes its place. Set only by the scholar; a
+    // teacher's offer of the same mission still reaches them. Bounded by the
+    // mission registry (only its keys are ever written). Absent = none.
+    codeItDismissedSkills: v.optional(v.array(v.string())),
     // Staff-aide model preference — the "vote with your feet" opt-in.
     // Absent = the fleet default (MODELS.OPUS_5_5, a code constant — there is
     // no env override); "sonnet" / "opus" / "fable" pin that staff member's
@@ -1575,6 +1660,18 @@ export default defineSchema({
     // Rabbithole Lock, and a disarm is refused while frozen.
     freezeUntil: v.optional(v.number()),
     freezeUpdatedBy: v.optional(v.id("users")),
+    // Find my BunnyPad (convex/bunnypadFind.ts): the APNs device token this
+    // install reported, the bundle id it belongs to (the APNs topic: each
+    // channel build is its own app), and which APNs host serves it. A find
+    // is a visible push with a loud bundled sound; no token, no find.
+    apnsToken: v.optional(v.string()),
+    apnsTopic: v.optional(v.string()),
+    apnsEnvironment: v.optional(
+      v.union(v.literal("production"), v.literal("development")),
+    ),
+    apnsTokenUpdatedAt: v.optional(v.number()),
+    // When the last find sound was sent here, for the repeat guard.
+    lastFindAt: v.optional(v.number()),
     // A temporary, staff-authorized Robotics capture surface for this already
     // assigned managed iPad. All fields are optional so existing bindings stay
     // valid; the server treats an expired command as inactive even before its
@@ -1845,6 +1942,10 @@ export default defineSchema({
         v.literal("stop-motion-studio"),
         v.literal("mentava-reading"),
         v.literal("google-arts-culture"),
+        v.literal("adobe-lightroom"),
+        v.literal("brilliant"),
+        v.literal("carnets"),
+        v.literal("sage-teacher"),
       ),
     ),
     expiresAt: v.optional(v.number()),
@@ -2099,6 +2200,19 @@ export default defineSchema({
     gitSha: v.string(),
     managedDeviceId: v.optional(v.id("managedDeviceClaims")),
     lastSeenAt: v.number(),
+    // The iPad's own battery reading at `batteryAt`, from builds that report
+    // it (older builds leave all three absent). The charge reminder reads it:
+    // a fresh "charging"/"full" means the BunnyPad is plugged in tonight.
+    batteryLevel: v.optional(v.number()), // 0–100
+    batteryState: v.optional(
+      v.union(
+        v.literal("unplugged"),
+        v.literal("charging"),
+        v.literal("full"),
+        v.literal("unknown"),
+      ),
+    ),
+    batteryAt: v.optional(v.number()),
   })
     .index("by_user_device", ["userId", "deviceId"])
     .index("by_institution_last_seen", ["institutionId", "lastSeenAt"])
@@ -2175,6 +2289,51 @@ export default defineSchema({
     .index("by_institution_day", ["institutionId", "dayKey"])
     .index("by_user_device_client_at", ["userId", "deviceId", "clientAt"]),
 
+  // School › Screen time's per-scholar-day summary (convex/screenTimeDays.ts),
+  // one row per scholar, school and day (a scholar on an iPad paired to
+  // another school has a row at each).
+  // Week and Month read these small rows instead of re-rolling every device
+  // event, play, web session, tutor turn and practice attempt on each
+  // heartbeat. Each row is written by the SAME read model the live page uses
+  // (`readScholarDayUsage` with the day strip's classifier), so the two never
+  // disagree. Kept fresh by a debounced recompute after the scholar's device
+  // activity, and finalized by a nightly pass.
+  screenTimeDays: defineTable({
+    scholarId: v.id("users"),
+    institutionId: v.id("institutions"),
+    dayKey: v.string(),
+    usage: screenTimeDayUsageValidator,
+    /** Measured minutes by stretch kind, split at the bell. */
+    kinds: v.object({
+      inSchool: kindMinutesValidator,
+      outside: kindMinutesValidator,
+    }),
+    computedAt: v.number(),
+  })
+    .index("by_institution_day", ["institutionId", "dayKey"])
+    .index("by_scholar_day", ["scholarId", "dayKey"]),
+
+  // A scholar-day whose summary is waiting on its debounced recompute, one
+  // row per pending scholar, day and school. `deviceActivity.record`
+  // schedules a recompute only when it inserts this row (or finds it stale),
+  // so a busy iPad costs one recompute every few minutes. The recompute
+  // deletes it first.
+  screenTimeDirty: defineTable({
+    scholarId: v.id("users"),
+    dayKey: v.string(),
+    institutionId: v.id("institutions"),
+    markedAt: v.number(),
+  }).index("by_scholar_day", ["scholarId", "dayKey"]),
+
+  // An institution-day the nightly pass (or the backfill) has summarized for
+  // every scholar. A Week or Month read is served from `screenTimeDays` only
+  // when every past day in it is covered; otherwise the page reads live.
+  screenTimeDayCoverage: defineTable({
+    institutionId: v.id("institutions"),
+    dayKey: v.string(),
+    summarizedAt: v.number(),
+  }).index("by_institution_day", ["institutionId", "dayKey"]),
+
 // A scholar's pass through an activity. The locked nomenclature calls
   // this a *session* (see review/curriculum-rehearse-and-maturity.md). The
   // canonical PHYSICAL table is `sessions` (renamed from `projects`; see
@@ -2206,7 +2365,9 @@ export default defineSchema({
     .index("by_free_play_of", ["freePlayOf"])
     // "Has this scholar already followed this seed?" for one seed, without
     // reading every session they own (the teacher Prep `bestNext` read).
-    .index("by_user_seed", ["userId", "seedId"]),
+    .index("by_user_seed", ["userId", "seedId"])
+    // A scholar's tile sessions of one app: find-or-create and the switcher.
+    .index("by_user_sourceCustomApp", ["userId", "sourceCustomAppId"]),
 
   messages: defineTable({
     sessionId: v.id("sessions"),
@@ -2299,6 +2460,17 @@ export default defineSchema({
     flagReason: v.optional(v.string()),
     // Image attachment (Convex file storage)
     imageId: v.optional(v.id("_storage")),
+    // The copy of a scholar's chat photo that an app may show: `imageId`
+    // re-encoded within the app-asset caps (shared/appAssets.ts) by
+    // appAssetActions.prepareSessionPhotoAssets, or `imageId` itself when it
+    // already fits. A chat photo is sized for the tutor model (1568 px), not
+    // for the app host (300 KB), so the builder is handed THIS id as the
+    // /app-assets/ path, and the host serves it for a stale reference to the
+    // raw `imageId` too. Set lazily, builder sessions only.
+    appAssetId: v.optional(v.id("_storage")),
+    // No app-usable copy can be made of `imageId` (a GIF, a corrupt upload,
+    // one over the source cap), so it is not retried on every builder turn.
+    appAssetUnavailable: v.optional(v.literal(true)),
     // The live code-app frame the tutor saw on this user turn. Persist it so a
     // teacher reviewing the transcript can see the same state (~50 KB JPEG).
     appSnapshotStorageId: v.optional(v.id("_storage")),
@@ -2375,6 +2547,11 @@ export default defineSchema({
         contentVersion: v.number(),
       }),
     ),
+    // TRA-690: a proposal card the tutor drafted (offer_quest_proposal), on a
+    // `role: "tool"` row split into the turn where it was offered. A draft
+    // only: the scholar's Propose tap sends it (questProposals.propose). Its
+    // toolAction is blank, so a client without the card shows nothing.
+    questProposalCard: v.optional(questProposalCardValidator),
     // Legacy redraw marker; no writer since 2026-09. Kept for historical rows.
     magicProcessed: v.optional(v.boolean()),
     // For persistent-text-streaming: links to active stream
@@ -2414,6 +2591,20 @@ export default defineSchema({
     // while still alive. Optional so pre-existing rows validate; the reap falls
     // back to _creationTime when it's absent.
     lastStreamActivityAt: v.optional(v.number()),
+    // Why /session-stream turned this placeholder's request away before the
+    // tutor started (TRA-472). Stamped only by a request carrying the turn's
+    // streamId. An untouched, empty placeholder WITHOUT this means the request
+    // never reached the server; with it, the status and error say what refused
+    // it. It stays after a retry that succeeds, so a stranded turn is a stamped
+    // placeholder whose content is still empty. Diagnostic only: nothing reads
+    // it at runtime.
+    streamRefusal: v.optional(
+      v.object({
+        status: v.number(),
+        reason: v.string(),
+        at: v.number(),
+      }),
+    ),
     // Reading-ramp grapheme spans (young-learners-plan.html §10). Written
     // post-stream by the grapheme annotator (graphemeActions.annotateAndStore)
     // ONLY for pre-reader scholars with an active team inventory; consumed by
@@ -2431,6 +2622,9 @@ export default defineSchema({
       ),
     ),
   })
+    // Lets lib/storageReferences.ts see that this feature holds a blob.
+    .index("by_image_storage", ["imageId"])
+    .index("by_app_snapshot_storage", ["appSnapshotStorageId"])
     .index("by_session", ["sessionId"])
     .index("by_session_role", ["sessionId", "role"])
     .index("by_stream", ["streamId"])
@@ -3250,9 +3444,10 @@ export default defineSchema({
   // One row per scholar per map (`sky` | `tree` | `mapComplete`) recording that
   // its ONE-TIME celebratory reveal has already been shown. It is NOT the
   // unlock flag — the gate that HIDES/SHOWS a map in the scholar's own nav is
-  // derived purely from EVIDENCE (see convex/mapGates.ts: welcome-unit complete
-  // / seeds / masteryObservations for the Sky; any practicePlacements row for
-  // the Tree), so an existing scholar with history is never re-locked. This
+  // derived purely from EVIDENCE (see convex/mapGates.ts: a star the kid's own
+  // Sky draws, skyStars.forSelf, for the Sky; any practiceMastery or
+  // practicePlacements row for the Tree), so an existing scholar with history
+  // is never re-locked. This
   // table only answers "has the fun reveal already fired?" so it never
   // replays. A one-shot backfill (migrations.backfillMapReveals) stamps every
   // already-unlocked scholar as already-revealed, so the reveal fires only for
@@ -3280,6 +3475,57 @@ export default defineSchema({
     revealedAt: v.number(),
     eligibleCountSeen: v.optional(v.number()),
   }).index("by_scholar_map", ["scholarId", "map"]),
+
+  // One row each time a scholar opens their Sky (TRA-669), on web or BunnyPad,
+  // so "Sky opens per kid per week" can be counted; `_creationTime` is when.
+  // Nothing recorded an open before. No existing table fits: `mapReveals`
+  // above is one row per scholar per map (a one-shot flag), `momentEvents` is
+  // the story/seed card ledger that the done-screen governor and the question
+  // queue read, and `deviceActivityEvents` is BunnyPad-only and keyed by
+  // device. Written only by skyOpens.record; read by people counting opens.
+  skyOpens: defineTable({
+    scholarId: v.id("users"),
+  }).index("by_scholar", ["scholarId"]),
+
+  // One star on a kid's own Sky (TRA-699): something that kid did, a wonder
+  // (`seedId`) or one of their own Quests (`unitId`); exactly one is set.
+  // Rules: lib/skySources.ts. A row is added when its source first qualifies
+  // and is never deleted: a source that stops qualifying keeps its row and
+  // drops out of the read (skyStars.forSelf). `label` is the source's text
+  // tidied once (lib/skyLabel.ts); `hidden` marks a keyboard mash. `x`/`y` (em,
+  // lib/skyLayout.ts) are set once, when the star is placed, and never moved.
+  // `queuedAt` is when a refresh was last scheduled to place a waiting star
+  // (lib/skyRefresh.ts: one run per kid; an old one means the run died).
+  // Written by lib/skyRefresh.ts and skyStars.ts only. Its own table because a
+  // star is per-kid layout state: on `seeds` or `units` it would ride along on
+  // every hot read of those, and `skyOpens`/`mapReveals` are per-kid events
+  // and flags, not one row per star.
+  skyStars: defineTable({
+    scholarId: v.id("users"),
+    seedId: v.optional(v.id("seeds")),
+    unitId: v.optional(v.id("units")),
+    label: v.optional(v.string()),
+    hidden: v.optional(v.boolean()),
+    x: v.optional(v.number()),
+    y: v.optional(v.number()),
+    queuedAt: v.optional(v.number()),
+  })
+    // A kid's rows (prefix), and one wonder's star.
+    .index("by_scholar_seed", ["scholarId", "seedId"])
+    // One Quest's star: the per-turn trigger's single lookup.
+    .index("by_scholar_unit", ["scholarId", "unitId"]),
+
+  // A star's embedding (512 numbers, lib/embeddings.ts), keyed 1:1 to its
+  // skyStars row. A side table for the reason knowledgeNodeEmbeddings is one:
+  // the Sky's read (skyStars.forSelf) never touches a vector; only the
+  // per-kid refresh reads them, to place a star beside its closest sibling.
+  skyStarEmbeddings: defineTable({
+    starId: v.id("skyStars"),
+    scholarId: v.id("users"),
+    vector: v.array(v.float64()),
+  })
+    .index("by_star", ["starId"])
+    .index("by_scholar", ["scholarId"]),
 
   // Append-only practice attempt telemetry. One row per GRADED practice attempt
   // (correct and incorrect), keyed by the node and optional served item identity,
@@ -3511,6 +3757,8 @@ export default defineSchema({
     expectedAnswer: v.optional(v.string()),
     createdAt: v.optional(v.number()),
   })
+    // Lets lib/storageReferences.ts see that this feature holds a blob.
+    .index("by_work_image", ["workImageId"])
     .index("by_scholar", ["scholarId"])
     .index("by_scholar_client_event", ["scholarId", "clientEventId"])
     .index("by_node", ["nodeKey"])
@@ -4218,14 +4466,17 @@ export default defineSchema({
     suggestionType: seedSuggestionTypeValidator,
     // TWO descriptions, by audience (DEC — the redaction boundary):
     //   `rationale`         = TEACHER-facing diagnostic. May name the scholar,
-    //                         the gap, the misconception ("Oliver couldn't
+    //                         the gap, the misconception ("Juniper couldn't
     //                         explain the pressure mechanism — the key gap").
-    //   `scholarInvitation` = SCHOLAR-facing 2nd-person hook the kid actually
-    //                         reads on their sky ("Why does a kettle boil
-    //                         faster up a mountain?"). Never names them, never
-    //                         says "gap"/"misconception". Optional for back-
-    //                         compat: scholar surfaces fall back to `rationale`
-    //                         when absent (older observer seeds, teacher seeds).
+    //                         Never shown to a scholar: `seedScholarText`
+    //                         (lib/seedLabel.ts) never reads it.
+    //   `scholarInvitation` = SCHOLAR-facing: one question the kid actually
+    //                         reads ("Why does a kettle boil sooner on a
+    //                         mountaintop?"). Never names them, never says
+    //                         "gap"/"misconception". Optional for back-compat:
+    //                         when absent, scholar surfaces show no text
+    //                         (an older badge-follow trail's line is rebuilt
+    //                         from its topic and inspirer).
     rationale: v.string(),
     scholarInvitation: v.optional(v.string()),
     approachHint: v.optional(v.string()),
@@ -4273,9 +4524,22 @@ export default defineSchema({
     // scholarInvitation/connectionTo) at mint time.
     storyFromKey: v.optional(v.string()),
     storyToKey: v.optional(v.string()),
+    // Where a "wonder" seed was asked: on Quests, on Scholar's Prep, or while
+    // building in a unit (lib/seeds.ts wonderAskedOnValidator). Present only on
+    // origin "wonder", which no older seed read returns (isWonderSeed).
+    // Its own field because no existing one fits: `sourceLens` names the lens
+    // that proposed a suggestion, `connectionTo` is read to the tutor as "what
+    // sparked it", and `unitId` makes a seed an offer of that unit.
+    askedOn: v.optional(wonderAskedOnValidator),
   })
     .index("by_scholar_status", ["scholarId", "status"])
     .index("by_scholar_origin", ["scholarId", "origin"])
+    // The observer's live ideas (`ai` × `pending` / `active`) without
+    // reading a kid's completed and dismissed history: its dedupe, cap and
+    // pruning run on every observer write (lib/seeds.ts
+    // observerPoolNewestFirst), and the Sky's live read keeps them apart from
+    // the pins (activeSeedsForScholar).
+    .index("by_scholar_origin_status", ["scholarId", "origin", "status"])
     // Narrow the roster-wide Interpretive surfaces (Class Galaxy, Trophy
     // Case) to just the "leap" stars — the interpretive-lens seeds OR
     // those explicitly typed "leap" — instead of scanning every seed in
@@ -4844,6 +5108,16 @@ export default defineSchema({
     // explicitly skip it and still reach "Ready to assign" — the gate renders
     // hatched, not failed. Timestamp of the skip (null/unset = not skipped).
     rehearsalSkippedAt: v.optional(v.number()),
+    // ─── Quest proposal (TRA-685, review/quests-rebuilt-proposal.html) ──
+    // Set only on a unit a scholar PROPOSED: their own Quest waiting for a
+    // teacher's yes. Absent on every other unit (teacher curriculum, older
+    // scholar Quests), which behave exactly as before. While `state` is
+    // "waiting" or "declined" the unit has no activity and the list reads old
+    // BunnyPad builds call leave it out. "approved" makes the teacher who
+    // answered its advisor and creates its one maker activity. Writers:
+    // convex/questProposals.ts only. Named questApproval because
+    // featureProposals already means something else.
+    questApproval: v.optional(questApprovalValidator),
   })
     .index("by_teacher", ["teacherId"])
     .index("by_active", ["isActive"])
@@ -4984,9 +5258,10 @@ export default defineSchema({
     // must be TRUE about ("cholera spreads only through contaminated water";
     // "a defense's effect depends on how many people use it"), `freedoms` are
     // what the scholar owns outright (setting, characters, genre, visuals,
-    // side quests), and `gate` names the one thing that must exist and have
-    // been run once before cosmetic requests are honoured ("the spread model,
-    // run once with no defense"). Written by the teacher's aide alongside the
+    // side quests), and `gate` is the MISSION line scholars see: one open
+    // understanding goal ("Understand escape velocity"). It never holds a
+    // build back (the gate as a build sequencer was retired); the key keeps
+    // its old name for stored rows. Written by the teacher's aide alongside the
     // build brief; absent on legacy activities, where the designer behaves as
     // before. See review/designer-steering-plan.html.
     buildContract: v.optional(
@@ -4996,13 +5271,9 @@ export default defineSchema({
         gate: v.optional(v.string()),
       }),
     ),
-    // kind="vibecode" only. When true the designer may end a turn WITHOUT
-    // replying: a learning question it asked stands until the scholar actually
-    // answers it, and a non-answer ("idk", "just build it", a wall of
-    // exclamation marks) gets a brick wall rather than a nudge. False/absent =
-    // the ordinary always-reply chatbot contract. Andy, 2026-10-10: true for
-    // contract-steered build activities, false by default; may later extend to
-    // the tutor elsewhere.
+    // RETIRED (kind="vibecode"): let the designer end a turn without replying
+    // until the scholar answered its question. The builder no longer has a
+    // stay-silent tool, so nothing reads this; stored values stay harmless.
     allowSilence: v.optional(v.boolean()),
     // kind="web" only: the start URL the webview opens. When
     // `externalAppId` is set this is an OPTIONAL per-activity override
@@ -5075,19 +5346,6 @@ export default defineSchema({
     // scope, so a dictated answer earns the same credit as a typed one. The
     // wording lives in lib/writingMechanicsPolicy.ts.
     assessesWritingMechanics: v.optional(v.boolean()),
-    // Design-time intent for how this activity is meant to be done.
-    // Auto-populates an Assignment's activitySchedule when the unit
-    // is assigned: "homework" activities land on each cohort's plate
-    // immediately; "classFocus" activities stay dormant until the
-    // teacher pushes them from the Run page; "either" / undefined
-    // also stay dormant (no auto-push, no UI hint).
-    defaultMode: v.optional(
-      v.union(
-        v.literal("classFocus"),
-        v.literal("homework"),
-        v.literal("either"),
-      ),
-    ),
     // Deliverable spec: what the scholar must produce + the private quality
     // map the AI (or teacher) checks against. Full criteria award their
     // labels as scholar-visible flair; the map does not gate completion.
@@ -5609,6 +5867,18 @@ export default defineSchema({
     offDomainBlocks: v.optional(v.number()),
     // Last main-frame URL seen (debugging + teacher context).
     lastUrl: v.optional(v.string()),
+    // The most recent page that failed to open in the web view: the
+    // address, the HTTP status when the site answered with one, and the
+    // message the scholar saw. Without it a "Couldn't open this activity"
+    // report can't say which page failed or how (Typing Club, 2026-11-17).
+    loadError: v.optional(
+      v.object({
+        url: v.string(),
+        status: v.optional(v.number()),
+        message: v.string(),
+        at: v.number(),
+      }),
+    ),
     // Structured extraction from the external site, best-effort.
     extracted: v.optional(
       v.object({
@@ -6115,6 +6385,17 @@ export default defineSchema({
     // when the reads that only list rows agree. Never set on a "grant" row,
     // which parks a login and grants nothing anyway.
     expiresAt: v.optional(v.number()),
+    // The group whose one-day opening (appAudiences.openGroupForDay) wrote
+    // this row's current end. Taking the app away from that group removes
+    // only rows carrying its id, so a teacher's own timed add ("open until
+    // Friday") that the group left alone is not swept up with it (TRA-636).
+    // Any other path that re-sets the row (coreAddToScholar) clears it.
+    openedForGroupId: v.optional(v.id("scholarGroups")),
+    // Set when a direct add was made by promoting a "grant" row that parked a
+    // saved login. When the add ends (removed or expired) the row goes back
+    // to parking that login instead of being deleted, since the login predates
+    // the add (TRA-636). Cleared when the row is parked again.
+    promotedFromParkedLogin: v.optional(v.boolean()),
     // ── Account-link (Layer 2). The username is NOT a secret (helper
     //    prefill; shown to staff). The password is OPT-IN, dev-grade
     //    plaintext, returned ONLY to the owner (autofill) for the key
@@ -6202,6 +6483,16 @@ export default defineSchema({
     // Marks non-installed activity starters so aide name-based app management
     // cannot mutate them or let their rehearsal-generated names shadow tiles.
     origin: v.optional(v.literal("starter")),
+    // Set only by a dev/preview seed that owns this row (e.g. "python-bench-tile"),
+    // so a re-seed finds and rewrites its own tile and never a teacher's app that
+    // happens to share its name. No product code reads it.
+    seedKey: v.optional(v.string()),
+    // A first-party app with a reviewed tutor brief: its launcher tile opens a
+    // tile session (lib/tileSessions.ts), and the session's copy carries the
+    // same marker as `artifacts.fixedApp`, so every AI write path refuses it.
+    // v1: only the Python bench. Set by the dev seed, and on prod by
+    // migrations:markPythonBenchTile.
+    fixedApp: v.optional(v.literal("python-bench")),
     // kind "coded": the in-repo route the token redirects to, e.g.
     // "/custom-apps/collab-whiteboard". Written by the dispatched PR.
     routePath: v.optional(v.string()),
@@ -6221,12 +6512,30 @@ export default defineSchema({
     // Static HTML version cloned into vibecode sessions. Optional while legacy
     // custom apps predate version stamping and are widened in place.
     updatedAt: v.optional(v.number()),
-    // Autosave provenance for an activity starter: the rehearsal artifact +
-    // revision this starter's html was promoted from. Lets the App designer's
+    // Provenance: the artifact + revision this html was copied from. For an
+    // activity starter, the rehearsal artifact — lets the App designer's
     // per-turn autosave short-circuit a re-promotion of the same revision to a
-    // true no-op (the starter already reflects it). Only starters carry these.
+    // true no-op. For a published scholar app, the scholar's app at the last
+    // publish — the Apps page compares it to their current app to offer
+    // "Publish latest". Other custom apps leave these unset.
     sourceArtifactId: v.optional(v.id("artifacts")),
     sourceRevision: v.optional(v.number()),
+    // Published scholar apps only: a digest of the source HTML at the last
+    // publish. A free-play copy carries the app into a NEW artifact at
+    // revision 0, so artifact + revision alone would call an unchanged copy
+    // "changed" (lib/publishedAppSource.ts isPublishedCopyCurrent).
+    sourceDigest: v.optional(v.string()),
+    // Set when a teacher published a scholar's app to other scholars
+    // (convex/publishedApps.ts). `sessionId` is the ROOT of the app's
+    // free-play lineage, so a later copy still finds this row; `builderId`
+    // is credited ("Made by <first name>") on the launcher page. The copy is
+    // frozen until a teacher publishes the latest version.
+    publishedFrom: v.optional(
+      v.object({
+        sessionId: v.id("sessions"),
+        builderId: v.id("users"),
+      }),
+    ),
     // Server-only AI spec (character persona, judge rubrics) carried with a
     // starter so a cloned scholar session gets the same character and judges.
     appAi: v.optional(appAiSpecValidator),
@@ -6234,7 +6543,8 @@ export default defineSchema({
     .index("by_token", ["token"])
     .index("by_featureProposal", ["featureProposalId"])
     .index("by_thumbnail", ["thumbnailStorageId"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    .index("by_published_session", ["publishedFrom.sessionId"]),
 
   // ─── Assignments — execution instances ──────────────────────────
   //
@@ -6247,7 +6557,7 @@ export default defineSchema({
   // across runs.
   //
   // Within an Assignment, individual activities are scheduled — each
-  // entry in `activitySchedule` says "scholars in the cohort should
+  // schedule entry (stored as a `pushes` row, lib/scheduleStore) says "scholars in the cohort should
   // do this activity right now (classFocus)" or "this activity is on
   // their plate to finish (homework)". An activity can only appear
   // once per Assignment; flipping it from homework → class focus
@@ -6335,52 +6645,10 @@ export default defineSchema({
     // Soft-archived: shown in history, hidden from active lists.
     archivedAt: v.optional(v.number()),
     // Self-paced assignments (onboarding) expose the whole unit to the
-    // scholar-facing readers. `activitySchedule` still drives plate cards +
-    // the live class focus, but progress/next/browse do not filter to it.
+    // scholar-facing readers. The schedule (lib/scheduleStore) still drives
+    // plate cards + the live class focus, but progress/next/browse do not
+    // filter to it.
     selfPaced: v.optional(v.boolean()),
-    // Per-activity scheduling state. Empty array = the cohort is on
-    // the unit broadly but no specific activity has been pushed yet.
-    // Entries can be added by:
-    //   - the dialog at create time (auto-fills from each activity's
-    //     defaultMode — homework activities land here immediately)
-    //   - the Run page (teacher pushes/clears per activity)
-    //   - the calendar/agenda (teacher PLANS a future push)
-    //
-    // An entry is LIVE to scholars only when `setAt` is stamped.
-    // `startsAt` is the *planned* time (agenda position) and is
-    // harmless on its own — a planned entry (startsAt set, setAt null)
-    // is visible to the teacher on the agenda but NOT to scholars,
-    // until either its activation job fires at a future startsAt or the
-    // teacher hits "Start now". See review/calendar-view-plan.md.
-    activitySchedule: v.optional(
-      v.array(
-        v.object({
-          activityId: v.id("activities"),
-          mode: v.union(v.literal("classFocus"), v.literal("homework")),
-          // When this entry went LIVE to scholars. Absent = planned,
-          // not-yet-live (agenda-only). Optional for that reason.
-          setAt: v.optional(v.number()),
-          // Planned time — when the teacher intends it to go live.
-          // Drives agenda position; editing it never auto-pushes.
-          startsAt: v.optional(v.number()),
-          // Pending activation job (so reschedule/cancel can stop it).
-          scheduledFnId: v.optional(v.id("_scheduled_functions")),
-          endsAt: v.optional(v.number()), // classFocus auto-clear
-          dueAt: v.optional(v.number()),  // homework due date
-          // ─── Per-scholar targeting (divide & conquer / trimmed choice) ──
-          // Optional narrowing of who this activity is live for. ABSENT (or
-          // empty) = cohort-wide, exactly today's behavior — every reader
-          // assumes this. PRESENT & non-empty = only these scholars see this
-          // activity live; it's dropped from everyone else's plate/progress.
-          // MUST be a subset of the assignment's `scholarIds` (kept in sync
-          // when the roster shrinks — see applySetScholars). Enables
-          // divide & conquer (option A → some scholars, option B → others)
-          // and teacher-trimmed choice without a new table. See
-          // review/activity-choice-plan.html.
-          scholarIds: v.optional(v.array(v.id("users"))),
-        }),
-      ),
-    ),
   })
     .index("by_practice_mode", ["practiceMode"])
     .index("by_teacher", ["teacherId"])
@@ -6411,6 +6679,13 @@ export default defineSchema({
     institutionId: v.id("institutions"),
 
     // ── WHAT ──
+    // INVARIANT (TRA-336), not expressible in the validator: an `app` target
+    // is always a `focus` timing with a finite `endsAt` and `afterEnd: "fade"`.
+    // An app give unlocks the launcher tile, launch gates, credential autofill
+    // and the MDM allowlist, so homework or untilCleared timing would be a
+    // standing grant with no end. `assertPushAllowed` (lib/pushes.ts) refuses
+    // it at every writer; `isPushShowing` grants nothing for a row that breaks
+    // it; `pushes.inventoryEndlessAppPushes` counts any that exist.
     target: v.union(
       v.object({
         kind: v.literal("activity"),
@@ -6478,6 +6753,11 @@ export default defineSchema({
     //                the institution day it was set unless a teacher clears
     //                it sooner or turns the work into homework
     // homework     = a deadline to MEET; it never expires
+    // openUntil    = a focus open until the end of a later school day; it
+    //                fades then and is never late (TRA-726, being phased in)
+    //
+    // Only `focus` is valid for an `app` target (see the invariant on
+    // `target` above).
     //
     // `untilCleared` is not an immortal or weaker `focus`; it records that no
     // longer lifetime was requested. The showing predicate uses the
@@ -6494,13 +6774,24 @@ export default defineSchema({
     // that row with no due chip. Inventing a deadline for it would put a
     // fictional date in front of a scholar. Undated homework sorts last —
     // no deadline is the least urgent thing in the lane, not the most.
+    //
+    // TRA-580 step 5: the end itself lives in the top-level `endsAt` +
+    // `afterEnd` below, and `timing` is only the KIND. The nested
+    // `endsAt`/`dueAt` duplicates were stripped from prod (step 5a) and
+    // narrowed away here (step 5b).
     timing: v.union(
-      v.object({ kind: v.literal("focus"), endsAt: v.number() }),
+      v.object({ kind: v.literal("focus") }),
       v.object({ kind: v.literal("untilCleared") }),
       v.object({
         kind: v.literal("homework"),
-        dueAt: v.optional(v.number()),
       }),
+      // TRA-726 step 1 (widen): "Open until a date", a focus whose window runs
+      // to the end of a later school day. Read exactly as a `focus` ending on
+      // a later day is read today (lib/pushes.ts `isTimedFocusKind`,
+      // shared/openUntil.ts `isOpenUntil`). Only the TRA-726 backfill writes
+      // it, and the schedule store keeps it on rows that have it; writers
+      // switch to it in a later step, and the date guess retires after that.
+      v.object({ kind: v.literal("openUntil") }),
     ),
 
     // Does this take over the scholar's home ("finish this first")?
@@ -6540,22 +6831,27 @@ export default defineSchema({
 
     pushedBy: v.id("users"),
 
-    // MIGRATION SCAFFOLDING — delete with `activitySchedule` itself.
-    // True on a row this table maintains as a mirror of an
-    // `assignments.activitySchedule` entry, so the mirror sync can find
-    // and update its own rows without ever touching a genuine push. The
-    // two are otherwise indistinguishable: makeFocus takes an optional
-    // assignmentId, so a teacher featuring an activity from the Run page
-    // can produce the same (assignmentId, activityId) pair a mirror uses.
-    // See Linear TRA-13.
+    // True on every row of an assignment's schedule (lib/scheduleStore), and
+    // the test for one (lib/pushes isScheduleRow). An ad hoc push can carry an
+    // `assignmentId` too (an old makeFocus stored any it was given), so the
+    // flag, not the shape, tells them apart. It also keeps #4506's rollback
+    // valid (the reverted rebuild reads only flagged rows). Retiring it is a
+    // later step, after that rollback window closes (TRA-575).
     scheduleMirror: v.optional(v.boolean()),
+    // MIGRATION SCAFFOLDING — delete with `activitySchedule` itself.
+    // True on a CLOSED schedule mirror that still stands for a field entry:
+    // staff-withdrawn homework (homework with `endsAt`). The field keeps such
+    // an entry, and some readers use it (history, origin, auto-filing), so the
+    // mirror keeps it too, with `clearedAt` = the entry's `endsAt`. Cleared
+    // back to absent when the field entry is replaced or removed.
+    scheduleWithdrawn: v.optional(v.boolean()),
 
     // Provenance + dedup key for a row the MASTER SCHEDULE materializer
-    // (masterSchedule.reconcilePlacement) owns, distinct from scheduleMirror
-    // above: a schedulePlacements row carrying an `externalAppId` (the
+    // (masterSchedule.reconcilePlacement) owns, distinct from an
+    // assignment's schedule rows: a schedulePlacements row carrying an `externalAppId` (the
     // "standing assignment" shape — LEGO SPIKE live for Robotics' Block E)
     // materializes into exactly one open push per (placement, occurrence),
-    // found by this field the same way `scheduleMirror` rows are found by
+    // found by this field the same way schedule rows are found by
     // (assignmentId, activityId, blocking). Set ONLY by the master-schedule
     // materializer; a teacher's own makeFocus never stamps it. Absent on
     // every other push, including a genuine teacher-pushed app focus.
@@ -6574,6 +6870,36 @@ export default defineSchema({
     // invariant. Absent on every push this field's sibling above is absent
     // on too.
     occurrenceDate: v.optional(v.string()),
+
+    // ── Class record + one end time (TRA-582 + TRA-580) ──
+    // Step 1 of 5 (widen): nothing writes or reads these yet. Writers stamp
+    // them from step 2; readers switch to them in step 4; step 5 narrows.
+
+    // The class this give belongs to. Absent = work given at a time outside
+    // any class (the "Other times" strip). Homework links to a class but no
+    // meeting. Written from step 2, read from step 4.
+    classId: v.optional(v.id("classes")),
+    // Homework only: where `classId` came from. "chosen" = named by the
+    // teacher or the aide's class pick, so it stays with the homework when it
+    // moves (still re-checked); "meeting" = found from the class meeting at its
+    // start, so a move finds it again. Absent = written before this field (or
+    // no class); the store then infers it, as before (TRA-581).
+    classSource: v.optional(v.union(v.literal("chosen"), v.literal("meeting"))),
+    // School-local "YYYY-MM-DD" of the class meeting this give belongs to.
+    // With `classId`, it names one meeting: a class meets at most once a
+    // weekday, so the class's meeting that day supplies the times (and a
+    // retimed meeting carries its gives with it). Written from step 2, read
+    // from step 4.
+    dayKey: v.optional(v.string()),
+    // The give's ONE end time. Absent = no end (program work: open until done
+    // or a teacher ends it). The nested `timing.endsAt`/`timing.dueAt` were its
+    // legacy duplicates, removed in step 5. Written from step 2, read from
+    // step 4.
+    endsAt: v.optional(v.number()),
+    // What happens once `endsAt` passes: "late" stays on the scholar's list
+    // marked late; "fade" leaves screens and closes as expired. Every row has
+    // one (checked on prod in step 5a), so it is required.
+    afterEnd: v.union(v.literal("late"), v.literal("fade")),
   })
     // Live reads are institution-scoped: load the open pushes for a
     // school, then match `audience` in JS. Convex cannot index into a
@@ -6583,13 +6909,27 @@ export default defineSchema({
     .index("by_institution_cleared", ["institutionId", "clearedAt"])
     .index("by_institution_setAt", ["institutionId", "setAt"])
     .index("by_assignment", ["assignmentId"])
+    // An assignment's OPEN pushes only. The schedule readers
+    // (lib/scheduleStore.readSchedule) run per assignment on hot paths,
+    // and cleared rows accumulate forever by design.
+    .index("by_assignment_cleared", ["assignmentId", "clearedAt"])
+    // Withdrawn-homework schedule mirrors (closed, but still schedule
+    // entries): read alongside the open ones. MIGRATION SCAFFOLDING (TRA-13).
+    .index("by_assignment_withdrawn", ["assignmentId", "scheduleWithdrawn"])
+    // "Do any schedule mirrors reference this activity?" (parity), reading
+    // only open rows and withdrawn ones, never the cleared history
+    // (lib/scheduleStore anyScheduleReferencesActivity). MIGRATION SCAFFOLDING.
+    .index("by_target_activity_cleared", ["target.activityId", "clearedAt"])
+    .index("by_target_activity_withdrawn", ["target.activityId", "scheduleWithdrawn"])
     .index("by_pusher", ["pushedBy"])
     .index("by_schedule_placement", ["schedulePlacementId"])
     // The exact-occurrence lookup + the bounded "recent pushes for this
     // placement" scan both key off this pair — see masterSchedule.ts's
     // findPushForOccurrence / recentPushesForPlacement. Ordered by
     // occurrenceDate, so "most recent" is simply index order, descending.
-    .index("by_schedule_placement_occurrence", ["schedulePlacementId", "occurrenceDate"]),
+    .index("by_schedule_placement_occurrence", ["schedulePlacementId", "occurrenceDate"])
+    // A class meeting's gives (the grid cell, "Up next"). Read from step 4.
+    .index("by_class_day", ["classId", "dayKey"]),
 
   // (focusSettings dropped — replaced by `assignments`. See
   // review/design-vs-execution-split.md.)
@@ -6661,29 +7001,10 @@ export default defineSchema({
     ),
   })
     .index("by_teacher", ["teacherId"])
-    .index("by_institution", ["institutionId"]),
-
-  // Teacher-created multiplayer spaces for vibecoded apps. Assignment rooms
-  // auto-bind to every member's session in that assignment; group/explicit
-  // rooms are selected by id by apps that deliberately opt into shared state.
-  // Membership is stored on the room and is the authorization boundary.
-  rooms: defineTable({
-    ownerTeacherId: v.id("users"),
-    name: v.string(),
-    kind: v.union(
-      v.literal("assignment"),
-      v.literal("group"),
-      v.literal("explicit"),
-    ),
-    assignmentId: v.optional(v.id("assignments")),
-    groupId: v.optional(v.id("scholarGroups")),
-    memberIds: v.array(v.id("users")),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_owner", ["ownerTeacherId"])
-    .index("by_assignment", ["assignmentId"])
-    .index("by_group", ["groupId"]),
+    .index("by_institution", ["institutionId"])
+    // Every class bound to one channel, so the day's wonders can refuse a
+    // channel whose classes span more than one school (dayWonders.ts).
+    .index("by_slack_channel", ["slackChannelId"]),
 
   // Per-teacher "my scholars" affinity. Convenience only — NOT an ACL.
   // Every teacher still has full read/write on every scholar; this just
@@ -6750,6 +7071,71 @@ export default defineSchema({
     .index("by_period", ["periodId"])
     .index("by_period_group", ["periodId", "groupId"]),
 
+  // A class: one group's subject for one term (TRA-582), with its weekly
+  // meetings. Today a class is only implied by grid cells sharing a
+  // (group, subject); this makes it a record that gives, the grid, scholar
+  // subject tabs and the parent "subject · teacher" line can all reference,
+  // instead of free-text subjects copied around. A class meets at most ONCE
+  // per weekday (enforced by the writer), so (classId, dayKey) names one
+  // meeting and a give stores only that pair: the meeting supplies the times.
+  //
+  // Step 1 of 5 (widen): the table exists, nothing writes or reads it yet.
+  classes: defineTable({
+    institutionId: v.id("institutions"),
+    periodId: v.id("reportingPeriods"), // the term
+    groupId: v.id("scholarGroups"),
+    subject: v.string(), // display, e.g. "Humanities"
+    // classSubjectKey(subject) (convex/lib/classResolver.ts): the same key the
+    // implied-class code uses, so "Humanities " and "Humanities" are one class.
+    subjectKey: v.string(),
+    teacherId: v.optional(v.id("users")),
+    // The weekly meetings: at most one per weekday (1–5 = Mon–Fri, 7 = Sun,
+    // matching scheduleBlocks.weekdays). Times come from the block.
+    meetings: v.array(
+      v.object({ weekday: v.number(), blockId: v.id("scheduleBlocks") }),
+    ),
+    // An app that opens during each meeting (Robotics' LEGO SPIKE).
+    externalAppId: v.optional(v.id("externalApps")),
+    // Soft delete: gives keep pointing at an archived class.
+    archivedAt: v.optional(v.number()),
+    // "enrichment" marks a class whose work reports under "Enrichment and
+    // projects" instead of its own section (TRA-723). Unset = an ordinary
+    // class. Set by `migrations:setClassKind`; the schedule sync never clears
+    // it and copies it onto a new row for the same class name.
+    kind: v.optional(v.literal("enrichment")),
+    // false = "Not included in reports" (TRA-723): no report row even with
+    // work, and its work reaches no report and not the enrichment row
+    // (Extended Ed, Physical Education, Morning Circle). Absent = included.
+    // Set by `migrations:setClassIncludedInReports`; the schedule sync copies
+    // it onto a new row for the same class name, like `kind`.
+    includedInReports: v.optional(v.boolean()),
+  })
+    .index("by_period_group", ["periodId", "groupId"])
+    .index("by_group_subject_period", ["groupId", "subjectKey", "periodId"])
+    .index("by_institution", ["institutionId"])
+    .index("by_institution_subjectKey", ["institutionId", "subjectKey"]),
+
+  // A class plan the aide showed a teacher and is waiting for them to confirm
+  // (TRA-582: give_class_days / move_class_days, convex/classPlans.ts). The
+  // commit writes exactly this stored plan, only for the same person in the
+  // same place (the in-app chat, or the same Slack channel and thread), from a
+  // later turn, before it expires, and once. `args` is the canonical plan
+  // input; `fingerprint` is the canonical computed plan, so a commit refuses
+  // when the schedule changed since the teacher saw it.
+  classPlanConfirmations: defineTable({
+    userId: v.id("users"),
+    surface: v.union(v.literal("app"), v.literal("slack")),
+    slackChannelId: v.optional(v.string()),
+    slackThreadTs: v.optional(v.string()),
+    tool: v.union(v.literal("give_class_days"), v.literal("move_class_days")),
+    args: v.string(),
+    fingerprint: v.string(),
+    planTurn: v.number(),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    usedAt: v.optional(v.number()),
+  }).index("by_user_tool", ["userId", "tool"]),
+
   // Layer 2 — a recurring class pinned to a slot: (group × weekday × block).
   // Every filled cell in the grid is one of these. `weekday`/`blockId` BOTH
   // null ⇒ the placement is on the SHELF (tentatively scheduled, not yet
@@ -6795,17 +7181,19 @@ export default defineSchema({
     // epoch-ms). Absent = a recurring shell that applies to every week
     // (today's default). Set = a week-specific materialized instance.
     weekStartMs: v.optional(v.number()),
-    // Groups the placements a single unit-drop cascaded — for bulk move,
-    // undo, labeling, and the out-of-order flag. A random slug minted per
-    // cascade. NOT a recurrence rule: the rows are the source of truth.
+    // RETIRED with unit flow (TRA-582): sequenceId, sequenceIndex,
+    // orderOverride and createdFromStrategy are no longer written or read;
+    // old rows keep them until a later narrow removes them.
+    // Groups the placements a single unit-drop cascaded. A random slug minted
+    // per cascade. NOT a recurrence rule: the rows are the source of truth.
     sequenceId: v.optional(v.string()),
     // 0-based position of this activity within its cascade sequence.
     sequenceIndex: v.optional(v.number()),
     // The teacher accepted this chip's actual (weekday/block/week) order even
-    // though it differs from sequenceIndex — suppress the out-of-order flag.
+    // though it differed from sequenceIndex (the retired out-of-order flag).
     orderOverride: v.optional(v.boolean()),
     // Flag ids the teacher explicitly dismissed/silenced on this cell
-    // (conflict / out-of-order) so they don't re-raise.
+    // (overload) so they don't re-raise.
     dismissedFlags: v.optional(v.array(v.string())),
     // Which generator produced this row — for explanation/labeling only,
     // NEVER re-run to regenerate children (no hidden recurrence engine).
@@ -6965,6 +7353,11 @@ export default defineSchema({
     // artifact (not resolved through the activity) so an older session keeps
     // the persona and rubrics it was played with. Never sent to the sandbox.
     appAi: v.optional(appAiSpecValidator),
+    // "code" artifacts only: a fixed, reviewed app the tutor attached to the
+    // session (open_python_bench, convex/lib/pythonBench.ts), byte-identical
+    // to the generated source. No AI tool may change its code: the scholar
+    // writes every line of their program inside it. Absent on every other app.
+    fixedApp: v.optional(v.literal("python-bench")),
   }).index("by_session", ["sessionId"]),
 
   // Every model exchange that happens INSIDE an app, rather than in the tutor
@@ -7049,16 +7442,9 @@ export default defineSchema({
 
   // EXECUTION — opaque-origin code apps cannot use browser storage reliably,
   // so the trusted web/native host persists one small LWW document + bounded
-  // console ring. Room scope stores one shared document plus separate per-user
-  // presence/write-throttle partitions; it is never projected into tutor context.
+  // console ring.
   appStates: defineTable({
-    scope: v.optional(
-      v.union(
-        v.literal("session"),
-        v.literal("customApp"),
-        v.literal("room"),
-      ),
-    ),
+    scope: v.optional(v.union(v.literal("session"), v.literal("customApp"))),
     scopeId: v.optional(v.string()),
     userId: v.optional(v.string()),
     key: v.optional(v.string()),
@@ -7126,6 +7512,45 @@ export default defineSchema({
     .index("by_scope_scopeId_userId", ["scope", "scopeId", "userId"])
     .index("by_scope_scopeId", ["scope", "scopeId"])
     .index("by_session_artifact", ["sessionId", "artifactId"]),
+
+  // When a scholar actually had one of their own apps (a session `code`
+  // artifact) on screen: one row per continuous foreground interval, written
+  // by the Rabbithole host around the app, so it exists whether or not the
+  // app ever saves state (appStates above only keeps the LATEST saved doc).
+  // `lastActiveAt` is the last check-in and the honest end of an interval
+  // that was never closed; nothing ever stretches a row to "now". On screen
+  // is not in use: `activeMs` (interaction-tracked rows) is. Timing
+  // policy: shared/appPlaySession.ts. Writer + reads: convex/appPlaySessions.ts.
+  appPlaySessions: defineTable({
+    userId: v.id("users"),
+    // The session's tenant at start time, mirroring sessions.institutionId.
+    institutionId: v.optional(v.id("institutions")),
+    sessionId: v.id("sessions"),
+    artifactId: v.id("artifacts"),
+    surface: v.union(v.literal("web"), v.literal("native")),
+    startedAt: v.number(),
+    lastActiveAt: v.number(),
+    endedAt: v.optional(v.number()),
+    // Bumped each time start() reopens the row. end() must echo the value
+    // its start() returned, so a superseded host cannot close an interval
+    // another start() has since taken over.
+    resumes: v.number(),
+    // Set when every host that wrote this row reported interactions (touch,
+    // key press, scroll). Absent on rows from older hosts: their on-screen
+    // time is all there is, and a BunnyPad locked into Rabbithole could keep
+    // it running with the folio closed (shared/appPlaySession.ts).
+    interactionTracked: v.optional(v.literal(true)),
+    // Interaction-tracked rows only: ms with an interaction in the previous
+    // APP_PLAY_ACTIVE_IDLE_MS, and the latest interaction (server clock).
+    activeMs: v.optional(v.number()),
+    lastInteractionAt: v.optional(v.number()),
+  })
+    // Newest-first per-scholar reads (Portfolio, aide) and retention pruning.
+    .index("by_user_startedAt", ["userId", "startedAt"])
+    // start()'s "reopen this app's interval that just ended" lookup.
+    .index("by_artifact_startedAt", ["artifactId", "startedAt"])
+    // The Portfolio row's latest play for one session.
+    .index("by_session_startedAt", ["sessionId", "startedAt"]),
 
   scholarDossiers: defineTable({
     scholarId: v.id("users"),
@@ -7426,12 +7851,14 @@ export default defineSchema({
   // Tracking sidecar for active MCP connections, so a user can see and
   // revoke them (Account Details → "Connect Claude"). An MCP access token
   // is a stock Convex Auth session (authSessions), which carries NO provider
-  // tag — browser and MCP sessions are otherwise indistinguishable. So at
-  // token-exchange the freshly-authenticated session records ITSELF here
-  // (mcpOauth.recordMySession, keyed on its own sessionId — unspoofable),
-  // capturing the client it connected from. Revoke deletes the authSessions
-  // row (killing the token) + this sidecar row. Rows whose authSessions
-  // parent is gone/expired are dead and swept on next connect.
+  // tag — browser and MCP sessions are otherwise indistinguishable. So the
+  // code exchange writes this row in the same transaction that mints the
+  // session (mcpOauth.openSession, internal — a browser session can't add
+  // one), capturing the client it connected from. A row here is also what
+  // lets a refresh slide the session's end date (mcpOauth.recordMySession).
+  // Revoke deletes the authSessions row (killing the token) + this sidecar
+  // row. Rows whose authSessions parent is gone/expired are dead and swept
+  // on next connect.
   mcpSessions: defineTable({
     sessionId: v.id("authSessions"),
     userId: v.id("users"),
@@ -7448,12 +7875,16 @@ export default defineSchema({
   // auto-approve and skip the click. Keyed on (userId, clientId) — scope
   // doesn't widen access (tools follow the user's role), so it isn't part of
   // the key. Cleared when the user revokes that client's connection, so a
-  // revoke also stops silent re-granting.
+  // revoke also stops silent re-granting. `consentVersion` is the consent
+  // screen the person last approved with "remember"; hasConsent ignores rows
+  // older than mcpOauth.CONSENT_SCREEN_VERSION, so a screen that misdescribed
+  // access can't keep auto-approving (absent = before TRA-635).
   mcpOauthConsents: defineTable({
     userId: v.id("users"),
     clientId: v.string(),
     createdAt: v.number(),
     lastUsedAt: v.number(),
+    consentVersion: v.optional(v.number()),
   }).index("by_user_client", ["userId", "clientId"]),
 
   // Institution-scoped MCP SERVICE-ACCOUNT bearer tokens. Unlike the per-teacher
@@ -7475,6 +7906,11 @@ export default defineSchema({
     kind: v.union(v.literal("teacher"), v.literal("staff")),
     tokenHash: v.string(), // sha256 hex of the plaintext token
     tokenHint: v.string(), // last 4 chars of the plaintext, for display
+    // true: the token signs in as the institution's READ-ONLY service user
+    // for its kind (users.readOnly), so every write refuses it however the
+    // token is used. Unset on rows issued before the flag existed: those are
+    // full tokens. New tokens always store it (issueToken defaults to true).
+    readOnly: v.optional(v.boolean()),
     createdBy: v.id("users"),
     createdAt: v.number(),
     lastUsedAt: v.optional(v.number()),
@@ -7507,6 +7943,10 @@ export default defineSchema({
     // author independently).
     startedByUserId: v.id("users"),
     lastActivityAt: v.number(),
+    // When someone last pressed Slack's Stop button on the bot in this thread
+    // (the `agent_session_stopped` event). A running turn stops if this is
+    // later than the moment it started; an older stamp means nothing.
+    stopRequestedAt: v.optional(v.number()),
   })
     .index("by_channel_thread", ["channelId", "threadTs"])
     // Reverse lookup: given a unified `chats` row, find its Slack thread —
@@ -7532,7 +7972,9 @@ export default defineSchema({
     name: v.optional(v.string()),
     mimetype: v.optional(v.string()),
     sizeBytes: v.optional(v.number()),
-  }).index("by_slackFileId", ["slackFileId"]),
+  })
+    .index("by_slackFileId", ["slackFileId"])
+    .index("by_storage", ["storageId"]),
 
   // Durable bug-report intake: one row carries the reporter/context packet,
   // storage-backed evidence, Slack thread bridge, and per-step receipts.
@@ -7580,6 +8022,29 @@ export default defineSchema({
     attempts: v.optional(v.number()),
     lastError: v.optional(v.string()),
     resolvedAt: v.optional(v.number()),
+    // Automatic reports only: sha256 of the crash signature
+    // (lib/bugReportSignature.ts crashSignatureKey), so repeats of the same
+    // crash can be counted and handed to Claude once (bugReportHandoff.ts).
+    signature: v.optional(v.string()),
+    // The Claude Tag handoff after triage. Written "pending" with the triage
+    // commit only while BUG_REPORT_CLAUDE_HANDOFF_ENABLED is on (so a report
+    // triaged before enablement never has one and never dispatches), then
+    // resolved once to a final outcome by bugReportHandoff.ts.
+    claudeHandoff: v.optional(
+      v.object({
+        outcome: v.union(
+          v.literal("pending"), // waiting for the handoff; `at` = last attempt
+          v.literal("dispatched"), // this report's brief was posted to Claude
+          v.literal("already_with_claude"), // its signature already was
+          v.literal("needs_person"), // refused (privacy check) or Slack failed
+          v.literal("skipped"), // not eligible: see `detail`
+        ),
+        at: v.number(),
+        since: v.optional(v.number()), // pending only: when it first went pending
+        deliveryId: v.optional(v.string()), // claudeDispatches.deliveryId
+        detail: v.optional(v.string()),
+      }),
+    ),
     status: v.union(
       v.literal("received"),
       v.literal("waiting_for_channel"),
@@ -7589,11 +8054,16 @@ export default defineSchema({
       v.literal("failed"),
     ),
   })
+    // Lets lib/storageReferences.ts see that this feature holds a blob.
+    .index("by_audio_storage", ["audioStorageId"])
+    .index("by_screenshot_storage", ["screenshotStorageId"])
     .index("by_institution", ["institutionId"])
     .index("by_actor", ["actorUserId"])
     .index("by_client_id", ["clientReportId", "actorUserId"])
     .index("by_status", ["status"])
-    .index("by_trigger", ["trigger"]),
+    .index("by_trigger", ["trigger"])
+    .index("by_signature", ["signature"])
+    .index("by_claude_handoff", ["claudeHandoff.outcome", "claudeHandoff.at"]),
 
   // Outbound notification queue for group-linked channels (Phase 3).
   // Digest-mode events accumulate here until the hourly flush posts one
@@ -7638,6 +8108,25 @@ export default defineSchema({
     // reconciles or reposts the same headline rather than regenerating it.
     parentText: v.optional(v.string()),
     replyText: v.optional(v.string()),
+    // Screenshots of apps scholars built that day, posted into the thread just
+    // above the wrap-up. Persisted with the reply so a retry posts the same
+    // images (after re-checking the roster and the session by these ids); the
+    // blobs belong to the sessions' render checks, not to this row.
+    buildSnapshots: v.optional(
+      v.array(
+        v.object({
+          scholarId: v.id("users"),
+          sessionId: v.id("sessions"),
+          storageId: v.id("_storage"),
+          title: v.string(),
+          caption: v.string(),
+        }),
+      ),
+    ),
+    // Fridays: the weekly screen-time roundup, posted to the channel as its
+    // own message after the check-in. Persisted with the reply so a retry
+    // reconciles or posts the same text.
+    weekScreenTimeText: v.optional(v.string()),
     // Exact rows rendered into the initial wrap-up. Rows arriving after this
     // snapshot remain pending for the next hourly activity update.
     initialQueueIds: v.optional(v.array(v.id("slackNotificationQueue"))),
@@ -7661,6 +8150,72 @@ export default defineSchema({
     .index("by_channel_date", ["channelId", "dateKey"])
     .index("by_retryAt", ["retryAt"]),
 
+  // One row per class per institution-local day whose wonders went (or are
+  // going) to the class's Slack channel, one message per wonder
+  // (convex/dayWonders.ts, TRA-680). Claimed, with its wonders, BEFORE any
+  // Slack post, so a retry or a second run never posts a wonder twice, and
+  // its window starts where the class's previous run's ended, so a wonder is
+  // in one run at most. Not `eodCheckins`: that row is per CHANNEL and every
+  // one of its readers (the claim, the retry sweep, the hourly flush) treats
+  // a row as a check-in, while this run is per class. Holds ids only: the
+  // questions and replies are re-read, and re-authorized, before every post.
+  dayWonderNotes: defineTable({
+    groupId: v.id("scholarGroups"),
+    dayKey: v.string(), // institution-local "YYYY-MM-DD" of the run
+    channelId: v.string(), // the channel the class was linked to at claim time
+    institutionId: v.id("institutions"), // the class's school at claim time
+    // The run carries the wonders asked in [windowStartMs, cutoffMs).
+    windowStartMs: v.number(),
+    cutoffMs: v.number(),
+    // The wonders this run claimed, fixed at claim time. A retry only ever
+    // skips one that stopped qualifying; it never adds one.
+    wonders: v.array(v.object({ scholarId: v.id("users"), seedId: v.id("seeds") })),
+    state: v.union(v.literal("pending"), v.literal("posted"), v.literal("failed")),
+    attempts: v.number(),
+    // While an attempt runs, no other may start; a crashed attempt's lease
+    // runs out and the retry scheduled for that moment picks the run up.
+    leaseUntil: v.optional(v.number()),
+    lastError: v.optional(v.string()),
+    // Kids whose Quest ideas have been drafted (or tried) for this run, so a
+    // kid's model call is made once however often it is scheduled
+    // (dayWonders.claimIdeaDraft). Drafting never gates delivery.
+    ideasDraftedFor: v.optional(v.array(v.id("users"))),
+    // The message each wonder was posted as in THIS run (recorded as the
+    // delivery maps it), so a post sync and an idea's tap are bound to this
+    // run's own message, never another run's in the same channel.
+    postedTs: v.optional(v.array(v.object({ seedId: v.id("seeds"), ts: v.string() }))),
+  }).index("by_group_day", ["groupId", "dayKey"]),
+
+  // "Could become" Quest ideas under a day's wonder (TRA-697). Drafted when the
+  // run is claimed, at most two per kid, each on a wonder in that run; the
+  // Slack button carries only this row's id, never the mission. `state`
+  // moves to "offered" when a teacher taps it (wonderQuestIdeas.markOffered);
+  // the offer itself is questProposals.offerQuestForUser with
+  // ideaKey = this row's id, so a repeat tap is the same offer.
+  wonderQuestIdeas: defineTable({
+    noteId: v.id("dayWonderNotes"),
+    scholarId: v.id("users"),
+    institutionId: v.id("institutions"),
+    seedId: v.id("seeds"), // the wonder whose message carries the button
+    position: v.number(), // 0 or 1: the button's place, and its action id
+    kind: v.union(v.literal("app"), v.literal("slides"), v.literal("python")),
+    mission: v.string(),
+    title: v.string(),
+    // Why the model judged the two items it judges, and what held, kept so a
+    // teacher or an eval can see the evidence the idea stood on.
+    reasons: v.string(),
+    evidence: v.object({
+      cameBack: v.boolean(),
+      followUps: v.number(),
+      open: v.boolean(),
+      connects: v.boolean(),
+    }),
+    state: v.union(v.literal("waiting"), v.literal("offered")),
+    unitId: v.optional(v.id("units")), // the offer, once made
+  })
+    .index("by_note_seed", ["noteId", "seedId"])
+    .index("by_scholar", ["scholarId"]),
+
   // Parent-message Slack transport. One row maps ONE posted Slack thread root
   // in the shared staff parent-message channel back to ONE parent thread, so
   // any trusted teacher/admin reply can be routed fail-closed even if a
@@ -7678,6 +8233,25 @@ export default defineSchema({
   })
     .index("by_channel_thread", ["channelId", "threadTs"])
     .index("by_parent_thread", ["parentThreadId"]),
+
+  // Slack root → the (scholar, Quest-or-wonder) conversations a teacher's
+  // plain reply under it is for. Not `parentSlackThreads`: those point at a
+  // thread that already exists, one per root, while a wonder's `about` thread
+  // is created only when a teacher first answers it, and a class's day's note
+  // is ONE root holding a line per wonder, so it maps to several rows here.
+  // The relay (slackBot → scholarMessages.recordAboutSlackReply) picks one by
+  // the scholar the reply names (lib/threadAbout.ts → pickAboutSlackTarget),
+  // creates the thread if needed, and posts the reply as a staff message.
+  // Written by scholarMessages.recordAboutSlackThread only.
+  aboutSlackThreads: defineTable({
+    channelId: v.string(),
+    threadTs: v.string(), // the root's ts
+    scholarId: v.id("users"),
+    about: threadAboutValidator,
+    postedAt: v.number(),
+  })
+    .index("by_channel_thread", ["channelId", "threadTs"])
+    .index("by_scholar", ["scholarId"]),
 
   // The single admin-linked destination for teacher↔parent Slack notices. At
   // most one row; linking upserts it. This channel must be private/staff-only
@@ -7927,6 +8501,9 @@ export default defineSchema({
         provider: v.union(
           v.literal("github-cloud"),
           v.literal("autonomous-coordinator"),
+          // An approved proposal handed to Claude Tag; executionId is the
+          // claudeDispatches delivery id.
+          v.literal("claude-tag"),
         ),
         executionId: v.string(),
         attemptId: v.optional(v.string()),
@@ -7993,9 +8570,11 @@ export default defineSchema({
     "weekKey",
   ]),
 
-  // Durable dedupe for the hourly Rounds reminder dispatcher. The row contains
-  // only schedule identity and delivery state, never Slack payloads or learner
-  // evidence.
+  // RETIRED 2026-10-29: durable dedupe for the hourly Rounds reminder
+  // dispatcher, which was removed (no one acted on the reminders; the SEL
+  // write-ups now post to class channels instead). Nothing writes here; kept
+  // only because it still holds rows. The row contains only schedule identity
+  // and delivery state, never Slack payloads or learner evidence.
   roundsReminderDeliveries: defineTable({
     institutionId: v.id("institutions"),
     cadenceKind: v.union(v.literal("academic"), v.literal("sel")),
@@ -8025,6 +8604,9 @@ export default defineSchema({
     completedAt: v.optional(v.number()),
     attemptCount: v.optional(v.number()),
     lastFailedCount: v.optional(v.number()),
+    // Set once the completed week's write-ups were handed to the class
+    // channels (`selSynthesisSlack.ts`). Stamped BEFORE posting: at-most-once.
+    slackClaimedAt: v.optional(v.number()),
   }).index("by_institution_week", ["institutionId", "weekKey"]),
 
   // One row per scholar per Rounds week. The team's written NOTE is the whole
@@ -8195,8 +8777,8 @@ export default defineSchema({
     sourceChatId: v.optional(v.id("metaChats")),
     // Set when this card mirrors a bug report the scholar filed themselves
     // (bugReports.submit). Same card, same #workshop post, same staff-reply
-    // loop as an idea — it just never counts toward the open-ideas cap, since
-    // a bug report must never be refused. Triage lives separately, in the
+    // loop as an idea — it is just left out of the reflection chat's open-ideas
+    // list. Triage lives separately, in the
     // bug-report channel's own thread.
     bugReportId: v.optional(v.id("bugReports")),
     // The idea's conversation (a `parentThreads` row, kind "workshop"). Replaces
@@ -8207,15 +8789,13 @@ export default defineSchema({
     // `staffResponse !== undefined`; whether a card can be opened on the kid's
     // board is the same question; and "is this still on my plate" is the
     // SCHOLAR's call (`archivedAt`). A staffer replying must not close a kid's
-    // idea, and the five-open cap is a prioritization lesson aimed at the kid —
-    // so the kid holds the lever, not staff.
+    // idea — the kid holds the lever, not staff.
     // Optional for the widen→migrate→narrow rollout ONLY; nothing reads or
     // writes it. Dropped from this validator once `migrations:dropSuggestionStatus`
     // has run on prod.
     status: v.optional(v.union(v.literal("heard"), v.literal("answered"))),
     // When the SCHOLAR put this idea away. Their board, their call: staff have
-    // no way to set it, an archived idea stops counting against the five-open
-    // cap, and it is reversible (they can bring it back).
+    // no way to set it, and it is reversible (they can bring it back).
     archivedAt: v.optional(v.number()),
     // The single human reply. No verdict field exists, by design (§5).
     staffResponse: v.optional(
@@ -8233,7 +8813,7 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   })
-    // A scholar's own "My ideas" board + the open-ideas soft cap.
+    // A scholar's own "My ideas" board.
     .index("by_scholar", ["scholarId"])
     .index("by_bugReport", ["bugReportId"])
     // The staff queue's "still on someone's plate" read. Replaces the retired
@@ -8275,6 +8855,28 @@ export default defineSchema({
     deliveryId: v.string(),
     receivedAt: v.number(),
   }).index("by_delivery", ["deliveryId"]),
+
+  // "Your change merged" notes for Claude-in-Slack PRs (convex/githubEvents.ts
+  // → postClaudePrMergedNote). One row per PR, never swept: it is the durable
+  // at-most-once receipt (githubWebhookEvents is swept after a day, so a
+  // later redelivery of the merge event would otherwise post again) and the
+  // retry state for a rate-limited post. Holds only the PR title, a Slack
+  // channel/thread id and the note text — no learner data.
+  claudePrThreadNotes: defineTable({
+    dedupKey: v.string(), // claude-pr-merged-note:<repo>#<number>
+    channel: v.string(),
+    threadTs: v.string(),
+    text: v.string(),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("posted"),
+      v.literal("failed"),
+    ),
+    attempts: v.number(),
+    lastError: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_dedupKey", ["dedupKey"]),
 
   // ── ALERTS (general staff-facing alert fabric) ────────────────────────
   // The urgent, single-destination sibling of slackNotificationQueue.
@@ -8378,7 +8980,29 @@ export default defineSchema({
     .index("by_dedup", ["dedupKey"])
     .index("by_scholar", ["scholarId"])
     .index("by_scholar_created", ["scholarId", "createdAt"])
-    .index("by_practice_trigger", ["practiceTriggerAttemptId"]),
+    .index("by_practice_trigger", ["practiceTriggerAttemptId"])
+    // A reply in an alert's Slack thread finds its alert (and so its scholar
+    // and session) from the thread's root ts, with no Slack call.
+    .index("by_slack_message", ["slackChannelId", "slackMessageTs"]),
+
+  // A whisper a teacher queued from Slack (the bot's whisper_to_session tool),
+  // kept until the AI reads it so the bot can say so in the thread the teacher
+  // asked in: "Delivered… The AI replied: …" (whisperReceipts.ts, TRA-591). A
+  // whisper the remote-mode box clears or edits before it is read is removed
+  // here, and the thread is told it won't be delivered as sent.
+  slackWhisperReceipts: defineTable({
+    sessionId: v.id("sessions"),
+    text: v.string(),
+    slackChannelId: v.string(),
+    slackThreadTs: v.string(),
+    queuedBy: v.id("users"),
+    queuedAt: v.number(),
+    // Quote the AI's reply only where the teacher's audience matches the
+    // alert's: an alert channel or a 1:1 DM. Elsewhere the post just says
+    // "Delivered".
+    quoteReply: v.boolean(),
+    deliveredAt: v.optional(v.number()),
+  }).index("by_session_delivered", ["sessionId", "deliveredAt"]),
 
   // Admin-linked destinations for `alerts`. Separate from
   // scholarGroups.slackChannelId (those are per-group, lower-urgency,
@@ -8411,11 +9035,45 @@ export default defineSchema({
         v.literal("platform-ops"),
         // Private platform-wide cadence and proposal threads for the improvement system.
         v.literal("improvement-loops"),
+        // Private platform-wide channel where automatic work with no human in
+        // the conversation is handed to Claude Tag with one top-level mention
+        // (convex/claudeDispatch.ts).
+        v.literal("claude-dispatch"),
       ),
     ),
   })
     .index("by_institution", ["institutionId"])
     .index("by_role", ["role"]),
+
+  // ── CLAUDE DISPATCHES (automatic work handed to Claude Tag) ───────────
+  // One row per top-level `@Claude` message Rabbithole posts in the bound
+  // "claude-dispatch" channel (convex/claudeDispatch.ts). It is the durable
+  // idempotency ledger, and it is written BEFORE the post: a run first
+  // reserves the `deliveryId` in a mutation, so two concurrent runs can't
+  // both post, then marks the row `posted` with the message ts. A
+  // reservation that never reached `posted` (the action died after Slack
+  // accepted the post, or Slack's answer was lost) is reconciled on the next
+  // run by reading the channel from `firstAttemptAt` onward for our own
+  // metadata, never by a rolling window. `reservedAt` is only the renewable
+  // lease; `firstAttemptAt` never moves, so a run that re-claims an expired
+  // lease and then fails can't shrink the next run's search. Holds no brief text and nothing
+  // about a learner: the opaque delivery id, where the message went, and
+  // which producer sent it. Mr. Rabbit's monthly roundup reuses the same
+  // reservation for its once-a-month marketing post (`source:
+  // "mr_rabbit_monthly"`, convex/mrRabbitMonthly.ts).
+  claudeDispatches: defineTable({
+    deliveryId: v.string(),
+    source: v.string(),
+    slackChannelId: v.string(),
+    state: v.union(v.literal("reserved"), v.literal("posted")),
+    firstAttemptAt: v.number(),
+    reservedAt: v.number(),
+    attempts: v.number(),
+    messageTs: v.optional(v.string()),
+    postedAt: v.optional(v.number()),
+  })
+    .index("by_deliveryId", ["deliveryId"])
+    .index("by_source_firstAttemptAt", ["source", "firstAttemptAt"]),
 
   // ── LLM LEASES (scholar endpoint burst control) ───────────────────────
   // One short-lived row per authenticated scholar-facing LLM start. Active
@@ -8499,6 +9157,43 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_source", ["source", "createdAt"]),
 
+  // ── SCHOLAR BEDTIMES (a family's own BunnyPad bedtime, TRA-625) ───────
+  // Why: Rabbithole sleeps 8 pm to 6 am for every primary-institution scholar
+  // (shared/bedtime.ts). A guardian may set a STRICTER nightly window for
+  // their own child: an earlier start or a later wake, never looser
+  // (familyBedtimeProblem). One row per child; any guardian may change it and
+  // the last write wins. No row means the school's window. Read by
+  // convex/lib/bedtime.ts, which only applies it where bedtime applies.
+  scholarBedtimes: defineTable({
+    scholarId: v.id("users"),
+    startMinutes: v.number(), // minutes past local midnight, evening
+    endMinutes: v.number(), // minutes past local midnight, next morning
+    updatedBy: v.id("users"), // the guardian who set it
+    updatedAt: v.number(),
+  }).index("by_scholar", ["scholarId"]),
+
+  // ── SCHEDULED FREEZES (a family's planned BunnyPad freezes) ───────────
+  // Why: a guardian can freeze their child's BunnyPad now (deviceLock.ts's
+  // freezeFromGuardian), but also wants "6 to 7pm tonight" or "6 to 7pm every
+  // weeknight". Each row is one planned window in school-local minutes; at
+  // its start a revision-checked job (scheduledFreezes.fire) sets the
+  // ordinary `pairedDevices.freezeUntil`, so the BunnyPad needs nothing new.
+  // "once" rows delete themselves after firing; "weekly" rows roll
+  // `nextStartAt` forward. Any guardian of the child may add or remove one.
+  scheduledFreezes: defineTable({
+    scholarId: v.id("users"),
+    createdBy: v.id("users"), // the guardian whose freeze it is
+    repeat: v.union(v.literal("once"), v.literal("weekly")),
+    // 0 = Sunday … 6 = Saturday, school-local; weekly rows only.
+    weekdays: v.optional(v.array(v.number())),
+    startMinutes: v.number(), // minutes past local midnight
+    endMinutes: v.number(), // same day, after startMinutes
+    // The next occurrence as instants; the fire job checks nextStartAt.
+    nextStartAt: v.number(),
+    nextEndAt: v.number(),
+    createdAt: v.number(),
+  }).index("by_scholar", ["scholarId"]),
+
   // ── GUARDIANSHIPS (parent ↔ scholar relationship) ─────────────────────
   // The real link the old token model lacked: which parent accounts may
   // see which scholars' (non-sensitive) learning data. Many-to-many — one
@@ -8556,7 +9251,7 @@ export default defineSchema({
   // rollout; access and per-parent read state live in parentThreadParticipants.
   parentThreads: defineTable({
     parentUserId: v.id("users"), // DEPRECATED: first participant; remove after backfill
-    teacherId: v.optional(v.id("users")), // staff author; null = parent-initiated
+    teacherId: v.optional(v.id("users")), // staff author (a scholar-opened general thread: the teacher written to — seeds the Slack @-mentions); null = parent-initiated
     scholarId: v.optional(v.id("users")), // SUBJECT of the conversation (never an access grant)
     // Required for new scholar-less staff threads. Legacy rows remain unstamped
     // during the widen; staff access derives only when every guardian child is
@@ -8564,25 +9259,51 @@ export default defineSchema({
     institutionId: v.optional(v.id("institutions")),
     broadcastId: v.optional(v.string()), // DEPRECATED: old per-parent broadcast rollup
     // Which conversation this is. Absent = "family" (every pre-existing row).
-    //   family   — a scholar's guardians ↔ school staff (parentMessages.ts).
-    //   mentor   — ONE scholar ↔ staff, opened by an adult (a mentor holding a
-    //              `scholars:mentor` grant, or a teacher). Open door: the
-    //              scholar's teachers can always read + reply. scholarMessages.ts.
-    //   workshop — one scholar's Workshop idea ↔ the Rabbithole team
-    //              (institution teachers + platform admins). `suggestionId` set.
+    //   family  — a scholar's guardians ↔ school staff (parentMessages.ts).
+    //   scholar — ONE scholar ↔ adults (scholarMessages.ts). Its `flavor`:
+    //     general  — opened by an adult (a teacher, or a mentor holding a
+    //                `scholars:mentor` grant) with the adults NAMED on it, or
+    //                by the scholar writing to ONE teacher at their school.
+    //                Open door: the scholar's teachers can always read + reply.
+    //     workshop — the scholar ↔ the Rabbithole team (institution teachers +
+    //                platform admins), usually about one Workshop idea
+    //                (`suggestionId`); a teacher can also open one with none.
+    //     about    — the scholar ↔ their school's teaching team, about ONE
+    //                Quest or ONE wonder (`about` set; one thread per pair).
+    //                Same open door as workshop; never a mentor or a guardian.
+    // MIGRATING (widen): rows written before the `flavor` field store the
+    // flavor in `kind` itself — "mentor" (= general), "workshop", "about".
+    // Read `kind`/`flavor` ONLY through lib/scholarThreadAccess.ts
+    // (`threadKind`, `threadFlavor`). migrations:runScholarThreadKinds
+    // rewrites them; the narrow then drops the three legacy literals.
     // The table name is legacy; a rename to `conversations` is deferred.
     kind: v.optional(
-      v.union(v.literal("family"), v.literal("mentor"), v.literal("workshop")),
+      v.union(
+        v.literal("family"),
+        v.literal("scholar"),
+        v.literal("mentor"),
+        v.literal("workshop"),
+        v.literal("about"),
+      ),
+    ),
+    // Set exactly when kind is "scholar" (see above).
+    flavor: v.optional(
+      v.union(v.literal("general"), v.literal("workshop"), v.literal("about")),
     ),
     suggestionId: v.optional(v.id("scholarSuggestions")),
+    // What an `about` thread is about: the scholar's Quest (its unit) or one of
+    // their wonders (its seed). Set exactly when the flavor is "about", by
+    // scholarMessages.ensureAboutThread only, which checks it is the scholar's
+    // own before writing. Never changes after creation.
+    about: v.optional(threadAboutValidator),
     botEnabled: v.optional(v.boolean()), // DEPRECATED: removed in-thread assistant
     lastMessageAt: v.number(),
     lastParentToTeacherAt: v.optional(v.number()),
     lastToParentAt: v.optional(v.number()),
     lastReadByParentAt: v.optional(v.number()), // DEPRECATED: participant rows own this
     lastReadByTeacherAt: v.optional(v.number()),
-    // Mentor threads: when the last batched "a scholar wrote" email went to the
-    // named mentors. Batching sends at most one per thread per 15 minutes
+    // General scholar threads: when the last batched "a scholar wrote" email
+    // went to the named adults. Batching sends at most one per thread per 15 minutes
     // (scholarMessages.ts → sendMentorEmailBatch).
     lastStaffEmailAt: v.optional(v.number()),
   })
@@ -8591,8 +9312,14 @@ export default defineSchema({
     .index("by_scholar", ["scholarId"])
     .index("by_institution", ["institutionId"])
     .index("by_broadcast", ["broadcastId"])
+    // Legacy rows only (kind = the old flavor name); dropped with the narrow.
     .index("by_kind_institution", ["kind", "institutionId"])
-    .index("by_suggestion", ["suggestionId"]),
+    .index("by_kind_flavor_institution", ["kind", "flavor", "institutionId"])
+    .index("by_suggestion", ["suggestionId"])
+    // A scholar's `about` thread for one wonder (TRA-683): the "replied"
+    // lookup on a wonder row reads one wonder's threads, never all of a
+    // scholar's (scholarMessages.ts `wonderReplyForScholar`).
+    .index("by_scholar_about_seed", ["scholarId", "about.seedId"]),
 
   // `parentUserId` is the legacy name for the PARTICIPANT user. `side` says
   // which side of the conversation they are on; absent = "family" (a guardian).
@@ -8808,6 +9535,11 @@ export default defineSchema({
     optInAt: v.optional(v.number()),
     consentSource: v.optional(v.string()), // "self-serve" | "staff"
     stopState: v.optional(v.boolean()), // true = opted out (STOP / unsubscribe)
+    // What the consent covers. "aide" = texting the parent aide only
+    // (parentSms.recordSmsConsent): the row does NOT opt the parent into
+    // teacher messages by SMS, so a reply to a teacher can't land with the
+    // aide. Absent = every use (the WhatsApp self-serve opt-in).
+    scope: v.optional(v.literal("aide")),
     // Last time this parent messaged us on this channel — opens WhatsApp's
     // 24-hour customer-service window (free-form replies allowed inside it;
     // a pre-approved template is required outside it).
@@ -8816,9 +9548,56 @@ export default defineSchema({
     // delivers webhooks at-least-once, so we dedup a re-delivered opt-in on this
     // (the normal-message path dedups via parentMessages.providerMessageId).
     lastInboundMessageId: v.optional(v.string()),
+    // School-night BunnyPad charge reminder (parentSms.sendChargeReminders).
+    // Every sms row with consent gets it; the parent turns it off by texting
+    // NO REMINDERS (sets this) and back on with REMINDERS ON (clears it).
+    chargeRemindersOffAt: v.optional(v.number()),
+    // The institution-local day key of the last reminder claimed for this
+    // row, so a doubled or retried cron never texts twice in one evening.
+    chargeReminderLastDayKey: v.optional(v.string()),
+    // When the intro text (parentSms.sendSmsIntro) was claimed for this row.
+    // Set before the send, so it goes out at most once per row: re-recording
+    // consent (e.g. after a STOP) doesn't send it again.
+    introSentAt: v.optional(v.number()),
   })
     .index("by_parent", ["parentUserId"])
     .index("by_identity", ["channel", "identity"]),
+
+  // One row per inbound Twilio SMS, keyed by its MessageSid (convex/parentSms.ts).
+  // Two jobs: dedupe (a Twilio retry with the same MessageSid finds this row
+  // and writes nothing), and a per-parent FIFO of aide turns, so two quick
+  // texts are answered one at a time, in arrival order. No phone number is
+  // stored here; the reply goes to `identityId`'s number, re-checked for
+  // consent at send time. `body` is held only while a turn is queued and
+  // cleared when it starts (it then lives in parentChatMessages).
+  parentSmsInbound: defineTable({
+    messageSid: v.string(),
+    // The consented guardian the sender resolved to; absent when it didn't.
+    parentUserId: v.optional(v.id("users")),
+    identityId: v.optional(v.id("parentChannelIdentities")),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("running"),
+      v.literal("answered"),
+      v.literal("failed"),
+      v.literal("stopped"), // a STOP keyword, recorded
+      v.literal("help"), // a HELP keyword, answered or left to Twilio
+      v.literal("ignored"), // no aide turn; `reason` says why
+    ),
+    // Machine reason for ignored/failed rows ("unknown-number",
+    // "ambiguous-identity", "timed-out", …). Never a number or a body.
+    reason: v.optional(v.string()),
+    body: v.optional(v.string()),
+    // SHA-256 of the trimmed body, kept after `body` is cleared, so an exact
+    // repeat (an auto-responder answering our reply) is ignored, not answered.
+    bodyHash: v.optional(v.string()),
+    startedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+  })
+    .index("by_message_sid", ["messageSid"])
+    // Time-ordered per parent (_creationTime is implicit): the hourly cap.
+    .index("by_parent", ["parentUserId"])
+    .index("by_parent_status", ["parentUserId", "status"]),
 
   processState: defineTable({
     sessionId: v.id("sessions"),
@@ -9204,12 +9983,16 @@ export default defineSchema({
     //   upload       — a file the teacher uploaded directly
     //   photo        — captured from the webcam (1+ pages → one PDF)
     //   manual       — legacy per-scholar manual upload (scholar known up front)
+    //   decibel_meter — a take filmed on the Decibel meter with nobody linked
+    //                  (see decibelMeterTakes); the speaker is named on the
+    //                  meter or filed from the inbox like a scan
     source: v.union(
       v.literal("google_drive"),
       v.literal("upload"),
       v.literal("photo"),
       v.literal("manual"),
       v.literal("capture_station"),
+      v.literal("decibel_meter"),
     ),
     fileStorageId: v.optional(v.id("_storage")),
     fileMimeType: v.optional(v.string()),
@@ -9348,6 +10131,10 @@ export default defineSchema({
       ),
     ),
   })
+    // Lets lib/storageReferences.ts see that this feature holds a blob.
+    .index("by_thumb_storage", ["thumbStorageId"])
+    .index("by_magic_storage", ["magicStorageId"])
+    .index("by_magic_thumb_storage", ["magicThumbStorageId"])
     .index("by_scholar", ["scholarId"])
     .index("by_driveFileId", ["driveFileId"])
     .index("by_matchStatus", ["matchStatus"])
@@ -9481,6 +10268,7 @@ export default defineSchema({
     .index("by_session", ["sessionId"])
     .index("by_storage", ["storageId"])
     .index("by_status_expiry", ["status", "expiresAt"]),
+
 
   captureStationCaptures: defineTable({
     captureStationId: v.id("captureStations"),
@@ -9640,6 +10428,195 @@ export default defineSchema({
     uploaderId: v.id("users"),
   }).index("by_uploader", ["uploaderId"]),
 
+  // ─── Live talks (back-row audience recording) ─────────────────────
+  //
+  // One presenting session on a scholar's BunnyPad: slides or their own app's
+  // Present mode, to the class or as a rehearsal. It spans several takes
+  // (rehearse, review, rehearse again), so the take is a field, not the row.
+  // A second device at the back of the room (a classmate's or a teacher's)
+  // finds the talk by the presenter's school and links to it as the listener;
+  // the presenter's start and stop drive that device's camera. Liveness comes
+  // from `lastSeenAt` plus a scheduled expiry check (liveTalks.expireIfStale),
+  // never a clock read in a query.
+  liveTalks: defineTable({
+    presenterId: v.id("users"),
+    // The presenter's school; the audience list is scoped to it.
+    institutionId: v.id("institutions"),
+    kind: v.union(v.literal("slides"), v.literal("app")),
+    mode: v.union(v.literal("present"), v.literal("rehearse")),
+    title: v.string(),
+    // Always 0 / 0 for an app talk, which has no slides.
+    slideIndex: v.number(),
+    slideCount: v.number(),
+    state: v.union(
+      v.literal("waiting"),
+      v.literal("recording"),
+      v.literal("ended"),
+    ),
+    // The back device's signed-in user while linked. Kept on an ended talk so
+    // the listener still sees "ended" and can finish uploading the last take.
+    listenerId: v.optional(v.id("users")),
+    // The back device's last join or heartbeat. A listener not heard from in
+    // a minute is unlinked (liveTalks.expireListenerIfStale), so a killed or
+    // backgrounded back device never holds the slot.
+    listenerSeenAt: v.optional(v.number()),
+    // The presenter's client-generated id for the current or last take.
+    takeId: v.optional(v.string()),
+    // Whether the presenter's close mic hears them talking right now, sent
+    // live during a take. The back device's mic can read quiet speech as
+    // silence; this lets its screen tell "too quiet" from a pause. Cleared
+    // when the take stops.
+    presenterTalking: v.optional(v.boolean()),
+    lastSeenAt: v.number(),
+    endedAt: v.optional(v.number()),
+    // Why it ended: the presenter ended it ("left"), it went quiet ("stale"),
+    // or the same presenter began another talk ("replaced"). The app begins
+    // again only after "stale", so two devices on one account don't keep
+    // ending each other's talks.
+    endedReason: v.optional(
+      v.union(v.literal("left"), v.literal("stale"), v.literal("replaced")),
+    ),
+  })
+    .index("by_institution_state", ["institutionId", "state"])
+    .index("by_presenter_state", ["presenterId", "state"])
+    .index("by_listener", ["listenerId"]),
+
+  // One back-row video per take of a live talk, recorded by the listener's
+  // device and played on the presenter's review screen. A row exists only for
+  // takes that started while a listener was linked. Status runs recording →
+  // uploading (presenter stopped) → ready (listener uploaded), or → failed
+  // (listener gone mid-take, or no upload within liveTalks.UPLOAD_EXPIRY_MS).
+  // `levels` is the back device's loudness trace (one sample per `frameMs`),
+  // opaque to the server; `cameraStartedAtClient` is the back device's own
+  // clock when its camera began, so the app can line the trace up with video.
+  // `facing` is the presenter's head direction the back device read off the
+  // video (one sample per `facingFrameMs`, also opaque here); absent when that
+  // device's build can't read it or reading failed. `facingZone` is where the
+  // back device's meter counted facing the room (degrees), so the presenter's
+  // review judges the trace the same way; absent means the app's default zone.
+  talkRecordings: defineTable({
+    talkId: v.id("liveTalks"),
+    presenterId: v.id("users"),
+    institutionId: v.id("institutions"),
+    takeId: v.string(),
+    listenerId: v.id("users"),
+    status: v.union(
+      v.literal("recording"),
+      v.literal("uploading"),
+      v.literal("ready"),
+      v.literal("failed"),
+    ),
+    // Server time at startRecording.
+    startedAt: v.number(),
+    // Set by finishUpload.
+    storageId: v.optional(v.id("_storage")),
+    mimeType: v.optional(v.string()),
+    sizeBytes: v.optional(v.number()),
+    durationMs: v.optional(v.number()),
+    levels: v.optional(v.string()),
+    frameMs: v.optional(v.number()),
+    roomDbfs: v.optional(v.number()),
+    // The back meter's green threshold at Stop, in dB over the room, so the
+    // presenter's review judges the take as that screen did. Absent from a
+    // back device that predates sending it: the review uses the default.
+    thresholdDb: v.optional(v.number()),
+    cameraStartedAtClient: v.optional(v.number()),
+    facing: v.optional(v.string()),
+    facingFrameMs: v.optional(v.number()),
+    facingZone: v.optional(
+      v.object({
+        centerYaw: v.number(),
+        centerPitch: v.number(),
+        turnDeg: v.number(),
+        tiltDeg: v.number(),
+      }),
+    ),
+  })
+    .index("by_presenter_take", ["presenterId", "takeId"])
+    .index("by_talk", ["talkId"])
+    .index("by_listener", ["listenerId"])
+    .index("by_storage", ["storageId"]),
+
+  // One take filmed on the Decibel meter with nobody linked: someone holds a
+  // BunnyPad at the back of the room while a scholar practises a talk. The
+  // video is a portfolio item (source "decibel_meter", its poster still the
+  // item's thumbnail), so it lands in the scanner inbox unless the speaker was
+  // named, and staff file it like a scan. This row keeps what the item has no
+  // place for: the take's sound as a small audio file until it is transcribed
+  // (the video is too big for Whisper), the meter's loudness and
+  // head-direction traces, the threshold it judged them by, and the
+  // transcript. Deleted with its item.
+  decibelMeterTakes: defineTable({
+    portfolioItemId: v.id("portfolioItems"),
+    institutionId: v.id("institutions"),
+    // The meter's signed-in user: often a classmate's or a teacher's account,
+    // not the speaker's. May discard the take for a while after recording it.
+    recordedBy: v.id("users"),
+    durationMs: v.number(),
+    // Deleted once the transcript is written (or fails).
+    audioStorageId: v.optional(v.id("_storage")),
+    // As on talkRecordings: one dBFS sample per `frameMs`, opaque here.
+    levels: v.string(),
+    frameMs: v.number(),
+    roomDbfs: v.number(),
+    // The green threshold, in dB over the room, as the meter had it.
+    thresholdDb: v.number(),
+    facing: v.optional(v.string()),
+    facingFrameMs: v.optional(v.number()),
+    facingZone: v.optional(
+      v.object({
+        centerYaw: v.number(),
+        centerPitch: v.number(),
+        turnDeg: v.number(),
+        tiltDeg: v.number(),
+      }),
+    ),
+    // Absent when there was no sound file to transcribe.
+    transcriptStatus: v.optional(
+      v.union(v.literal("pending"), v.literal("ready"), v.literal("error")),
+    ),
+    // JSON [[startMs, endMs, text], ...], Whisper's segments. The plain text
+    // also goes to the item's extractedText, so the inbox can search it.
+    transcriptSegments: v.optional(v.string()),
+    wordCount: v.optional(v.number()),
+    fillerCount: v.optional(v.number()),
+    // When the recorder named or cleared the speaker ("Leave it for a
+    // teacher" counts). The transcript's self-introduction never overrides it.
+    speakerChosenAt: v.optional(v.number()),
+    // When staff first touched the take in the inbox or a profile (filing,
+    // labels, sharing, an assignment or activity). It ends the recorder's say
+    // for good, even if staff later undo their change.
+    staffTookOverAt: v.optional(v.number()),
+  })
+    .index("by_portfolio_item", ["portfolioItemId"])
+    .index("by_recorder", ["recordedBy"])
+    .index("by_institution", ["institutionId"])
+    // Lets lib/storageReferences.ts see that this feature holds a blob.
+    .index("by_audio_storage", ["audioStorageId"]),
+
+  // One upload the Decibel meter asked for: its video, poster or sound. A take
+  // can only adopt uploads its own recorder reserved, made after the
+  // reservation and bound to it (decibelMeter.recordUpload), so a storage id
+  // seen elsewhere (any served file's URL carries one) can never be adopted
+  // or deleted through the meter. A take claims and deletes its reservations
+  // when it saves; one never claimed is swept with its blob
+  // (decibelMeter.expireUpload).
+  decibelMeterUploads: defineTable({
+    uploaderId: v.id("users"),
+    institutionId: v.id("institutions"),
+    kind: v.union(v.literal("video"), v.literal("poster"), v.literal("audio")),
+    createdAt: v.number(),
+    // Set once the upload has landed and the BunnyPad has reported it.
+    storageId: v.optional(v.id("_storage")),
+    // The take that adopted it. The row stays as a receipt (so a retried save
+    // finds the take it already made) until the sweep, and no longer counts
+    // as the blob's owner.
+    claimedItemId: v.optional(v.id("portfolioItems")),
+  })
+    .index("by_uploader", ["uploaderId", "createdAt"])
+    // Lets lib/storageReferences.ts see that this feature holds a blob.
+    .index("by_storage", ["storageId"]),
+
   // ─── Submitted deliverables ───────────────────────────────────────
   //
   // One per (project, activity). Re-submitting overwrites the previous
@@ -9751,6 +10728,8 @@ export default defineSchema({
       v.union(v.literal("not"), v.literal("half"), v.literal("full")),
     ),
   })
+    // Lets lib/storageReferences.ts see that this feature holds a blob.
+    .index("by_file_storage", ["fileStorageId"])
     .index("by_scholar", ["scholarId"])
     .index("by_scholar_submittedAt", ["scholarId", "submittedAt"])
     .index("by_activity", ["activityId"])
@@ -9864,6 +10843,31 @@ export default defineSchema({
     regeneratedAt: v.optional(v.number()),
   })
     .index("by_label", ["label"]),
+
+  // Charm models: the 3D twin of the app charm sprites above. One row per
+  // normalized subject ("chimpanzee"), SHARED across scholars like a charm
+  // icon: GPT-6 Astra writes a three.js `build(THREE)` function once, the
+  // server sandbox-checks it (lib/charmModelSandbox.ts), and every app that
+  // asks for the subject gets a session-owned script copy. Remixes are never
+  // cached here; they live only as that one session's app asset.
+  charmModels: defineTable({
+    label: v.string(),
+    // The subject as first typed, for logs and a future staff list.
+    displayLabel: v.string(),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("ready"),
+      v.literal("failed"),
+    ),
+    // The checked `function build(THREE) { ... }` source (4-9 KB measured).
+    code: v.optional(v.string()),
+    generationModel: v.optional(v.string()),
+    // Staff override, as on manipulativeThemeIcons: a hidden subject is never
+    // served or regenerated. Auto-live by default.
+    hidden: v.optional(v.boolean()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+  }).index("by_label", ["label"]),
 
   // Generated Bold lineal-color art for earned rubric flair. Criteria may be
   // institution-authored or per-scholar AI output, so this cache is isolated
@@ -10363,6 +11367,36 @@ export default defineSchema({
     kind: v.union(v.literal("holiday"), v.literal("staffOnly")),
   }).index("by_institution", ["institutionId"]),
 
+  // ── Field trips (TRA-601) ──────────────────────────────────────────────
+  // Some groups leave school for part of ONE day. Its own record, neither a
+  // closure (school stays open for everyone else) nor a schedule edit: a class
+  // meeting of a going group that overlaps the window doesn't meet that day
+  // (convex/lib/classLink.ts classMeetingForGive, convex/lib/giveWindow.ts),
+  // and the trip shows on the scholar's Home and the parent Homework weeks.
+  // Rabbithole is the source of truth: staff enter trips on School › Classes
+  // & times (convex/fieldTrips.ts); nothing syncs from a Google calendar.
+  //
+  // Times are institution-local wall clock like scheduleBlocks, so a trip and
+  // a class block compare in the same units (shared/fieldTrips.ts).
+  // Later slices (permission slips, transport, drivers, headcounts) are their
+  // own tables keyed by `tripId`, so this row never has to change shape.
+  fieldTrips: defineTable({
+    institutionId: v.id("institutions"),
+    // The groups going. Each belongs to `institutionId` (checked on write).
+    groupIds: v.array(v.id("scholarGroups")),
+    dayKey: v.string(), // "YYYY-MM-DD" institution-local
+    startLocal: v.string(), // "09:00"
+    endLocal: v.string(), // "12:00"
+    destination: v.string(), // "Kualoa Ranch"
+    // Staff-only: never sent to scholars or families. "Bus 3, two chaperones"
+    notes: v.optional(v.string()),
+    createdBy: v.id("users"),
+    updatedAt: v.number(),
+    // Set = canceled. Kept rather than deleted so a later slip or driver row
+    // never points at nothing; every reader skips it.
+    canceledAt: v.optional(v.number()),
+  }).index("by_institution_day", ["institutionId", "dayKey"]),
+
   // ── Course narrative (§7) — one per scholar × period × subject ────────
   // Sections stored as a keyed list (NOT fixed columns) so the "simplify?"
   // decision is config, not migration. Numbers are a staff instrument.
@@ -10370,9 +11404,12 @@ export default defineSchema({
     scholarId: v.id("users"),
     teacherId: v.id("users"),
     periodId: v.id("reportingPeriods"),
-    subject: v.string(), // "Mathematics" · "Science" · "Humanities"
+    subject: v.string(), // "Mathematics" · "Science" · "Humanities" · "SEL"
     unitIds: v.array(v.id("units")), // what actually ran this period
-    // context · progress · perDimension… · goals — each { key, title, body }.
+    // Since 2026-11 a report is ONE parent-facing prose body, the `report`
+    // section (lib/parentReport.ts). Rows started earlier also hold the retired
+    // rubric sections (context · progress · perDimension… · goals), now read as
+    // teacher notes. Each { key, title, body }.
     sections: v.array(
       v.object({ key: v.string(), title: v.string(), body: v.string(), done: v.optional(v.boolean()) }),
     ),
@@ -10429,6 +11466,18 @@ export default defineSchema({
       v.literal("final"),
       v.literal("shared"),
     ),
+    // Parent-report drafting (convex/parentReports.ts). The prose itself is the
+    // `report` section above; these only track the background draft:
+    // set while the model is writing, the last successful draft, and the last
+    // failure (cleared by the next request).
+    draftRequestedAt: v.optional(v.number()),
+    draftedAt: v.optional(v.number()),
+    // Portfolio pieces the report describes, shown under it for the family
+    // to open. The drafter picks them from the evidence; the teacher can
+    // remove any. Parents see only pieces the portfolio already shares with
+    // them (parents.childSharedNarratives filters through the guardian view).
+    pieces: v.optional(v.array(v.id("portfolioItems"))),
+    draftError: v.optional(v.string()),
     sharedAt: v.optional(v.number()),
     // The shared narrative also lands as a scholarDocuments row so it enters
     // the redaction pipeline + document history (§5).

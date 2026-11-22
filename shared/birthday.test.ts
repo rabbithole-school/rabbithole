@@ -7,6 +7,7 @@ import {
   nthBirthdayLabel,
   nthBirthdayOnDayKey,
   ordinal,
+  scholarBirthdayAcknowledgement,
 } from "./birthday";
 
 describe("isBirthdayOnDayKey", () => {
@@ -116,6 +117,42 @@ describe("nthBirthdayLabel", () => {
 
   it("returns null when it is not the birthday", () => {
     expect(nthBirthdayLabel("2015-07-21", "2026-07-22")).toBeNull();
+  });
+});
+
+describe("scholarBirthdayAcknowledgement", () => {
+  it("returns the greeting on the birthday", () => {
+    expect(
+      scholarBirthdayAcknowledgement("Kai Kahale", "2015-07-21", "2026-07-21"),
+    ).toEqual({ firstName: "Kai", bannerText: "Happy birthday, Kai!" });
+  });
+
+  it("never carries the date of birth, an age, or a school name", () => {
+    const ack = scholarBirthdayAcknowledgement(
+      "Kai Kahale",
+      "2015-07-21",
+      "2026-07-21",
+    );
+    const text = JSON.stringify(ack);
+    expect(text).not.toMatch(/2015|2026|07-21|\b11\b|School/);
+  });
+
+  it("is absent off the birthday or when DOB is missing", () => {
+    expect(
+      scholarBirthdayAcknowledgement("Kai Kahale", "2015-07-21", "2026-07-22"),
+    ).toBeNull();
+    expect(
+      scholarBirthdayAcknowledgement("Kai Kahale", null, "2026-07-21"),
+    ).toBeNull();
+    expect(
+      scholarBirthdayAcknowledgement("Kai Kahale", "2015-07-21", null),
+    ).toBeNull();
+  });
+
+  it("falls back gracefully when the scholar has no display name", () => {
+    expect(
+      scholarBirthdayAcknowledgement("  ", "2015-07-21", "2026-07-21"),
+    ).toEqual({ firstName: "Scholar", bannerText: "Happy birthday, Scholar!" });
   });
 });
 

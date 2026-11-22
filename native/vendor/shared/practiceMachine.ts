@@ -56,6 +56,7 @@ import {
 } from "./practiceLoop";
 import type { BreakerLifecycleOperation } from "./practiceLifecycleRetry";
 import type { OutboxAnswer } from "./practiceOutboxContract";
+import { formNudgeOf } from "./practiceAnswerForm";
 
 // ─── Identity ────────────────────────────────────────────────────────────
 
@@ -517,7 +518,78 @@ export type GradeResult = {
   /** The server's own verdict on a linked fresh recovery attempt. Client state
    *  alone can never earn recognition. */
   breakerRecoveryVerified?: boolean;
+  /** The answer was equal to the right one but not in the form the item asks
+   *  for (shared/practiceAnswerForm `formNudgeOf`). Nothing was recorded: the
+   *  item stays in answering for an edit and resubmit. */
+  formNudge?: true;
 };
+
+/** The fields of a `practiceSkills.submitAnswer` response a host reads. Both
+ *  hosts cast the outbox barrier's `submitted` result to this before handing it
+ *  to `onGrade` and projecting it into a `GradeResult`. */
+export type SubmitAnswerResponse = {
+  correct: boolean;
+  backOff?: {
+    missStreak: number;
+  };
+  breakerRecovery?: {
+    triggerAttemptId: string;
+    triggerNodeKey: string;
+    domain: string;
+    initialRepair?: {
+      rung: null | {
+        kind: "completion" | "reveal";
+        stepIndex: number;
+      };
+      hasMore: boolean;
+    };
+  };
+  breakerRecoveryVerified?: boolean;
+  dispatchCompleted?: unknown;
+};
+
+/**
+ * Project a submit response into the reducer's `GradeResult`. Pure, so web and
+ * native share one mapping. A breaker opened by a server too old to send
+ * `breakerRecovery` gets a `legacy:<itemId>` trigger id and no recovery; an
+ * absent `initialRepair` means the repair is still opening, while a `null`
+ * rung means none is available. `breakerRecoveryVerified` is carried only when
+ * the server sent it.
+ */
+export function gradeResultFromSubmitResponse(
+  res: SubmitAnswerResponse,
+  itemId: string,
+): GradeResult {
+  const recovery = res.breakerRecovery;
+  const initialRepair = recovery?.initialRepair;
+  return {
+    correct: res.correct,
+    ...(res.backOff
+      ? {
+          backOff: {
+            triggerAttemptId: recovery?.triggerAttemptId ?? `legacy:${itemId}`,
+            triggerNodeKey: recovery?.triggerNodeKey ?? "",
+            domain: recovery?.domain ?? "",
+            missStreak: res.backOff.missStreak,
+            recoveryAvailable: recovery !== undefined,
+            initialRepairStatus:
+              initialRepair === undefined
+                ? "opening"
+                : initialRepair.rung === null
+                  ? "unavailable"
+                  : initialRepair.rung.kind === "reveal"
+                    ? "done"
+                    : "open",
+            repairStepIndex: initialRepair?.rung?.stepIndex ?? null,
+          },
+        }
+      : {}),
+    ...(res.breakerRecoveryVerified !== undefined
+      ? { breakerRecoveryVerified: res.breakerRecoveryVerified }
+      : {}),
+    ...(formNudgeOf(res) !== null ? { formNudge: true } : {}),
+  };
+}
 
 export type PracticeEvent =
   // ── the scholar ──
@@ -1315,6 +1387,22 @@ export function practiceReduce(
     case "server:submitSucceeded": {
       if (!isAwaiting(state, event.id)) return none(state);
       const { result } = event;
+      if (result.formNudge) {
+        // Right value, not yet in the form asked: the server recorded nothing.
+        // Back to answering with no tally, miss, haptic or resume write; the
+        // receipt is spent, so the edited answer mints a fresh one.
+        return none({
+          ...state,
+          item: {
+            ...state.item,
+            phase: { kind: "answering" },
+            confirming: null,
+            clientEventId: null,
+            clientEventKey: null,
+            clientEventReplay: null,
+          },
+        });
+      }
       const confirming = state.item.confirming;
       if (confirming?.commandId === event.id) {
         // The server's verdict on an answer already marked provisionally. It

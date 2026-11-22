@@ -15,7 +15,10 @@
  * signal, not the tutor's opinion — that's what makes "too soon" measurable:
  * completing before the kid worked the goals through.
  */
-import { isValidActivityCompletionClosing } from "../../../convex/lib/activityCompletionTool";
+import {
+  hasNoFollowUpQuestionOrTask,
+  isValidActivityCompletionClosing,
+} from "../../../convex/lib/activityCompletionTool";
 import { isAutomaticCompletionClosing } from "../../../convex/lib/tutorClosingGuidance";
 
 /**
@@ -78,6 +81,12 @@ export type CompletionObservation = {
    * as the closing response and explicitly suppresses a second closing.
    */
   completionHadPostToolText?: boolean | null;
+  /**
+   * The completing scholar turn asked a real question or raised new confusion
+   * (a fixture's `openQuestionTurns`). The tutor should answer it and complete
+   * on a later turn (TRA-703).
+   */
+  completedOnOpenQuestion?: boolean | null;
 };
 
 /**
@@ -107,13 +116,42 @@ export type CompletionScore = {
   reason: string;
 };
 
+/**
+ * Splits a completing turn's scholar-visible text into the tutor's reply and
+ * the app's trailing note. The note is always its own paragraph, so a reply
+ * whose last sentence merely reads like a short legacy line ("That one is
+ * finished.") is not mistaken for it. `note` is null when the last paragraph
+ * is not an automatic closing.
+ */
+export function splitTrailingCompletionNote(text: string): {
+  reply: string;
+  note: string | null;
+} {
+  const trimmed = text.trim();
+  const cut = trimmed.lastIndexOf("\n");
+  const last = trimmed.slice(cut + 1).trim();
+  if (!isAutomaticCompletionClosing(last)) return { reply: trimmed, note: null };
+  return { reply: cut < 0 ? "" : trimmed.slice(0, cut).trim(), note: last };
+}
+
 function completionKeepsGoing(
   text: string | null | undefined,
   completionToolWasFirst: boolean | null | undefined,
 ): boolean {
-  return completionToolWasFirst
-    ? !isAutomaticCompletionClosing(text ?? "")
-    : !isValidActivityCompletionClosing(text ?? "");
+  if (!completionToolWasFirst) {
+    return !isValidActivityCompletionClosing(text ?? "");
+  }
+  // Tool-first: the app's note must end the turn. A reply before it is the
+  // tutor answering the scholar's last message (TRA-703), and passes as long
+  // as it hands them no new question or task and is not a model-written
+  // closing recap of their reasoning.
+  const { reply, note } = splitTrailingCompletionNote(text ?? "");
+  if (note === null) return true;
+  if (!reply) return false;
+  const flat = reply.replace(/\s+/g, " ");
+  return (
+    !hasNoFollowUpQuestionOrTask(flat) || isValidActivityCompletionClosing(flat)
+  );
 }
 
 /** Classify the timing of a single session, expectation-agnostic. */
@@ -127,6 +165,7 @@ export function classifyCompletion(
     if (completed < MIN_REAL_TURNS) return "too-soon";
     if (arc === null) return "too-soon";
     if (completed < arc) return "too-soon";
+    if (obs.completedOnOpenQuestion) return "too-soon";
     if (
       obs.completionToolWasFirst === false &&
       obs.completionHadPostToolText !== false
@@ -174,7 +213,9 @@ export function scoreCompletion(
           ? `Completed at scholar turn ${completed} — before the scholar engaged (< ${MIN_REAL_TURNS} turns).`
           : arc === null
             ? `Completed at scholar turn ${completed} without the goal ever being reached.`
-            : `Completed at scholar turn ${completed}, before the goal was reached (turn ${arc}).`;
+            : completed !== null && arc !== null && completed < arc
+              ? `Completed at scholar turn ${completed}, before the goal was reached (turn ${arc}).`
+              : `Completed at scholar turn ${completed}, on a message that asked a real question or raised new confusion.`;
       break;
     case "too-late":
       pass = false;

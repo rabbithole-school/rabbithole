@@ -1,4 +1,4 @@
-import { ConvexReactClient } from "convex/react";
+import { RetryingAuthConvexReactClient } from "@/lib/retryingAuthToken";
 
 // Single Convex client for the native app, pointed at the same dev deployment
 // the web app uses (EXPO_PUBLIC_CONVEX_URL, set in native/.env).
@@ -7,7 +7,9 @@ if (!url) {
   throw new Error("EXPO_PUBLIC_CONVEX_URL is not set (see native/.env)");
 }
 
-export const convex = new ConvexReactClient(url, {
+// Its token fetchers retry instead of throwing: a throw on a renewal leaves
+// Convex's socket stopped until the app relaunches (retryingAuthToken.ts).
+export const convex = new RetryingAuthConvexReactClient(url, {
   unsavedChangesWarning: false,
 });
 

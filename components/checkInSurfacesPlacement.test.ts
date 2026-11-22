@@ -30,7 +30,8 @@ describe("MapCompletionCard — scholar-self only", () => {
     );
     const remoteBlock = between(
       read(WEB_HOME),
-      '{(activeTab === "all" || isRemoteMode) && (',
+      // The remote-only Home block (the All tab is gone).
+      "{isRemoteMode && (",
       "{/* Remote view stays comprehensive",
     );
     expect(remoteBlock).not.toContain("MapCompletionCard");

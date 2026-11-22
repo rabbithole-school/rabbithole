@@ -1,5 +1,6 @@
-// Typed CLIENT ADAPTER for the one backend call the native launcher still
-// makes: the cold-path projection nudge (`convex/deviceAppUnlock.ts`).
+// Typed CLIENT ADAPTER for the two backend calls the native launcher makes:
+// the cold-path projection nudge and, for an app with no URL scheme, the
+// installed-app read (both in `convex/deviceAppUnlock.ts`).
 //
 // It used to bind three functions — `status`, `requestUnlock`, `markReturned` —
 // because the client DROVE the launch-time unlock ceremony. Under the allowlist
@@ -20,7 +21,9 @@
 // in the native app names a backend function for this feature.
 //
 // Backend contract this binds to (convex/deviceAppUnlock.ts):
-//   deviceAppUnlock:nudgeProjection   authedMutation  {deviceId} → {nudged}
+//   deviceAppUnlock:nudgeProjection          authedMutation  {deviceId} → {nudged}
+//   deviceAppUnlock:managedAppInstallState   authedQuery     {deviceId, externalAppId}
+//                                             → "installed" | "missing" | "unknown"
 // The server owns app identity, so there is no app argument: the nudge says
 // "converge THIS iPad now", and the projection decides what that means.
 
@@ -32,6 +35,7 @@ import type { ConvexReactClient } from "convex/react";
  * Changing this one string is the entire client-side cost of a backend rename.
  */
 const NUDGE_FUNCTION = "deviceAppUnlock:nudgeProjection";
+const INSTALL_STATE_FUNCTION = "deviceAppUnlock:managedAppInstallState";
 
 const nudgeProjectionRef = makeFunctionReference<
   "mutation",
@@ -39,8 +43,55 @@ const nudgeProjectionRef = makeFunctionReference<
   { nudged: boolean }
 >(NUDGE_FUNCTION);
 
+export type ManagedAppInstallState = "installed" | "missing" | "unknown";
+
+const installStateRef = makeFunctionReference<
+  "query",
+  { deviceId: string; externalAppId: string },
+  ManagedAppInstallState
+>(INSTALL_STATE_FUNCTION);
+
 /** Only the client method the nudge needs — trivially fakeable in tests. */
 export type AppUnlockConvexClient = Pick<ConvexReactClient, "mutation">;
+
+/** Only the client method the install read needs. */
+export type AppInstallConvexClient = Pick<ConvexReactClient, "query">;
+
+/**
+ * How long a tap waits for the install read before giving up on it. The read
+ * only ever REFUSES a launch, so a slow network must cost the scholar nothing
+ * beyond this: on timeout the tile hands off exactly as it did before.
+ */
+export const INSTALL_STATE_TIMEOUT_MS = 2_500;
+
+/**
+ * Is this scheme-less managed app installed on this iPad, as SimpleMDM last
+ * saw it? Any failure (no claim, an old backend, a timeout) is "unknown", and
+ * "unknown" keeps today's Home Screen handoff, so this can only ever stop a
+ * scholar from being sent to look for an icon that isn't there.
+ */
+export async function readManagedAppInstallState(
+  client: AppInstallConvexClient,
+  deviceId: string,
+  externalAppId: string,
+  timeoutMs: number = INSTALL_STATE_TIMEOUT_MS,
+): Promise<ManagedAppInstallState> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<ManagedAppInstallState>((resolve) => {
+      timer = setTimeout(() => resolve("unknown"), timeoutMs);
+    });
+    const result = await Promise.race([
+      client.query(installStateRef, { deviceId, externalAppId }),
+      timeout,
+    ]);
+    return result === "installed" || result === "missing" ? result : "unknown";
+  } catch {
+    return "unknown";
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /**
  * Ask the backend to converge this iPad's managed-app allowlist NOW, because a

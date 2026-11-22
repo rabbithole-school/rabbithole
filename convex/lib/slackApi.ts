@@ -14,6 +14,7 @@
 // (e.g. the workspace/app combination rejects startStream).
 
 import { quipHtmlToMarkdown } from "./canvasHtml";
+import { SlackMentionRewriter, type SlackMentionTarget } from "./slackText";
 export {
   escapeSlackText,
   escapeSlackInline,
@@ -335,7 +336,9 @@ export async function postMessage(
     unfurl_media: args.unfurl ?? false,
   };
   if (args.blocks) {
-    body.text = args.text;
+    // Beside blocks Slack refuses `text` over 4,000 characters; an empty one is
+    // left out, and Slack builds the fallback from the blocks.
+    if (args.text) body.text = args.text;
     body.blocks = args.blocks;
   } else if (args.markdown) {
     body.markdown_text = normalizeSlackMarkdown(args.text);
@@ -360,6 +363,28 @@ export async function postMessage(
         error === "fatal_error" ||
         error?.startsWith("request_failed:") === true),
   };
+}
+
+/**
+ * Attach the bot's own cards to links someone else posted (`chat.unfurl`,
+ * `links:write`), answering a `link_shared` event. A posted message is
+ * addressed by channel + ts; a link still in the composer by `unfurl_id` +
+ * `source: "composer"`. `unfurls` maps each URL, exactly as the event gave it,
+ * to `{ blocks }`. Everyone in the conversation sees the cards.
+ */
+export async function unfurlLinks(
+  token: string,
+  args: (
+    | { channel: string; ts: string }
+    | { unfurlId: string; source: "composer" }
+  ) & { unfurls: Record<string, { blocks: unknown[] }> },
+): Promise<{ ok: boolean; error?: string }> {
+  const target =
+    "unfurlId" in args
+      ? { unfurl_id: args.unfurlId, source: args.source }
+      : { channel: args.channel, ts: args.ts };
+  const res = await slackCall(token, "chat.unfurl", { ...target, unfurls: args.unfurls });
+  return { ok: res.ok, error: res.error as string | undefined };
 }
 
 /**
@@ -390,9 +415,15 @@ export async function openConversation(
 }
 
 type SlackFileUploadArgs = {
-  channel: string;
+  /**
+   * Where to share the file. Omit it to upload without sharing, for a Block
+   * Kit image block to show by id (`slack_file: { id }`) once Slack has
+   * processed it.
+   */
+  channel?: string;
   threadTs?: string;
-  bytes: Uint8Array;
+  /** A Blob lets a large file stay on disk. */
+  bytes: Uint8Array | Blob;
   filename: string;
   mimeType?: string;
   title?: string;
@@ -410,7 +441,7 @@ export async function uploadFileToSlack(
   try {
     const start = await slackCallForm(token, "files.getUploadURLExternal", {
       filename: args.filename,
-      length: args.bytes.byteLength,
+      length: args.bytes instanceof Blob ? args.bytes.size : args.bytes.byteLength,
     });
     const uploadUrl = start.upload_url as string | undefined;
     const fileId = start.file_id as string | undefined;
@@ -419,9 +450,11 @@ export async function uploadFileToSlack(
     const form = new FormData();
     form.append(
       "file",
-      new Blob([args.bytes as unknown as BlobPart], {
-        type: args.mimeType ?? "application/octet-stream",
-      }),
+      args.bytes instanceof Blob
+        ? args.bytes
+        : new Blob([args.bytes as unknown as BlobPart], {
+            type: args.mimeType ?? "application/octet-stream",
+          }),
       args.filename,
     );
     const up = await fetch(uploadUrl, { method: "POST", body: form });
@@ -429,8 +462,8 @@ export async function uploadFileToSlack(
 
     const complete = await slackCall(token, "files.completeUploadExternal", {
       files: [{ id: fileId, title: args.title ?? args.filename }],
-      channel_id: args.channel,
-      ...(args.threadTs ? { thread_ts: args.threadTs } : {}),
+      ...(args.channel ? { channel_id: args.channel } : {}),
+      ...(args.channel && args.threadTs ? { thread_ts: args.threadTs } : {}),
       ...(args.initialComment ? { initial_comment: args.initialComment } : {}),
     });
     return { ok: complete.ok, fileId };
@@ -445,63 +478,6 @@ export async function uploadImageToSlack(
   args: Omit<SlackFileUploadArgs, "mimeType">,
 ): Promise<{ ok: boolean; fileId?: string }> {
   return uploadFileToSlack(token, args);
-}
-
-/**
- * Post a subtle "context block" message — small gray text, Slack's idiomatic
- * treatment for system/aside notes. We use it to render coalesced tool
- * activity inline between assistant utterances (mirrors the web UI's gray
- * tool-activity rows) without the visual weight of a normal message.
- */
-export async function postContext(
-  token: string,
-  args: { channel: string; text: string; threadTs?: string },
-): Promise<{ ok: boolean; ts?: string }> {
-  const body: Record<string, unknown> = {
-    channel: args.channel,
-    ...(args.threadTs ? { thread_ts: args.threadTs } : {}),
-    // Default OFF: every Rabbithole app route answers an anonymous scraper with
-    // the same content-free shell (one root OG block — a stock image + tagline),
-    // so an unfurl just staples that noise under a message that already said
-    // everything. `unfurl: true` is the opt-in for messages whose EXTERNAL
-    // links are worth previewing. A context block is a small gray aside for
-    // tool activity, so it takes no opt-in — a preview is never wanted here.
-    unfurl_links: false,
-    unfurl_media: false,
-    // Fallback text for notifications / clients that can't render blocks.
-    text: args.text,
-    blocks: [
-      {
-        type: "context",
-        elements: [{ type: "mrkdwn", text: args.text }],
-      },
-    ],
-  };
-  const res = await slackCall(token, "chat.postMessage", body);
-  return { ok: res.ok, ts: res.ts as string | undefined };
-}
-
-/**
- * Rewrite a context-block message in place. Same block shape as postContext, so
- * a row posted live as "⋯ Creating event drafts…" can settle into the "✓ …"
- * record without posting a second message.
- */
-export async function updateContext(
-  token: string,
-  args: { channel: string; ts: string; text: string },
-): Promise<{ ok: boolean }> {
-  const res = await slackCall(token, "chat.update", {
-    channel: args.channel,
-    ts: args.ts,
-    text: args.text,
-    blocks: [
-      {
-        type: "context",
-        elements: [{ type: "mrkdwn", text: args.text }],
-      },
-    ],
-  });
-  return { ok: res.ok };
 }
 
 /** Post a Block Kit message (`text` is the notification/accessibility fallback). */
@@ -562,14 +538,19 @@ export async function openView(
 export async function updateBlocks(
   token: string,
   args: { channel: string; ts: string; text: string; blocks: unknown[] },
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; status?: number; retryAfterMs?: number }> {
   const res = await slackCall(token, "chat.update", {
     channel: args.channel,
     ts: args.ts,
     text: args.text,
     blocks: args.blocks,
   });
-  return { ok: res.ok, error: res.error as string | undefined };
+  return {
+    ok: res.ok,
+    error: res.error as string | undefined,
+    status: res.status,
+    retryAfterMs: res.retryAfterMs,
+  };
 }
 
 /** Delete one of the bot's own messages (`chat:write`, no extra scope). Used to
@@ -614,6 +595,12 @@ export interface SlackMessage {
    * live (see `resolveSlackEmoji`).
    */
   blocks?: unknown;
+  /**
+   * Slack's record of an agent reply's outcome. A reply the person stopped
+   * with the Stop button carries `result_status: "stopped_by_user"` (and who
+   * stopped it), and keeps it through later edits (seen live 2026-11-08).
+   */
+  ai_context?: { result_status?: string; stopped_by_user_id?: string };
 }
 
 /**
@@ -707,7 +694,12 @@ export interface SlackAttachment {
   title_link?: string;
   /** Plain-text stand-in Slack generates; last resort when `text` is absent. */
   fallback?: string;
-  /** Files attached to the ORIGINAL message. Not downloaded — named only. */
+  /** Block Kit content, as on an app's own link card (`chat.unfurl`). */
+  blocks?: unknown[];
+  /** Files attached to the ORIGINAL message. On a forward (`is_share`) the
+   *  visible ones are lifted onto the forwarding message by
+   *  `liftForwardedFiles`, so the bot downloads and sees them like any upload;
+   *  the rest stay named only. */
   files?: SlackFile[];
 }
 
@@ -722,6 +714,22 @@ export interface SlackFile {
   editable?: boolean;
   size?: number;
   url_private_download?: string;
+  /** Slack's word on whether THIS viewer can open the file. `"visible"` on a
+   *  normal or forwarded upload; anything else means the file is withheld. */
+  file_access?: string;
+  /** Pixel size of the original upload (images only). */
+  original_w?: number;
+  original_h?: number;
+  /** Slack's own downscaled JPEG renditions (images only). Upright pixels,
+   *  no EXIF; fetched with the same bearer token as the original. */
+  thumb_720?: string;
+  thumb_800?: string;
+  thumb_960?: string;
+  thumb_1024?: string;
+  /** A video's length, once Slack has processed it. */
+  duration_ms?: number;
+  /** Slack's poster frame for a video. Same bearer token as the original. */
+  thumb_video?: string;
 }
 
 /**
@@ -913,19 +921,34 @@ export async function fetchConversationShape(
 ): Promise<{
   kind: "dm" | "mpim" | "channel";
   privacy: "private" | "public" | null;
+  /** Shared, or being shared, with another organization (Slack Connect). */
+  externallyShared: boolean;
+  /** Slack said plainly yes or no; false is a malformed answer a post must not rely on. */
+  sharingKnown: boolean;
 } | null> {
   const res = await slackCallForm(token, "conversations.info", { channel });
   if (!res.ok) return null;
   const info = res.channel as
-    | { is_im?: boolean; is_mpim?: boolean; is_private?: boolean }
+    | {
+        is_im?: boolean;
+        is_mpim?: boolean;
+        is_private?: boolean;
+        is_ext_shared?: boolean;
+        is_pending_ext_shared?: boolean;
+      }
     | undefined;
   if (!info) return null;
-  if (info.is_im) return { kind: "dm", privacy: null };
-  if (info.is_mpim) return { kind: "mpim", privacy: null };
+  // Slack omits the flag on DMs; a caller about to post to a channel needs it.
+  const sharingKnown = typeof info.is_ext_shared === "boolean";
+  const externallyShared = info.is_ext_shared === true || info.is_pending_ext_shared === true;
+  if (info.is_im) return { kind: "dm", privacy: null, externallyShared, sharingKnown };
+  if (info.is_mpim) return { kind: "mpim", privacy: null, externallyShared, sharingKnown };
   return {
     kind: "channel",
     privacy:
       info.is_private === true ? "private" : info.is_private === false ? "public" : null,
+    externallyShared,
+    sharingKnown,
   };
 }
 
@@ -950,13 +973,14 @@ export async function getMessagePermalink(
 export async function fetchSlackUserInfo(
   token: string,
   slackUserId: string,
-): Promise<{ name: string | null; email: string | null }> {
+): Promise<{ name: string | null; email: string | null; isBot: boolean }> {
   const res = await slackCallForm(token, "users.info", { user: slackUserId });
-  if (!res.ok) return { name: null, email: null };
+  if (!res.ok) return { name: null, email: null, isBot: false };
   const user = res.user as
     | {
         real_name?: string;
         name?: string;
+        is_bot?: boolean;
         profile?: { display_name?: string; real_name?: string; email?: string };
       }
     | undefined;
@@ -966,7 +990,7 @@ export async function fetchSlackUserInfo(
     user?.real_name ||
     user?.name ||
     null;
-  return { name, email: user?.profile?.email ?? null };
+  return { name, email: user?.profile?.email ?? null, isBot: user?.is_bot === true };
 }
 
 export async function lookupSlackUserByEmail(
@@ -1009,11 +1033,39 @@ export async function setAssistantStatus(
   });
 }
 
-export async function setAssistantTitle(
+/**
+ * The agent session's state in a thread (a channel thread or a DM).
+ * `processing` is what shows Slack's native Stop button. The button appears
+ * only because the app subscribes to `agent_session_stopped`; without that
+ * subscription this call answers `ok` with the warning
+ * `missing_agent_session_stopped_event_subscription`. `chat.stopStream` puts
+ * the session back to `active` unless told otherwise. It takes no custom text
+ * (and neither does anything else: under agent_view the legacy
+ * `assistant.threads.setStatus` text renders nowhere). Needs only
+ * `chat:write`; live-verified in a channel thread and a DM 2026-11-08.
+ */
+export type AgentSessionStatus = "processing" | "active";
+
+export async function setAgentSessionStatus(
+  token: string,
+  args: { channelId: string; threadTs: string; status: AgentSessionStatus },
+): Promise<void> {
+  await slackCall(token, "agents.sessions.setStatus", {
+    channel_id: args.channelId,
+    thread_ts: args.threadTs,
+    status: args.status,
+  });
+}
+
+/** Title a thread's agent session (the Messages-tab thread name).
+ * `agents.sessions.rename` replaces `assistant.threads.setTitle`, which Slack
+ * keeps working only through a compatibility bridge "for now". Needs only
+ * `chat:write`; live-verified in a DM and a channel thread 2026-11-08. */
+export async function renameAgentSession(
   token: string,
   args: { channelId: string; threadTs: string; title: string },
 ): Promise<void> {
-  await slackCall(token, "assistant.threads.setTitle", {
+  await slackCall(token, "agents.sessions.rename", {
     channel_id: args.channelId,
     thread_ts: args.threadTs,
     title: args.title,
@@ -1573,20 +1625,65 @@ export async function listItemDelete(
 
 // ── Streaming responses ─────────────────────────────────────────────────
 
+/** One task card in a streamed reply ("Adding activities… (3)", then
+ * "Added 3 activities"). Re-sending the same `id` updates the card in place. */
+export interface SlackTaskState {
+  id: string;
+  title: string;
+  status: "in_progress" | "complete" | "error";
+  details?: string;
+}
+
+/** Slack caps a task title at 256 characters; details can be longer, but a
+ * card is a glance, so keep them short too. */
+const TASK_TITLE_MAX = 256;
+const TASK_DETAILS_MAX = 1000;
+
+function capTask(t: SlackTaskState): SlackTaskState {
+  return {
+    id: t.id,
+    title: t.title.slice(0, TASK_TITLE_MAX),
+    status: t.status,
+    ...(t.details ? { details: t.details.slice(0, TASK_DETAILS_MAX) } : {}),
+  };
+}
+
+function plainRichText(text: string): Record<string, unknown> {
+  return {
+    type: "rich_text",
+    elements: [{ type: "rich_text_section", elements: [{ type: "text", text }] }],
+  };
+}
+
+/** A task's final state as a Block Kit `task_card`, for rebuilding a finished
+ * message (see SlackStreamer.finish). */
+function taskCardBlock(t: SlackTaskState): Record<string, unknown> {
+  return {
+    type: "task_card",
+    task_id: t.id,
+    title: t.title,
+    status: t.status,
+    ...(t.details ? { details: plainRichText(t.details) } : {}),
+  };
+}
+
 /**
  * Buffered streamed reply in a thread. Usage:
  *   const s = new SlackStreamer(token, { channel, threadTs, recipientTeamId, recipientUserId });
  *   await s.start();          // OPTIONAL eager start: message appears immediately
- *   s.taskUpdate({...});      // live "thinking / running tool" progress chunks
  *   s.append(textDelta);      // cheap, buffers
+ *   s.setTasks([...]);        // live tool progress as task cards, in order with the text
  *   await s.flush();          // optional explicit flush
  *   await s.finish();         // stop the stream (or post buffered text if streaming unavailable)
  *
- * Eager start + task updates are the responsiveness affordance: without
- * them nothing renders until the FIRST TEXT token, which on a tool-heavy
- * turn is the last thing the model produces. If chat.startStream is
- * rejected (older workspace / missing feature), everything degrades to a
- * single chat.postMessage on finish().
+ * Text is always sent as `markdown_text` CHUNKS, never the top-level
+ * `markdown_text` argument. Slack fixes a stream's mode on first use and
+ * rejects the other style with `streaming_mode_mismatch`, and task cards only
+ * exist as chunks, so the two styles cannot share a stream (live-probed
+ * 2026-11-08: text-arg then task chunk is rejected; chunk then task then
+ * chunk renders text · card · text). If chat.startStream is rejected (older
+ * workspace / missing feature), everything degrades to a single
+ * chat.postMessage on finish(), without cards.
  */
 export class SlackStreamer {
   private token: string;
@@ -1597,18 +1694,42 @@ export class SlackStreamer {
 
   private streamTs: string | null = null;
   private streamingUnavailable = false;
-  private buffer = "";
+  /** What is waiting to be sent, in call order: runs of text (consecutive
+   * appends merge) and card updates (consecutive updates merge, later state
+   * winning). One queue, and each card update carries the cards as they were
+   * when it was queued, so nothing can overtake what came before it: a card
+   * first described AFTER some text never goes out ahead of that text. */
+  private pending: Array<
+    | { kind: "text"; text: string; rawLength: number }
+    | { kind: "tasks"; tasks: Map<string, SlackTaskState> }
+  > = [];
   private fullText = "";
   private sentAnything = false;
   private discarded = false;
+  /** The person pressed Stop: see halt(). Nothing more goes to Slack. */
+  private halted = false;
   private finalize?: (text: string) => string;
+  /** Turns "@Name" into a real mention as the text streams (see
+   * SlackMentionRewriter). It can hold back the end of a delta that might
+   * still be a name; a card update or finish() releases it. */
+  private mentions: SlackMentionRewriter | null;
   private lastFlush = 0;
   private inFlight: Promise<void> = Promise.resolve();
-  /** Optional ordering gate: the stream won't open (and thus won't claim its
-   * Slack ts / ordering slot) until this resolves. Used to keep a fresh
-   * utterance's message strictly after the context-block message that
-   * precedes it. */
-  private startGate?: Promise<unknown>;
+  /** The cards as Slack last accepted them, by id. */
+  private sentTasks = new Map<string, SlackTaskState>();
+  /** Every card's latest described state, for the one retry in finish(). */
+  private latestTasks = new Map<string, SlackTaskState>();
+  /** How much of `fullText` Slack has accepted; text is sent in order, so
+   * this is a prefix. */
+  private sentTextLength = 0;
+  /** The same two lengths counted in the model's own text, before mentions
+   * were rewritten: halt() reports what went unsent in those units, because
+   * the caller trims its copy of the model's text by it. */
+  private fullRawLength = 0;
+  private sentRawLength = 0;
+  /** What actually reached the stream, in order: text runs and the first
+   * appearance of each card. finish() rebuilds the message from this. */
+  private segments: Array<{ kind: "text"; text: string } | { kind: "task"; id: string }> = [];
 
   /** Flush when the buffer exceeds this many chars (or on explicit flush).
    * Modest values keep the streamed text crawling in small, frequent
@@ -1625,10 +1746,10 @@ export class SlackStreamer {
       threadTs: string;
       recipientTeamId?: string;
       recipientUserId?: string;
-      /** See `startGate`: delays the first chat.startStream until resolved. */
-      startGate?: Promise<unknown>;
       /** Last-mile rewrite applied once to the complete reply before Slack normalization. */
       finalize?: (text: string) => string;
+      /** The people this reply may @-mention by name. */
+      mentions?: readonly SlackMentionTarget[];
     },
   ) {
     this.token = token;
@@ -1636,83 +1757,128 @@ export class SlackStreamer {
     this.threadTs = args.threadTs;
     this.recipientTeamId = args.recipientTeamId;
     this.recipientUserId = args.recipientUserId;
-    this.startGate = args.startGate;
     this.finalize = args.finalize;
+    this.mentions = args.mentions?.length
+      ? new SlackMentionRewriter(args.mentions)
+      : null;
+  }
+
+  /** Characters of text this message holds so far, sent or buffered. Slack
+   * caps a stream at 12,000, so a caller starts a new message before that. */
+  get textLength(): number {
+    return this.fullText.length;
   }
 
   /** Open the stream NOW so Slack renders the reply container before any
-   * model output exists. Safe to skip — doFlush lazily starts too. */
+   * model output exists. Safe to skip — the first send opens it too. */
   async start(): Promise<void> {
     this.inFlight = this.inFlight.then(() => this.ensureStream().then(() => {}));
     await this.inFlight;
   }
 
   /**
-   * Live progress: render/advance an entry in the message's task timeline
-   * ("Thinking…", "Reading Kai's mastery ✓"). Serialized with text flushes;
-   * silently no-ops when streaming is unavailable (the postMessage fallback
-   * has no task surface). title/details capped per Slack (256 chars).
+   * Show tool progress as task cards. Pass the current state of any number of
+   * cards; only cards that changed since Slack last accepted them are sent,
+   * so callers can re-describe the whole run on every tool event. Text
+   * appended before this call lands before the new cards. A rejected update
+   * is logged and retried by the next call; it never stops the text stream.
+   * No-op when streaming is unavailable (the postMessage fallback has no
+   * cards).
    */
-  taskUpdate(args: {
-    id: string;
-    title: string;
-    status: "pending" | "in_progress" | "complete" | "error";
-    details?: string;
-  }): void {
-    this.inFlight = this.inFlight.then(async () => {
-      if (this.streamingUnavailable) return;
-      if (!(await this.ensureStream())) return;
-      const res = await slackCall(this.token, "chat.appendStream", {
-        channel: this.channel,
-        ts: this.streamTs!,
-        chunks: [
-          {
-            type: "task_update",
-            id: args.id,
-            title: args.title.slice(0, 256),
-            status: args.status,
-            ...(args.details ? { details: args.details.slice(0, 256) } : {}),
-          },
-        ],
-      });
-      // Non-fatal: a rejected task chunk must not kill the text stream.
-      if (!res.ok) {
-        console.error("Slack task_update rejected (continuing):", res.error);
-      }
-    });
+  setTasks(tasks: SlackTaskState[]): void {
+    // The text before these cards is complete, so nothing more can finish a
+    // name it ended on.
+    this.releaseHeldText();
+    // Updates queued back to back collapse into one send of the latest state.
+    const last = this.pending[this.pending.length - 1];
+    const op =
+      last?.kind === "tasks"
+        ? last
+        : { kind: "tasks" as const, tasks: new Map<string, SlackTaskState>() };
+    if (op !== last) this.pending.push(op);
+    for (const t of tasks) {
+      const capped = capTask(t);
+      op.tasks.set(t.id, capped);
+      this.latestTasks.set(t.id, capped);
+    }
+    this.scheduleDrain();
   }
 
   append(text: string): void {
-    this.fullText += text;
-    this.buffer += text;
-    const due =
-      this.buffer.length >= SlackStreamer.FLUSH_CHARS ||
-      Date.now() - this.lastFlush >= SlackStreamer.FLUSH_MS;
-    if (due) {
-      // Serialize flushes; appendStream chunks must arrive in order.
-      this.inFlight = this.inFlight.then(() => this.doFlush());
+    if (!this.mentions) {
+      this.appendText(text, text.length);
+      return;
     }
+    const heldBefore = this.mentions.heldLength;
+    const out = this.mentions.push(text);
+    this.appendText(out, text.length + heldBefore - this.mentions.heldLength);
+  }
+
+  /** Take back, unsent, the text the mention rewriter is holding (a name
+   * that may be cut in half), so the message the reply continues in can
+   * finish reading it. Call before finish() when starting a new message. */
+  takeHeldText(): string {
+    return this.mentions?.take() ?? "";
+  }
+
+  /** The end of a text run: queue whatever the mention rewriter held back. */
+  private releaseHeldText(): void {
+    if (!this.mentions) return;
+    const rawLength = this.mentions.heldLength;
+    this.appendText(this.mentions.flush(), rawLength);
+  }
+
+  /** Queue rewritten text that stands for `rawLength` characters of the
+   * model's own text. */
+  private appendText(text: string, rawLength: number): void {
+    if (!text) return;
+    this.fullText += text;
+    this.fullRawLength += rawLength;
+    const last = this.pending[this.pending.length - 1];
+    if (last?.kind === "text") {
+      last.text += text;
+      last.rawLength += rawLength;
+    } else {
+      this.pending.push({ kind: "text", text, rawLength });
+    }
+    const waitingText = this.pending.reduce(
+      (n, op) => n + (op.kind === "text" ? op.text.length : 0),
+      0,
+    );
+    const due =
+      waitingText >= SlackStreamer.FLUSH_CHARS ||
+      Date.now() - this.lastFlush >= SlackStreamer.FLUSH_MS;
+    if (due) this.scheduleDrain();
   }
 
   async flush(): Promise<void> {
-    this.inFlight = this.inFlight.then(() => this.doFlush());
+    this.scheduleDrain();
     await this.inFlight;
+  }
+
+  /** Serialize sends; appendStream chunks must arrive in order. */
+  private scheduleDrain(): void {
+    this.inFlight = this.inFlight.then(() => this.drain());
+  }
+
+  /** Send everything queued, in order. Ops queued while a send is in flight
+   * join the same queue and go out in this same pass. */
+  private async drain(): Promise<void> {
+    while (this.pending.length > 0) {
+      if (this.streamingUnavailable || this.discarded || this.halted) {
+        this.pending = [];
+        return;
+      }
+      const op = this.pending.shift()!;
+      if (op.kind === "text") await this.sendText(op.text, op.rawLength);
+      else await this.sendTasks(op.tasks);
+    }
   }
 
   /** Start the stream if it isn't started; false = streaming unavailable. */
   private async ensureStream(): Promise<boolean> {
     if (this.streamTs) return true;
     if (this.streamingUnavailable) return false;
-    // Hold for the ordering gate (e.g. a preceding context-block message)
-    // before claiming this message's Slack ts. Never let a gate failure block.
-    if (this.startGate) {
-      try {
-        await this.startGate;
-      } catch {
-        /* gate failure must not strand the reply */
-      }
-      this.startGate = undefined;
-    }
     const res = await slackCall(this.token, "chat.startStream", {
       channel: this.channel,
       thread_ts: this.threadTs,
@@ -1727,28 +1893,73 @@ export class SlackStreamer {
     return true;
   }
 
-  private async doFlush(): Promise<void> {
-    if (!this.buffer || this.streamingUnavailable) return;
-    const chunk = this.buffer;
-    this.buffer = "";
+  private recordText(text: string): void {
+    this.sentTextLength += text.length;
+    const last = this.segments[this.segments.length - 1];
+    if (last?.kind === "text") last.text += text;
+    else this.segments.push({ kind: "text", text });
+  }
+
+  /** Send one run of text. If the stream can't be opened, the streamer gives
+   * up on streaming and finish() posts the whole reply as one message. If an
+   * open stream rejects it, finish() closes the stream and posts only the
+   * text Slack never received. */
+  private async sendText(chunk: string, rawLength: number): Promise<void> {
     this.lastFlush = Date.now();
-
-    if (!(await this.ensureStream())) {
-      // Streaming not available — buffer everything for a postMessage.
-      this.buffer = chunk + this.buffer;
-      return;
-    }
-
+    if (!(await this.ensureStream())) return;
     const res = await slackCall(this.token, "chat.appendStream", {
       channel: this.channel,
       ts: this.streamTs!,
-      markdown_text: chunk,
+      chunks: [{ type: "markdown_text", text: chunk }],
     });
-    if (res.ok) this.sentAnything = true;
-    else {
+    if (res.ok) {
+      this.sentAnything = true;
+      this.recordText(chunk);
+      this.sentRawLength += rawLength;
+    } else {
       this.streamingUnavailable = true;
-      this.buffer = chunk + this.buffer;
     }
+  }
+
+  private async sendTasks(tasks: Map<string, SlackTaskState>): Promise<void> {
+    const changed = [...tasks.values()].filter((t) => {
+      const sent = this.sentTasks.get(t.id);
+      return (
+        !sent ||
+        sent.title !== t.title ||
+        sent.status !== t.status ||
+        sent.details !== t.details
+      );
+    });
+    if (changed.length === 0) return;
+    if (!(await this.ensureStream())) return;
+    const res = await slackCall(this.token, "chat.appendStream", {
+      channel: this.channel,
+      ts: this.streamTs!,
+      chunks: changed.map((t) => ({ type: "task_update", ...t })),
+    });
+    // Non-fatal: a rejected card must not kill the text stream. Leaving
+    // `sentTasks` untouched makes the next setTasks resend it.
+    if (!res.ok) {
+      console.error("Slack task_update rejected (continuing):", res.error);
+      return;
+    }
+    for (const t of changed) {
+      if (!this.sentTasks.has(t.id)) this.segments.push({ kind: "task", id: t.id });
+      this.sentTasks.set(t.id, t);
+    }
+  }
+
+  /** chat.stopStream's body. Slack puts the agent session back to `active`
+   * when a stream stops; a message closed mid-turn passes
+   * `keepSessionProcessing` so the Stop button stays up for the rest of the
+   * turn. */
+  private stopStreamBody(ts: string, keepSessionProcessing = false) {
+    return {
+      channel: this.channel,
+      ts,
+      ...(keepSessionProcessing ? { session_status: "processing" } : {}),
+    };
   }
 
   /**
@@ -1756,26 +1967,37 @@ export class SlackStreamer {
    * post the whole accumulated reply as one message. `fallbackText`
    * replaces an empty reply so the user never gets silence.
    */
-  async finish(fallbackText = "(no response)"): Promise<void> {
+  async finish(
+    fallbackText = "(no response)",
+    opts: { keepSessionProcessing?: boolean } = {},
+  ): Promise<void> {
     await this.inFlight;
     // Retracted mid-turn (react_only) — discard() already stopped+deleted any
-    // open message; do NOT resurrect it as a postMessage fallback.
-    if (this.discarded) return;
+    // open message; do NOT resurrect it as a postMessage fallback. Stopped by
+    // the person: halt() already settled the message.
+    if (this.discarded || this.halted) return;
+    this.releaseHeldText();
+    // Send whatever is still queued (a text tail, a last card update). This
+    // also opens the stream for a reply too short to have flushed yet.
+    await this.drain();
     if (this.streamTs && !this.streamingUnavailable) {
-      // Flush any tail buffer, then stop.
-      if (this.buffer) {
-        const tail = this.buffer;
-        this.buffer = "";
-        await slackCall(this.token, "chat.appendStream", {
-          channel: this.channel,
-          ts: this.streamTs,
-          markdown_text: tail,
-        });
+      // One retry for a card whose last update Slack rejected: nothing else
+      // would resend it, and the stream is about to close. Only cards Slack
+      // already shows, so a retry updates in place and can't land out of
+      // order.
+      const stale = new Map(
+        [...this.latestTasks].filter(([id]) => this.sentTasks.has(id)),
+      );
+      await this.sendTasks(stale);
+      await slackCall(
+        this.token,
+        "chat.stopStream",
+        this.stopStreamBody(this.streamTs, opts.keepSessionProcessing),
+      );
+      if (this.sentTasks.size > 0) {
+        await this.rewriteWithCards();
+        return;
       }
-      await slackCall(this.token, "chat.stopStream", {
-        channel: this.channel,
-        ts: this.streamTs,
-      });
       const finalText = this.fullText.trim() || fallbackText;
       const finalized = this.finalize?.(finalText) ?? finalText;
       const normalized = normalizeSlackMarkdown(finalized);
@@ -1788,10 +2010,30 @@ export class SlackStreamer {
       }
       return;
     }
+    if (this.streamTs) {
+      // The stream opened, then stopped taking text (a rejected append). Close
+      // it rather than leave it open until Slack times it out, and post only
+      // the text it never received, not the whole reply a second time.
+      await slackCall(
+        this.token,
+        "chat.stopStream",
+        this.stopStreamBody(this.streamTs, opts.keepSessionProcessing),
+      );
+      const rest = this.fullText.slice(this.sentTextLength).trim();
+      if (rest) {
+        await postMessage(this.token, {
+          channel: this.channel,
+          text: this.finalize?.(rest) ?? rest,
+          threadTs: this.threadTs,
+          markdown: true,
+        });
+      }
+      return;
+    }
     // Fallback: single message.
     const finalText = this.fullText.trim() || fallbackText;
     const text = this.finalize?.(finalText) ?? finalText;
-    this.buffer = "";
+    this.pending = [];
     await postMessage(this.token, {
       channel: this.channel,
       text,
@@ -1799,6 +2041,43 @@ export class SlackStreamer {
       markdown: true,
     });
     this.sentAnything = true;
+  }
+
+  /**
+   * The finished-message cleanup (finalize + link normalization) for a reply
+   * that carries cards. Editing it with `markdown_text` would replace the
+   * whole message and erase the cards (live-probed 2026-11-08), so when the
+   * cleanup changes anything the message is rebuilt block by block: each text
+   * run as a `markdown` block, each card as a `task_card` in its final state.
+   *
+   * No `text` is sent. Beside `blocks`, Slack caps `text` at 4,000
+   * characters and refuses anything longer with `msg_too_long`, which left
+   * every long carded reply un-normalized, cut off mid-link (live-probed
+   * 2026-11-09). Without it Slack builds `text` from the blocks at any
+   * length, card titles included, as it does for the streamed message.
+   */
+  private async rewriteWithCards(): Promise<void> {
+    let changed = false;
+    const blocks: Record<string, unknown>[] = [];
+    for (const seg of this.segments) {
+      if (seg.kind === "task") {
+        const t = this.sentTasks.get(seg.id);
+        if (t) blocks.push(taskCardBlock(t));
+        continue;
+      }
+      const raw = seg.text.trim();
+      if (!raw) continue;
+      const finalized = this.finalize?.(raw) ?? raw;
+      const normalized = normalizeSlackMarkdown(finalized);
+      if (normalized !== raw) changed = true;
+      blocks.push({ type: "markdown", text: normalized });
+    }
+    if (!changed) return;
+    await slackCall(this.token, "chat.update", {
+      channel: this.channel,
+      ts: this.streamTs,
+      blocks,
+    });
   }
 
   /**
@@ -1813,10 +2092,11 @@ export class SlackStreamer {
    * rendered yet (streamTs null, or streaming fell back to a not-yet-sent
    * postMessage); never throws. After discard(), finish() is a no-op.
    */
-  async discard(): Promise<void> {
+  async discard(opts: { keepSessionProcessing?: boolean } = {}): Promise<void> {
     await this.inFlight.catch(() => {});
     this.discarded = true;
-    this.buffer = "";
+    this.pending = [];
+    this.mentions?.flush();
     this.fullText = "";
     const ts = this.streamTs;
     this.streamTs = null;
@@ -1825,13 +2105,53 @@ export class SlackStreamer {
     // best-effort — a retract failure must never surface to the caller — and
     // use the same `chat:write` scope the bot already streams with (no new
     // permission). chat.delete removes the bot's own message.
-    await slackCall(this.token, "chat.stopStream", {
-      channel: this.channel,
-      ts,
-    }).catch(() => {});
+    await slackCall(
+      this.token,
+      "chat.stopStream",
+      this.stopStreamBody(ts, opts.keepSessionProcessing),
+    ).catch(() => {});
     await slackCall(this.token, "chat.delete", {
       channel: this.channel,
       ts,
     }).catch(() => {});
+  }
+
+  /**
+   * The person pressed Stop. Slack does not end the stream on the click: it
+   * shows "Stopping…" and keeps taking appends until the app closes the
+   * stream itself (live-probed in a channel thread and a DM, 2026-11-08). So
+   * halt() is finish() without the words not yet sent: the unsent text is
+   * dropped, the cards Slack shows get their settled state (`finalTasks`; the
+   * stream is still open, so they go as ordinary card updates), and the stream
+   * is stopped. On that stop Slack adds its own grey "(stopped)" after the
+   * text, records `ai_context.result_status: "stopped_by_user"` on the
+   * message, and turns any card still in progress into a ⚠ error card. No
+   * label of ours is added: it would say "Stopped" twice.
+   *
+   * Returns whether any of this reply reached Slack, and how many characters
+   * of the model's text never did (counted before mentions were rewritten),
+   * so the caller can keep only what was shown.
+   * After halt(), finish() is a no-op.
+   */
+  async halt(
+    finalTasks: SlackTaskState[] = [],
+  ): Promise<{ shown: boolean; unsentChars: number }> {
+    // Empty the queue BEFORE waiting: a send already in flight still lands,
+    // but drain() would otherwise go on to send what is queued behind it.
+    this.pending = [];
+    // Text the mention rewriter held back was never sent either.
+    const held = this.mentions?.heldLength ?? 0;
+    this.mentions?.flush();
+    await this.inFlight.catch(() => {});
+    const unsentChars = this.fullRawLength - this.sentRawLength + held;
+    this.fullText = this.fullText.slice(0, this.sentTextLength);
+    const shown = !this.discarded && this.streamTs !== null;
+    if (shown) {
+      const settled = finalTasks.filter((t) => this.sentTasks.has(t.id));
+      if (settled.length > 0) this.setTasks(settled);
+      await this.finish();
+    }
+    this.halted = true;
+    return { shown, unsentChars };
   }
 }

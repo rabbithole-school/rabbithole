@@ -1,31 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 import { Stack } from "expo-router";
-import { compassHeaderRight } from "@/components/HeaderCompassButton";
+import { compassHeaderItems } from "@/components/HeaderCompassButton";
 import Constants from "expo-constants";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import {
   ConvexAuthProvider,
   useAuthActions,
+  useAuthToken,
   useConvexAuth,
 } from "@convex-dev/auth/react";
+import { setTTSAuthToken } from "@/lib/nativeTTS";
 import {
   useFonts,
   HankenGrotesk_400Regular,
   HankenGrotesk_500Medium,
   HankenGrotesk_600SemiBold,
   HankenGrotesk_700Bold,
+  HankenGrotesk_400Regular_Italic,
 } from "@expo-google-fonts/hanken-grotesk";
 
 import { AccountMenuButton } from "@/components/AccountMenu";
 import { ScholarIdentityReveal } from "@/components/ScholarIdentityReveal";
 import { AsamHybridHost } from "@/components/AsamHybridHost";
+import { BedtimeGate } from "@/components/BedtimeGate";
 import { NativeAppLaunchProvider } from "@/contexts/NativeAppLaunchContext";
 import { BadgeAwardOverlay } from "@/components/BadgeAwardOverlay";
 import { BugReportGate } from "@/components/bugreport/BugReportGate";
 import { AppHealthBoundary } from "@/components/AppHealthBoundary";
 import { AppHealthReporter } from "@/components/AppHealthReporter";
-import { startAppHealthMonitor } from "@/lib/appHealthMonitor";
+import {
+  noteAppHealthTouch,
+  startAppHealthMonitor,
+} from "@/lib/appHealthMonitor";
 import { ExternalAppHost } from "@/components/ExternalAppHost";
 import { NativeManipulativeHost } from "@/components/manipulatives/NativeManipulativeHost";
 import { GameHost } from "@/components/games/GameHost";
@@ -43,7 +50,6 @@ import { secureTokenStorage } from "@/lib/secureTokenStorage";
 import { fonts, useColors } from "@/theme";
 import { hasSeenOnboarding } from "@/lib/onboardingStorage";
 import { useManagedClaimBootstrap } from "@/hooks/useManagedClaimBootstrap";
-import { useManagedMaximumBrightness } from "@/hooks/useManagedMaximumBrightness";
 import { devServerUrlFromHostUri } from "@/lib/devClientSafety";
 import { guardCurrentDevServer } from "../../modules/dev-client-safety";
 import {
@@ -51,6 +57,7 @@ import {
   useDeviceActivity,
 } from "@/hooks/useDeviceActivity";
 import { useNativeClientHeartbeat } from "@/hooks/useNativeClientHeartbeat";
+import { useVoiceKeyListener } from "@/lib/voiceKey";
 import { DevNavigationBridge } from "@/components/DevNavigationBridge";
 import { UniversalLinkNavigator } from "@/components/UniversalLinkNavigator";
 import { getManagedConfig } from "../../modules/managed-config";
@@ -121,6 +128,15 @@ const DEV_AUTOLOGIN =
 const DEV_NAVIGATION_ENABLED =
   __DEV__ && process.env.EXPO_PUBLIC_DEV_NAV_BRIDGE === "1";
 
+/** Hands the Convex auth token to the app-wide TTS engine (`/tts` will require it, TRA-491). */
+function TTSAuthTokenSync() {
+  const token = useAuthToken();
+  useEffect(() => {
+    setTTSAuthToken(token);
+  }, [token]);
+  return null;
+}
+
 function DevClientSafetyGate() {
   useEffect(() => {
     if (!__DEV__) return;
@@ -165,6 +181,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useConvexAuth();
   useNativeClientHeartbeat();
   useDeviceActivity();
+  useVoiceKeyListener(); // spike: the hardware voice key (src/lib/voiceKey.ts)
   const { signIn, signOut } = useAuthActions();
   const colors = useColors();
   const devLoginAttempted = useRef(false);
@@ -298,9 +315,10 @@ export default function RootLayout() {
     HankenGrotesk_500Medium,
     HankenGrotesk_600SemiBold,
     HankenGrotesk_700Bold,
+    // Scholars' writing: italic spans in the document editor (writingItalics).
+    HankenGrotesk_400Regular_Italic,
   });
   const colors = useColors();
-  useManagedMaximumBrightness(ASAM_HYBRID_ENABLED);
   const captureStation = captureStationEnrollmentToken() !== null;
 
   if (!fontsLoaded) return null;
@@ -365,6 +383,7 @@ export default function RootLayout() {
             <Stack.Screen name="messages" options={{ title: "Messages" }} />
             <Stack.Screen name="meta" options={{ title: "The Workshop" }} />
             <Stack.Screen name="account" options={{ title: "Account details" }} />
+            <Stack.Screen name="audience" options={{ title: "Decibel meter" }} />
             <Stack.Screen name="how-it-works" options={{ title: "How it works" }} />
             <Stack.Screen name="unit-progress" options={{ title: "Where you are" }} />
             <Stack.Screen
@@ -384,7 +403,9 @@ export default function RootLayout() {
                 return {
                   ...(params?.title ? { title: params.title } : {}),
                   // The same stable compass item the screen uses.
-                  ...(params?.navDir ? { headerRight: compassHeaderRight } : {}),
+                  ...(params?.navDir
+                    ? { unstable_headerRightItems: compassHeaderItems }
+                    : {}),
                   ...(params?.navDir
                     ? { animation: "fade" as const, animationDuration: 150 }
                     : {}),
@@ -393,6 +414,7 @@ export default function RootLayout() {
             />
             <Stack.Screen name="dev-hdr-stars" options={{ title: "HDR stars (spike)" }} />
             <Stack.Screen name="dev-slides" options={{ title: "Slides (harness)" }} />
+            <Stack.Screen name="dev-key-probe" options={{ title: "Key probe (spike)" }} />
             <Stack.Screen
               name="sky"
               options={{
@@ -460,15 +482,18 @@ export default function RootLayout() {
     <GestureHandlerRootView
       style={{ flex: 1 }}
       // Presence witness: observe every touch in the capture phase to feed the
-      // device-activity presence clock. Returning false NEVER makes this view
+      // device-activity presence clock and the app-health journal's last
+      // touch. Returning false NEVER makes this view
       // the responder, so it cannot intercept or swallow any touch — it only
       // records that a human is here.
       onStartShouldSetResponderCapture={() => {
         recordInteraction();
+        noteAppHealthTouch();
         return false;
       }}
     >
       <ConvexAuthProvider client={convex} storage={secureTokenStorage}>
+        <TTSAuthTokenSync />
         <AppHealthReporter />
         {/* The reporter sits outside the boundary, so a render crash cannot
             unmount the sender. */}
@@ -479,6 +504,9 @@ export default function RootLayout() {
                 Must be inside ConvexAuthProvider (uses useAsamController) but wraps
                 AuthGate so Device settings is reachable even from the sign-in screen.
                 When the MDM runtime gate is absent, appContent renders plainly. */}
+            {/* Bedtime (8 pm–6 am) wraps the whole app, above AsamHybridHost so
+                ASAM keep-awake can let the screen sleep. See BedtimeGate. */}
+            <BedtimeGate renderLayers={!ASAM_HYBRID_ENABLED}>
             {captureStation ? (
               <CaptureStationScreen source={{ kind: "static" }} />
             ) : ASAM_HYBRID_ENABLED ? (
@@ -491,6 +519,7 @@ export default function RootLayout() {
               // its presentation controller is safely a no-op in that posture.
               <NativeAppLaunchProvider>{appContent}</NativeAppLaunchProvider>
             )}
+            </BedtimeGate>
           </BugReportGate>
         </AppHealthBoundary>
       </ConvexAuthProvider>

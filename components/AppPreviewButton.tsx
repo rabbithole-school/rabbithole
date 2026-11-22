@@ -6,8 +6,8 @@
  * scholar does, without switching accounts. Never renders the app inside the
  * dashboard.
  *
- * A quiet ghost icon button: on a row it sits before "Make focus" and stays
- * visually subordinate to it (Make focus is the headline action). It reuses the
+ * A quiet ghost icon button: on a row it sits before "Give" and stays
+ * visually subordinate to it (Give is the headline action). It reuses the
  * same catalog `webUrl` the scholar launcher opens (`useExternalApp`), via the
  * one `appPreviewTarget` helper — no second URL is hand-built. When an app
  * can't be previewed the button is disabled with a tooltip saying why.

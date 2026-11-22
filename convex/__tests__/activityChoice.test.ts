@@ -8,6 +8,8 @@
 //   4. The scholar plate surfaces choice option rows with the grouping
 //      fields, and stops surfacing them once the pick is satisfied.
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
+import { readSchedule } from "../lib/scheduleStore";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -29,6 +31,13 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+async function sched(
+  t: { run: <R>(fn: (ctx: any) => Promise<R>) => Promise<R> },
+  doc: { _id: Id<"assignments"> } | null | undefined,
+) {
+  return t.run((ctx) => readSchedule(ctx, { _id: doc!._id }));
+}
 
 async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
@@ -190,7 +199,7 @@ describe("choice-aware progress through a live assignment", () => {
     const t = convexTest(schema, modules);
     const { teacher, s1, unit, lesson, a1, a2, a3 } = await seedChoiceUnit(t);
     const assignment = await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [s1],
@@ -241,7 +250,7 @@ describe("per-scholar targeting (divide & conquer)", () => {
     const t = convexTest(schema, modules);
     const { teacher, s1, s2, unit, a1, a2, a3 } = await seedChoiceUnit(t);
     const assignment = await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [s1, s2],
@@ -287,8 +296,8 @@ describe("per-scholar targeting (divide & conquer)", () => {
     });
 
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    const e1 = a?.activitySchedule?.find((e) => String(e.activityId) === String(a1));
-    const e2 = a?.activitySchedule?.find((e) => String(e.activityId) === String(a2));
+    const e1 = (await sched(t, a)).find((e) => String(e.activityId) === String(a1));
+    const e2 = (await sched(t, a)).find((e) => String(e.activityId) === String(a2));
     expect(e1?.scholarIds?.map(String)).toEqual([String(s1)]);
     expect(e2?.scholarIds).toBeUndefined();
   });
@@ -297,7 +306,7 @@ describe("per-scholar targeting (divide & conquer)", () => {
     const t = convexTest(schema, modules);
     const { teacher, s1, s2, unit, a1, a2 } = await seedChoiceUnit(t);
     const assignmentId = await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [s1, s2],
@@ -319,9 +328,9 @@ describe("per-scholar targeting (divide & conquer)", () => {
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
     expect(a?.scholarIds.map(String)).toEqual([String(s1)]);
     // a1 entry dropped (its only target left the roster).
-    expect(a?.activitySchedule?.some((e) => String(e.activityId) === String(a1))).toBe(false);
+    expect((await sched(t, a)).some((e) => String(e.activityId) === String(a1))).toBe(false);
     // a2 entry narrowed to [s1], never silently re-broadcast.
-    const e2 = a?.activitySchedule?.find((e) => String(e.activityId) === String(a2));
+    const e2 = (await sched(t, a)).find((e) => String(e.activityId) === String(a2));
     expect(e2?.scholarIds?.map(String)).toEqual([String(s1)]);
   });
 });
@@ -331,7 +340,7 @@ describe("scholar plate surfaces choice options", () => {
     const t = convexTest(schema, modules);
     const { teacher, s1, unit, lesson, a1, a2, a3 } = await seedChoiceUnit(t);
     const assignment = await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [s1],

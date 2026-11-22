@@ -689,22 +689,22 @@ describe("first-person / companion rail (anti-parasocial)", () => {
 
 describe("scholar-name rail (finding #1 address slip)", () => {
   it("fails a line that refers to the child in the third person by name", () => {
-    // Real specimen: the address slip printed for Lily.
-    const line = `"Everybody agreeing" takes a super long time, Lily said. Is there a faster way?`;
-    const result = validateGeneratedLine(line, "lookBack", "Lily");
+    // Specimen shape: an address slip that names the child.
+    const line = `"Sorting the shells" takes a really long time, Kawika said. Is there a faster way?`;
+    const result = validateGeneratedLine(line, "lookBack", "Kawika");
     expect(result.ok).toBe(false);
-    expect(result.reasons).toContainEqual({ kind: "contains-scholar-name", name: "Lily" });
+    expect(result.reasons).toContainEqual({ kind: "contains-scholar-name", name: "Kawika" });
   });
 
   it("is case-insensitive and word-bounded", () => {
-    expect(checkScholarName("Nice work today, henry.", "Henry").ok).toBe(false);
+    expect(checkScholarName("Nice work today, makoa.", "Makoa").ok).toBe(false);
     // A name that only appears as a substring of another word must NOT fire.
     expect(checkScholarName("The prime numbers were surprising.", "Prime").ok).toBe(false);
   });
 
   it("passes a clean 'you'-addressed line, and skips the rail when no name is given", () => {
-    const line = "You noticed everybody agreeing takes a long time. What would speed it up without losing anyone?";
-    expect(validateGeneratedLine(line, "lookBack", "Lily").ok).toBe(true);
+    const line = "You noticed sorting the shells takes a long time. What would speed it up?";
+    expect(validateGeneratedLine(line, "lookBack", "Kawika").ok).toBe(true);
     // Empty name → rail skipped (a pure output-rail context).
     expect(checkScholarName(line, "").ok).toBe(true);
   });
@@ -716,9 +716,9 @@ describe("scholar-name rail (finding #1 address slip)", () => {
 
 describe("quoted-spelling rail (finding #2)", () => {
   it("fails a quoted span with a standalone lowercase 'i' or an ALL-CAPS run", () => {
-    // Real specimen: Ryder's verbatim carried both a lowercase "i" and "HARD".
-    const line = `"You would need to think HARD and i mean HARD" — what makes a choice weigh so much?`;
-    const result = validateGeneratedLine(line, "lookBack", "Ryder");
+    // Specimen shape: a verbatim with both a lowercase "i" and an ALL-CAPS "HARD".
+    const line = `"That puzzle was HARD and i almost quit" — what makes a choice weigh so much?`;
+    const result = validateGeneratedLine(line, "lookBack", "Kawika");
     expect(result.ok).toBe(false);
     expect(result.reasons.some((r) => r.kind === "quoted-spelling")).toBe(true);
   });
@@ -833,24 +833,24 @@ describe("print-nothing decision (§3.6)", () => {
     ).toEqual({ print: true });
   });
 
-  it("F2 — the Ryder shape: clue prints on a today-named interest while look-back blanks", () => {
+  it("F2 shape: clue prints on a today-named interest while look-back blanks", () => {
     // No self-generated scholar moment all day, but a seed invitation dated
     // today. The clue can legitimately stand on it; the look-back cannot.
-    const ryder = facts({
+    const f2Day = facts({
       keyMoments: [],
       seedInvitations: [activity({ subject: "what makes an autorotation stable", datedToday: true })],
     });
-    const selection = selectLetterCandidates(ryder);
+    const selection = selectLetterCandidates(f2Day);
 
     // look-back: no self-generated signal → blank.
     expect(
-      decidePrintNothing({ section: "lookBack", facts: ryder, candidates: selection.lookBack }),
+      decidePrintNothing({ section: "lookBack", facts: f2Day, candidates: selection.lookBack }),
     ).toEqual({ print: false, reason: "no-self-generated-signal" });
 
     // clue: the signal floor does NOT apply; a today seed survived → print.
     expect(selection.clue.some((c) => c.sourceKind === "seedInvitation")).toBe(true);
     expect(
-      decidePrintNothing({ section: "clue", facts: ryder, candidates: selection.clue }),
+      decidePrintNothing({ section: "clue", facts: f2Day, candidates: selection.clue }),
     ).toEqual({ print: true });
   });
 

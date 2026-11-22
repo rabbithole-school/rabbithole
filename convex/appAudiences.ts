@@ -32,7 +32,15 @@ import {
   type ExternalAppScope,
 } from "./lib/externalAppsResolve";
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
-import { timeZoneForInstitution } from "./lib/institutionTime";
+import {
+  timeZoneForInstitution,
+  timeZoneForScholar,
+} from "./lib/institutionTime";
+import { directLinkHasEnded } from "./lib/appAudiences";
+import {
+  coreOpenForScholarThrough,
+  coreRemoveByScholarAndApp,
+} from "./scholarApps";
 import {
   APP_PLACEMENT_GRACE_MS,
   APP_PLACEMENT_LEAD_MS,
@@ -857,7 +865,7 @@ async function timedAccessByApp(
         state: live ? "live" : "next",
         source,
         startsAt: push.startsAt ?? push.setAt ?? now,
-        endsAt: live ? liveUntil(push, clock) : pushExpiresAt(push.timing),
+        endsAt: live ? liveUntil(push, clock) : pushExpiresAt(push),
         audience,
         timeZone: clock.timeZone,
       });
@@ -1256,7 +1264,7 @@ async function appPushAccess(
         continue;
       }
       const live = appVisible && isPushShowing(push, clock);
-      const endsAt = pushExpiresAt(push.timing);
+      const endsAt = pushExpiresAt(push);
       // `startsAt` is the planned time: the materializer always sets it and
       // a teacher's push never does, so fall back to `setAt`.
       const beginsAt = push.startsAt ?? push.setAt;
@@ -1374,7 +1382,10 @@ async function appGrantHistory(
 async function coreGetAppAccess(
   ctx: QueryCtx,
   appId: Id<"externalApps">,
-  scope: ExternalAppScope | null = null,
+  scope: ExternalAppScope | null,
+  /** The SERVER clock a direct add's end is judged at (T11): the aide's
+   *  action passes its own `Date.now()`, the same instant as every push. */
+  now: number,
 ) {
   const allGrants = await ctx.db
     .query("appAudiences")
@@ -1408,9 +1419,14 @@ async function coreGetAppAccess(
     .query("scholarApps")
     .withIndex("by_app", (q) => q.eq("appId", appId))
     .collect();
+  // An add opened "all day today" or "until" a day (TRA-444) is gone from
+  // its first millisecond past `expiresAt`, as the tile and the scholar's
+  // Apps panel (`scholarApps.listForScholar`) treat it, whether or not
+  // `expireDirectGrant` has deleted the row yet (TRA-448).
   const directLinks = links.filter(
     (l) =>
       (l.source === "manual" || l.source === "default") &&
+      !directLinkHasEnded(l, now) &&
       (!scope || isScholarInScope(scope, l.scholarId)),
   );
   const scholars = await Promise.all(
@@ -1420,6 +1436,21 @@ async function coreGetAppAccess(
         name: u?.name ?? u?.username ?? "Unknown",
         username: u?.username ?? null,
         enabled: l.enabled,
+        // The add's last day, "YYYY-MM-DD" on the scholar's school calendar:
+        // it ends at the midnight after. Null for a standing add (it lasts
+        // until someone removes it) and for one switched off, which opens
+        // nothing — the same rule as the Apps panel's `directThroughDay`.
+        throughDay:
+          l.enabled && l.expiresAt !== undefined
+            ? dayKeyForTimezone(
+                l.expiresAt - 1,
+                // A deleted scholar's row has no school to read a calendar
+                // from; the default zone still names the right day.
+                u
+                  ? await timeZoneForScholar(ctx, l.scholarId)
+                  : await timeZoneForInstitution(ctx),
+              )
+            : null,
         // Extended Education (program-guest) rows carry a tag so the aide
         // tool edge can apply the enrolled-only default (see
         // lib/scholarParticipationTooling.ts); enrolled rows are unchanged.
@@ -1678,7 +1709,7 @@ async function describeRoute(
     }
     case "push": {
       const push = await ctx.db.get(authority.pushId);
-      const endsAt = push ? pushExpiresAt(push.timing) : null;
+      const endsAt = push ? pushExpiresAt(push) : null;
       return {
         route: {
           route: authority.source === "schedule" ? "schedule push" : "teacher push",
@@ -1868,7 +1899,7 @@ async function whenForScholar(
     for (const push of planned) {
       if (!pushCoversScholar(push, audience)) continue;
       const at = push.startsAt!;
-      const endsAt = pushExpiresAt(push.timing);
+      const endsAt = pushExpiresAt(push);
       opens.push({
         at,
         atLocal: localInstant(at, timeZone),
@@ -2119,7 +2150,7 @@ export const aideGetAppAccess = internalQuery({
       scholar === undefined
         ? undefined
         : await scholarAccessForStaff(ctx, scope, scholar, app, now);
-    const access = await coreGetAppAccess(ctx, app._id, scope);
+    const access = await coreGetAppAccess(ctx, app._id, scope, now);
     const schedule = await appScheduleAccess(ctx, app._id, scope, now);
     const timeZone = await timeZoneForInstitution(
       ctx,
@@ -2153,12 +2184,28 @@ export const aideSetGroupAccess = internalMutation({
     groupName: v.string(),
     enabled: v.boolean(),
     via: v.optional(v.union(v.literal("aide"), v.literal("slack"))),
+    // Enable only: open the app to the group for one school day instead of
+    // standing. "today" (read from the server clock) or a "YYYY-MM-DD" school
+    // day. See `openGroupForDay`.
+    throughDay: v.optional(v.string()),
   },
-  handler: async (ctx, { callerUserId, appName, groupName, enabled, via }) => {
+  handler: async (
+    ctx,
+    { callerUserId, appName, groupName, enabled, via, throughDay },
+  ) => {
     const scope = await requireScholarAdminScope(ctx, callerUserId);
     const caller = scope.caller;
     const app = await resolveAppByName(ctx, appName);
     const group = await resolveGroupByName(ctx, groupName, scope);
+    if (enabled && throughDay !== undefined) {
+      return await openGroupForDay(ctx, {
+        scope,
+        app,
+        group,
+        throughDay,
+        via: via ?? "aide",
+      });
+    }
     if (enabled) {
       const r = await coreAssignToAudience(
         ctx,
@@ -2188,9 +2235,130 @@ export const aideSetGroupAccess = internalMutation({
       caller,
       via ?? "aide",
     );
-    return { app: app.name, group: group.name, enabled: false, removed: r.removed };
+    // A one-day group opening is a timed direct add on each member, so taking
+    // the app away from the group takes those too, or the members would keep
+    // it until midnight after the aide said it was gone. Only the rows this
+    // group's opening wrote, by their `openedForGroupId` marker: a member's
+    // own add, timed or standing, is someone's separate decision and stays,
+    // and a re-enabled "default" row the opening wrote goes too (TRA-636).
+    let dayAddsRemoved = 0;
+    for (const scholarId of group.scholarIds) {
+      if (!isScholarInScope(scope, scholarId)) continue;
+      const link = await ctx.db
+        .query("scholarApps")
+        .withIndex("by_scholar_app", (q) =>
+          q.eq("scholarId", scholarId).eq("appId", app._id),
+        )
+        .first();
+      if (link?.openedForGroupId === group._id) {
+        const removed = await coreRemoveByScholarAndApp(
+          ctx,
+          scholarId,
+          app._id,
+          caller._id,
+          via ?? "aide",
+        );
+        dayAddsRemoved += removed.removed;
+      }
+    }
+    return {
+      app: app.name,
+      group: group.name,
+      enabled: false,
+      removed: r.removed,
+      dayAddsRemoved,
+    };
   },
 });
+
+/**
+ * Open an app to a whole group for one school day: "all day today" for a
+ * group. Before this, the aide could only say that as one app placement per
+ * block, so the grid drew a copy of the app in every row of the day and
+ * scholars lost the app in each passing time (prod, 2026-10-30).
+ *
+ * This is the single-scholar day add (`coreOpenForScholarThrough`, TRA-444)
+ * applied to each member in the caller's scope, not a second clock: each
+ * member gets a direct add that ends at the midnight after `throughDay` in
+ * their school's time zone, and `expireDirectGrant` removes it then. It does
+ * not follow later membership changes, which is right for one day. A standing,
+ * enabled group grant already covers every member all day, so it is reported
+ * and nothing is added.
+ */
+async function openGroupForDay(
+  ctx: MutationCtx,
+  args: {
+    scope: ExternalAppScope;
+    app: Doc<"externalApps">;
+    group: Doc<"scholarGroups">;
+    throughDay: string;
+    via: "aide" | "slack";
+  },
+) {
+  const { scope, app, group } = args;
+  const caller = scope.caller;
+  // Same write gate as a standing group grant.
+  await requireAudienceInScope(ctx, caller, "group", group._id);
+  if (app.archived) {
+    throw new Error(`"${app.name}" is archived — unarchive it first.`);
+  }
+  const raw = args.throughDay.trim().toLowerCase();
+  const throughDay = raw === "" || raw === "today" ? undefined : raw;
+  if (throughDay !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(throughDay)) {
+    throw new Error(
+      `"${args.throughDay}" is not a day. Use "today" or YYYY-MM-DD.`,
+    );
+  }
+  const standing = await findGrant(ctx, app._id, "group", group._id);
+  if (standing?.enabled) {
+    return {
+      app: app.name,
+      group: group.name,
+      enabled: true,
+      standingGroupGrant: true,
+      throughDay: null,
+      scholarCount: 0,
+    };
+  }
+  const days = new Set<string>();
+  let opened = 0;
+  let keptLonger = 0;
+  for (const scholarId of group.scholarIds) {
+    if (!isScholarInScope(scope, scholarId)) continue;
+    const scholar = await ctx.db.get(scholarId);
+    if (!scholar || scholar.role !== "scholar") continue;
+    const r = await coreOpenForScholarThrough(
+      ctx,
+      scholarId,
+      app._id,
+      caller._id,
+      args.via,
+      throughDay,
+      group._id,
+    );
+    if (r.kept) keptLonger++;
+    else {
+      opened++;
+      if (r.throughDay) days.add(r.throughDay);
+    }
+  }
+  if (opened === 0 && keptLonger === 0) {
+    throw new Error(`${group.name} has no scholars you can give the app to.`);
+  }
+  return {
+    app: app.name,
+    group: group.name,
+    enabled: true,
+    standingGroupGrant: false,
+    // The last day the new adds cover ("YYYY-MM-DD"); they end at the
+    // midnight after it. One value unless members' schools differ in zone.
+    throughDay: [...days].sort().join(", ") || null,
+    scholarCount: opened,
+    // Members who already had the app at least that long (a standing or
+    // longer direct add), left as they were.
+    keptLonger,
+  };
+}
 
 export const aideSetInstitutionAccess = internalMutation({
   args: {

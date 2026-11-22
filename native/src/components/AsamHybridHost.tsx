@@ -30,6 +30,7 @@ import { useMemo, useState } from "react";
 import { useAsamController } from "@/hooks/useAsamController";
 import { useAsamDisplayPolicy } from "@/hooks/useAsamDisplayPolicy";
 import { AsamParentGate } from "@/components/AsamParentGate";
+import { useBedtimeLayers, useIsBedtime } from "@/contexts/BedtimeContext";
 import { FreezeModeOverlay } from "@/components/FreezeModeOverlay";
 import { AsamControllerContext } from "@/contexts/AsamControllerContext";
 
@@ -42,21 +43,34 @@ export function AsamHybridHost({ children }: { children: React.ReactNode }) {
   const asam = useAsamController();
   const displayPolicy = useAsamDisplayPolicy(asam.inSam);
   const [gateVisible, setGateVisible] = useState(false);
+  // At bedtime, let the iPad's own Auto-Lock turn the screen off.
+  const isBedtime = useIsBedtime();
+  const bedtimeLayers = useBedtimeLayers();
 
   const presentationValue = useMemo(
     () => ({
       releaseForSystemUI: asam.releaseForSystemUI,
       restoreAfterSystemUI: asam.restoreAfterSystemUI,
+      rearmLock: asam.rearmLock,
+      isLockSettled: asam.isLockSettled,
       openTeacherUnlock: () => setGateVisible(true),
       isTeacherUnlockAvailable: true,
       frozenUntil: asam.lockState?.frozenUntil ?? null,
+      frozenBy: asam.lockState?.frozenBy ?? null,
     }),
-    [asam.releaseForSystemUI, asam.restoreAfterSystemUI, asam.lockState?.frozenUntil],
+    [
+      asam.releaseForSystemUI,
+      asam.restoreAfterSystemUI,
+      asam.rearmLock,
+      asam.isLockSettled,
+      asam.lockState?.frozenUntil,
+      asam.lockState?.frozenBy,
+    ],
   );
 
   return (
     <AsamControllerContext.Provider value={presentationValue}>
-      {displayPolicy.keepAwake ? <AsamKeepAwake /> : null}
+      {displayPolicy.keepAwake && !isBedtime ? <AsamKeepAwake /> : null}
       <AsamParentGate
         lockState={asam.lockState}
         qrCodeUrl={asam.qrCodeUrl}
@@ -71,8 +85,12 @@ export function AsamHybridHost({ children }: { children: React.ReactNode }) {
       >
         {children}
         {/* Inside the gate so the four-finger hold still reaches Device
-            settings (and its QR code) while the iPad is frozen. */}
-        <FreezeModeOverlay frozenUntil={asam.lockState?.frozenUntil} />
+            settings (and its QR code) at bedtime and while frozen. */}
+        {bedtimeLayers}
+        <FreezeModeOverlay
+          frozenUntil={asam.lockState?.frozenUntil}
+          frozenBy={asam.lockState?.frozenBy}
+        />
       </AsamParentGate>
     </AsamControllerContext.Provider>
   );

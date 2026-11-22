@@ -28,7 +28,7 @@ export interface SlackBlockActionsPayload {
   response_url?: string;
   channel?: { id: string };
   container?: { type?: string; message_ts?: string; channel_id?: string };
-  message?: { ts: string; blocks?: unknown[]; text?: string };
+  message?: { ts: string; thread_ts?: string; blocks?: unknown[]; text?: string };
   actions: SlackBlockAction[];
 }
 

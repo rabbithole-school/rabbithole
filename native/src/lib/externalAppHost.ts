@@ -66,10 +66,20 @@ export type OpenInteractiveWebContent = EmbeddedWebBase & {
   authHandoff?: boolean;
 };
 
+/**
+ * A plain link a scholar tapped in Messages or tutor chat. The BunnyPad kiosk
+ * has no browser, so it opens here, fenced loosely to the link's site; see
+ * `linkNavigationVerdict` in lib/linkViewer.ts for what gets through.
+ */
+export type OpenLink = EmbeddedWebBase & {
+  kind: "link";
+};
+
 export type OpenEmbeddedWebContent =
   | OpenExternalApp
   | OpenWebActivity
-  | OpenInteractiveWebContent;
+  | OpenInteractiveWebContent
+  | OpenLink;
 
 let current: OpenEmbeddedWebContent | null = null;
 const listeners = new Set<() => void>();
@@ -184,6 +194,16 @@ export function openYouTubeVideo(args: {
     ...content,
   });
   return true;
+}
+
+/** Open a tapped http(s) link in the embedded host (kind "link"). */
+export function openLink(args: { url: string; title: string }) {
+  openEmbeddedWebContent({
+    kind: "link",
+    url: args.url,
+    title: args.title,
+    gestureMode: "page",
+  });
 }
 
 /**

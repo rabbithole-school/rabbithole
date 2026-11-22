@@ -3,6 +3,7 @@
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
 import { roboticsPortfolioItems } from "./seed/rich/robotics";
+import { classPortfolioItems } from "./seed/rich/classWork";
 
 export const attach = internalAction({
   args: {},
@@ -10,10 +11,10 @@ export const attach = internalAction({
     let attached = 0;
     let skipped = 0;
 
-    for (const item of roboticsPortfolioItems) {
+    for (const item of [...roboticsPortfolioItems, ...classPortfolioItems]) {
       const existing = await ctx.runQuery(
         internal.seedRichCohort.findRoboticsPortfolioItem,
-        { title: item.title },
+        { title: item.title, source: item.source },
       );
       if (!existing) {
         skipped += 1;

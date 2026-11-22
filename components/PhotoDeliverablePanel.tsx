@@ -215,6 +215,7 @@ export function PhotoDeliverablePanel({
               deliverableId={existing?._id}
               resolved={existing !== undefined}
               animateArrivals={animateFlairArrivals}
+              sessionId={sessionId}
             />
 
             <HStack gap={2}>

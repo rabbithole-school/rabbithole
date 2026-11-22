@@ -1,3 +1,5 @@
+import { readSchedule } from "../lib/scheduleStore";
+import { insertAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
@@ -348,7 +350,7 @@ describe("production block schedule seed", () => {
     const blocks = await t.run(ctx => ctx.db.query("scheduleBlocks").withIndex("by_period", q => q.eq("periodId", periodId)).collect());
     const a = blocks.find(b => b.key === "block-a")!;
     const unitId = await t.run(ctx => ctx.db.insert("units", { teacherId: people[0]!, title: "U", isActive: true }));
-    const assignmentId = await t.run(ctx => ctx.db.insert("assignments", { teacherId: people[0]!, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [] }));
+    const assignmentId = await t.run(ctx => insertAssignmentWithSchedule(ctx, { teacherId: people[0]!, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [] }));
     await t.run(ctx => ctx.db.insert("schedulePlacements", {
       periodId, groupId: groups[0]!, weekday: 1, blockId: a._id, subject: "Concrete", weekStartMs: 1,
     }));
@@ -695,7 +697,7 @@ describe("production block schedule seed", () => {
       ctx.db.insert("units", { teacherId: people[0]!, title: "U", isActive: true }),
     );
     const [assignmentId, activityId] = await t.run(async (ctx) => [
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId: people[0]!, unitId, scholarIds: [], startedAt: 1, activitySchedule: [],
       }),
       await ctx.db.insert("activities", { title: "A", kind: "online", systemPrompt: "...", order: 0 }),
@@ -761,8 +763,8 @@ describe("production block schedule seed", () => {
       ctx.db.insert("units", { teacherId: people[0]!, title: "U", isActive: true }),
     );
     const [assignmentId, otherAssignmentId, activityId, otherActivityId] = await t.run(async (ctx) => [
-      await ctx.db.insert("assignments", { teacherId: people[0]!, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [] }),
-      await ctx.db.insert("assignments", { teacherId: people[0]!, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [] }),
+      await insertAssignmentWithSchedule(ctx, { teacherId: people[0]!, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [] }),
+      await insertAssignmentWithSchedule(ctx, { teacherId: people[0]!, unitId, scholarIds: [], startedAt: Date.now(), activitySchedule: [] }),
       await ctx.db.insert("activities", { title: "A1", kind: "online", systemPrompt: "...", order: 0 }),
       await ctx.db.insert("activities", { title: "A2", kind: "online", systemPrompt: "...", order: 1 }),
     ]);
@@ -818,7 +820,7 @@ describe("production block schedule seed", () => {
       ctx.db.insert("activities", { title: "Activity", kind: "online", systemPrompt: "...", order: 0 }),
     );
     const assignmentId = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: people[0]!, unitId, scholarIds: [], startedAt: Date.now(),
         activitySchedule: [{ activityId, mode: "classFocus", startsAt: 1, setAt: 1 }],
       }),
@@ -833,8 +835,7 @@ describe("production block schedule seed", () => {
     });
 
     await t.mutation(internal.seed.prodBlockSchedule.cleanupExactScheduleDuplicates, { dryRun: false });
-    const assignment = await t.run((ctx) => ctx.db.get(assignmentId));
-    expect(assignment!.activitySchedule).toEqual([
+    expect(await t.run((ctx) => readSchedule(ctx, { _id: assignmentId }))).toEqual([
       { activityId, mode: "classFocus", startsAt: 1, setAt: 1 },
     ]);
     expect(await t.run((ctx) => ctx.db.query("schedulePlacements").collect())).toHaveLength(1);
@@ -855,7 +856,7 @@ describe("production block schedule seed", () => {
       await ctx.db.insert("schedulePlacements", duplicate);
       await ctx.db.insert("schedulePlacements", {
         periodId, groupId: groups[0]!, weekday: 2, blockId, subject: "Partial",
-        assignmentId: await ctx.db.insert("assignments", {
+        assignmentId: await insertAssignmentWithSchedule(ctx, {
           teacherId: people[0]!, scholarIds: [], startedAt: Date.now(), activitySchedule: [],
         }),
       });
@@ -871,7 +872,7 @@ describe("production block schedule seed", () => {
       const activityId = await ctx.db.insert("activities", {
         title: "Deleted", kind: "online", systemPrompt: "...", order: 0,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId: people[0]!, scholarIds: [], startedAt: Date.now(), activitySchedule: [],
       });
       await ctx.db.delete(activityId);
@@ -905,10 +906,10 @@ describe("production block schedule seed", () => {
       await ctx.db.insert("activities", { title: "A", kind: "online", systemPrompt: "...", order: 0 }),
     ]);
     const [canonicalAssignmentId, redundantAssignmentId] = await t.run(async (ctx) => [
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId: people[0]!, unitId, scholarIds: scholars, startedAt: Date.now(), activitySchedule: [],
       }),
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId: people[0]!, unitId, scholarIds: scholars, startedAt: Date.now(),
         activitySchedule: [{ activityId, mode: "classFocus", startsAt: Date.now() - DAY }],
       }),
@@ -973,7 +974,7 @@ describe("production block schedule seed", () => {
     }));
     expect(state.canonical?.archivedAt).toBeUndefined();
     expect(state.redundant?.archivedAt).toBeDefined();
-    expect(state.redundant?.activitySchedule).toEqual([]);
+    expect(await world.t.run((ctx) => readSchedule(ctx, { _id: world.redundantAssignmentId }))).toEqual([]);
     expect(state.canonicalPlacement).not.toBeNull();
     expect(state.redundantPlacement).toBeNull();
     expect(state.sessions).toHaveLength(1);
@@ -1010,8 +1011,7 @@ describe("production block schedule seed", () => {
         }));
       } else if (kind === "live-entry" || kind === "scheduled-entry" || kind === "future-entry") {
         await world.t.run(async (ctx) => {
-          const assignment = await ctx.db.get(world.redundantAssignmentId);
-          const entry = assignment!.activitySchedule![0]!;
+          const entry = (await readSchedule(ctx, { _id: world.redundantAssignmentId }))[0]!;
           const scheduledFnId =
             kind === "scheduled-entry"
               ? await ctx.scheduler.runAfter(
@@ -1020,14 +1020,12 @@ describe("production block schedule seed", () => {
                   {},
                 )
               : undefined;
-          await ctx.db.patch(world.redundantAssignmentId, {
-            activitySchedule: [{
+          await setSchedule(ctx, world.redundantAssignmentId, [{
               ...entry,
               ...(kind === "live-entry" ? { setAt: Date.now() } : {}),
               ...(scheduledFnId ? { scheduledFnId } : {}),
               ...(kind === "future-entry" ? { startsAt: Date.now() + DAY } : {}),
-            }],
-          });
+            }]);
         });
       } else if (kind === "count") {
         world.args.expectedPlacementCount = 2;

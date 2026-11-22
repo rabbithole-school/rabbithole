@@ -482,7 +482,9 @@ function SelectChip<T extends EditableChipValue>({
   );
 }
 
-function PopoverEditorFrame({
+/** The chip trigger + popover body shared by the text and number chips, and
+ *  by a chip whose editor is its own control (the unit's grade picker). */
+export function PopoverEditorFrame({
   open,
   setOpen,
   display,

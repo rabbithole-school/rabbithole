@@ -144,6 +144,54 @@ export async function familyMediaReleaseStatus(
   return status === "granted" ? "granted" : "not_granted";
 }
 
+/**
+ * A family's answer on PUBLIC media: the school website and social media.
+ * Separate from the private-communications consent above, which governs
+ * sharing work with families. An enrolled scholar's answer is the annual
+ * program-participation form (a submission wins over the older answer kept on
+ * the signed health record, as the staff emergency read does); a program
+ * guest's is the media release on the visiting-student form. No form, or a
+ * blank release, is "no_answer", which is not a yes.
+ */
+export async function publicMediaReleaseStatus(
+  ctx: ConsentCtx,
+  scholar: Doc<"users">,
+): Promise<"released" | "opted_out" | "no_answer"> {
+  if (isProgramGuest(scholar)) {
+    const submission = await ctx.db
+      .query("guardianFormSubmissions")
+      .withIndex("by_scholar_form", (q) =>
+        q
+          .eq("scholarId", scholar._id)
+          .eq("formId", "extended_education_visiting_student"),
+      )
+      .unique();
+    if (submission?.answers.kind !== "extended_education_visiting_student") {
+      return "no_answer";
+    }
+    if (submission.answers.mediaRelease === "grant") return "released";
+    if (submission.answers.mediaRelease === "do_not_grant") return "opted_out";
+    return "no_answer";
+  }
+  const annual = await ctx.db
+    .query("guardianFormSubmissions")
+    .withIndex("by_scholar_form", (q) =>
+      q
+        .eq("scholarId", scholar._id)
+        .eq("formId", "annual_program_participation"),
+    )
+    .unique();
+  if (annual?.answers.kind === "annual_program_participation") {
+    return annual.answers.publicMediaOptOut ? "opted_out" : "released";
+  }
+  const record = await ctx.db
+    .query("scholarHealthRecords")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+    .unique();
+  if (record?.standardProgramAcknowledgedAt === undefined) return "no_answer";
+  return record.publicMediaOptOut === true ? "opted_out" : "released";
+}
+
 export function captureRosterName(scholar: Pick<Doc<"users">, "name">): string {
   const parts = scholar.name?.trim().split(/\s+/).filter(Boolean) ?? [];
   if (parts.length === 0) return "Scholar";

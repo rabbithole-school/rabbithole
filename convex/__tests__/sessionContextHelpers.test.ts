@@ -174,14 +174,19 @@ describe("buildSignalContext", () => {
 });
 
 describe("mergeSeeds", () => {
+  const row = (topic: string, origin: string) => ({
+    topic,
+    suggestionType: "frontier",
+    origin,
+  });
   test("empty inputs → empty array", () => {
     expect(mergeSeeds([], [])).toEqual([]);
   });
-  test("approved seeds first, then pending; nulls defaulted; flags set", () => {
+  test("active first, then pending; nulls defaulted", () => {
     expect(
       mergeSeeds(
-        [{ topic: "arches", domain: "engineering", suggestionType: "frontier" }],
-        [{ topic: "tides", suggestionType: "depth_probe" }],
+        [{ ...row("arches", "teacher"), domain: "engineering" }],
+        [{ ...row("tides", "ai"), suggestionType: "depth_probe" }],
       ),
     ).toEqual([
       {
@@ -200,6 +205,29 @@ describe("mergeSeeds", () => {
       },
     ]);
   });
+  test("only an active seed a teacher planted is approved", () => {
+    const merged = mergeSeeds(
+      [
+        row("planted", "teacher"),
+        row("a story", "story"),
+        row("a follow", "badge_follow"),
+        row("parked", "parked"),
+        row("observer", "ai"),
+        row("sky", "ai-constellation"),
+      ],
+      [row("pending teacher", "teacher"), row("pending ai", "ai")],
+    );
+    expect(Object.fromEntries(merged.map((s) => [s.topic, s.approved]))).toEqual({
+      planted: true,
+      "a story": false,
+      "a follow": false,
+      parked: false,
+      observer: false,
+      sky: false,
+      "pending teacher": false,
+      "pending ai": false,
+    });
+  });
 });
 
 describe("resolveTimingContext", () => {
@@ -207,7 +235,7 @@ describe("resolveTimingContext", () => {
   test("no schedule, no duration → null", () => {
     expect(
       resolveTimingContext({
-        activitySchedule: undefined,
+        schedule: undefined,
         sessionActivityId: undefined,
         sessionStartedAt: 0,
         unitDurationMinutes: null,
@@ -219,7 +247,7 @@ describe("resolveTimingContext", () => {
   test("no active focus but a unit duration → soft-pacing window", () => {
     expect(
       resolveTimingContext({
-        activitySchedule: undefined,
+        schedule: undefined,
         sessionActivityId: undefined,
         sessionStartedAt: 42,
         unitDurationMinutes: 30,
@@ -230,7 +258,7 @@ describe("resolveTimingContext", () => {
 
   test("picks soonest-ending active classFocus targeting this activity", () => {
     const result = resolveTimingContext({
-      activitySchedule: [
+      schedule: [
         { mode: "classFocus", endsAt: NOW + 5000, activityId: act("a1") },
         { mode: "classFocus", endsAt: NOW + 2000, activityId: act("a1") },
         { mode: "homework", endsAt: NOW + 1000, activityId: act("a1") },
@@ -249,7 +277,7 @@ describe("resolveTimingContext", () => {
 
   test("ignores expired pushes, non-classFocus modes, and other activities", () => {
     const result = resolveTimingContext({
-      activitySchedule: [
+      schedule: [
         { mode: "classFocus", endsAt: NOW - 1, activityId: act("a1") }, // expired
         { mode: "homework", endsAt: NOW + 9000, activityId: act("a1") }, // wrong mode
         { mode: "classFocus", endsAt: NOW + 9000, activityId: act("other") }, // wrong activity
@@ -269,7 +297,7 @@ describe("resolveTimingContext", () => {
 
   test("non-activity-specific project accepts any active classFocus", () => {
     const result = resolveTimingContext({
-      activitySchedule: [
+      schedule: [
         { mode: "classFocus", endsAt: NOW + 3000, activityId: act("whatever") },
       ],
       sessionActivityId: undefined,

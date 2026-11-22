@@ -19,6 +19,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // so both are replaced with tiny in-memory/no-op fakes.
 // ─────────────────────────────────────────────────────────────────────────
 
+/** The order the host fired its grade-side callbacks and dispatch in. */
+const hostCalls = vi.hoisted((): string[] => []);
+
+// Pass-through: the host evaluates the projection as the dispatch argument, so
+// logging it marks where `server:submitSucceeded` sits among the callbacks.
+vi.mock("../../../vendor/shared/practiceMachine", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../../vendor/shared/practiceMachine")>();
+  return {
+    ...actual,
+    gradeResultFromSubmitResponse: (
+      ...args: Parameters<typeof actual.gradeResultFromSubmitResponse>
+    ) => {
+      hostCalls.push("dispatch");
+      return actual.gradeResultFromSubmitResponse(...args);
+    },
+  };
+});
+
 const store = vi.hoisted(() => ({
   files: new Map<string, string>(),
   failNextWrite: false,
@@ -113,6 +132,7 @@ import {
 } from "../../../vendor/shared/practiceOutboxContract";
 import { nativePracticePersistenceAdapter } from "@/lib/practicePersistenceAdapter";
 import { restoreBreakerTriggerItemPayload } from "@/lib/breakerItemCache";
+import { FORM_NUDGE_CAP } from "../../../vendor/practice/answers";
 
 const SCHOLAR = "scholar-1" as Id<"users">;
 
@@ -201,14 +221,18 @@ function Harness({
     getTriggerItemPayload: (itemId) => ({ itemId, stem: "What is 2 + 2?" }),
     onTriggerItemPersistenceError,
     onBreakerItem,
-    onHintRung: () => {},
+    onHintRung: (_rung, source) => {
+      hostCalls.push(`hint:${source}`);
+    },
     onHintError,
     onGrade,
     onCoach,
     onHandoff: () => {},
     buildResumeSnapshot: () => null,
     onQueuedCount,
-    onDispatchCompleted: () => {},
+    onDispatchCompleted: (receipts) => {
+      hostCalls.push(`receipt:${JSON.stringify(receipts)}`);
+    },
     onAnswerQueued,
     provisionalGrade: () => ({ correct: false }),
     onHeld: () => {},
@@ -306,6 +330,7 @@ async function mount(online: boolean) {
 }
 
 beforeEach(() => {
+  hostCalls.length = 0;
   store.files.clear();
   store.failNextWrite = false;
   handlers.submitAnswer.mockReset();
@@ -567,6 +592,55 @@ describe("usePracticeMachine (native binding seams)", () => {
     await act(async () => tree.unmount());
   });
 
+  it("reports grade, receipt and breaker rung before dispatching the projected grade", async () => {
+    handlers.submitAnswer.mockResolvedValue({
+      correct: false,
+      backOff: { missStreak: 3 },
+      breakerRecovery: {
+        triggerAttemptId: "attempt-order",
+        triggerNodeKey: "node-order",
+        domain: "whole-number-arithmetic",
+        initialRepair: {
+          rung: { kind: "reveal", stepIndex: 0 },
+          hasMore: false,
+        },
+      },
+      breakerRecoveryVerified: false,
+      dispatchCompleted: ["receipt-1"],
+    });
+    const { handle, onGrade, tree } = await mount(true);
+    onGrade.mockImplementation((result: unknown) => {
+      hostCalls.push(`grade:${(result as { correct: boolean }).correct}`);
+    });
+
+    await act(async () => {
+      handle.current!.send({
+        type: "ui:submit",
+        answer: "4",
+        clientEventId: "evt-order",
+        entry: entry("evt-order"),
+      });
+    });
+
+    expect(hostCalls).toEqual([
+      "grade:false",
+      'receipt:["receipt-1"]',
+      "hint:breaker",
+      "dispatch",
+    ]);
+    // onGrade still receives the raw server response, not the projection.
+    expect(onGrade.mock.calls[0]![0]).toMatchObject({
+      breakerRecovery: { triggerAttemptId: "attempt-order" },
+      dispatchCompleted: ["receipt-1"],
+    });
+    expect(handle.current!.state.breaker).toMatchObject({
+      triggerAttemptId: "attempt-order",
+      triggerItemId: "item-1",
+      repairStepIndex: 0,
+    });
+    await act(async () => tree.unmount());
+  });
+
   it("presents the coach before awaiting lifecycle persistence and confirms after one retry", async () => {
     vi.useFakeTimers();
     handlers.submitAnswer.mockResolvedValue(unavailableBreakerResult());
@@ -738,6 +812,48 @@ describe("usePracticeMachine (native binding seams)", () => {
     expect(onQueuedCount).toHaveBeenLastCalledWith(0);
 
     await act(async () => tree.unmount());
+  });
+
+  it("a live first submit sends formNudgesUsed 0; a queued answer replays at the cap", async () => {
+    vi.useFakeTimers();
+    handlers.submitAnswer.mockResolvedValue({ correct: true });
+    // Live: the scholar is on the item, so the first submit offers a nudge.
+    const live = await mount(true);
+    await act(async () => {
+      live.handle.current!.send({
+        type: "ui:submit",
+        answer: "√18",
+        clientEventId: "evt-live",
+        entry: { ...entry("evt-live"), answer: "√18", formNudgesUsed: 0 },
+      });
+    });
+    expect(handlers.submitAnswer.mock.calls.at(-1)![0]).toMatchObject({ formNudgesUsed: 0 });
+    await act(async () => live.tree.unmount());
+
+    // Offline: queued, then drained after reconnect with nobody at the item —
+    // graded as after the nudges are spent, so it is recorded, not dropped.
+    handlers.submitAnswer.mockClear();
+    const offline = await mount(false);
+    await act(async () => {
+      offline.handle.current!.send({
+        type: "ui:submit",
+        answer: "√18",
+        clientEventId: "evt-queued",
+        entry: { ...entry("evt-queued"), answer: "√18", formNudgesUsed: 0 },
+      });
+    });
+    expect(handlers.submitAnswer).not.toHaveBeenCalled();
+    await offline.rerender(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(handlers.submitAnswer).toHaveBeenCalledTimes(1);
+    expect(handlers.submitAnswer.mock.calls[0]![0]).toMatchObject({
+      clientEventId: "evt-queued",
+      formNudgesUsed: FORM_NUDGE_CAP,
+    });
+    expect(offline.onQueuedCount).toHaveBeenLastCalledWith(0);
+    await act(async () => offline.tree.unmount());
   });
 
   it("queues an online submit that fails ambiguously and reports it the same way", async () => {

@@ -10,6 +10,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule, writeSchedule } from "./lib/scheduleStore";
 import { ensureDefaultMembershipForUser } from "./memberships";
 import { assertValidUsername } from "./lib/username";
 import { seedDefaultAppsForScholar } from "./lib/externalAppsSeed";
@@ -97,17 +98,17 @@ async function ensureWelcomeAssignment(ctx: MutationCtx, userId: Id<"users">) {
   }
 
   const now = Date.now();
-  await ctx.db.insert("assignments", {
+  const welcomeAssignmentId = await ctx.db.insert("assignments", {
     teacherId: systemUser._id,
     unitId: welcome._id,
     scholarIds: [userId],
     title: welcome.title,
     startedAt: now,
     selfPaced: true,
-    activitySchedule: firstActivity
-      ? [{ activityId: firstActivity, mode: "classFocus", setAt: now }]
-      : [],
   });
+  await writeSchedule(ctx, welcomeAssignmentId, firstActivity
+      ? [{ activityId: firstActivity, mode: "classFocus", setAt: now }]
+      : []);
   return true;
 }
 
@@ -176,7 +177,6 @@ export const suggestQuest = internalMutation({
         kind: "online",
         order: 0,
         durationMinutes: 20,
-        defaultMode: "homework",
         systemPrompt: [
           `Guide a curiosity-first exploration of "${title}".`,
           args.description,
@@ -275,7 +275,6 @@ export const addToAssignmentByUnitTitle = internalMutation({
         title: unit.title,
         startedAt: Date.now(),
         selfPaced: args.selfPaced,
-        activitySchedule: [],
       });
       return { updated: 1, created: true };
     }
@@ -316,11 +315,11 @@ export const pinStandingPractice = internalMutation({
       title: PILOT_STANDING_TITLE,
       practiceMode: "standing" as const,
       practiceConfig: { domain },
-      activitySchedule: [],
       archivedAt: undefined,
     };
     if (existing) {
       await ctx.db.patch(existing._id, patch);
+      await writeSchedule(ctx, existing, []);
       return { assignmentId: existing._id, created: false, domain };
     }
     const assignmentId = await ctx.db.insert("assignments", {
@@ -388,7 +387,7 @@ export const endLiveFocusForUnit = internalMutation({
     const now = Date.now();
     let ended = 0;
     for (const a of assignments) {
-      const sched = a.activitySchedule ?? [];
+      const sched = (await readSchedule(ctx, a));
       let changed = false;
       for (const e of sched) {
         if (
@@ -401,7 +400,9 @@ export const endLiveFocusForUnit = internalMutation({
           ended++;
         }
       }
-      if (changed) await ctx.db.patch(a._id, { activitySchedule: sched });
+      if (changed) {
+        await writeSchedule(ctx, a._id, sched);
+      }
     }
     return { ended };
   },
@@ -422,7 +423,7 @@ export const setFocusWindowForUnit = internalMutation({
     let n = 0;
     for (const a of assignments) {
       if (a.archivedAt) continue;
-      const sched = a.activitySchedule ?? [];
+      const sched = (await readSchedule(ctx, a));
       let changed = false;
       for (const e of sched) {
         if (e.mode === "classFocus") {
@@ -433,7 +434,9 @@ export const setFocusWindowForUnit = internalMutation({
           n++;
         }
       }
-      if (changed) await ctx.db.patch(a._id, { activitySchedule: sched });
+      if (changed) {
+        await writeSchedule(ctx, a._id, sched);
+      }
     }
     return { n, endsAt };
   },
@@ -476,7 +479,7 @@ export const pushActivityByUnitTitle = internalMutation({
     const live = assignments.find((a) => !a.archivedAt);
     if (!live) throw new Error("no assignment");
     const now = Date.now();
-    const existingEntry = (live.activitySchedule ?? []).find((entry) =>
+    const existingEntry = (await readSchedule(ctx, live)).find((entry) =>
       sameId(entry.activityId, act._id),
     );
     if (args.preserveExisting && existingEntry) {
@@ -486,7 +489,7 @@ export const pushActivityByUnitTitle = internalMutation({
         preserved: true,
       };
     }
-    const sched = (live.activitySchedule ?? []).filter(
+    const sched = (await readSchedule(ctx, live)).filter(
       (entry) => !sameId(entry.activityId, act._id),
     );
     if (args.plannedStartInMinutes !== undefined) {
@@ -509,12 +512,13 @@ export const pushActivityByUnitTitle = internalMutation({
         mode: args.mode,
         setAt: now,
         startsAt: now,
-        ...(args.dueInHours
+        // Class focus never carries a dueAt; only homework is due.
+        ...(args.dueInHours && args.mode === "homework"
           ? { dueAt: now + args.dueInHours * 3_600_000 }
           : {}),
       });
     }
-    await ctx.db.patch(live._id, { activitySchedule: sched });
+    await writeSchedule(ctx, live._id, sched);
     return {
       pushed: String(act._id),
       mode: args.mode,
@@ -562,7 +566,7 @@ export const activateFocusByUnitTitle = internalMutation({
       .collect();
     const live = assignments.find((assignment) => !assignment.archivedAt);
     if (!live) throw new Error("no assignment");
-    const schedule = live.activitySchedule ?? [];
+    const schedule = (await readSchedule(ctx, live));
     const entry = schedule.find(
       (candidate) =>
         candidate.mode === "classFocus" &&
@@ -573,7 +577,7 @@ export const activateFocusByUnitTitle = internalMutation({
     entry.setAt = now;
     entry.startsAt = now;
     entry.endsAt = now + args.minutesFromNow * 60_000;
-    await ctx.db.patch(live._id, { activitySchedule: schedule });
+    await writeSchedule(ctx, live._id, schedule);
     return {
       assignmentId: live._id,
       activityId: activity._id,
@@ -597,7 +601,7 @@ export const probeFocus = internalQuery({
     for (const a of all) {
       if (a.archivedAt) continue;
       const targeted = a.scholarIds.includes(user._id);
-      for (const e of a.activitySchedule ?? []) {
+      for (const e of (await readSchedule(ctx, a))) {
         if (e.mode !== "classFocus") continue;
         out.push({
           assignment: String(a._id),

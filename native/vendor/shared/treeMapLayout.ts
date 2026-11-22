@@ -83,16 +83,16 @@ export type LayoutNode = { skillKey: string; strand?: string | null; grade?: str
 export type LayoutEdge = { fromKey: string; toKey: string };
 
 // ── Grade anchoring (the x-axis's PRIMARY signal; topology is the tie-break) ──
-// `grade` is a soft K–9 band hint (knowledgeNodes.grade — "not identity"), so
+// `grade` is a soft K–11 band hint (knowledgeNodes.grade — "not identity"), so
 // this is a FLOOR nudging a node's column no earlier than its own grade's
 // column band; it never overrides the prerequisite/strand-chain requirement
-// above (0 backwards edges stays guaranteed). Mirrors the K..9 order
+// above (0 backwards edges stays guaranteed). Mirrors the K..11 order
 // convex/lib/practice/placement.ts's `gradeRank` uses for placement, kept as
 // an independent copy here (this module imports nothing so native can vendor
 // it standalone under Metro).
-export const GRADE_ORDER = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"] as const;
+export const GRADE_ORDER = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"] as const;
 
-/** K → 0 … 9 → 9; -1 for anything missing or outside the known K–9 set. */
+/** K → 0 … 11 → 11; -1 for anything missing or outside the known K–11 set. */
 export function gradeRank(grade: string | null | undefined): number {
   if (grade == null) return -1;
   return GRADE_ORDER.indexOf(grade as (typeof GRADE_ORDER)[number]);
@@ -502,7 +502,7 @@ export type TreeNode = {
   label: string;
   domain: string;
   strand?: string | null;
-  /** Soft K–9 band hint (knowledgeNodes.grade) — the x-axis's grade anchor. */
+  /** Soft K–11 band hint (knowledgeNodes.grade) — the x-axis's grade anchor. */
   grade?: string | null;
   repetition: number;
   becameFluentAt?: number | null;

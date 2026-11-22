@@ -15,9 +15,8 @@ import { withInstitutionScope } from "@/lib/institutionLinks";
  * The reporting surface is organized by scholar:
  *   /teacher/report                      -> roster of every scholar in the period
  *   /teacher/report/<scholarId>          -> that scholar's reporting detail
- *                                           (0+ course narratives, 0-1 Whole Child)
- *   /teacher/report/<scholarId>?n=<id>   -> the course-narrative composer
- *   /teacher/report/<scholarId>?wc=1     -> the Whole Child (meeting-mode) editor
+ *                                           (one parent report per subject + SEL)
+ *   /teacher/report/<scholarId>?n=<id>   -> the parent-report composer
  *   /teacher/report/<scholarId>?ic=1     -> the Interim check-in editor
  *
  * `?period=<id>` scopes to a reporting period (defaults to the current one).
@@ -30,10 +29,6 @@ const ScholarReportRoster = dynamic(
 );
 const ScholarReportDetail = dynamic(
   () => import("@/components/narrative/ScholarReportDetail").then((m) => m.ScholarReportDetail),
-  { ssr: false },
-);
-const ScholarWholeChildEditor = dynamic(
-  () => import("@/components/narrative/ScholarWholeChildEditor").then((m) => m.ScholarWholeChildEditor),
   { ssr: false },
 );
 const InterimCheckinEditor = dynamic(
@@ -73,7 +68,6 @@ function ReportPageInner() {
   const rest = pathname.replace(/^\/teacher\/report\/?/, "");
   const scholarId = (rest ? rest.split("/").filter(Boolean)[0] ?? null : null) as Id<"users"> | null;
   const narrativeId = searchParams.get("n") as Id<"courseNarratives"> | null;
-  const wc = searchParams.get("wc");
   const ic = searchParams.get("ic");
   const periodParam = searchParams.get("period");
 
@@ -94,8 +88,6 @@ function ReportPageInner() {
     );
     const rosterHref = withInstitutionScope(`/teacher/report${periodParam ? `?period=${periodParam}` : ""}`, inst);
     view = <NarrativeComposer narrativeId={narrativeId} backHref={backHref} rosterHref={rosterHref} />;
-  } else if (scholarId && wc) {
-    view = <ScholarWholeChildEditor scholarId={scholarId} periodParam={periodParam} />;
   } else if (scholarId && ic) {
     view = <InterimCheckinEditor scholarId={scholarId} periodParam={periodParam} />;
   } else if (scholarId) {

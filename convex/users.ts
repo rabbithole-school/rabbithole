@@ -1,11 +1,12 @@
 import { ConvexError, v } from "convex/values";
 import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import { authedQuery, authedMutation, teacherQuery, platformAdminMutation, platformAdminQuery, scholarAdminQuery, scholarAdminMutation, schoolAdminMutation } from "./lib/customFunctions";
-import { assertCanWrite, getActiveOverlay, getCurrentUser, getSessionOwner } from "./lib/auth";
+import { assertCanWrite, getActiveOverlay, getCurrentUser, getSessionOwner, requireUser } from "./lib/auth";
 import {
   assertInstitutionActive,
   requireActiveScholarAccess,
   evaluateInstitutionSuspension,
+  resolveActiveMembership,
 } from "./lib/access";
 import {
   curriculumAccessInstitutionIds,
@@ -25,6 +26,7 @@ import {
   ROLES,
   isNonTeachingOperationsRole,
   isPlatformAdminRole,
+  isTeacherRole,
   GLOBALLY_PRIVILEGED_ROLES,
   isGloballyPrivilegedMembership,
   isStaffRole,
@@ -47,11 +49,13 @@ import { scholarHasPasswordCredential } from "./lib/scholarCredential";
 import { scheduleClaimDecommissionLocksForScholar } from "./lib/deviceAppUnlockScheduling";
 import {
   hasScholarMembership,
+  requireActiveSessionOwnerInstitution,
   scholarInstitutionId,
 } from "./lib/scholarEnrollment";
 import type { Id } from "./_generated/dataModel";
 import type { Doc } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import { readSchedule } from "./lib/scheduleStore";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { createTokenForUser, enrollPath } from "./enrollment";
 import {
   findInviteByCode,
@@ -91,6 +95,8 @@ import {
   STAFF_CAPABILITIES,
 } from "./lib/staffCapabilities";
 import { readLevelOf, talkLevelOf } from "./lib/readingLevels";
+import { bedtimeTimeZoneFor, bedtimeWindowFor } from "./lib/bedtime";
+import { closeScheduleForAssignment } from "./lib/scheduleStore";
 
 /**
  * The outcome of a successful `registerWithCode`, telling the client how to
@@ -532,6 +538,13 @@ export const currentUser = query({
       // (`readLevelOf`), so practice can read questions aloud by it on both
       // clients without re-deriving the rule (TRA-514).
       effectiveReadLevel: readLevelOf(user),
+      // The zone this user's Rabbithole sleeps in at night, or null when
+      // bedtime doesn't apply to them (lib/bedtime.ts), and the nightly
+      // window: the school's 8 pm to 6 am unless a guardian set a stricter
+      // one (scholarBedtimes.ts). Both clients' BedtimeGate run the clock
+      // locally (shared/bedtime.ts); a client too old to read the window
+      // keeps the school's.
+      ...(await bedtimeFieldsFor(ctx, user)),
     };
   },
 });
@@ -611,9 +624,23 @@ export const storeUser = mutation({
   },
 });
 
+/** How many of a scholar's newest sessions `listScholars` checks message by
+ *  message for the latest activity time; older sessions contribute their
+ *  denormalized `lastMessageAt` only. One index range each, per scholar. */
+const RECENT_SESSION_MESSAGE_PROBES = 20;
+
 /**
  * List all scholars (for teacher dashboard).
- * Returns scholars with project counts and status.
+ * Returns scholars with session counts and status.
+ *
+ * This runs over the whole roster, so anything that grows with a scholar's
+ * history is multiplied by every scholar in the school. TRA-651: collecting
+ * every message of every session hit Convex's 32,000-document read limit and
+ * took the Scholars tab down; one message query per session would have hit
+ * the 4,096 index-range limit next. Message reads and index ranges are now
+ * fixed per scholar. The sessions themselves are still collected (the scope
+ * filter needs them), one document each, so document reads still grow with
+ * the number of sessions — about 1,150 at the primary school in Nov 2026.
  */
 export const listScholars = scholarAdminQuery({
   args: {
@@ -678,23 +705,34 @@ export const listScholars = scholarAdminQuery({
 
         const activeSessions = allSessions.filter((c) => !c.isArchived).slice(0, 5);
 
-        // Count messages across all projects, and track the single latest
-        // message timestamp across ALL sessions (not just the most-recently-
-        // CREATED one) — reusing this same scan rather than adding a query.
-        let messageCount = 0;
+        // The latest message time across ALL in-scope sessions (not just the
+        // most-recently-CREATED one), in two parts so message reads and index
+        // ranges stay bounded however long the history:
+        //  - every session's denormalized `lastMessageAt`, already loaded
+        //    above. Sends (sessions.sendMessage), the tutor's finished reply
+        //    (sessionHelpers' finalize, which counts the reply as activity at
+        //    finish time) and physical-task photos stamp it;
+        //  - an exact newest-message read for the newest sessions, which
+        //    also catches writers that don't stamp it: Workbench notebook
+        //    entries and run markers, instruction/practice tool and system
+        //    rows, reply placeholders.
+        // Known gap: an unstamped write in a session older than the newest
+        // RECENT_SESSION_MESSAGE_PROBES doesn't move lastActive. Stamping
+        // those writers instead would make Workbench sessions eligible for
+        // the reading-trend and typed-turn evidence readers, which then count
+        // generated notebook text as the scholar's writing (TRA-651 review).
         let latestMessageAt = 0;
-        for (const proj of allSessions) {
-          const msgs = await ctx.db
+        for (const session of allSessions) {
+          latestMessageAt = Math.max(latestMessageAt, session.lastMessageAt ?? 0);
+        }
+        for (const session of allSessions.slice(0, RECENT_SESSION_MESSAGE_PROBES)) {
+          const latest = await ctx.db
             .query("messages")
-            .withIndex("by_session", (q) =>
-              q.eq("sessionId", proj._id)
-            )
-            .collect();
-          messageCount += msgs.length;
-          for (const msg of msgs) {
-            if (msg._creationTime > latestMessageAt) {
-              latestMessageAt = msg._creationTime;
-            }
+            .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+            .order("desc")
+            .first();
+          if (latest) {
+            latestMessageAt = Math.max(latestMessageAt, latest._creationTime);
           }
         }
 
@@ -726,14 +764,15 @@ export const listScholars = scholarAdminQuery({
         let lastMessage: string | null = null;
         let lastMessageAt: number | null = null;
         if (mostRecent && !isNonTeachingOps) {
-          const msgs = await ctx.db
+          // The scholar's last turn in the newest session: one indexed read
+          // however long the session is or how many tutor/tool rows follow it.
+          const lastUserMsg = await ctx.db
             .query("messages")
-            .withIndex("by_session", (q) =>
-              q.eq("sessionId", mostRecent._id)
+            .withIndex("by_session_role", (q) =>
+              q.eq("sessionId", mostRecent._id).eq("role", "user")
             )
             .order("desc")
-            .collect();
-          const lastUserMsg = msgs.find((m) => m.role === "user");
+            .first();
           if (lastUserMsg) {
             const text = lastUserMsg.content;
             lastMessage = text.length > 120 ? text.slice(0, 120) + "..." : text;
@@ -783,9 +822,10 @@ export const listScholars = scholarAdminQuery({
           dateOfBirth: scholar.dateOfBirth ?? null,
           gradeLevel: scholar.gradeLevel ?? null,
           sessionCount: activeSessions.length,
-          messageCount,
           lastActive: Math.max(
-            mostRecent?._creationTime ?? scholar._creationTime,
+            // Newest in-scope session, archived or not: starting one is
+            // activity even if it was archived since.
+            allSessions[0]?._creationTime ?? scholar._creationTime,
             latestMessageAt,
             latestPracticeAt,
           ),
@@ -819,8 +859,12 @@ export const listDirectoryScholars = scholarAdminQuery({
       ctx.user,
       args.institutionScope,
     );
+    // The directory is how staff find anyone, including a scholar who has
+    // withdrawn (to read their history or undo the withdrawal), so it keeps
+    // them and says so.
     const scholarIds = await scholarIdsInLens(ctx, lens, {
       includeProgramGuests: true,
+      includeWithdrawn: true,
     });
     const scholars = (
       await Promise.all([...scholarIds].map((id) => ctx.db.get(id)))
@@ -834,6 +878,7 @@ export const listDirectoryScholars = scholarAdminQuery({
         username: scholar.username ?? null,
         enrollmentStanding:
           scholar.enrollmentStanding ?? ENROLLMENT_STANDINGS.ENROLLED,
+        withdrawnOn: scholar.withdrawnOn ?? null,
         hasCredential: await scholarHasPasswordCredential(ctx, scholar._id),
       })),
     );
@@ -880,14 +925,70 @@ export const updateRole = platformAdminMutation({
   handler: async (ctx, args) => {
     const user = await ctx.db.get(args.userId);
     if (!user) throw new Error("User not found");
-    if (user.role !== args.role) {
-      await retireDefaultMembershipForRole(ctx, user);
+    if (user.role === args.role) return;
+
+    // A school-scoped staff role is standing AT a school, and the only honest
+    // source for which school is the person's existing standing. Never fall
+    // back to the primary school: that made every outside teacher a
+    // primary-school teacher until someone removed it by hand.
+    if (
+      isInstitutionScopedStaffRole(args.role) &&
+      isInstitutionScopedStaffRole(user.role)
+    ) {
+      // The role changes at the person's HOME school only. Standing at any
+      // other school stays exactly as it was: promoting a primary-school teacher
+      // who also teaches at a guest school must not make them that school's
+      // admin, and their guest-school rows are managed there, with Add
+      // standing (TRA-247).
+      const home = await resolveActiveMembership(ctx, user);
+      await ctx.db.patch(args.userId, { role: args.role });
+      const homeInstitutionId = home?.institutionId;
+      if (homeInstitutionId && home.role === user.role) {
+        const oldRows = await ctx.db
+          .query("memberships")
+          .withIndex("by_user_role", (q) =>
+            q.eq("userId", user._id).eq("role", user.role!),
+          )
+          .collect();
+        for (const row of oldRows) {
+          if (row.institutionId === homeInstitutionId) {
+            await ctx.db.delete(row._id);
+          }
+        }
+        await ensureMembership(ctx, {
+          userId: args.userId,
+          role: args.role,
+          institutionId: homeInstitutionId,
+          createdBy: ctx.user._id,
+        });
+      }
+      return;
     }
+
+    await retireDefaultMembershipForRole(ctx, user);
     await ctx.db.patch(args.userId, { role: args.role });
-    // Keep the user's membership in sync with their new role.
+
+    if (isInstitutionScopedStaffRole(args.role)) {
+      // A scholar or parent promoted to a staff role has no school standing
+      // to carry; the accounts page says so, and the admin adds the school
+      // with Add standing.
+      return;
+    }
+    // Scholar, parent and the deployment-wide roles keep their own defaults.
     await ensureDefaultMembershipForUser(ctx, args.userId);
   },
 });
+
+/** Roles whose authority is standing at one named school. */
+function isInstitutionScopedStaffRole(
+  role: string | undefined,
+): role is typeof ROLES.TEACHER | typeof ROLES.STAFF | typeof ROLES.SCHOOL_ADMIN {
+  return (
+    role === ROLES.TEACHER ||
+    role === ROLES.STAFF ||
+    role === ROLES.SCHOOL_ADMIN
+  );
+}
 
 /**
  * Admin: create a new account with a chosen username, optional name, and role.
@@ -906,9 +1007,10 @@ export const adminCreateUser = platformAdminMutation({
       v.literal(ROLES.CURRICULUM_DESIGNER),
       v.literal(ROLES.STAFF)
     ),
-    // Which institution a newly created SCHOLAR belongs to. Ignored for staff
-    // roles (they stay global / get stamped by ensureDefaultMembershipForUser).
-    // Absent → ensureDefaultMembershipForUser stamps the primary school.
+    // The school this account belongs to. Required for teacher, staff and
+    // school admin: their standing is at one school, and there is no safe
+    // default. For a scholar it is optional and absent means the primary
+    // school. Ignored for the deployment-wide roles.
     institutionId: v.optional(v.id("institutions")),
   },
   handler: async (ctx, args) => {
@@ -918,11 +1020,12 @@ export const adminCreateUser = platformAdminMutation({
       .withIndex("by_username", (q) => q.eq("username", username))
       .unique();
     if (existing) throw new Error(`Username "${username}" is already taken`);
-    // For a scholar, honor an explicit institution choice; ensureDefaultMembership
-    // below reads users.institutionId, so stamp it at insert time. Validate it
-    // exists first. Non-scholar roles ignore this.
+    const staffAtSchool = isInstitutionScopedStaffRole(args.role);
+    if (staffAtSchool && !args.institutionId) {
+      throw new Error(`Pick a school for this ${args.role.replace("_", " ")}`);
+    }
     let institutionId: Id<"institutions"> | undefined;
-    if (args.role === ROLES.SCHOLAR && args.institutionId) {
+    if ((args.role === ROLES.SCHOLAR || staffAtSchool) && args.institutionId) {
       const inst = await ctx.db.get(args.institutionId);
       if (!inst) throw new Error("Institution not found");
       institutionId = args.institutionId;
@@ -931,9 +1034,20 @@ export const adminCreateUser = platformAdminMutation({
       username,
       name: args.name?.trim() || undefined,
       role: args.role,
-      ...(institutionId ? { institutionId } : {}),
+      // users.institutionId is the scholar's school; staff carry theirs only
+      // on the membership below.
+      ...(args.role === ROLES.SCHOLAR && institutionId ? { institutionId } : {}),
     });
-    await ensureDefaultMembershipForUser(ctx, userId);
+    if (staffAtSchool) {
+      await ensureMembership(ctx, {
+        userId,
+        role: args.role,
+        institutionId,
+        createdBy: ctx.user._id,
+      });
+    } else {
+      await ensureDefaultMembershipForUser(ctx, userId);
+    }
     // New scholars get the default External Apps (any flagged default provider) on their
     // launcher. Other roles have no launcher. Idempotent.
     if (args.role === ROLES.SCHOLAR) {
@@ -1052,6 +1166,29 @@ export const isSessionOwnerReadOnly = internalQuery({
   handler: async (ctx) => {
     const owner = await getSessionOwner(ctx);
     return owner?.readOnly === true;
+  },
+});
+
+/**
+ * Action bridge for the signed-in action gate (authedAction): runs requireUser,
+ * so a suspended institution is refused exactly as it is for queries and
+ * mutations. With a sessionId it also requires the caller to own that session
+ * or, for a teacher, to have scholar access to its owner, so an action cannot
+ * attribute spend to another school's session (TRA-496).
+ */
+export const assertActiveCaller = internalQuery({
+  args: { sessionId: v.optional(v.id("sessions")) },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    if (!args.sessionId) return;
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) throw new Error("Session not found");
+    // Owning a session isn't enough: its school must still admit the owner,
+    // as sessions.get requires.
+    await requireActiveSessionOwnerInstitution(ctx, user, session);
+    if (session.userId === user._id) return;
+    if (!isTeacherRole(user.role)) throw new Error("Forbidden: not your session");
+    await requireActiveScholarAccess(ctx, user, session.userId);
   },
 });
 
@@ -1853,7 +1990,10 @@ export async function deleteUserCore(
     .query("assignments")
     .withIndex("by_teacher", (q) => q.eq("teacherId", args.userId))
     .collect();
-  for (const a of assignments) await ctx.db.delete(a._id);
+  for (const a of assignments) {
+    await closeScheduleForAssignment(ctx, a._id);
+    await ctx.db.delete(a._id);
+  }
 
   // 5. Delete auth sessions and accounts
   const authSessions = await ctx.db
@@ -1977,6 +2117,45 @@ export const updatePreferredFont = authedMutation({
 });
 
 /**
+ * A scholar turns "Coding challenges" on or off, for themselves only. They
+ * start off: only while on does a "Code it" mission unlock for them on its
+ * own (lib/codeItUnlock.ts). On is stored as `true`; off clears the field.
+ */
+export const setCodeItEnabled = authedMutation({
+  args: { enabled: v.boolean() },
+  handler: async (ctx, args) => {
+    if (ctx.user.role !== ROLES.SCHOLAR) {
+      throw new Error("Forbidden: only a scholar turns coding challenges on or off");
+    }
+    await ctx.db.patch(ctx.user._id, {
+      codeItEnabled: args.enabled ? true : undefined,
+    });
+  },
+});
+
+/**
+ * Staff switch one scholar's "Coding challenges" on or off from the CLI
+ * (`npx convex run users:setCodeItEnabledForUser`); same storage as above.
+ */
+export const setCodeItEnabledForUser = internalMutation({
+  args: { userId: v.id("users"), enabled: v.boolean() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error(`No user ${args.userId}`);
+    if (user.role !== ROLES.SCHOLAR) {
+      throw new Error(`User ${args.userId} is not a scholar`);
+    }
+    const changed = (user.codeItEnabled === true) !== args.enabled;
+    if (changed) {
+      await ctx.db.patch(args.userId, {
+        codeItEnabled: args.enabled ? true : undefined,
+      });
+    }
+    return { userId: args.userId, enabled: args.enabled, changed };
+  },
+});
+
+/**
  * Create a new scholar user (any scholar-admin: teacher / operations staff /
  * school_admin / platform_admin).
  *
@@ -1990,6 +2169,60 @@ export const updatePreferredFont = authedMutation({
  * silently file that child into the primary institution. A primary-school
  * caller is unaffected (their home already resolves to the primary).
  */
+export async function createScholarAs(
+  ctx: MutationCtx,
+  caller: Doc<"users">,
+  args: { name: string; username?: string; scope?: string },
+): Promise<{ userId: Id<"users"> }> {
+  const name = args.name.trim();
+  if (!name) throw new ConvexError("Name is required");
+  const lens = await resolveInstitutionLens(ctx, caller, args.scope);
+  const institutionId =
+    lens.institution?._id ??
+    lens.homeInstitution?._id ??
+    lens.primaryInstitution?._id;
+  if (!institutionId) {
+    throw new Error("No institution to assign this scholar to");
+  }
+
+  // Usernames are a login key (`by_username` unique lookups back /dev-login,
+  // auth, and the directory), so refuse a collision up front now that the
+  // school-admin "Add scholar" surface lets a username be typed. Mirrors
+  // createInstitutionStaff / adminCreateUser.
+  const username = args.username?.trim()
+    ? assertValidUsername(args.username)
+    : undefined;
+  if (username) {
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_username", (q) => q.eq("username", username))
+      .unique();
+    // A ConvexError, so production shows staff this sentence rather than
+    // "Server Error".
+    if (existing) {
+      throw new ConvexError(`Username "${username}" is already taken`);
+    }
+  }
+
+  const userId = await ctx.db.insert("users", {
+    name,
+    username,
+    role: ROLES.SCHOLAR,
+    // Stamp the user row so ensureDefaultMembershipForUser mints the
+    // membership on the SAME school (it reads users.institutionId for
+    // scholars) — keeping user.institutionId and the membership consistent.
+    institutionId,
+  });
+  await ensureDefaultMembershipForUser(ctx, userId);
+  // Seed the scholar's home launcher with the default External Apps
+  // (any flagged default provider). Idempotent. See review/external-apps-launcher.html §3.
+  await seedDefaultAppsForScholar(ctx, userId, caller._id);
+  await ctx.scheduler.runAfter(0, internal.onboarding.enrollScholar, {
+    scholarId: userId,
+  });
+  return { userId };
+}
+
 export const createScholar = scholarAdminMutation({
   args: {
     name: v.string(),
@@ -1999,53 +2232,7 @@ export const createScholar = scholarAdminMutation({
     // home institution.
     scope: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
-    const lens = await resolveInstitutionLens(ctx, ctx.user, args.scope);
-    const institutionId =
-      lens.institution?._id ??
-      lens.homeInstitution?._id ??
-      lens.primaryInstitution?._id;
-    if (!institutionId) {
-      throw new Error("No institution to assign this scholar to");
-    }
-
-    // Usernames are a login key (`by_username` unique lookups back /dev-login,
-    // auth, and the directory), so refuse a collision up front now that the
-    // school-admin "Add scholar" surface lets a username be typed. Mirrors
-    // createInstitutionStaff / adminCreateUser.
-    const username = args.username?.trim()
-      ? assertValidUsername(args.username)
-      : undefined;
-    if (username) {
-      const existing = await ctx.db
-        .query("users")
-        .withIndex("by_username", (q) => q.eq("username", username))
-        .unique();
-      // A ConvexError, so production shows staff this sentence rather than
-      // "Server Error".
-      if (existing) {
-        throw new ConvexError(`Username "${username}" is already taken`);
-      }
-    }
-
-    const userId = await ctx.db.insert("users", {
-      name: args.name.trim(),
-      username,
-      role: ROLES.SCHOLAR,
-      // Stamp the user row so ensureDefaultMembershipForUser mints the
-      // membership on the SAME school (it reads users.institutionId for
-      // scholars) — keeping user.institutionId and the membership consistent.
-      institutionId,
-    });
-    await ensureDefaultMembershipForUser(ctx, userId);
-    // Seed the scholar's home launcher with the default External Apps
-    // (any flagged default provider). Idempotent. See review/external-apps-launcher.html §3.
-    await seedDefaultAppsForScholar(ctx, userId, ctx.user._id);
-    await ctx.scheduler.runAfter(0, internal.onboarding.enrollScholar, {
-      scholarId: userId,
-    });
-    return { userId };
-  },
+  handler: async (ctx, args) => createScholarAs(ctx, ctx.user, args),
 });
 
 /**
@@ -2435,6 +2622,16 @@ export const assignmentsForScholar = teacherQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
     await requireScholarsAccessible(ctx, ctx.user, [args.scholarId]);
+    return await assignmentsForScholarCore(ctx, args);
+  },
+});
+
+/** assignmentsForScholar after its access check (the parity check reuses it). */
+export async function assignmentsForScholarCore(
+  ctx: QueryCtx,
+  args: { scholarId: Id<"users"> },
+) {
+  {
     const candidates = await ctx.db.query("assignments").collect();
     const scholarAssignments = candidates.filter(
       (a) => !a.archivedAt && a.scholarIds.includes(args.scholarId),
@@ -2472,7 +2669,7 @@ export const assignmentsForScholar = teacherQuery({
         }
       | null = null;
     for (const a of scholarAssignments) {
-      const active = (a.activitySchedule ?? []).find(
+      const active = (await readSchedule(ctx, a)).find(
         (e) =>
           e.mode === "classFocus" &&
           entryTargetsScholar(e, args.scholarId) &&
@@ -2495,8 +2692,8 @@ export const assignmentsForScholar = teacherQuery({
     }
 
     return { assignments, focus };
-  },
-});
+  }
+}
 
 /**
  * Operator correction of an account's display name — for staff, whose only
@@ -2515,3 +2712,22 @@ export const setDisplayName = internalMutation({
     return { previous: user.name ?? null, name };
   },
 });
+
+/** currentUser's bedtime fields: the zone, and the window's two ends (null
+ *  wherever bedtime doesn't apply). */
+async function bedtimeFieldsFor(ctx: QueryCtx, user: Doc<"users">) {
+  const bedtimeTimeZone = await bedtimeTimeZoneFor(ctx, user);
+  if (!bedtimeTimeZone) {
+    return {
+      bedtimeTimeZone,
+      bedtimeStartMinutes: null,
+      bedtimeEndMinutes: null,
+    };
+  }
+  const window = await bedtimeWindowFor(ctx, user._id);
+  return {
+    bedtimeTimeZone,
+    bedtimeStartMinutes: window.startMinutes,
+    bedtimeEndMinutes: window.endMinutes,
+  };
+}

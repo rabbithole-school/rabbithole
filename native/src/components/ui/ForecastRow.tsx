@@ -71,7 +71,15 @@ function makeStyles(c: Colors) {
       alignItems: "flex-start",
       gap: 8,
     },
-    glyph: { fontSize: 16, lineHeight: 22, flexShrink: 0 },
+    // A fixed glyph column, so title and meta share one left edge on every
+    // row and line up with the Homework rows' text column (hwListEmoji).
+    glyph: {
+      width: 22,
+      fontSize: 16,
+      lineHeight: 22,
+      textAlign: "center",
+      flexShrink: 0,
+    },
     stack: { flex: 1, gap: 2 },
     title: { fontFamily: fonts.medium, fontSize: 15, color: c.charcoal },
     meta: { fontFamily: fonts.medium, fontSize: 12, color: c.charcoalMuted },

@@ -4,7 +4,8 @@
  * StemText (web) — renders a practice stem, lifting any embedded pipe table
  * (see shared/practiceStemBlocks) out of the prose into a real hairline table.
  * A drop-in for the `<FractionText value={stem} …>` stem render; a stem with no
- * table renders byte-identically through FractionText. The DOM twin of
+ * table renders byte-identically through FractionText. A fenced code listing
+ * (shared `CODE_FENCE`) is drawn monospaced, with its indentation kept. The DOM twin of
  * native/src/components/practice/StemText.tsx — they must look indistinguishable.
  *
  * Prose blocks (and every table CELL) render through FractionText, so fractions
@@ -26,6 +27,7 @@ import {
 const RULE = "#ded8cb";
 const HEADER_TEXT = "#8a7f6d";
 const BODY_TEXT = "#3f3528";
+const CODE_BG = "#f7f3ea";
 
 // Cell font 22 when the stem is 28; scale proportionally for other sizes.
 const CELL_SCALE = 22 / 28;
@@ -84,10 +86,39 @@ export function StemText({
       {blocks.map((block, i) =>
         block.kind === "text" ? (
           <FractionText key={i} value={block.text} fontSize={fontSize} align={align} color={color} />
+        ) : block.kind === "code" ? (
+          <StemCode key={i} lines={block.lines} fontSize={cellFont} align={align} />
         ) : (
           <StemTable key={i} block={block} cellFont={cellFont} align={align} />
         ),
       )}
+    </chakra.div>
+  );
+}
+
+/** A code listing: monospaced and left-aligned inside a block that itself
+ *  sits where the stem is aligned, so indentation lines up. */
+function StemCode({ lines, fontSize, align }: { lines: string[]; fontSize: number; align: "center" | "left" }) {
+  return (
+    <chakra.div display="flex" justifyContent={align === "center" ? "center" : "flex-start"} my="10px">
+      <chakra.pre
+        m="0"
+        px="16px"
+        py="10px"
+        maxWidth="100%"
+        overflowX="auto"
+        textAlign="left"
+        borderRadius="10px"
+        borderWidth="1px"
+        borderColor={RULE}
+        bg={CODE_BG}
+        color={BODY_TEXT}
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        fontWeight={500}
+        style={{ fontSize, lineHeight: 1.45 }}
+      >
+        {lines.join("\n")}
+      </chakra.pre>
     </chakra.div>
   );
 }

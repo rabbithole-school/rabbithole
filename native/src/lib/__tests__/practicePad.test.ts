@@ -18,6 +18,7 @@ describe("practicePad", () => {
     expect(isPadAnswerType("decimal")).toBe(true);
     expect(isPadAnswerType("fraction")).toBe(true);
     expect(isPadAnswerType("expression")).toBe(true);
+    expect(isPadAnswerType("solutionSet")).toBe(true);
     expect(isPadAnswerType("multipleChoice")).toBe(false);
     expect(isPadAnswerType("manipulative")).toBe(false);
   });

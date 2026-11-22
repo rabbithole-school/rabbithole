@@ -5,6 +5,7 @@ import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
   APP_OFF_TRACK_ALERT_KIND,
+  APP_STUCK_ALERT_KIND,
   OFF_MISSION_ALERT_KIND,
   buildOffMissionAlert,
   entersOffTrack,
@@ -56,6 +57,8 @@ async function seedWorld(
     activity?: Partial<Doc<"activities">>;
     /** The session has no activity (open chat, Quest planning, exploration). */
     noActivity?: boolean;
+    /** The session holds no app (otherwise it gets one code artifact). */
+    noApp?: boolean;
   } = {},
 ) {
   const institutionId = await seedTestInstitution(t, { slug: "home-school" });
@@ -99,6 +102,15 @@ async function seedWorld(
       title: "Cholera game",
       kind: "vibecode",
       order: 0,
+      ...(!opts.activity
+        ? {
+            buildContract: {
+              invariants: ["cholera spreads only through contaminated water"],
+              freedoms: ["setting"],
+              gate: "Understand how cholera spreads",
+            },
+          }
+        : {}),
       ...(opts.buildContract
         ? {
             buildContract: {
@@ -126,6 +138,16 @@ async function seedWorld(
       isArchived: false,
       ...opts.session,
     });
+    if (!opts.noApp) {
+      await ctx.db.insert("artifacts", {
+        sessionId,
+        title: "My cholera game",
+        content: "<!doctype html><html><body>Cholera</body></html>",
+        lastEditedBy: "ai",
+        type: "code",
+        language: "html",
+      });
+    }
     return { unitId, activityId, assignmentId, sessionId };
   });
   return {
@@ -191,6 +213,103 @@ describe("entersOffTrack", () => {
   });
 });
 
+describe("app stuck alert (no app in the session)", () => {
+  test("pages as stuck, never as off mission, when there is no app", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, { noApp: true });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+    const stuck = await t.run((ctx) =>
+      ctx.db
+        .query("alerts")
+        .filter((q) => q.eq(q.field("kind"), APP_STUCK_ALERT_KIND))
+        .collect(),
+    );
+    expect(stuck).toHaveLength(1);
+    expect(stuck[0].title).toBe("Ava looks stuck in Cholera game");
+    expect(stuck[0].body).toContain("no app in this session yet");
+    expect(stuck[0].body).not.toContain("Mission:");
+  });
+
+  test("a non-app activity with no artifact is still off mission", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      noApp: true,
+      activity: {
+        kind: "online",
+        deliverable: {
+          kind: "text",
+          prompt: "Write about the outbreak.",
+          mode: "none",
+          criteria: [],
+        },
+      } as Partial<Doc<"activities">>,
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(1);
+  });
+});
+
+describe("an app contract without a mission line", () => {
+  test("never pages drift when its mission line is blank", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      activity: {
+        buildContract: {
+          invariants: ["cholera spreads only through contaminated water"],
+          freedoms: [],
+          gate: "   ",
+        },
+      },
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("a free-build app with no authored contract has no mission and never pages", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, { activity: { buildContract: undefined } });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("a free-build app without a contract still pages when there is no app", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      activity: { buildContract: undefined },
+      noApp: true,
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    const alerts = await t.run((ctx) =>
+      ctx.db
+        .query("alerts")
+        .filter((q) => q.eq(q.field("kind"), APP_STUCK_ALERT_KIND))
+        .collect(),
+    );
+    expect(alerts).toHaveLength(1);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("still pages as stuck when there is no app", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, { buildContract: true, noApp: true });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    const stuck = await t.run((ctx) =>
+      ctx.db
+        .query("alerts")
+        .filter((q) => q.eq(q.field("kind"), APP_STUCK_ALERT_KIND))
+        .collect(),
+    );
+    expect(stuck).toHaveLength(1);
+  });
+});
+
 describe("app off-track alert", () => {
   test("fires on the second consecutive off-track reading, not the first", async () => {
     const t = convexTest(schema, modules);
@@ -202,6 +321,8 @@ describe("app off-track alert", () => {
     expect(alerts).toHaveLength(1);
     expect(alerts[0].scholarId).toBe(w.scholarId);
     expect(alerts[0].sessionId).toBe(w.sessionId);
+    expect(alerts[0].body).toContain("Mission: Understand how cholera spreads");
+    expect(alerts[0].body).not.toContain("(default)");
   });
 
   test("one noisy reading between on-track readings never alerts", async () => {
@@ -512,7 +633,15 @@ describe("off-mission alert", () => {
 
   test("message shape: who, where, the observer's line, a session link — no scores", async () => {
     const t = convexTest(schema, modules);
-    const w = await seedWorld(t, { buildContract: true });
+    const w = await seedWorld(t, {
+      activity: {
+        buildContract: {
+          invariants: ["cholera spreads only through contaminated water"],
+          freedoms: ["setting"],
+          gate: "One outbreak has run once",
+        },
+      },
+    });
     await t.run((ctx) =>
       ctx.db.patch(w.sessionId, {
         parkingLot: [
@@ -527,9 +656,10 @@ describe("off-mission alert", () => {
     const lines = post.text.split("\n");
     expect(lines[0]).toContain("Ava");
     expect(lines[0]).toContain("Cholera game");
-    expect(lines[1].startsWith("<@UASSIGN01> ")).toBe(true);
-    expect(lines[1]).toContain("microbe model");
-    expect(lines[2].startsWith("Mission: ")).toBe(true);
+    expect(lines[1]).toBe(
+      "<@UASSIGN01> The game has drifted from the microbe model into combat.",
+    );
+    expect(lines[2]).toBe("Mission: One outbreak has run once");
     expect(lines[3]).toContain("2 ideas for later");
     expect(lines.at(-1)).toContain(`/scholar/${w.sessionId}?remote=${w.scholarId}`);
     expect(post.text).not.toMatch(/0\.\d/);
@@ -542,7 +672,7 @@ describe("buildOffMissionAlert", () => {
       scholarName: "Ava",
       activityTitle: "Cholera game",
       observerSummary: "Drifted into combat.",
-      mission: { gateAuthored: true, gate: "The microbe model has run once." },
+      mission: { gate: "The microbe model has run once." },
       teacherSlackUserId: "not-an-id>",
       parkedIdeas: 0,
     });
@@ -557,10 +687,74 @@ describe("buildOffMissionAlert", () => {
       scholarName: "Ava",
       activityTitle: "Field journal",
       observerSummary: "Wandered off.",
-      mission: { gateAuthored: false, gate: "A first draft exists." },
+      mission: { defaultMission: true, gate: "A first draft exists." },
       parkedIdeas: 1,
     });
     expect(body).toContain("Mission: (default) A first draft exists.");
     expect(body).toContain("The tutor has saved 1 idea for later this session.");
+  });
+});
+
+/** Save the scholar's running app's state, as the host does. */
+async function saveAppState(
+  t: T,
+  w: { sessionId: Id<"sessions">; scholarId: Id<"users"> },
+  doc: Record<string, unknown>,
+) {
+  await t.run(async (ctx) => {
+    const app = await ctx.db
+      .query("artifacts")
+      .filter((q) => q.eq(q.field("sessionId"), w.sessionId))
+      .first();
+    const key = {
+      scope: "session" as const,
+      scopeId: String(w.sessionId),
+      userId: String(w.scholarId),
+      key: String(app!._id),
+    };
+    const existing = await ctx.db
+      .query("appStates")
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("scopeId"), key.scopeId),
+          q.eq(q.field("userId"), key.userId),
+          q.eq(q.field("key"), key.key),
+        ),
+      )
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, { doc, updatedAt: Date.now() });
+    } else {
+      await ctx.db.insert("appStates", {
+        ...key,
+        doc,
+        version: 1,
+        updatedAt: Date.now(),
+      });
+    }
+  });
+}
+
+const APP_MISSION = {
+  invariants: ["a stat changes only because of a player's choice"],
+  freedoms: ["genre"],
+  gate: "Explore how choices change the world",
+};
+
+describe("app mission drift does not depend on run state", () => {
+  test("drift pages after the app runs", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, { activity: { buildContract: APP_MISSION } });
+    await saveAppState(t, w, {
+      runLog: [
+        { choice: "share the harvest", changed: { trust: { from: 3, to: 5 } } },
+      ],
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    const alerts = await offTrackAlerts(t);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body).toContain("Mission: Explore how choices change the world");
+    expect(alerts[0].body).not.toContain("first loop");
   });
 });

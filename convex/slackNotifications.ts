@@ -123,7 +123,7 @@ export const linkedGroupForChannel = internalQuery({
     let memberCount = 0;
     for (const scholarId of group.scholarIds) {
       const scholar = await ctx.db.get(scholarId);
-      if (scholar?.role === "scholar" && scholarInLens(lens, scholar)) {
+      if (scholar?.role === "scholar" && (await scholarInLens(ctx, lens, scholar))) {
         memberCount++;
       }
     }

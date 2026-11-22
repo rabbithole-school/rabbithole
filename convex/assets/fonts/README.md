@@ -18,3 +18,8 @@ Regenerate by downloading the variable font from
 ```
 fonttools varLib.instancer -q -o HankenGrotesk-SemiBold.ttf HankenGrotesk[wght].ttf wght=600
 ```
+
+`hankenGroteskBoldStory.ts` is separate: the Story text font, a Latin + Latin
+Extended-A WOFF with composite glyphs flattened so satori draws capital kahakō
+correctly. Used only by `convex/lib/storyOverlay.ts`; rebuild it with
+`scripts/build-story-font.py`, whose header has the exact commands.

@@ -4,6 +4,8 @@ import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import { isUsableVibecodeStarterApp } from "./vibecodeStarter";
+import { pythonBenchArtifactRow } from "./pythonBench";
+import { isPythonQuestActivity } from "./questApproval";
 
 type SetupResult = {
   seededArtifact: boolean;
@@ -93,8 +95,18 @@ export async function ensureSessionActivitySetup(
   // empty app instead of "Describe the app" and the first build adds a second
   // app (TRA-519). Its starter, when the teacher set one, is seeded below.
   const isApp = isAppActivity(args.activity);
+  // A Python Quest's one activity opens on the Python bench, the way the
+  // tutor's open_python_bench attaches it: the bench IS the session's app, and
+  // its "artifact" deliverable is the program the scholar types in it, never a
+  // blank code canvas.
+  const unitId = args.unitId ?? session.unitId;
+  const isPythonQuest =
+    !isApp &&
+    unitId != null &&
+    isPythonQuestActivity(await ctx.db.get(unitId), args.activity._id);
   const needsCanvas =
     !isApp &&
+    !isPythonQuest &&
     (args.activity.deliverable?.kind === "text" ||
       args.activity.deliverable?.kind === "artifact");
   let starterSnapshot:
@@ -121,13 +133,15 @@ export async function ensureSessionActivitySetup(
     }
   }
   let seededArtifact = false;
-  if (starterSnapshot || needsCanvas) {
+  if (starterSnapshot || needsCanvas || isPythonQuest) {
     const existingArtifact = await ctx.db
       .query("artifacts")
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
       .first();
     if (!existingArtifact) {
-      if (starterSnapshot) {
+      if (isPythonQuest) {
+        await ctx.db.insert("artifacts", pythonBenchArtifactRow(args.sessionId));
+      } else if (starterSnapshot) {
         await ctx.db.insert("artifacts", {
           sessionId: args.sessionId,
           title: starterSnapshot.title,

@@ -1,6 +1,15 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { talkLevelOf } from "./lib/readingLevels";
+import {
+  audienceGroupIds, classFieldsForPush, classMeetingForGive, invalidateClassLinkClasses,
+  loadClassLinkData, syncClassesForPlacements, unitSubjectForWork, type ClassLinkReadCache,
+} from "./lib/classLink";
+import { decidingEntryByActivity } from "./lib/homeOrigin";
 import { publishUnitOnAssign } from "./lib/unitPublication";
+import {
+  NOTHING_TO_OPEN_REFUSAL,
+  appActivityHasNothingToOpen,
+} from "./lib/appActivity";
 import { requireUnitAccessForUser } from "./lib/unitAccess";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -22,16 +31,31 @@ import {
 } from "./lib/curriculumRun";
 import { ROLES, isTeacherRole } from "./lib/roles";
 import {
-  syncScheduleMirror,
-  syncScheduleMirrorAll,
-} from "./lib/scheduleMirror";
+  assignmentAdminScope,
+  mayActOnAssignment,
+} from "./lib/assignmentAuthority";
+import {
+  firstClassIdByWork,
+  scheduleWorkKey as giveWorkKey,
+} from "./lib/homeworkSubject";
+import {
+  anyScheduleReferencesActivity,
+  loadScheduleRows,
+  readSchedule,
+  writeSchedule,
+  type ScheduleCache,
+  type ScheduleReadCtx,
+} from "./lib/scheduleStore";
 import { resolveActivityWebTarget } from "./lib/webActivityTarget";
 import {
   effectiveInstitutionTimeZone,
+  institutionDayForRequest,
   timeZoneForInstitution,
   timeZoneForScholar,
   timeZoneForStaff,
 } from "./lib/institutionTime";
+import { closuresForInstitution, hasUsableDays } from "./academicCalendar";
+import { closuresInWeekOf } from "../shared/homeworkWeek";
 import { ONBOARDING_UNIT_SLUG } from "./onboardingData";
 import {
   DEFAULT_TIMEZONE,
@@ -39,8 +63,9 @@ import {
   shiftDayKey,
   weekdayForDayKey,
 } from "../shared/institutionDay";
-import { isFocusShowing } from "../shared/focusShowing";
+import { isFocusShowing, isScheduleEntryActive } from "../shared/focusShowing";
 import { subjectMatches, uniqueSubjects } from "../lib/subjects";
+import { unitSubjectFitsClass } from "./lib/classResolver";
 import { youtubeVideoId } from "../shared/activityResourceEmbed";
 import { addUrlResource } from "./activityResources";
 import { getGame } from "../lib/games/catalog";
@@ -50,6 +75,7 @@ import type { QueryCtx, MutationCtx } from "./_generated/server";
 import {
   requireActiveScholarAccess,
   requireScholarsAccessible,
+  filterToAccessibleScholars,
   resolveActiveMembership,
 } from "./lib/access";
 import { questionRowForSeed } from "./lib/questionQueue";
@@ -76,16 +102,26 @@ import {
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
 import {
   nextOpenSchoolDayEndAt,
-  nextOpenSchoolDayKey as findNextOpenSchoolDayKey,
   nextOpenSchoolDayKeys as findNextOpenSchoolDayKeys,
   schoolDayEndAt,
 } from "./lib/schoolDays";
 import {
   buildComingUpGroups,
-  type ComingUpHomework,
   type ComingUpPlanned,
 } from "../shared/comingUp";
 import { effectiveActivityKind } from "../shared/appSurface";
+import { isOpenUntil } from "../shared/openUntil";
+import {
+  GiveQuestionError,
+  giveChoices as giveChoicesFor,
+  finishIsHomework,
+  giveFinishValidator,
+  resolveGiveWindow,
+  type GiveFinish,
+  type GiveWindow,
+} from "./lib/giveWindow";
+import { MISSING_FINISH_QUESTION } from "./lib/giveQuestions";
+import { matchByName } from "./lib/nameMatch";
 
 /**
  * Assignments — execution instances of a Unit.
@@ -114,12 +150,14 @@ export function targetsScholar(
   return assignment.scholarIds.some((id) => id === scholarId);
 }
 
-type ScheduleEntry = NonNullable<Doc<"assignments">["activitySchedule"]>[number];
+import type { ScheduleEntry } from "./lib/pushes";
+import { assertProposedQuestRecipients } from "./lib/questStructure";
 
 async function homeworkCalendarForRoster(
   ctx: QueryCtx,
   scholarIds: readonly Id<"users">[],
   institutionHint?: Id<"institutions">,
+  classLinkCache?: ClassLinkReadCache,
 ): Promise<{
   institutionId: Id<"institutions"> | undefined;
   timeZone: string;
@@ -127,7 +165,9 @@ async function homeworkCalendarForRoster(
   if (institutionHint) {
     return {
       institutionId: institutionHint,
-      timeZone: await timeZoneForInstitution(ctx, institutionHint),
+      timeZone: classLinkCache
+        ? (await loadClassLinkData(ctx, institutionHint, classLinkCache)).timeZone
+        : await timeZoneForInstitution(ctx, institutionHint),
     };
   }
   const scholars = await Promise.all(scholarIds.map((id) => ctx.db.get(id)));
@@ -143,24 +183,10 @@ async function homeworkCalendarForRoster(
   const institutionId = scholars[0]?.institutionId;
   return {
     institutionId,
-    timeZone: await timeZoneForInstitution(ctx, institutionId),
+    timeZone: classLinkCache
+      ? (await loadClassLinkData(ctx, institutionId, classLinkCache)).timeZone
+      : await timeZoneForInstitution(ctx, institutionId),
   };
-}
-
-async function defaultHomeworkDueAt(
-  ctx: QueryCtx,
-  scholarIds: readonly Id<"users">[],
-  fromMs = Date.now(),
-  institutionHint?: Id<"institutions">,
-): Promise<number> {
-  const { institutionId, timeZone } = await homeworkCalendarForRoster(
-    ctx,
-    scholarIds,
-    institutionHint,
-  );
-  return (
-    await nextOpenSchoolDayEndAt(ctx, institutionId, fromMs, timeZone)
-  ).dueAt;
 }
 
 async function homeworkDueDateOptionsForRoster(
@@ -225,6 +251,89 @@ async function homeworkInstitutionForAssignment(
     : undefined;
 }
 
+/**
+ * Live give counts for a teacher's chips, worded by finish (TRA-722): an
+ * open-until give is stored as class focus but counted on its own, read with
+ * the same `isOpenUntilEntry` rule every other surface uses. Reads no clock.
+ */
+async function liveGiveCounts(
+  ctx: QueryCtx,
+  assignment: Doc<"assignments">,
+  entries: readonly Pick<ScheduleEntry, "mode" | "setAt" | "startsAt" | "endsAt" | "openUntilKind">[],
+  classLinkCache: ClassLinkReadCache,
+): Promise<{ classFocusCount: number; openUntilCount: number; homeworkCount: number }> {
+  let classFocusCount = 0;
+  let openUntilCount = 0;
+  let homeworkCount = 0;
+  for (const e of entries) {
+    if (e.mode === "homework") homeworkCount++;
+    else if (await isOpenUntilEntry(ctx, assignment, e, classLinkCache)) openUntilCount++;
+    else classFocusCount++;
+  }
+  return { classFocusCount, openUntilCount, homeworkCount };
+}
+
+/**
+ * Is this class focus "open until a date" (shared/openUntil.ts), read in the
+ * assignment's own school time zone?
+ */
+async function isOpenUntilEntry(
+  ctx: QueryCtx,
+  assignment: Doc<"assignments">,
+  entry: Pick<ScheduleEntry, "mode" | "setAt" | "startsAt" | "endsAt" | "openUntilKind">,
+  classLinkCache?: ClassLinkReadCache,
+): Promise<boolean> {
+  if (entry.mode !== "classFocus" || entry.endsAt == null) return false;
+  return isOpenUntil(
+    entry,
+    await timeZoneForAssignment(ctx, assignment, classLinkCache),
+  );
+}
+
+/**
+ * The give's own school time zone: where the teacher set its closing day.
+ * The ONE zone every write path reads a give's open-until window in (giving
+ * it, opening its offline page, marking it done).
+ */
+export async function timeZoneForAssignment(
+  ctx: QueryCtx,
+  assignment: Doc<"assignments">,
+  classLinkCache?: ClassLinkReadCache,
+): Promise<string> {
+  const institutionId = await homeworkInstitutionForAssignment(ctx, assignment);
+  return classLinkCache
+    ? (await loadClassLinkData(ctx, institutionId, classLinkCache)).timeZone
+    : await timeZoneForInstitution(ctx, institutionId);
+}
+
+/**
+ * Queue the clear for a timed class focus at its `endsAt`, returning the job
+ * (undefined when none is due). Open-until work is
+ * never cleared: its entry outlives the close so the Run page can say
+ * "Closed Sat · N of M finished" and the parent plan keeps it in its week.
+ * Every reader closes it on `endsAt` at read time, so the scholar's list
+ * still drops it on time. `autoClearActivity` re-checks, for jobs queued
+ * before an entry became open-until.
+ */
+async function armFocusAutoClear(
+  ctx: MutationCtx,
+  assignment: Doc<"assignments">,
+  activityId: Id<"activities">,
+  entry: Pick<ScheduleEntry, "mode" | "setAt" | "startsAt" | "endsAt" | "openUntilKind">,
+  classLinkCache?: ClassLinkReadCache,
+): Promise<Id<"_scheduled_functions"> | undefined> {
+  if (entry.mode !== "classFocus" || entry.endsAt == null) return undefined;
+  if (entry.endsAt <= Date.now()) return undefined;
+  if (await isOpenUntilEntry(ctx, assignment, entry, classLinkCache)) return undefined;
+  // Armed for this live occurrence (its `setAt`); the caller stores the
+  // handle on the row so clear, archive and a re-time can cancel it.
+  return await ctx.scheduler.runAt(
+    entry.endsAt,
+    internal.assignments.autoClearActivity,
+    { assignmentId: assignment._id, activityId, armedSetAt: entry.setAt },
+  );
+}
+
 export function entryTargetsScholar(
   entry: ScheduleEntry,
   scholarId: Id<"users">,
@@ -236,6 +345,13 @@ export function entryTargetsScholar(
   );
 }
 
+function scheduleWorkKey(
+  assignmentId: Id<"assignments">,
+  activityId: Id<"activities">,
+): string {
+  return `${assignmentId}::${activityId}`;
+}
+
 export type ScholarTimetableContext = {
   periodId: Id<"reportingPeriods"> | null;
   groupIds: Id<"scholarGroups">[];
@@ -243,13 +359,6 @@ export type ScholarTimetableContext = {
   subjectTabs: string[];
   subjectByWork: Map<string, string>;
 };
-
-function scheduleWorkKey(
-  assignmentId: Id<"assignments">,
-  activityId: Id<"activities">,
-): string {
-  return `${assignmentId}::${activityId}`;
-}
 
 /**
  * The scholar's current timetable vocabulary and placement join. Current-term
@@ -328,23 +437,45 @@ export async function scholarTimetableContext(
   };
 }
 
+export { workSubjectLabel } from "./lib/homeworkSubject";
+
 export function resolveScholarWorkSubject(
   timetable: ScholarTimetableContext,
   assignmentId: Id<"assignments"> | null | undefined,
   activityId: Id<"activities"> | null | undefined,
   unitSubject: string | null | undefined,
+  /** The subject of the class the give is filed under (`pushes.classId`). */
+  classSubject?: string | null,
 ): string | null {
+  // The give's filed class comes first (TRA-721), when the scholar's timetable
+  // has a tab for it, so the tab agrees with the label.
+  const matchingClassTab = classSubject?.trim()
+    ? timetable.subjectTabs.find((subject) => subjectMatches(classSubject, subject))
+    : undefined;
+  if (matchingClassTab) return matchingClassTab;
+  // Then the unit's subject, matched to a tab by meaning (TRA-723): a "Social
+  // Studies" unit lands on "Humanities". An exact spelling wins; otherwise the
+  // tab is used only when it is the ONE tab that fits. A unit that fits two
+  // tabs ("Science & Art" beside Science and Art) is not guessed between: it
+  // goes where it went before, the placement's subject or else Other.
+  const unitSubjectText = unitSubject?.trim() ?? "";
+  const fittingTabs = unitSubjectText
+    ? timetable.subjectTabs.filter((subject) =>
+        unitSubjectFitsClass(unitSubjectText, subject),
+      )
+    : [];
+  const matchingTimetableSubject =
+    timetable.subjectTabs.find((subject) => subjectMatches(unitSubject, subject)) ??
+    (fittingTabs.length === 1 ? fittingTabs[0] : undefined);
+  if (matchingTimetableSubject) return matchingTimetableSubject;
+  // Last resort: the timetable placement's subject. A unit with no subject
+  // (about a third of gives) has no other way to land on a tab.
   if (assignmentId && activityId) {
     const placementSubject = timetable.subjectByWork.get(
       scheduleWorkKey(assignmentId, activityId),
     );
     if (placementSubject) return placementSubject;
   }
-
-  const matchingTimetableSubject = timetable.subjectTabs.find((subject) =>
-    subjectMatches(unitSubject, subject),
-  );
-  if (matchingTimetableSubject) return matchingTimetableSubject;
   if (timetable.subjectTabs.length > 0) return null;
   return unitSubject?.trim() || null;
 }
@@ -363,7 +494,7 @@ export function resolveScholarWorkSubject(
  * This is the honest "can the scholar complete this focus solo?" signal. It
  * used to gate the read-only focus lock (a focus the scholar can't
  * self-complete must not padlock their other work — PR #707's root-cause
- * writeup); the lock is gone (shared/focusLock.ts), and it now decides which
+ * writeup); the lock is gone (shared/classFocus.ts), and it now decides which
  * live focus may be HEADLINED to the scholar as what the room is on. See
  * `soloStartableByMe` below.
  */
@@ -426,29 +557,44 @@ export function isEntryBlocking(e: ScheduleEntry, now: number): boolean {
   return e.setAt != null && (!e.endsAt || e.endsAt > now);
 }
 
+/**
+ * Has this class focus's window closed? Only open-until work outlives its
+ * close in the schedule (armFocusAutoClear), so in practice this is a closed
+ * open-until give. Giving that activity again is a fresh give: it must not
+ * inherit the old `setAt` and go live before its new start.
+ */
+export function isClosedFocusEntry(e: ScheduleEntry, now: number): boolean {
+  return (
+    e.mode === "classFocus" &&
+    e.setAt != null &&
+    e.endsAt != null &&
+    e.endsAt <= now
+  );
+}
+
 /** Teacher-visible live entries, with focus and homework clocks kept distinct. */
-function activeScheduleEntries(
+async function activeScheduleEntries(
+  ctx: ScheduleReadCtx,
   assignment: Doc<"assignments">,
   nowMs: number,
   todayDayKey: string,
   timeZone: string,
 ) {
-  const schedule = assignment.activitySchedule ?? [];
+  const schedule = await readSchedule(ctx, assignment);
   return schedule.filter((entry) =>
-    entry.mode === "classFocus"
-      ? isEntryShowing(entry, nowMs, todayDayKey, timeZone)
-      : isLiveEntry(entry, nowMs),
+    isScheduleEntryActive(entry, nowMs, todayDayKey, timeZone),
   );
 }
 
 /** Class-focus entries still showing on this institution day. */
-function showingScheduleEntries(
+async function showingScheduleEntries(
+  ctx: ScheduleReadCtx,
   assignment: Doc<"assignments">,
   nowMs: number,
   todayDayKey: string,
   timeZone: string,
 ) {
-  const schedule = assignment.activitySchedule ?? [];
+  const schedule = await readSchedule(ctx, assignment);
   return schedule.filter((entry) =>
     isEntryShowing(entry, nowMs, todayDayKey, timeZone),
   );
@@ -490,7 +636,7 @@ export async function liveActivityAt(
   if (!a || a.archivedAt) return null;
   if (!targetsScholar(a, scholarId)) return null;
   let best: ScheduleEntry | null = null;
-  for (const e of a.activitySchedule ?? []) {
+  for (const e of await readSchedule(ctx, a)) {
     if (!entryTargetsScholar(e, scholarId)) continue;
     if (e.setAt == null || e.setAt > timestamp) continue;
     if (e.endsAt != null && timestamp >= e.endsAt) continue;
@@ -557,7 +703,7 @@ async function scholarCompletedFocusActivity(
 async function enrichScheduleEntryForScholar(
   ctx: QueryCtx,
   assignment: Doc<"assignments">,
-  entry: NonNullable<Doc<"assignments">["activitySchedule"]>[number],
+  entry: ScheduleEntry,
   scholarId: Id<"users">,
   descriptionAudience: "scholar" | "teacher" = "scholar",
 ) {
@@ -643,7 +789,7 @@ async function enrichScheduleEntryForScholar(
     // scholar-launchable kinds can — an `offline`/`shareBack` focus (e.g. a
     // card-sort done together in class) has no solo surface, so it must NOT be
     // headlined as what the scholar is on (it used to be barred from driving
-    // the read-only lock — PR #707). Applied in shared/focusLock.ts.
+    // the read-only lock — PR #707). Applied in shared/classFocus.ts.
     //
     // Also false once the window has closed. A same-day overrun focus keeps
     // its label but stops being headlined as work that can hold the scholar
@@ -660,13 +806,16 @@ export async function homeworkForScholarFromAssignments(
   scholarId: Id<"users">,
   candidates: readonly Doc<"assignments">[],
   now = Date.now(),
+  // Shared across a loop over many scholars, so each assignment's schedule
+  // is read once per request rather than once per scholar.
+  scheduleCache?: ScheduleCache,
 ) {
   const out: Array<
     Awaited<ReturnType<typeof enrichScheduleEntryForScholar>>
   > = [];
   for (const assignment of candidates) {
     if (assignment.archivedAt || !targetsScholar(assignment, scholarId)) continue;
-    for (const entry of assignment.activitySchedule ?? []) {
+    for (const entry of await readSchedule(ctx, assignment, scheduleCache)) {
       if (!isLiveEntry(entry, now)) continue;
       if (entry.mode !== "homework" || !entryTargetsScholar(entry, scholarId)) {
         continue;
@@ -745,7 +894,28 @@ export const programScheduleOverview = authedQuery({
         groups.push(group);
       }
     }
-    const now = Date.now();
+    const scheduled = await programScheduleRows(ctx, groups, Date.now());
+    return {
+      groups: groups.map((group) => ({
+        groupId: group._id,
+        groupName: group.name,
+      })),
+      scheduled,
+    };
+  },
+});
+
+/**
+ * The live program-homework rows for these groups (the parity check reuses
+ * it). `recipientCount` reads the entry's own `scholarIds` when present —
+ * including an empty list — else the roster.
+ */
+export async function programScheduleRows(
+  ctx: QueryCtx,
+  groups: ReadonlyArray<Doc<"scholarGroups">>,
+  now: number,
+) {
+  {
     const scheduled = [];
     for (const group of groups) {
       const assignments = await ctx.db
@@ -759,7 +929,7 @@ export const programScheduleOverview = authedQuery({
         const unit = assignment.unitId
           ? await ctx.db.get(assignment.unitId)
           : null;
-        for (const entry of assignment.activitySchedule ?? []) {
+        for (const entry of await readSchedule(ctx, assignment)) {
           if (entry.mode !== "homework" || !isLiveEntry(entry, now)) continue;
           const activity = await ctx.db.get(entry.activityId);
           const resources = await resolveReachableActivityResources(
@@ -782,15 +952,9 @@ export const programScheduleOverview = authedQuery({
       }
     }
     scheduled.sort((a, b) => b.sharedAt - a.sharedAt);
-    return {
-      groups: groups.map((group) => ({
-        groupId: group._id,
-        groupName: group.name,
-      })),
-      scheduled,
-    };
-  },
-});
+    return scheduled;
+  }
+}
 
 /**
  * Resolve the authorized program assignment for one activity without changing
@@ -830,6 +994,8 @@ export async function ensureProgramAssignment(
       }
       roster.push(scholar._id);
     }
+    // A proposed Quest goes to no program group (TRA-685).
+    assertProposedQuestRecipients(unit, roster);
     // Assigning a unit publishes it (TRA-490).
     await publishUnitOnAssign(ctx, unit._id, user._id);
 
@@ -855,7 +1021,6 @@ export async function ensureProgramAssignment(
         title: `${group.name} — ${unit.title}`,
         startedAt: Date.now(),
         selfPaced: true,
-        activitySchedule: [],
       });
 
       assignment = (await ctx.db.get(assignmentId))!;
@@ -869,21 +1034,15 @@ export async function ensureProgramAssignment(
       // An absent entry target means "everyone currently on the assignment."
       // Freeze those old entries before widening the assignment roster so a new
       // group member receives today's publish without inheriting prior work.
-      const frozenSchedule = (assignment.activitySchedule ?? []).map((entry) =>
-        entry.scholarIds === undefined
-          ? { ...entry, scholarIds: previousRoster }
-          : entry,
+      const frozenSchedule = (await readSchedule(ctx, assignment)).map(
+        (entry) =>
+          entry.scholarIds === undefined
+            ? { ...entry, scholarIds: previousRoster }
+            : entry,
       );
-      await ctx.db.patch(assignment._id, {
-        scholarIds: nextRoster,
-        activitySchedule: frozenSchedule,
-      });
-      assignment = {
-        ...assignment,
-        scholarIds: nextRoster,
-        activitySchedule: frozenSchedule,
-      };
-      await syncScheduleMirrorAll(ctx, assignment, frozenSchedule);
+      await ctx.db.patch(assignment._id, { scholarIds: nextRoster });
+      assignment = { ...assignment, scholarIds: nextRoster };
+      await writeSchedule(ctx, assignment, frozenSchedule);
     }
 
     return {
@@ -942,7 +1101,7 @@ export const endProgramActivity = authedMutation({
     }
     const now = Date.now();
     let ended = false;
-    const activitySchedule = (assignment.activitySchedule ?? []).map((entry) => {
+    const schedule = (await readSchedule(ctx, assignment)).map((entry) => {
       if (
         entry.activityId !== activityId ||
         entry.mode !== "homework" ||
@@ -954,29 +1113,19 @@ export const endProgramActivity = authedMutation({
       return { ...entry, endsAt: now };
     });
     if (!ended) throw new Error("This activity is no longer available.");
-    await ctx.db.patch(assignment._id, { activitySchedule });
-    // Clear the mirror rather than restamping it. On a homework entry `endsAt`
-    // records an early WITHDRAWAL, and the push shape has no field for that —
-    // its homework timing carries only `dueAt`, so a restamp would leave an
-    // open push until the original due date and hand the work back the moment
-    // reads switch over.
-    await syncScheduleMirror(
-      ctx,
-      { ...assignment, activitySchedule },
-      activityId,
-      null,
-      "teacher",
-    );
+    // Withdrawn homework (`endsAt` on a homework entry) is stored as a closed
+    // row that still reads back as the entry (lib/pushes
+    // isWithdrawnHomeworkEntry), so history survives.
+    await writeSchedule(ctx, assignment, schedule, { activityId });
     return { ended: true };
   },
 });
 
 /**
- * Create a new Assignment. Walks the unit's activities and
- * auto-populates activitySchedule with every defaultMode="homework"
- * activity (immediate homework push for the cohort). classFocus-default
- * activities stay dormant — the teacher pushes them from the Run page
- * when ready.
+ * Create a new Assignment: the cohort × unit row, with nothing on the schedule.
+ * Nothing goes live until a teacher gives an activity and answers both
+ * questions — when it shows up and when they should finish it (TRA-571). The
+ * unit's activities no longer carry a mode of their own.
  */
 export const create = curriculumRunMutation({
   args: {
@@ -997,63 +1146,15 @@ export const create = curriculumRunMutation({
       await requireScholarsAtInstitution(ctx, args.scholarIds, institutionId);
     }
     const teacherId = ctx.user._id;
-    const now = Date.now();
     // Assigning a unit publishes it (TRA-490).
     await publishUnitOnAssign(ctx, args.unitId, teacherId);
-    const unit = await ctx.db.get(args.unitId);
-    const institutionId =
-      unit?.institutionId ??
-      (await resolveActiveMembership(ctx, ctx.user))?.institutionId;
-    let homeworkDueAt: number | null = null;
-
-    // Auto-fill schedule from activities' defaultMode.
-    const lessons = await ctx.db
-      .query("lessons")
-      .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
-      .collect();
-    const autoEntries: Array<{
-      activityId: Id<"activities">;
-      mode: "classFocus" | "homework";
-      setAt: number;
-      dueAt?: number;
-    }> = [];
-    for (const l of lessons) {
-      const acts = await ctx.db
-        .query("activities")
-        .withIndex("by_lesson", (q) => q.eq("lessonId", l._id))
-        .collect();
-      for (const a of acts) {
-        if (a.defaultMode === "homework") {
-          homeworkDueAt ??= await defaultHomeworkDueAt(
-            ctx,
-            args.scholarIds,
-            now,
-            institutionId,
-          );
-          autoEntries.push({
-            activityId: a._id,
-            mode: "homework",
-            setAt: now,
-            dueAt: homeworkDueAt,
-          });
-        }
-      }
-    }
-
-    const newAssignmentId = await ctx.db.insert("assignments", {
+    return await ctx.db.insert("assignments", {
       teacherId,
       unitId: args.unitId,
       scholarIds: Array.from(new Set(args.scholarIds)),
       title: args.title?.trim() || undefined,
-      startedAt: now,
-      activitySchedule: autoEntries,
+      startedAt: Date.now(),
     });
-    await syncScheduleMirrorAll(
-      ctx,
-      (await ctx.db.get(newAssignmentId))!,
-      autoEntries,
-    );
-    return newAssignmentId;
   },
 });
 
@@ -1063,14 +1164,16 @@ export const create = curriculumRunMutation({
  * "Assign" dialog calls — an assignment is never born dateless/inert.
  *
  * `target` picks the granularity:
- *   - activity → schedule that single activity at `startsAt` in `mode`.
+ *   - activity → schedule that single activity at `startsAt`.
  *   - lesson   → land that lesson's activities on `startsAt`.
  *   - unit     → same, across the whole unit's activities in order.
- * Multi-activity (unit/lesson) entries use each activity's own
- * `defaultMode` (classFocus unless the curriculum marks it homework).
- * There's no authored per-activity pacing: a unit/lesson lands everything
- * on `startsAt` (planned, not auto-activated) and the teacher paces it
- * live with Start-now.
+ * Every give answers "when should they finish it?" (`finish`, mapped by
+ * lib/giveWindow.ts; TRA-571). A unit or lesson with no `finish` only makes
+ * the assignment and plans nothing: nothing goes live, and nothing is given
+ * a mode, until a teacher answers both questions for it. There's no authored
+ * per-activity pacing: a unit/lesson given with a finish lands everything on
+ * `startsAt` (planned, not auto-activated) and the teacher paces it live with
+ * Start-now.
  *
  * Find-or-create dedupes the common "assign more of the same unit to the
  * same cohort" case onto one assignment row (instead of spawning a second
@@ -1082,8 +1185,12 @@ const assignWorkTargetValidator = v.union(
   v.object({
     kind: v.literal("activity"),
     activityId: v.id("activities"),
-    mode: v.union(v.literal("classFocus"), v.literal("homework")),
+    // An explicit mode is the legacy answer; prefer `finish` on the args.
+    mode: v.optional(v.union(v.literal("classFocus"), v.literal("homework"))),
     endsAt: v.optional(v.number()),
+    // "Open until" (true) or "in that class" (false) for a raw class-focus
+    // end (TRA-726). Optional: absent, the dates decide, as before.
+    openUntilKind: v.optional(v.boolean()),
     dueAt: v.optional(v.number()),
     // Optional per-scholar targeting (divide & conquer). Subset of
     // `scholarIds`; absent = the whole cohort.
@@ -1097,8 +1204,9 @@ type AssignWorkTarget =
   | {
       kind: "activity";
       activityId: Id<"activities">;
-      mode: "classFocus" | "homework";
+      mode?: "classFocus" | "homework";
       endsAt?: number;
+      openUntilKind?: boolean;
       dueAt?: number;
       scholarIds?: Id<"users">[];
     };
@@ -1110,20 +1218,381 @@ type AssignWorkCoreArgs = {
   title?: string;
   startsAt: number;
   target: AssignWorkTarget;
+  /** "When should they finish it?" — required for an activity give. */
+  finish?: GiveFinish;
 };
+
+/** What a give said about finishing: the two-question answer, or (legacy
+ *  callers such as Start-now on a planned entry) an explicit mode. */
+type GiveAnswer = {
+  finish?: GiveFinish;
+  mode?: "classFocus" | "homework";
+  endsAt?: number;
+  /** With a raw class-focus `endsAt`: the teacher's finish (TRA-726). */
+  openUntilKind?: boolean;
+  dueAt?: number;
+};
+
+
+/**
+ * The entry field that carries a timed class focus's finish (TRA-726). Only
+ * a class focus with an end has one, so nothing else gains the key.
+ */
+function openUntilKindFor(
+  mode: "classFocus" | "homework",
+  endsAt: number | undefined,
+  openUntilKind: boolean | undefined,
+): { openUntilKind?: boolean } {
+  return mode === "classFocus" && endsAt !== undefined && openUntilKind !== undefined
+    ? { openUntilKind }
+    : {};
+}
+
+/**
+ * Turn a give's answer into stored fields. Never defaults: no finish is
+ * refused with the question the teacher has to answer.
+ *
+ * A legacy `mode` (older clients, and controls that re-send an entry the
+ * teacher already answered) still parses, but only counts as an answer where
+ * it says everything: class focus with no end means "in that class" and gets
+ * the bell-block end; an explicit end (Extend +10) or due date is kept; and
+ * homework with no date is refused rather than given an invented one.
+ */
+async function windowForGive(
+  ctx: QueryCtx,
+  args: {
+    roster: readonly Id<"users">[];
+    institutionId: Id<"institutions"> | undefined;
+    startsAt: number;
+    answer: GiveAnswer;
+    schedule?: ReadonlyArray<ScheduleEntry>;
+    activityId?: Id<"activities">;
+  },
+  classLinkCache?: ClassLinkReadCache,
+): Promise<GiveWindow> {
+  const { answer } = args;
+  if (answer.finish) {
+    const { timeZone } = await homeworkCalendarForRoster(
+      ctx,
+      args.roster,
+      args.institutionId,
+      classLinkCache,
+    );
+    return resolveGiveWindow(ctx, {
+      scholarIds: args.roster,
+      timeZone,
+      startsAt: args.startsAt,
+      finish: answer.finish,
+      schedule: args.schedule,
+      activityId: args.activityId,
+    }, classLinkCache);
+  }
+  if (answer.mode === "classFocus" && answer.endsAt !== undefined) {
+    // The caller's finish when it says; absent, the store reads the dates.
+    return { mode: "classFocus", endsAt: answer.endsAt, openUntilKind: answer.openUntilKind };
+  }
+  if (answer.mode === "classFocus") {
+    return windowForGive(ctx, { ...args, answer: { finish: { kind: "inClass" } } }, classLinkCache);
+  }
+  if (answer.mode === "homework" && answer.dueAt !== undefined) {
+    return { mode: "homework", dueAt: answer.dueAt };
+  }
+  throw new GiveQuestionError(MISSING_FINISH_QUESTION);
+}
+
+/** windowForGive for a give on an existing assignment. With
+ *  `reuseLiveFinish` ("more time" for named scholars), an unanswered finish
+ *  takes the activity's live entry as it stands, since the teacher already
+ *  answered for it. */
+async function windowForAssignmentGive(
+  ctx: QueryCtx,
+  a: Doc<"assignments">,
+  args: {
+    startsAt: number;
+    answer: GiveAnswer;
+    scholarIds?: Id<"users">[];
+    activityId: Id<"activities">;
+    reuseLiveFinish?: boolean;
+    /** The give goes live now (`pushActivity`): a raw class focus with no
+     *  end on a PLANNED open-until entry is the Run page's Start now. */
+    startsNow?: boolean;
+  },
+): Promise<GiveWindow> {
+  const schedule = await readSchedule(ctx, a);
+  if (args.reuseLiveFinish && !args.answer.finish && !args.answer.mode) {
+    const live = schedule.find(
+      (entry) => entry.activityId === args.activityId && entry.setAt != null,
+    );
+    if (live) {
+      return {
+        mode: live.mode,
+        endsAt: live.endsAt,
+        dueAt: live.dueAt,
+        openUntilKind: live.openUntilKind,
+      };
+    }
+  }
+  const sameGive = answeredByStoredFinish(schedule, args);
+  if (sameGive) return sameGive;
+  return windowForGive(ctx, {
+    roster: args.scholarIds?.length ? args.scholarIds : a.scholarIds,
+    institutionId: await homeworkInstitutionForAssignment(ctx, a),
+    startsAt: args.startsAt,
+    answer: args.answer,
+    schedule,
+    activityId: args.activityId,
+  });
+}
+
+/** The refusal for Extend (+10) on open-until work (TRA-726). */
+export const EXTEND_OPEN_UNTIL_REFUSAL =
+  "This is open until the end of its day, so it can't be extended by minutes. To keep it open longer, give it again open until a later day.";
+
+/**
+ * A raw class-focus answer (no finish: Extend, Start now, an older client)
+ * takes the teacher's finish from the activity's stored entry (TRA-726), so
+ * the server needs no new argument from the client. Only from an entry that
+ * still stands for this give:
+ *
+ *   - a raw end, against a LIVE entry (started, `endsAt` still ahead): it is
+ *     "in that class" or "open until" as the entry was. Extend on live
+ *     open-until work, which would push its close past midnight, is refused.
+ *   - no end, against a PLANNED open-until entry whose close is still ahead,
+ *     and only when the give goes live now (`startsNow`, the Run page's Start
+ *     now, whose client dropped the end because the close is today): it keeps
+ *     its closing day. A plan (`scheduleActivity`) with no end is a fresh
+ *     in-class give, as before.
+ *
+ * A closed or ended entry answers nothing (open-until work is never cleared,
+ * so `readSchedule` still returns it after its close): the request is a
+ * fresh give, decided as before. Null whenever the caller should resolve the
+ * answer itself.
+ */
+function answeredByStoredFinish(
+  schedule: ReadonlyArray<ScheduleEntry>,
+  args: {
+    answer: GiveAnswer;
+    activityId: Id<"activities">;
+    startsNow?: boolean;
+  },
+): GiveWindow | null {
+  const { answer } = args;
+  if (answer.finish || answer.mode !== "classFocus") return null;
+  const entry = schedule.find(
+    (e) => e.activityId === args.activityId && e.mode === "classFocus",
+  );
+  if (!entry || entry.openUntilKind === undefined || entry.endsAt === undefined) return null;
+  const now = Date.now();
+  if (entry.endsAt <= now) return null;
+  if (answer.endsAt !== undefined) {
+    if (entry.setAt == null) return null;
+    if (entry.openUntilKind && answer.endsAt !== entry.endsAt) {
+      throw new ConvexError(EXTEND_OPEN_UNTIL_REFUSAL);
+    }
+    if (answer.openUntilKind !== undefined) return null;
+    return { mode: "classFocus", endsAt: answer.endsAt, openUntilKind: entry.openUntilKind };
+  }
+  if (args.startsNow && entry.openUntilKind && entry.setAt == null) {
+    return { mode: "classFocus", endsAt: entry.endsAt, openUntilKind: true };
+  }
+  return null;
+}
+
+/** How far in the past a "shows up" time may be and still mean "now": the
+ *  give forms round now down to the minute. */
+const GIVE_START_GRACE_MS = 5 * 60_000;
+
+export const START_PASSED_QUESTION =
+  "That time has already passed. Should it show up now, or at a later time?";
+
+/**
+ * Write an answered give (TRA-571). The finish is resolved AFTER the start is
+ * settled (`resolve(start)`), so "in that class" reads the bell at the moment
+ * the work really shows up:
+ *
+ *   - not yet live: a start that has clearly passed is refused with a
+ *     question; one within the grace window (the forms round now down to the
+ *     minute) means NOW and goes live immediately; a later one is planned with
+ *     an activation job.
+ *   - already live (an edit): the work stays live. A start at or before now
+ *     re-reads the finish at now, so a focus is never stored already expired,
+ *     and a new class end gets its own clear job (applyScheduleActivity). A
+ *     later start re-times it in place.
+ *
+ * Every give detaches a Master Schedule cell linked to the same assignment +
+ * activity: it keeps its subject and loses the link, so reconciliation can't
+ * rewrite the teacher's newer answer.
+ */
+async function applyGive(
+  ctx: MutationCtx,
+  a: Doc<"assignments">,
+  args: {
+    activityId: Id<"activities">;
+    startsAt: number;
+    resolve: (startsAt: number) => Promise<GiveWindow>;
+    scholarIds?: Id<"users">[];
+  },
+  classLinkCache?: ClassLinkReadCache,
+): Promise<void> {
+  // Every push, however it got here, reaches only a proposed Quest's own
+  // proposer (TRA-685, as coreAssignWork).
+  if (a.unitId) {
+    assertProposedQuestRecipients(
+      await ctx.db.get(a.unitId),
+      args.scholarIds ?? a.scholarIds,
+    );
+  }
+  const now = Date.now();
+  const found = (await readSchedule(ctx, a)).find(
+    (entry) => entry.activityId === args.activityId,
+  );
+  // A closed focus is history, not live work to re-time.
+  const existing = found && !isClosedFocusEntry(found, now) ? found : undefined;
+  await detachPlacementsForGive(ctx, a._id, args.activityId, classLinkCache);
+  if (existing?.setAt != null) {
+    const effectiveStart = Math.max(args.startsAt, now);
+    const window = await args.resolve(effectiveStart);
+    // Re-giving live work "in that class" is a new class occurrence (TRA-638).
+    // Readers still date-guess a `focus` row from its `setAt` until TRA-726
+    // step 3, so keeping yesterday's would read today's in-class give as
+    // "Open until <today>". An "open until" re-give is stored as `openUntil`
+    // and needs no new start; it keeps its own.
+    const restartedAt =
+      window.mode === "classFocus" &&
+      window.endsAt !== undefined &&
+      window.openUntilKind !== true &&
+      (await isOpenUntilEntry(ctx, a, { ...window, openUntilKind: undefined, setAt: existing.setAt }, classLinkCache)) &&
+      !(await isOpenUntilEntry(ctx, a, { ...window, openUntilKind: undefined, setAt: now }, classLinkCache))
+        ? now
+        : undefined;
+    await applyScheduleActivity(ctx, a, {
+      activityId: args.activityId,
+      ...window,
+      startsAt: args.startsAt,
+      scholarIds: args.scholarIds,
+      restartedAt,
+    }, true, classLinkCache);
+    return;
+  }
+  if (args.startsAt < now - GIVE_START_GRACE_MS) {
+    throw new GiveQuestionError(START_PASSED_QUESTION);
+  }
+  if (args.startsAt <= now) {
+    await applyPushActivity(ctx, a, {
+      activityId: args.activityId,
+      ...(await args.resolve(now)),
+      scholarIds: args.scholarIds,
+    }, classLinkCache);
+    return;
+  }
+  await applyScheduleActivity(ctx, a, {
+    activityId: args.activityId,
+    ...(await args.resolve(args.startsAt)),
+    startsAt: args.startsAt,
+    scholarIds: args.scholarIds,
+  }, true, classLinkCache);
+}
+
+/** A teacher moving work someone else gave (the grid's Homework due drag). */
+export const NOT_YOUR_GIVE =
+  "Only the teacher who gave this, or a school admin, can move it.";
+
+/** Thrown when an older client asks to give a unit or lesson without a
+ *  finish (deploy skew): never a silent, empty success. */
+export const RELOAD_TO_GIVE =
+  "Rabbithole was updated. Reload the page to give work.";
+
+/** Unlink Master Schedule cells that materialize this assignment + activity
+ *  (see applyGive). A class cell stays on the grid as a plain class meeting:
+ *  its "homework" mode goes too, since that finish now belongs to the give
+ *  and would otherwise pull the empty class into the Homework due row beside
+ *  the give's own card. A row in the homework block has no class to fall
+ *  back to (it existed only to carry this work), so it is removed. */
+async function detachPlacementsForGive(
+  ctx: MutationCtx,
+  assignmentId: Id<"assignments">,
+  activityId: Id<"activities">,
+  classLinkCache?: ClassLinkReadCache,
+): Promise<void> {
+  const linked = await ctx.db
+    .query("schedulePlacements")
+    .withIndex("by_activity", (q) => q.eq("activityId", activityId))
+    .collect();
+  const changed: Doc<"schedulePlacements">[] = [];
+  for (const placement of linked) {
+    if (placement.assignmentId !== assignmentId) continue;
+    const block = placement.blockId ? await ctx.db.get(placement.blockId) : null;
+    if (block?.kind === "homework") {
+      await ctx.db.delete(placement._id);
+      changed.push(placement);
+      continue;
+    }
+    await ctx.db.patch(placement._id, {
+      assignmentId: undefined,
+      activityId: undefined,
+      mode: undefined,
+    });
+    changed.push({ ...placement, mode: undefined });
+  }
+  await syncClassesForPlacements(ctx, changed);
+  if (changed.length > 0 && classLinkCache) {
+    // Detaching can change class membership mid-batch; school/term data is
+    // still valid, but subsequent gives must see the newly synchronized classes.
+    await invalidateClassLinkClasses(classLinkCache);
+  }
+}
+
+export type StoredGiveEntry = {
+  mode: "classFocus" | "homework";
+  setAt: number | null;
+  startsAt: number | null;
+  endsAt: number | null;
+  dueAt: number | null;
+  /** Stored as the `openUntil` timing kind (TRA-726); absent otherwise. */
+  openUntilKind?: true;
+};
+
+/** The entry an assignment now stores for an activity, for honest replies. */
+async function storedEntry(
+  ctx: QueryCtx,
+  assignmentId: Id<"assignments">,
+  activityId: Id<"activities">,
+): Promise<StoredGiveEntry | null> {
+  const a = await ctx.db.get(assignmentId);
+  const entry = (a ? await readSchedule(ctx, a) : []).find(
+    (e) => e.activityId === activityId,
+  );
+  return entry
+    ? {
+        mode: entry.mode,
+        setAt: entry.setAt ?? null,
+        startsAt: entry.startsAt ?? null,
+        endsAt: entry.endsAt ?? null,
+        dueAt: entry.dueAt ?? null,
+        ...(entry.openUntilKind ? { openUntilKind: true as const } : {}),
+      }
+    : null;
+}
 
 export async function coreAssignWork(
   ctx: MutationCtx,
   args: AssignWorkCoreArgs,
-): Promise<{ assignmentId: Id<"assignments">; created: boolean }> {
+): Promise<{
+  assignmentId: Id<"assignments">;
+  created: boolean;
+  // From the stored rows, not the request: a start inside the grace window
+  // or a re-timed live entry is live even when asked for "later".
+  live: boolean;
+}> {
   const teacher = await ctx.db.get(args.teacherId);
   if (!teacher) throw new Error("Teacher not found");
+  const classLinkCache: ClassLinkReadCache = new Map();
   let institutionId: Id<"institutions"> | undefined;
   if (isTeacherRole(teacher.role)) {
     // The unit must be one this teacher may reach — another school's unit (or
     // a Quest of a scholar they can't read) is refused, rather than assigned
     // and published into a foreign tenant. Covers the UI, the aide's
-    // assign_unit (which accepts a raw unitId) and every other caller.
+    // give tool (which accepts a raw unitId) and every other caller.
     const unit = await requireUnitAccessForUser(ctx, teacher, args.unitId);
     institutionId =
       unit.institutionId ??
@@ -1147,6 +1616,10 @@ export async function coreAssignWork(
   }
   const roster = Array.from(new Set(args.scholarIds));
   if (roster.length === 0) throw new Error("Pick at least one scholar.");
+  // A proposed Quest is its proposer's alone: it is assigned to nobody else,
+  // and a proposal not yet approved to nobody (TRA-685). A teacher who wants
+  // a scholar's design for others copies it into their own curriculum.
+  assertProposedQuestRecipients(await ctx.db.get(args.unitId), roster);
   // Assigning a unit publishes it (TRA-490) — on reuse too, so assigning
   // again after an unpublish makes the unit findable again.
   await publishUnitOnAssign(ctx, args.unitId, teacher._id);
@@ -1174,83 +1647,94 @@ export async function coreAssignWork(
       scholarIds: roster,
       title: args.title?.trim() || undefined,
       startedAt: Date.now(),
-      activitySchedule: [],
     });
   }
 
   if (args.target.kind === "activity") {
     const a = (await ctx.db.get(assignmentId))!;
-    const dueAt =
-      args.target.mode === "homework"
-        ? (args.target.dueAt ??
-          (await defaultHomeworkDueAt(
-            ctx,
-            roster,
-            args.startsAt,
-            institutionId,
-          )))
-        : undefined;
-    await applyScheduleActivity(ctx, a, {
-      activityId: args.target.activityId,
-      mode: args.target.mode,
-      startsAt: args.startsAt,
-      endsAt: args.target.endsAt,
-      dueAt,
-      scholarIds: args.target.scholarIds,
-    });
-    return { assignmentId, created };
+    const target = args.target;
+    const scheduleNow = await readSchedule(ctx, a);
+    const resolve = (startsAt: number) =>
+      windowForGive(ctx, {
+        roster: target.scholarIds?.length ? target.scholarIds : roster,
+        institutionId,
+        startsAt,
+        answer: { ...target, finish: args.finish },
+        schedule: scheduleNow,
+        activityId: target.activityId,
+      }, classLinkCache);
+    if (args.finish) {
+      await applyGive(ctx, a, {
+        activityId: target.activityId,
+        startsAt: args.startsAt,
+        resolve,
+        scholarIds: target.scholarIds,
+      }, classLinkCache);
+    } else {
+      // Deploy skew: an older client's legacy mode (lib above).
+      await detachPlacementsForGive(ctx, a._id, target.activityId, classLinkCache);
+      await applyScheduleActivity(ctx, a, {
+        activityId: target.activityId,
+        ...(await resolve(args.startsAt)),
+        startsAt: args.startsAt,
+        scholarIds: target.scholarIds,
+      }, true, classLinkCache);
+    }
+    const stored = await storedEntry(ctx, assignmentId, target.activityId);
+    return { assignmentId, created, live: stored?.setAt != null };
   }
 
-  // unit / lesson → land every activity on the start date. There's no
-  // authored per-activity pacing: everything is planned (setAt null) on
-  // `startsAt` and NOT auto-activated, so a whole unit doesn't flip live
-  // all at once — the teacher paces it live with "Start now" (set focus)
-  // as they reach each piece.
+  // A unit / lesson give always carries a finish from a current client; an
+  // older one gets a reload message, never an empty success.
+  if (!args.finish) throw new Error(RELOAD_TO_GIVE);
+
+  // unit / lesson with a finish → every activity gets that window and shows
+  // up when the teacher said: live now for "now", or planned with an
+  // activation job for a later time (applyGive).
   const activities = await gatherUnitActivities(
     ctx,
     args.unitId,
     args.target.kind === "lesson" ? args.target.lessonId : null,
   );
   const startsAt = args.startsAt;
-  const homeworkDueAt = activities.some(
-    (activity) => activity.defaultMode === "homework",
-  )
-    ? await defaultHomeworkDueAt(
-        ctx,
-        roster,
-        startsAt,
-        institutionId,
-      )
-    : undefined;
+  const finish = args.finish;
+  const scheduleBefore = await readSchedule(ctx, { _id: assignmentId });
+  const resolve = (at: number) =>
+    windowForGive(ctx, {
+      roster,
+      institutionId,
+      startsAt: at,
+      answer: { finish },
+      schedule: scheduleBefore,
+    }, classLinkCache);
+  const givesHomework = finishIsHomework(finish);
+  const given: Id<"activities">[] = [];
   for (let i = 0; i < activities.length; i++) {
     const act = activities[i];
-    const mode: "classFocus" | "homework" =
-      act.defaultMode === "homework" ? "homework" : "classFocus";
     // A draft handout should not roll back an otherwise valid whole-unit or
     // lesson assignment. Single-activity publishing still rejects it below.
     if (
-      mode === "homework" &&
+      givesHomework &&
       act.kind === "offline" &&
       !(await hasReadableOfflineHomeworkContent(ctx, act))
     ) {
       continue;
     }
+    // Same for an app activity with no app that scholars can't build either:
+    // it is left out rather than failing the whole give (give it once its
+    // app exists).
+    if (await appActivityHasNothingToOpen(ctx, act)) continue;
     // Re-fetch each iteration: applyScheduleActivity patches the doc, so
     // a cached copy would clobber prior entries.
     const a = (await ctx.db.get(assignmentId))!;
-    await applyScheduleActivity(
-      ctx,
-      a,
-      {
-        activityId: act._id,
-        mode,
-        startsAt,
-        dueAt: mode === "homework" ? homeworkDueAt : undefined,
-      },
-      false,
-    );
+    await applyGive(ctx, a, { activityId: act._id, startsAt, resolve }, classLinkCache);
+    given.push(act._id);
   }
-  return { assignmentId, created };
+  const after = await readSchedule(ctx, { _id: assignmentId });
+  const live = after.some(
+    (e) => e.setAt != null && given.some((id) => id === e.activityId),
+  );
+  return { assignmentId, created, live };
 }
 
 /**
@@ -1263,14 +1747,8 @@ export async function coreAssignWork(
  */
 export const anyAssignmentReferencesActivityInternal = internalQuery({
   args: { activityId: v.id("activities") },
-  handler: async (ctx, { activityId }) => {
-    const assignments = await ctx.db.query("assignments").collect();
-    return assignments.some((a) =>
-      (a.activitySchedule ?? []).some(
-        (entry) => entry.activityId === activityId,
-      ),
-    );
-  },
+  handler: async (ctx, { activityId }) =>
+    anyScheduleReferencesActivity(ctx, activityId),
 });
 
 export const assignWork = curriculumRunMutation({
@@ -1280,6 +1758,7 @@ export const assignWork = curriculumRunMutation({
     title: v.optional(v.string()),
     startsAt: v.number(),
     target: assignWorkTargetValidator,
+    finish: v.optional(giveFinishValidator),
   },
   handler: async (ctx, args) =>
     (await coreAssignWork(ctx, { ...args, teacherId: ctx.user._id })).assignmentId,
@@ -1321,29 +1800,38 @@ export const pushActivity = curriculumRunMutation({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
-    mode: v.union(v.literal("classFocus"), v.literal("homework")),
+    mode: v.optional(v.union(v.literal("classFocus"), v.literal("homework"))),
+    finish: v.optional(giveFinishValidator),
     endsAt: v.optional(v.number()),
+    // "Open until" (true) or "in that class" (false) for a raw class-focus
+    // end (TRA-726). Optional: absent, the dates decide, as before.
+    openUntilKind: v.optional(v.boolean()),
     dueAt: v.optional(v.number()),
     // Optional per-scholar targeting; subset of the roster, absent = all.
     scholarIds: v.optional(v.array(v.id("users"))),
+    // Give the named scholars more time: add them to the live audience
+    // rather than replacing it (see applyPushActivity).
+    addToLiveAudience: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const a = await requireOwnedAssignment(ctx, args.assignmentId);
     if (!a) return;
     await requireRunnerScope(ctx, a, args.activityId);
+    const { finish: _finish, ...rest } = args;
     await applyPushActivity(ctx, a, {
-      ...args,
-      dueAt:
-        args.mode === "homework"
-          ? (args.dueAt ??
-            (await defaultHomeworkDueAt(
-              ctx,
-              a.scholarIds,
-              Date.now(),
-              await homeworkInstitutionForAssignment(ctx, a),
-            )))
-          : undefined,
+      ...rest,
+      ...(await windowForAssignmentGive(ctx, a, {
+        startsAt: Date.now(),
+        answer: args,
+        scholarIds: args.scholarIds,
+        activityId: args.activityId,
+        reuseLiveFinish: args.addToLiveAudience === true,
+        startsNow: true,
+      })),
     });
+    // Start now, Extend and Give more time are answers too: a linked grid
+    // cell must not reconcile them away.
+    await detachPlacementsForGive(ctx, a._id, args.activityId);
   },
 });
 
@@ -1366,20 +1854,71 @@ export const scheduleActivity = curriculumRunMutation({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
-    mode: v.union(v.literal("classFocus"), v.literal("homework")),
+    mode: v.optional(v.union(v.literal("classFocus"), v.literal("homework"))),
+    finish: v.optional(giveFinishValidator),
     startsAt: v.number(),
     endsAt: v.optional(v.number()),
+    // "Open until" (true) or "in that class" (false) for a raw class-focus
+    // end (TRA-726). Optional: absent, the dates decide, as before.
+    openUntilKind: v.optional(v.boolean()),
     dueAt: v.optional(v.number()),
     // Optional per-scholar targeting; subset of the roster, absent = all.
     scholarIds: v.optional(v.array(v.id("users"))),
   },
-  handler: async (ctx, args) => {
+  handler: (ctx, args) => coreScheduleActivity(ctx, args),
+});
+
+/** The scheduleActivity write, shared with the grid's give moves
+ *  (gridGiveActions.moveGive) so a drag and the Run page behave alike. */
+export async function coreScheduleActivity(
+  ctx: MutationCtx & { user: Doc<"users"> },
+  args: {
+    assignmentId: Id<"assignments">;
+    activityId: Id<"activities">;
+    mode?: "classFocus" | "homework";
+    finish?: GiveFinish;
+    startsAt: number;
+    endsAt?: number;
+    openUntilKind?: boolean;
+    dueAt?: number;
+    scholarIds?: Id<"users">[];
+  },
+): Promise<void> {
+  {
+    // The grid drags a Homework due card through here, so a non-owner gets
+    // the sentence (its toast), not a redacted "Server Error". Same owner rule
+    // as requireOwnedAssignment below; it only changes the words.
+    const owned = await ctx.db.get(args.assignmentId);
+    if (owned && !(await mayActOnAssignment(ctx, ctx.user, owned))) {
+      throw new ConvexError(NOT_YOUR_GIVE);
+    }
     const a = await requireOwnedAssignment(ctx, args.assignmentId);
     if (!a) return;
     await requireRunnerScope(ctx, a, args.activityId);
-    await applyScheduleActivity(ctx, a, args);
-  },
-});
+    const resolve = (startsAt: number) =>
+      windowForAssignmentGive(ctx, a, {
+        startsAt,
+        answer: args,
+        scholarIds: args.scholarIds,
+        activityId: args.activityId,
+      });
+    if (args.finish) {
+      await applyGive(ctx, a, {
+        activityId: args.activityId,
+        startsAt: args.startsAt,
+        resolve,
+        scholarIds: args.scholarIds,
+      });
+      return;
+    }
+    await detachPlacementsForGive(ctx, a._id, args.activityId);
+    const { finish: _finish, ...rest } = args;
+    await applyScheduleActivity(ctx, a, {
+      ...rest,
+      ...(await resolve(args.startsAt)),
+    });
+  }
+}
 
 /**
  * Reschedule a planned entry to a new time. Cancels the old activation
@@ -1448,6 +1987,7 @@ export const listForTeacher = curriculumRunQuery({
     const now = Date.now();
     const timeZone = await timeZoneForStaff(ctx, ctx.user._id);
     const todayDayKey = dayKeyForTimezone(now, timeZone);
+    const classLinkCache: ClassLinkReadCache = new Map();
     const rows = await runnableOwnedRows(
       ctx,
       ctx.user,
@@ -1476,9 +2016,9 @@ export const listForTeacher = curriculumRunQuery({
           // Offline projects are scanned-deliverable containers, not chat
           // sessions — exclude them from cohort rosters / counts / facepiles.
           .filter((p) => !p.isOffline);
-        const schedule = activeScheduleEntries(a, now, todayDayKey, timeZone);
-        const classFocusCount = schedule.filter((e) => e.mode === "classFocus").length;
-        const homeworkCount = schedule.filter((e) => e.mode === "homework").length;
+        const schedule = await activeScheduleEntries(ctx, a, now, todayDayKey, timeZone);
+        const { classFocusCount, openUntilCount, homeworkCount } =
+          await liveGiveCounts(ctx, a, schedule, classLinkCache);
         // Tiny slice of scholar info for the facepile — first 5 + a
         // count so the UI can render "N more".
         const facepileLimit = 5;
@@ -1509,7 +2049,9 @@ export const listForTeacher = curriculumRunQuery({
           sessionCount: sessions.length,
           startedAt: a.startedAt,
           archivedAt: a.archivedAt ?? null,
+          // Class focus not counting open-until gives (TRA-722).
           classFocusCount,
+          openUntilCount,
           homeworkCount,
           facepile,
         };
@@ -1533,18 +2075,20 @@ export const listForUnit = curriculumRunQuery({
     const now = Date.now();
     const timeZone = await timeZoneForStaff(ctx, ctx.user._id);
     const todayDayKey = dayKeyForTimezone(now, timeZone);
+    const classLinkCache: ClassLinkReadCache = new Map();
     const rows = await ctx.db
       .query("assignments")
       .withIndex("by_unit", (q) => q.eq("unitId", unitId))
       .collect();
-    // Scope to the calling teacher — assignments are per-teacher, same
-    // as listForTeacher. (Role-based model: a teacher only manages
-    // their own runs.)
-    const mine = await runnableOwnedRows(
-      ctx,
-      ctx.user,
-      rows.filter((r) => r.teacherId === ctx.user._id),
-    );
+    // Scope to the runs the caller may manage: their own, plus every run at
+    // a school they administer (lib/assignmentAuthority.ts), so a Head of
+    // School can reach another teacher's run from the unit page.
+    const scope = await assignmentAdminScope(ctx, ctx.user);
+    const manageable: Doc<"assignments">[] = [];
+    for (const r of rows) {
+      if (await mayActOnAssignment(ctx, ctx.user, r, scope)) manageable.push(r);
+    }
+    const mine = await runnableOwnedRows(ctx, ctx.user, manageable);
     // Active first (newest → oldest), then archived (newest → oldest).
     mine.sort((a, b) => {
       const aArch = a.archivedAt ? 1 : 0;
@@ -1564,9 +2108,9 @@ export const listForUnit = curriculumRunQuery({
           // Offline projects are scanned-deliverable containers, not chat
           // sessions — exclude them from cohort rosters / counts / facepiles.
           .filter((p) => !p.isOffline);
-        const schedule = activeScheduleEntries(a, now, todayDayKey, timeZone);
-        const classFocusCount = schedule.filter((e) => e.mode === "classFocus").length;
-        const homeworkCount = schedule.filter((e) => e.mode === "homework").length;
+        const schedule = await activeScheduleEntries(ctx, a, now, todayDayKey, timeZone);
+        const { classFocusCount, openUntilCount, homeworkCount } =
+          await liveGiveCounts(ctx, a, schedule, classLinkCache);
         const facepileLimit = 5;
         const facepile = await Promise.all(
           a.scholarIds.slice(0, facepileLimit).map(async (sid) => {
@@ -1593,7 +2137,9 @@ export const listForUnit = curriculumRunQuery({
           sessionCount: sessions.length,
           startedAt: a.startedAt,
           archivedAt: a.archivedAt ?? null,
+          // Class focus not counting open-until gives (TRA-722).
           classFocusCount,
+          openUntilCount,
           homeworkCount,
           facepile,
         };
@@ -1658,6 +2204,8 @@ export const activePushesForTeacher = teacherQuery({
       setAt: number;
       endsAt: number | null;
       dueAt: number | null;
+      /** Stored as the `openUntil` timing kind (TRA-726), for `giveBadge`. */
+      openUntilKind: boolean;
       scholarCount: number;
       timeZone: string;
     }> = [];
@@ -1668,7 +2216,7 @@ export const activePushesForTeacher = teacherQuery({
       // (kind "adHocDispatch") DO populate a schedule yet are also unitId-less,
       // so guard the optional unitId and don't assume a unit exists.
       const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
-      const entries = activeScheduleEntries(a, now, todayDayKey, timeZone);
+      const entries = await activeScheduleEntries(ctx, a, now, todayDayKey, timeZone);
       for (const e of entries) {
         const act = await ctx.db.get(e.activityId);
         const lesson = act?.lessonId ? await ctx.db.get(act.lessonId) : null;
@@ -1690,6 +2238,7 @@ export const activePushesForTeacher = teacherQuery({
           setAt: e.setAt ?? e.startsAt ?? 0,
           endsAt: e.endsAt ?? null,
           dueAt: e.dueAt ?? null,
+          openUntilKind: e.openUntilKind === true,
           scholarCount: a.scholarIds.length,
           timeZone,
         });
@@ -1807,7 +2356,7 @@ export const scheduleForTeacher = teacherQuery({
       if (a.archivedAt) continue;
       if (filterSet && !a.scholarIds.some((id) => filterSet.has(String(id))))
         continue;
-      const entries = a.activitySchedule ?? [];
+      const entries = await readSchedule(ctx, a);
       if (entries.length === 0) continue;
       // Ad-hoc dispatches (kind "adHocDispatch") DO carry an activitySchedule
       // yet are unitId-less, so a populated schedule no longer implies a unit —
@@ -1929,8 +2478,9 @@ export const get = curriculumRunQuery({
         };
       }),
     );
-    const schedule = a.activitySchedule ?? [];
-    const active = activeScheduleEntries(
+    const schedule = await readSchedule(ctx, a);
+    const active = await activeScheduleEntries(
+      ctx,
       a,
       now,
       todayDayKey,
@@ -1976,11 +2526,15 @@ export const get = curriculumRunQuery({
       scholarIds: a.scholarIds,
       startedAt: a.startedAt,
       archivedAt: a.archivedAt ?? null,
+      schedule,
+      // Old response key, derived from the rows (the schema field is gone).
+      // Compatibility for long-lived tabs; remove after 2026-12-01.
       activitySchedule: schedule,
       // The chip and every other teacher "live" surface share the same
       // institution-day focus predicate as the scholar.
-      classFocusCount: active.filter((e) => e.mode === "classFocus").length,
-      homeworkCount: active.filter((e) => e.mode === "homework").length,
+      // Counted by finish: class focus not counting open-until gives, which
+      // have their own count (TRA-722).
+      ...(await liveGiveCounts(ctx, a, active, new Map())),
       // The partition counts deliberately do not use the showing predicate. "Was
       // this sent, or is it still planned?" is one bit — `setAt` — and every
       // surface that answers it must read that same bit, or the header and
@@ -2019,6 +2573,262 @@ export const homeworkDueDateOptions = curriculumRunQuery({
   },
 });
 
+/** The active assignment a give would find-or-create onto (coreAssignWork's
+ *  key: same teacher, same unit, same exact roster). */
+export async function findReusableAssignment(
+  ctx: QueryCtx,
+  teacherId: Id<"users">,
+  unitId: Id<"units">,
+  roster: readonly Id<"users">[],
+): Promise<Doc<"assignments"> | null> {
+  const rosterSet = new Set(roster.map(String));
+  const mine = await ctx.db
+    .query("assignments")
+    .withIndex("by_teacher", (q) => q.eq("teacherId", teacherId))
+    .collect();
+  return (
+    mine.find(
+      (a) =>
+        !a.archivedAt &&
+        a.unitId === unitId &&
+        a.scholarIds.length === rosterSet.size &&
+        a.scholarIds.every((id) => rosterSet.has(String(id))),
+    ) ?? null
+  );
+}
+
+/**
+ * The choices the give form offers (TRA-571): upcoming bell blocks for "Shows
+ * up", and for "Finish" when "in that class" ends, due-day suggestions, and
+ * what "by the end of the unit" means. Pass `assignmentId` for a give on an
+ * existing assignment, or `unitId` + `scholarIds` for one that may create it.
+ * `nowMs` is the client's minute-rounded clock (T11).
+ */
+export const giveChoices = curriculumRunQuery({
+  args: {
+    assignmentId: v.optional(v.id("assignments")),
+    unitId: v.optional(v.id("units")),
+    scholarIds: v.optional(v.array(v.id("users"))),
+    activityId: v.optional(v.id("activities")),
+    nowMs: v.number(),
+    startsAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    let assignment: Doc<"assignments"> | null = null;
+    if (args.assignmentId) {
+      const owned = await ownedAssignmentForRead(ctx, args.assignmentId);
+      if (!owned) return null;
+      assignment = owned.a;
+    }
+    const scope = await authorizeGiveRoster(ctx, ctx.user, {
+      assignment,
+      unitId: args.unitId,
+      scholarIds: args.scholarIds,
+    });
+    if (!scope) return null;
+    // A refusal is a state the give form shows, never a thrown query error
+    // that would take the page down with it.
+    if ("refused" in scope) return { refused: scope.refused };
+    const choices = await giveChoicesFor(ctx, {
+      ...scope,
+      nowMs: args.nowMs,
+      startsAt: args.startsAt,
+      excludeActivityId: args.activityId,
+    });
+    const filed = await filedUnderFor(ctx, scope, args.startsAt ?? args.nowMs,
+      { assignmentId: assignment?._id, unitId: args.unitId });
+    return filed ? { ...choices, ...filed } : choices;
+  },
+});
+
+/**
+ * For classwork showing up at `at`: the class it is filed under, when that
+ * isn't the class meeting then (its unit's subject's class, TRA-725), and the
+ * class meeting then, if any, so the form can say where it shows and where it
+ * is filed. Null when it is filed under the class meeting then, or under
+ * nothing. Asks exactly what the writer asks (lib/scheduleStore:
+ * `classFieldsForPush` with `unitSubjectForWork`, at the give's start), and
+ * compares classes by id. Classwork only: the form leaves it off homework,
+ * whose class can be chosen.
+ */
+async function filedUnderFor(
+  ctx: QueryCtx,
+  scope: { scholarIds: Id<"users">[]; institutionId: Id<"institutions"> | undefined; timeZone: string },
+  at: number,
+  work: { assignmentId?: Id<"assignments">; unitId?: Id<"units"> },
+): Promise<{ filedUnder: string; filedShownIn: string | null } | null> {
+  const institutionId = scope.institutionId;
+  if (!institutionId) return null;
+  const unitSubject = await unitSubjectForWork(ctx, work);
+  if (!unitSubject) return null;
+  const audience = { kind: "scholars" as const, scholarIds: scope.scholarIds };
+  const cache: ClassLinkReadCache = new Map();
+  const { classId } = await classFieldsForPush(ctx, {
+    institutionId, audience, at, timeZone: scope.timeZone, timingKind: "focus", unitSubject,
+  }, cache);
+  if (!classId) return null;
+  const meeting = await classMeetingForGive(ctx, {
+    institutionId, at, timeZone: scope.timeZone,
+    groupIds: await audienceGroupIds(ctx, { institutionId, audience }, cache),
+  }, cache);
+  if (meeting?.classId === classId) return null;
+  const filed = await ctx.db.get(classId);
+  const shownIn = meeting ? await ctx.db.get(meeting.classId) : null;
+  return filed ? { filedUnder: filed.subject, filedShownIn: shownIn?.subject ?? null } : null;
+}
+
+/** The aide's twin of `giveChoices`, for the question a give tool asks when
+ *  an answer is missing. Authorized exactly like the web query, for the
+ *  verified caller. */
+export const aideGiveChoices = internalQuery({
+  args: {
+    callerUserId: v.id("users"),
+    assignmentId: v.optional(v.id("assignments")),
+    scholarIds: v.optional(v.array(v.id("users"))),
+    unitId: v.optional(v.id("units")),
+    activityId: v.optional(v.id("activities")),
+    startsAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) return null;
+    let assignment: Doc<"assignments"> | null = null;
+    if (args.assignmentId) {
+      assignment = await requireOwnedAssignmentBy(
+        ctx,
+        args.assignmentId,
+        args.callerUserId,
+      );
+      if (!assignment) return null;
+    }
+    const scope = await authorizeGiveRoster(ctx, caller, {
+      assignment,
+      unitId: args.unitId,
+      scholarIds: args.scholarIds,
+    });
+    // A refused roster reads as "no choices"; the write that follows reports
+    // the real refusal.
+    if (!scope || "refused" in scope) return null;
+    return await giveChoicesFor(ctx, {
+      ...scope,
+      // t11-ok: an internal query only aide actions call, once per tool call.
+      nowMs: Date.now(),
+      startsAt: args.startsAt,
+      excludeActivityId: args.activityId,
+    });
+  },
+});
+
+/**
+ * The roster a give's choices may describe, authorized for the caller BEFORE
+ * anything about those scholars is read (their groups, bell schedule, school
+ * calendar). It never throws: the give form renders from this.
+ *
+ *   - The assignment's own roster (no explicit scholars): narrowed to the
+ *     scholars the caller can reach right now. A real roster can hold someone
+ *     she can't (a transferred scholar, an Extended Education guest, a group
+ *     shared with another teacher); the choices then describe only the ones
+ *     she can, never more. Nobody reachable → refused.
+ *   - Explicit scholars (a narrower roster, a unit give, a dispatch): every
+ *     one must be on the assignment's roster (if any) and reachable now, or
+ *     the whole request is refused — named scholars fail loudly, not vanish.
+ *
+ * A teacher's reach is `canUserAccessScholar`; a curriculum:run holder's is a
+ * unit she can still run and scholars at its school.
+ */
+async function authorizeGiveRoster(
+  ctx: QueryCtx,
+  caller: Doc<"users">,
+  args: {
+    assignment: Doc<"assignments"> | null;
+    unitId?: Id<"units">;
+    scholarIds?: Id<"users">[];
+  },
+): Promise<
+  | {
+      scholarIds: Id<"users">[];
+      institutionId: Id<"institutions"> | undefined;
+      timeZone: string;
+      schedule: ReadonlyArray<ScheduleEntry> | undefined;
+    }
+  | { refused: string }
+  | null
+> {
+  const REFUSED = "You can't give work to those scholars from here.";
+  const explicit = args.scholarIds?.length ? args.scholarIds : null;
+  let assignment = args.assignment;
+  if (!assignment && !explicit) return null;
+
+  // Where the caller's reach is measured, and who is in it.
+  let institutionId: Id<"institutions"> | undefined;
+  let reachable: (ids: Id<"users">[]) => Promise<Id<"users">[]>;
+  if (isTeacherRole(caller.role)) {
+    reachable = (ids) => filterToAccessibleScholars(ctx, caller, ids);
+    const unitId = assignment?.unitId ?? args.unitId;
+    const unit = unitId ? await ctx.db.get(unitId) : null;
+    institutionId = assignment
+      ? await homeworkInstitutionForAssignment(ctx, assignment)
+      : (unit?.institutionId ??
+        (await resolveActiveMembership(ctx, caller))?.institutionId);
+  } else {
+    const unitId = assignment?.unitId ?? args.unitId;
+    if (!unitId) return null;
+    try {
+      institutionId = (await requireRunnableUnit(ctx, caller, unitId))
+        .institutionId;
+    } catch {
+      return { refused: REFUSED };
+    }
+    const runInstitution = institutionId;
+    reachable = async (ids) => {
+      const out: Id<"users">[] = [];
+      for (const id of ids) {
+        if ((await scholarInstitutionId(ctx, id)) === runInstitution) {
+          out.push(id);
+        }
+      }
+      return out;
+    };
+  }
+
+  let roster: Id<"users">[];
+  if (explicit) {
+    if (assignment) {
+      const onRoster = new Set(assignment.scholarIds.map(String));
+      if (explicit.some((id) => !onRoster.has(String(id)))) {
+        return { refused: "Those scholars aren't on this assignment's roster." };
+      }
+    }
+    if ((await reachable(explicit)).length !== explicit.length) {
+      return { refused: REFUSED };
+    }
+    roster = explicit;
+  } else {
+    roster = await reachable(assignment!.scholarIds);
+    if (roster.length === 0) return { refused: REFUSED };
+  }
+
+  if (!args.assignment && args.unitId) {
+    assignment = await findReusableAssignment(
+      ctx,
+      caller._id,
+      args.unitId,
+      roster,
+    );
+  }
+  const { timeZone } = await homeworkCalendarForRoster(
+    ctx,
+    roster,
+    institutionId,
+  );
+  return {
+    scholarIds: roster,
+    institutionId,
+    timeZone,
+    schedule: assignment ? await readSchedule(ctx, assignment) : undefined,
+  };
+}
+
 /**
  * Per-activity progress for an Assignment — completion roll-up + the
  * current schedule entry (or null) for each activity. Drives the Run
@@ -2030,10 +2840,9 @@ export const activityProgress = curriculumRunQuery({
     const owned = await ownedAssignmentForRead(ctx, assignmentId);
     if (!owned) return null;
     const { a } = owned;
-    const schedule = a.activitySchedule ?? [];
-    const scheduleByActivity = new Map(
-      schedule.map((e) => [String(e.activityId), e]),
-    );
+    const schedule = await readSchedule(ctx, a);
+    // One entry per activity, by the shared rule (never insertion order).
+    const scheduleByActivity = decidingEntryByActivity(schedule, Date.now()); // t11-ok: picks which entry to show; a live entry turning expired re-renders on the next schedule write or reload
     const completions = await ctx.db
       .query("activityCompletions")
       .withIndex("by_assignment", (q) => q.eq("assignmentId", assignmentId))
@@ -2072,7 +2881,6 @@ export const activityProgress = curriculumRunQuery({
                     activityId: act._id,
                     title: act.title,
                     kind: act.kind,
-                    defaultMode: act.defaultMode ?? "either",
                     completedScholarIds: Array.from(done),
                     selfMarked: selfMarkedByActivity.get(String(act._id)) ?? [],
                     doneCount: done.size,
@@ -2088,6 +2896,8 @@ export const activityProgress = curriculumRunQuery({
                       planned: entry.setAt == null,
                       endsAt: entry.endsAt ?? null,
                       dueAt: entry.dueAt ?? null,
+                      // Same shape as a lesson row's schedule (TRA-726).
+                      openUntilKind: entry.openUntilKind ?? null,
                       scholarIds: entry.scholarIds ?? null,
                     },
                   };
@@ -2153,7 +2963,6 @@ export const activityProgress = curriculumRunQuery({
               activityId: act._id,
               title: act.title,
               kind: act.kind,
-              defaultMode: act.defaultMode ?? "either",
               completedScholarIds: Array.from(done),
               selfMarked: selfMarkedByActivity.get(String(act._id)) ?? [],
               doneCount,
@@ -2168,6 +2977,9 @@ export const activityProgress = curriculumRunQuery({
                     planned: entry.setAt == null,
                     endsAt: entry.endsAt ?? null,
                     dueAt: entry.dueAt ?? null,
+                    // Stored as the `openUntil` kind (TRA-726), for
+                    // `isOpenUntil` on the Run page.
+                    openUntilKind: entry.openUntilKind ?? null,
                     // Who it's aimed at (absent = the whole roster). The Run
                     // page's "Start now" hands these straight back to
                     // pushActivity so releasing a planned entry keeps its
@@ -2189,7 +3001,7 @@ export const getForReview = teacherQuery({
   args: { assignmentId: v.id("assignments") },
   handler: async (ctx, { assignmentId }) => {
     const a = await ctx.db.get(assignmentId);
-    if (!a || a.teacherId !== ctx.user._id) return null;
+    if (!a || !(await mayActOnAssignment(ctx, ctx.user, a))) return null;
     // A standing (unitId-less) assignment has no unit/process to resolve.
     const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
     const processId = unit?.processId ?? null;
@@ -2285,18 +3097,19 @@ export const currentClassFocusForMe = authedQuery({
     const timeZone = await timeZoneForStaff(ctx, user._id);
     const todayDayKey = dayKeyForTimezone(now, timeZone);
     const candidates = await ctx.db.query("assignments").collect();
-    const filtered = candidates.filter((a) => {
-      if (a.archivedAt) return false;
-      if (a.teacherId !== user._id) return false;
-      return activeScheduleEntries(a, now, todayDayKey, timeZone).some(
-        (e) => e.mode === "classFocus",
-      );
-    });
     const out: Array<
       Awaited<ReturnType<typeof enrichScheduleEntryForScholar>>
     > = [];
-    for (const a of filtered) {
-      for (const e of activeScheduleEntries(a, now, todayDayKey, timeZone)) {
+    for (const a of candidates) {
+      if (a.archivedAt) continue;
+      if (a.teacherId !== user._id) continue;
+      for (const e of await activeScheduleEntries(
+        ctx,
+        a,
+        now,
+        todayDayKey,
+        timeZone,
+      )) {
         if (e.mode !== "classFocus") continue;
         out.push(
           await enrichScheduleEntryForScholar(ctx, a, e, user._id, "teacher"),
@@ -2315,10 +3128,10 @@ export const currentClassFocusForMe = authedQuery({
  * scholar. Onboarding ("Welcome to Rabbithole") is excluded (it owns its own
  * pin), and a class focus the scholar has already completed no longer appears
  * — a finished focus stops being surfaced the instant the work is done.
- * Entries are sorted most-recent-first, which `pickLockingFocus` relies on.
+ * Entries are sorted most-recent-first, which `pickLiveFocus` relies on.
  */
 export async function scholarClassFocusEntries(
-  ctx: QueryCtx,
+  ctx: QueryCtx & ScheduleReadCtx,
   scholarId: Id<"users">,
 ): Promise<Array<Awaited<ReturnType<typeof enrichScheduleEntryForScholar>>>> {
   const now = Date.now();
@@ -2330,23 +3143,27 @@ export async function scholarClassFocusEntries(
     .first();
   const onboardingUnitId = onboardingUnit?._id ?? null;
   const candidates = await ctx.db.query("assignments").collect();
-  const filtered = candidates.filter((a) => {
-    if (a.archivedAt) return false;
-    if (!targetsScholar(a, scholarId)) return false;
-    if (onboardingUnitId && String(a.unitId ?? "") === String(onboardingUnitId))
-      return false;
-    return showingScheduleEntries(a, now, todayDayKey, timeZone).some(
-      (e) => e.mode === "classFocus",
-    );
-  });
   const out: Array<
     Awaited<ReturnType<typeof enrichScheduleEntryForScholar>>
   > = [];
-  for (const a of filtered) {
+  for (const a of candidates) {
+    if (a.archivedAt) continue;
+    if (!targetsScholar(a, scholarId)) continue;
+    if (onboardingUnitId && String(a.unitId ?? "") === String(onboardingUnitId))
+      continue;
     // Showing, not blocking: an overrun focus still belongs on today's ladder,
     // while `enrichScheduleEntryForScholar` independently drops its wall.
-    for (const e of showingScheduleEntries(a, now, todayDayKey, timeZone)) {
+    for (const e of await showingScheduleEntries(
+      ctx,
+      a,
+      now,
+      todayDayKey,
+      timeZone,
+    )) {
       if (e.mode !== "classFocus") continue;
+      // Open until a later day is Homework, not the class section
+      // (shared/openUntil.ts), even though it is stored as class focus.
+      if (isOpenUntil(e, timeZone)) continue;
       if (!entryTargetsScholar(e, scholarId)) continue;
       if (await scholarCompletedFocusActivity(ctx, scholarId, e.activityId, a))
         continue;
@@ -2366,37 +3183,60 @@ export const homeworkForMe = authedQuery({
     if (args.asLearner === true) {
       await requireActiveLearnerInstitution(ctx, user._id);
     }
-    return await homeworkForScholar(ctx, user._id);
+    const rows = await homeworkForScholar(ctx, user._id);
+    // Each row carries the closures of its own due week, so the session
+    // header can apply the "this week" display rule (shared/homeworkWeek.ts)
+    // without a second subscription. Usually an empty array.
+    const institutionId = await scholarInstitutionId(ctx, user._id);
+    const closures =
+      institutionId && rows.some((row) => row.dueAt != null)
+        ? (await closuresForInstitution(ctx, institutionId))
+            .filter(hasUsableDays)
+            .map(({ startDayKey, endDayKey, label }) => ({
+              startDayKey,
+              endDayKey,
+              label,
+            }))
+        : [];
+    return rows.map((row) => ({
+      ...row,
+      dueWeekClosures:
+        row.dueAt != null
+          ? closuresInWeekOf(dayKeyForTimezone(row.dueAt, row.timeZone), closures)
+          : [],
+    }));
   },
 });
 
 /**
- * Today's planned, not-yet-live work for the calling scholar. `dayKey` only
- * re-arms the reactive query at local midnight; the server always derives and
- * returns the institution-authoritative day.
+ * Today's planned, not-yet-live work for the calling scholar, for the
+ * institution-local `dayKey` the client sends (its `useInstitutionDay`, which
+ * re-arms at institution midnight). Answering for the client's day keeps the
+ * subscription off the server clock (T11). `institutionDayForRequest` honors a
+ * neighbouring day only within minutes of midnight, so tomorrow's entries never
+ * leave the server early; any other key gets the server's own day.
  */
 export const todayScheduleForSelf = authedQuery({
   args: {
     dayKey: v.string(),
     includeWebActivities: v.optional(v.boolean()),
   },
-  handler: async (ctx, args) => {
-    const scholar = ctx.user;
+  handler: async (ctx, args) => todayScheduleForScholar(ctx, ctx.user, args),
+});
+
+/** todayScheduleForSelf for an already-resolved scholar (the parity check reuses it). */
+export async function todayScheduleForScholar(
+  ctx: QueryCtx,
+  scholar: Doc<"users">,
+  args: { dayKey: string; includeWebActivities?: boolean },
+) {
+  {
     const timeZone = await timeZoneForScholar(ctx, scholar._id);
-    const dayKey = dayKeyForTimezone(Date.now(), timeZone);
+    const { dayKey } = institutionDayForRequest(args.dayKey, timeZone);
     const institutionId = await scholarInstitutionId(ctx, scholar._id);
-    // Read the caller value so the cache-buster remains an explicit part of the
-    // contract; it never controls which day leaves the server.
-    void args.dayKey;
     if (!(await hasScholarMembership(ctx, scholar._id)) || !institutionId) {
-      return { timeZone, dayKey, nextOpenSchoolDayKey: null, entries: [] };
+      return { timeZone, dayKey, entries: [] };
     }
-    const nextOpenDayKey = await findNextOpenSchoolDayKey(
-      ctx,
-      institutionId,
-      dayKey,
-      timeZone,
-    );
 
     const timetable = await scholarTimetableContext(ctx, scholar);
     const assignments = await ctx.db.query("assignments").collect();
@@ -2415,6 +3255,17 @@ export const todayScheduleForSelf = authedQuery({
       completedByMe: boolean;
     }> = [];
 
+    const classSubjects = new Map<Id<"classes">, string | null>();
+    const filedClassSubject = async (
+      classId: Id<"classes"> | undefined,
+    ): Promise<string | null> => {
+      if (!classId) return null;
+      if (!classSubjects.has(classId)) {
+        classSubjects.set(classId, (await ctx.db.get(classId))?.subject ?? null);
+      }
+      return classSubjects.get(classId) ?? null;
+    };
+
     for (const assignment of assignments) {
       if (assignment.archivedAt || !targetsScholar(assignment, scholar._id)) {
         continue;
@@ -2422,7 +3273,9 @@ export const todayScheduleForSelf = authedQuery({
       const unit = assignment.unitId
         ? await ctx.db.get(assignment.unitId)
         : null;
-      for (const entry of assignment.activitySchedule ?? []) {
+      const scheduleRows = await loadScheduleRows(ctx, assignment._id);
+      const filedClasses = firstClassIdByWork(scheduleRows);
+      for (const entry of await readSchedule(ctx, assignment, undefined, scheduleRows)) {
         if (
           entry.setAt != null ||
           entry.startsAt == null ||
@@ -2443,6 +3296,9 @@ export const todayScheduleForSelf = authedQuery({
         ) {
           continue;
         }
+        const filedClassId = filedClasses.get(
+          giveWorkKey(entry.activityId, entry.mode),
+        );
         entries.push({
           assignmentId: assignment._id,
           activityId: entry.activityId,
@@ -2456,6 +3312,7 @@ export const todayScheduleForSelf = authedQuery({
             assignment._id,
             entry.activityId,
             unit?.subject,
+            await filedClassSubject(filedClassId),
           ),
           mode: entry.mode,
           startsAt: entry.startsAt,
@@ -2466,12 +3323,13 @@ export const todayScheduleForSelf = authedQuery({
     }
 
     entries.sort((a, b) => a.startsAt - b.startsAt);
-    return { timeZone, dayKey, nextOpenSchoolDayKey: nextOpenDayKey, entries };
-  },
-});
+    return { timeZone, dayKey, entries };
+  }
+}
 
 /** How many open school days the scholar lookahead spans (see comingUpForSelf). */
 const COMING_UP_HORIZON_OPEN_DAYS = 5;
+
 
 /**
  * The scholar "Coming up" lookahead — a week-scoped sibling of
@@ -2480,14 +3338,12 @@ const COMING_UP_HORIZON_OPEN_DAYS = 5;
  *
  * Over the NEXT 5 OPEN SCHOOL DAYS (weekends + calendar closures skipped, so
  * the window rolls into next week rather than collapsing on a Thursday/Friday)
- * it returns, grouped by institution-local day:
- *   (a) live homework whose `dueAt` falls AFTER the next open school day — the
- *       tonight card (`filterHomeworkForNow`) owns everything due on or before
- *       it, so Coming up begins exactly where tonight ends; and
- *   (b) schedule-committed planned placements (setAt == null AND a real
- *       `startsAt`) landing in the horizon.
+ * it returns schedule-committed planned placements (setAt == null AND a real
+ * `startsAt`) landing in the horizon, grouped by institution-local day.
+ * Homework is not here: every live homework item is on the scholar's "Your
+ * list" (shared/homeworkList.ts), whatever its due date.
  *
- * (b) DELIBERATELY WIDENS the planned-work visibility boundary. Today, future
+ * This DELIBERATELY WIDENS the planned-work visibility boundary. Today, future
  * planned work is teacher-only until activation; the sole scholar exception was
  * `todayScheduleForSelf`, which exposes only TODAY's planned entries. This
  * reveals schedule-committed placements for the next 5 open school days as
@@ -2498,18 +3354,26 @@ const COMING_UP_HORIZON_OPEN_DAYS = 5;
  *
  * The minute-rounded client timestamp (`now`) is an intentional reactive
  * dependency: Convex re-runs the query as wall-clock time passes — across the
- * institution-local midnight (rolling the horizon) and as a live entry's
- * `endsAt` elapses — without the client having to invent or know a day key. The
- * server still derives and returns the institution-authoritative day, and reads
- * `now` only as its time source (the client cannot spoof the timezone).
+ * institution-local midnight (rolling the horizon) — without the client having
+ * to invent or know a day key. The server still derives and returns the
+ * institution-authoritative day, and reads `now` only as its time source (the
+ * client cannot spoof the timezone).
  */
 export const comingUpForSelf = authedQuery({
   args: {
     now: v.number(),
     includeWebActivities: v.optional(v.boolean()),
   },
-  handler: async (ctx, args) => {
-    const scholar = ctx.user;
+  handler: async (ctx, args) => comingUpForScholar(ctx, ctx.user, args),
+});
+
+/** comingUpForSelf for an already-resolved scholar (the parity check reuses it). */
+export async function comingUpForScholar(
+  ctx: QueryCtx,
+  scholar: Doc<"users">,
+  args: { now: number; includeWebActivities?: boolean },
+) {
+  {
     const timeZone = await timeZoneForScholar(ctx, scholar._id);
     const now = args.now;
     const dayKey = dayKeyForTimezone(now, timeZone);
@@ -2538,34 +3402,20 @@ export const comingUpForSelf = authedQuery({
     const horizonSet = new Set(horizonDayKeys);
 
     const assignments = await ctx.db.query("assignments").collect();
-    const homework: ComingUpHomework[] = [];
     const planned: ComingUpPlanned[] = [];
 
     for (const assignment of assignments) {
       if (assignment.archivedAt || !targetsScholar(assignment, scholar._id)) {
         continue;
       }
-      for (const entry of assignment.activitySchedule ?? []) {
+      for (const entry of await readSchedule(ctx, assignment)) {
         if (!entryTargetsScholar(entry, scholar._id)) continue;
-
-        const dueDayKey =
-          entry.dueAt != null
-            ? dayKeyForTimezone(entry.dueAt, timeZone)
-            : null;
-        const isLiveHomework =
-          entry.mode === "homework" &&
-          isLiveEntry(entry, now) &&
-          entry.dueAt != null &&
-          dueDayKey != null &&
-          horizonSet.has(dueDayKey) &&
-          dueDayKey > nextOpenSchoolDayKey;
 
         const isCommittedPlanned =
           entry.setAt == null &&
           entry.startsAt != null &&
           horizonSet.has(dayKeyForTimezone(entry.startsAt, timeZone));
-
-        if (!isLiveHomework && !isCommittedPlanned) continue;
+        if (!isCommittedPlanned) continue;
 
         const enriched = await enrichScheduleEntryForScholar(
           ctx,
@@ -2579,51 +3429,24 @@ export const comingUpForSelf = authedQuery({
         ) {
           continue;
         }
-        const display = {
+        planned.push({
+          kind: "planned",
           assignmentId: String(assignment._id),
           activityId: String(entry.activityId),
           activityTitle: enriched.activityTitle ?? "(deleted activity)",
           unitTitle: enriched.unitTitle,
           unitEmoji: enriched.unitEmoji,
           teacherName: enriched.teacherName,
-        };
-        if (isLiveHomework) {
-          // Mirror the homework list's offline-content guard so an empty
-          // offline homework never surfaces here as a phantom deadline.
-          if (
-            enriched.activityKind === "offline" &&
-            !enriched.description?.trim()
-          ) {
-            const activity = await ctx.db.get(entry.activityId);
-            if (
-              !activity ||
-              !(await hasReadableOfflineHomeworkContent(ctx, activity))
-            ) {
-              continue;
-            }
-          }
-          homework.push({ kind: "homework", ...display, dueAt: entry.dueAt! });
-        } else {
-          planned.push({
-            kind: "planned",
-            ...display,
-            startsAt: entry.startsAt!,
-          });
-        }
+          startsAt: entry.startsAt!,
+        });
       }
     }
 
-    const groups = buildComingUpGroups({
-      homework,
-      planned,
-      horizonDayKeys,
-      nextOpenSchoolDayKey,
-      timeZone,
-    });
+    const groups = buildComingUpGroups({ planned, horizonDayKeys, timeZone });
 
     return { timeZone, dayKey, nextOpenSchoolDayKey, horizonDayKeys, groups };
-  },
-});
+  }
+}
 
 /** Recently archived for the teacher dashboard's "today" widget. */
 export const recentlyArchivedForTeacher = teacherQuery({
@@ -2676,13 +3499,17 @@ export const recentlyArchivedForTeacher = teacherQuery({
 
 // ─── Internals ───────────────────────────────────────────────────────
 
+/** The assignment, when the caller owns it or is an admin over its school
+ *  (lib/assignmentAuthority.ts); throws "Not your assignment" otherwise. */
 async function requireOwnedAssignment(
-  ctx: { db: QueryCtx["db"] } & { user: { _id: Id<"users"> } },
+  ctx: (QueryCtx | MutationCtx) & { user: Pick<Doc<"users">, "_id" | "role"> },
   assignmentId: Id<"assignments">,
 ) {
   const a = await ctx.db.get(assignmentId);
   if (!a) return null;
-  if (a.teacherId !== ctx.user._id) throw new Error("Not your assignment");
+  if (!(await mayActOnAssignment(ctx, ctx.user, a))) {
+    throw new Error("Not your assignment");
+  }
   return a;
 }
 
@@ -2761,7 +3588,7 @@ async function ownedAssignmentForRead(
   assignmentId: Id<"assignments">,
 ): Promise<{ a: Doc<"assignments">; isTeacher: boolean } | null> {
   const a = await ctx.db.get(assignmentId);
-  if (!a || a.teacherId !== ctx.user._id) return null;
+  if (!a || !(await mayActOnAssignment(ctx, ctx.user, a))) return null;
   const isTeacher = isTeacherRole(ctx.user.role);
   if (!isTeacher) {
     try {
@@ -2783,11 +3610,10 @@ async function cancelPendingActivation(
   assignment: Doc<"assignments">,
   activityId: Id<"activities">,
 ) {
-  const entry = (assignment.activitySchedule ?? []).find(
-    (e) => e.activityId === activityId,
-  );
-  if (entry?.scheduledFnId) {
-    await ctx.scheduler.cancel(entry.scheduledFnId);
+  for (const entry of await readSchedule(ctx, assignment)) {
+    if (entry.activityId === activityId && entry.scheduledFnId) {
+      await ctx.scheduler.cancel(entry.scheduledFnId);
+    }
   }
 }
 
@@ -2824,7 +3650,7 @@ function normalizeTargeting(
 }
 
 /**
- * Every write into `activitySchedule` goes through applySchedule/applyPush,
+ * Every schedule write goes through applySchedule/applyPush,
  * so this one guard keeps archived (and deleted) activities out of the live
  * push layer no matter which teacher surface initiated it. Bulk unit/lesson
  * assigns filter archived children earlier (gatherUnitActivities), and the
@@ -2832,13 +3658,21 @@ function normalizeTargeting(
  */
 async function assertSchedulableActivity(
   ctx: MutationCtx,
+  a: Doc<"assignments">,
   activityId: Id<"activities">,
-  mode: "classFocus" | "homework",
+  // The give's window, enough to tell "Open until a date" from "In that
+  // class" (shared/openUntil.ts).
+  window: Pick<ScheduleEntry, "mode" | "setAt" | "startsAt" | "endsAt" | "openUntilKind">,
+  // The activity is already live on this assignment (an extend, a re-time,
+  // more scholars): scholars already have it, so the go-live check below
+  // does not apply.
+  opts: { alreadyLive?: boolean; classLinkCache?: ClassLinkReadCache } = {},
 ): Promise<void> {
+  const mode = window.mode;
   const act = await ctx.db.get(activityId);
-  if (!act) throw new Error("Can't schedule: this activity was deleted.");
+  if (!act) throw new ConvexError("Can't schedule: this activity was deleted.");
   if (act.archivedAt) {
-    throw new Error(
+    throw new ConvexError(
       "Can't schedule an archived activity — unarchive it first.",
     );
   }
@@ -2847,10 +3681,36 @@ async function assertSchedulableActivity(
     act.kind === "offline" &&
     !(await hasReadableOfflineHomeworkContent(ctx, act))
   ) {
-    throw new Error(
-      "Can't schedule empty offline homework — add instructions or materials first.",
+    throw new ConvexError(
+      "Add instructions or materials first, then give it as homework.",
     );
   }
+  // Offline work given "Open until a date" reaches scholars the way offline
+  // homework does, as a page they open and read on their own (scholarPlate.ts
+  // `unstartedAssignedRowSurface`), so it needs something to read too.
+  // Offline work given "In that class" is led by the teacher and needs none.
+  if (
+    mode === "classFocus" &&
+    act.kind === "offline" &&
+    (await isOpenUntilEntry(ctx, a, window, opts.classLinkCache)) &&
+    !(await hasReadableOfflineHomeworkContent(ctx, act))
+  ) {
+    throw new ConvexError("Add instructions or materials first, then give it.");
+  }
+  if (!opts.alreadyLive && (await appActivityHasNothingToOpen(ctx, act))) {
+    throw new ConvexError(NOTHING_TO_OPEN_REFUSAL);
+  }
+}
+
+/** The activity already has a live entry on this assignment. */
+async function isLiveOnAssignment(
+  ctx: MutationCtx,
+  a: Doc<"assignments">,
+  activityId: Id<"activities">,
+): Promise<boolean> {
+  return (await readSchedule(ctx, a)).some(
+    (e) => e.activityId === activityId && e.setAt != null,
+  );
 }
 
 export async function applyScheduleActivity(
@@ -2861,44 +3721,111 @@ export async function applyScheduleActivity(
     mode: "classFocus" | "homework";
     startsAt: number;
     endsAt?: number;
+    /** A timed class focus: the teacher's finish (`ScheduleEntry.openUntilKind`). */
+    openUntilKind?: boolean;
     dueAt?: number;
     scholarIds?: Id<"users">[];
+    /** Homework given for a named class (TRA-581). */
+    homeworkClassId?: Id<"classes">;
+    /** A live entry re-given as a new class occurrence: its new `setAt`
+     *  (applyGive, TRA-638). */
+    restartedAt?: number;
   },
   // When false, the entry is planned but gets NO activation job — it
   // sits on the agenda at `startsAt` and only goes live on an explicit
   // Start now. Used for un-paced bulk assigns, so a whole unit dropped on
   // one date doesn't flip every activity live at the same instant.
   autoActivate = true,
+  classLinkCache?: ClassLinkReadCache,
 ) {
-  await assertSchedulableActivity(ctx, args.activityId, args.mode);
-  const now = Date.now();
-  const existing = (a.activitySchedule ?? []).find(
-    (e) => e.activityId === args.activityId,
-  );
-  // Replacing whatever's there for this activity — cancel its pending job.
-  await cancelPendingActivation(ctx, a, args.activityId);
-  const base = (a.activitySchedule ?? []).filter(
-    (e) => e.activityId !== args.activityId,
-  );
-  // Only schedule activation for a FUTURE start. Past starts stay
-  // planned (no auto-push) until an explicit Start now.
-  let scheduledFnId: Id<"_scheduled_functions"> | undefined;
-  if (existing?.setAt == null && autoActivate && args.startsAt > now) {
-    scheduledFnId = await ctx.scheduler.runAt(
-      args.startsAt,
-      internal.assignments.activateScheduledActivity,
-      { assignmentId: a._id, activityId: args.activityId },
+  // A proposed Quest reaches only its proposer (TRA-685, as coreAssignWork).
+  if (a.unitId) {
+    assertProposedQuestRecipients(
+      await ctx.db.get(a.unitId),
+      args.scholarIds ?? a.scholarIds,
     );
+  }
+  const now = Date.now();
+  const current = await readSchedule(ctx, a);
+  const found = current.find((e) => e.activityId === args.activityId);
+  // A closed focus (open-until work past its close) is replaced by a fresh
+  // plan: it keeps neither its old `setAt` nor its old audience.
+  const existing = found && !isClosedFocusEntry(found, now) ? found : undefined;
+  const setAt =
+    existing?.setAt != null ? (args.restartedAt ?? existing.setAt) : undefined;
+  // Judge the entry this call will store (a closed one's old `setAt` is
+  // dropped above), so re-planning old open-until work "In that class" is
+  // never read as open-until.
+  await assertSchedulableActivity(
+    ctx,
+    a,
+    args.activityId,
+    {
+      mode: args.mode,
+      setAt,
+      startsAt: args.startsAt,
+      endsAt: args.endsAt,
+      openUntilKind: args.openUntilKind,
+    },
+    {
+      alreadyLive: await isLiveOnAssignment(ctx, a, args.activityId),
+      classLinkCache,
+    },
+  );
+  // A live class focus re-applied with the SAME end keeps its auto-clear job
+  // (the recurring re-materialization re-applies this path every tick and
+  // must stay idempotent). A restarted one is a new occurrence and re-arms.
+  const keepsAutoClear =
+    existing?.setAt != null &&
+    setAt === existing.setAt &&
+    existing.mode === "classFocus" &&
+    args.mode === "classFocus" &&
+    args.endsAt === existing.endsAt &&
+    (args.openUntilKind ?? existing.openUntilKind) === existing.openUntilKind;
+  // Otherwise the entry's job (activation, or a live focus's auto-clear) is
+  // replaced: cancel it.
+  if (!keepsAutoClear) await cancelPendingActivation(ctx, a, args.activityId);
+  const base = current.filter((e) => e.activityId !== args.activityId);
+  let scheduledFnId: Id<"_scheduled_functions"> | undefined;
+  if (existing?.setAt == null) {
+    // Only schedule activation for a FUTURE start. Past starts stay
+    // planned (no auto-push) until an explicit Start now.
+    if (autoActivate && args.startsAt > now) {
+      scheduledFnId = await ctx.scheduler.runAt(
+        args.startsAt,
+        internal.assignments.activateScheduledActivity,
+        { assignmentId: a._id, activityId: args.activityId },
+      );
+    }
+  } else if (keepsAutoClear) {
+    scheduledFnId = existing.scheduledFnId;
+  } else if (
+    args.mode === "classFocus" &&
+    args.endsAt !== undefined &&
+    args.endsAt > now
+  ) {
+    // A live class focus re-timed to a NEW end gets a clear job at that end,
+    // stored on the row so clear, archive and the next re-time can cancel it
+    // (none for open-until work, which keeps its row past the close).
+    scheduledFnId = await armFocusAutoClear(ctx, a, args.activityId, {
+      mode: args.mode,
+      setAt,
+      startsAt: args.startsAt,
+      endsAt: args.endsAt,
+      openUntilKind: args.openUntilKind,
+    }, classLinkCache);
   }
   base.push({
     activityId: args.activityId,
     mode: args.mode,
     // Re-timing an already-live entry must not demote it back to planned.
-    setAt: existing?.setAt,
+    setAt,
     startsAt: args.startsAt,
     scheduledFnId,
     endsAt: args.mode === "classFocus" ? args.endsAt : undefined,
+    ...openUntilKindFor(args.mode, args.endsAt, args.openUntilKind),
     dueAt: args.mode === "homework" ? args.dueAt : undefined,
+    homeworkClassId: args.mode === "homework" ? args.homeworkClassId : undefined,
     // A live entry's targeting must not widen as a side effect of a re-time:
     // absent args.scholarIds means "everyone" for a fresh plan, but for an
     // already-live entry it means "leave the audience alone".
@@ -2907,26 +3834,7 @@ export async function applyScheduleActivity(
         ? existing.scholarIds
         : normalizeTargeting(a, args.scholarIds),
   });
-  await ctx.db.patch(a._id, { activitySchedule: base });
-  await syncScheduleMirror(ctx, a, args.activityId, base[base.length - 1]);
-  // A live class focus re-timed to a NEW end needs a clear job at that end
-  // (an unchanged end already has one — the recurring re-materialization
-  // re-applies this path every tick and must stay idempotent):
-  // the one scheduled at push/activation carries the OLD end, so when the
-  // focus was moved earlier it would clear late (autoClearActivity re-arms
-  // itself when the focus was moved later).
-  if (
-    existing?.setAt != null &&
-    args.mode === "classFocus" &&
-    args.endsAt !== undefined &&
-    args.endsAt !== existing.endsAt &&
-    args.endsAt > now
-  ) {
-    await ctx.scheduler.runAt(args.endsAt, internal.assignments.autoClearActivity, {
-      assignmentId: a._id,
-      activityId: args.activityId,
-    });
-  }
+  await writeSchedule(ctx, a, base, { activityId: args.activityId, classLinkCache });
 }
 
 /** Returns false if there was no entry for this activity (caller can
@@ -2937,14 +3845,49 @@ async function applyRescheduleActivity(
   args: { activityId: Id<"activities">; startsAt: number },
 ): Promise<boolean> {
   const now = Date.now();
-  await cancelPendingActivation(ctx, a, args.activityId);
-  const schedule = a.activitySchedule ?? [];
-  const idx = schedule.findIndex((e) => e.activityId === args.activityId);
-  if (idx === -1) return false;
+  const schedule = await readSchedule(ctx, a);
+  const existingIdx = schedule.findIndex(
+    (e) => e.activityId === args.activityId,
+  );
+  if (existingIdx === -1) return false;
+  // A moved give is the teacher's newest answer (see applyGive).
+  await detachPlacementsForGive(ctx, a._id, args.activityId);
+  const planned = schedule[existingIdx];
+  if (planned.setAt == null && args.startsAt <= now) {
+    // Moved to now: it shows up now. A time that has clearly passed is a
+    // question, never a plan that silently never activates.
+    if (args.startsAt < now - GIVE_START_GRACE_MS) {
+      throw new GiveQuestionError(START_PASSED_QUESTION);
+    }
+    const roster = planned.scholarIds?.length ? planned.scholarIds : a.scholarIds;
+    // Open-until work keeps its closing day (the teacher's finish, TRA-726),
+    // the same as Start now on the Run page; in-class work ends with the
+    // class it now shows up in.
+    const window: GiveWindow =
+      planned.mode !== "classFocus"
+        ? { mode: "homework", dueAt: planned.dueAt }
+        : planned.openUntilKind === true && planned.endsAt != null && planned.endsAt > now
+          ? { mode: "classFocus", endsAt: planned.endsAt, openUntilKind: true }
+          : await windowForGive(ctx, {
+              roster,
+              institutionId: await homeworkInstitutionForAssignment(ctx, a),
+              startsAt: now,
+              answer: { finish: { kind: "inClass" } },
+            });
+    await applyPushActivity(ctx, a, {
+      activityId: args.activityId,
+      ...window,
+      scholarIds: planned.scholarIds,
+    });
+    return true;
+  }
+  const idx = existingIdx;
   const entry = schedule[idx];
-  let scheduledFnId: Id<"_scheduled_functions"> | undefined;
-  // Only (re)schedule activation for a still-planned entry with a
-  // future start. A live entry keeps its setAt; we just move startsAt.
+  // A live entry keeps its setAt and its auto-clear job; we just move
+  // startsAt. A planned entry's activation job is replaced.
+  let scheduledFnId: Id<"_scheduled_functions"> | undefined =
+    entry.setAt != null ? entry.scheduledFnId : undefined;
+  if (entry.setAt == null) await cancelPendingActivation(ctx, a, args.activityId);
   if (entry.setAt == null && args.startsAt > now) {
     scheduledFnId = await ctx.scheduler.runAt(
       args.startsAt,
@@ -2952,21 +3895,55 @@ async function applyRescheduleActivity(
       { assignmentId: a._id, activityId: args.activityId },
     );
   }
-  const endsAt =
-    entry.setAt == null &&
-    entry.mode === "classFocus" &&
-    entry.endsAt !== undefined &&
-    entry.startsAt !== undefined
-      ? entry.endsAt + (args.startsAt - entry.startsAt)
-      : entry.endsAt;
+  // Moving a give keeps the teacher's finish answer, re-read at the new
+  // time (TRA-571): a planned in-class give ends with the bell block it now
+  // shows up in (or that school day); homework keeps its due date, and a move
+  // past that date is refused rather than starting already late.
+  let endsAt = entry.endsAt;
+  let openUntilKind = entry.openUntilKind;
+  // Open-until work keeps its closing day through a move (TRA-726), as a
+  // grid drag does; a start past it is refused like homework past its due.
+  if (entry.setAt == null && entry.mode === "classFocus" && entry.openUntilKind === true) {
+    if (entry.endsAt != null && args.startsAt >= entry.endsAt) {
+      // The grid's drag says the same (gridGiveActions.ts `openUntilMoveRefusal`).
+      throw new GiveQuestionError(
+        "That's after it closes. Move it to its closing day or earlier, or give it again open until a later day.",
+      );
+    }
+  } else if (entry.setAt == null && entry.mode === "classFocus") {
+    openUntilKind = false;
+    const roster = entry.scholarIds?.length ? entry.scholarIds : a.scholarIds;
+    const { timeZone } = await homeworkCalendarForRoster(
+      ctx,
+      roster,
+      await homeworkInstitutionForAssignment(ctx, a),
+    );
+    endsAt = (
+      await resolveGiveWindow(ctx, {
+        scholarIds: roster,
+        timeZone,
+        startsAt: args.startsAt,
+        finish: { kind: "inClass" },
+      })
+    ).endsAt;
+  }
+  if (
+    entry.mode === "homework" &&
+    entry.dueAt != null &&
+    args.startsAt > entry.dueAt
+  ) {
+    throw new GiveQuestionError(
+      "That's after it's due. Should the due date move too?",
+    );
+  }
   schedule[idx] = {
     ...entry,
     startsAt: args.startsAt,
     scheduledFnId,
     endsAt,
+    ...(entry.mode === "classFocus" && endsAt !== undefined ? { openUntilKind } : {}),
   };
-  await ctx.db.patch(a._id, { activitySchedule: schedule });
-  await syncScheduleMirror(ctx, a, args.activityId, schedule[idx]);
+  await writeSchedule(ctx, a, schedule, { activityId: args.activityId });
   return true;
 }
 
@@ -2979,10 +3956,9 @@ async function applyClearActivity(
   // Cancel a pending activation job so a cleared-while-planned entry
   // never goes live later.
   await cancelPendingActivation(ctx, a, activityId);
-  const before = a.activitySchedule ?? [];
+  const before = await readSchedule(ctx, a);
   const schedule = before.filter((e) => e.activityId !== activityId);
-  await ctx.db.patch(a._id, { activitySchedule: schedule });
-  await syncScheduleMirror(ctx, a, activityId, null);
+  await writeSchedule(ctx, a, schedule, { activityId });
   return schedule.length !== before.length;
 }
 
@@ -3002,15 +3978,110 @@ export async function unmaterializePlannedActivity(
 ): Promise<boolean> {
   const a = await ctx.db.get(assignmentId);
   if (!a) return false;
-  const schedule = a.activitySchedule ?? [];
+  const schedule = await readSchedule(ctx, a);
   const entry = schedule.find((e) => e.activityId === activityId);
   if (!entry || entry.setAt != null) return false; // gone, or already live
   await cancelPendingActivation(ctx, a, activityId);
-  await ctx.db.patch(a._id, {
-    activitySchedule: schedule.filter((e) => e.activityId !== activityId),
-  });
-  await syncScheduleMirror(ctx, a, activityId, null);
+  await writeSchedule(
+    ctx,
+    a,
+    schedule.filter((e) => e.activityId !== activityId),
+    { activityId },
+  );
   return true;
+}
+
+/**
+ * Merge an add-to-live push into the activity's current entry. Only the
+ * audience grows: a live entry keeps its mode and lifetime (homework may only
+ * move its due date later), so the push never takes anything from a scholar
+ * who already has it. Refuses, with the remedy, when merging would have to
+ * change something for someone else: a planned entry (pushing would cancel
+ * the plan), a live whole-cohort entry, or a live entry in the other mode.
+ * Off-roster scholars are refused by name rather than silently dropped.
+ */
+async function mergeIntoLiveAudience(
+  ctx: MutationCtx,
+  a: Doc<"assignments">,
+  args: {
+    activityId: Id<"activities">;
+    mode: "classFocus" | "homework";
+    endsAt?: number;
+    openUntilKind?: boolean;
+    dueAt?: number;
+    scholarIds?: Id<"users">[];
+  },
+  now: number,
+): Promise<{
+  scholarIds: Id<"users">[];
+  endsAt?: number;
+  openUntilKind?: boolean;
+  dueAt?: number;
+  keepsLifetime: boolean;
+}> {
+  const named = args.scholarIds ?? [];
+  if (named.length === 0) {
+    throw new Error("Name at least one scholar on this assignment's roster.");
+  }
+  const roster = new Set(a.scholarIds.map(String));
+  const offRoster = named.filter((id) => !roster.has(String(id)));
+  if (offRoster.length > 0) {
+    const names = await Promise.all(
+      offRoster.map(async (id) => (await ctx.db.get(id))?.name ?? "a scholar"),
+    );
+    throw new Error(
+      `Not on this assignment's roster: ${names.join(", ")}. Nothing pushed — add them to the roster first.`,
+    );
+  }
+  const existing = (await readSchedule(ctx, a)).find(
+    (e) => e.activityId === args.activityId,
+  );
+  if (existing && existing.setAt == null) {
+    throw new Error(
+      "This activity is planned for the cohort, and pushing it now would cancel that plan. Start or clear the planned push first.",
+    );
+  }
+  const timeZone = await timeZoneForInstitution(
+    ctx,
+    await homeworkInstitutionForAssignment(ctx, a),
+  );
+  const live =
+    existing != null &&
+    isScheduleEntryActive(existing, now, dayKeyForTimezone(now, timeZone), timeZone);
+  if (!existing || !live) {
+    return {
+      scholarIds: named,
+      endsAt: args.endsAt,
+      openUntilKind: args.openUntilKind,
+      dueAt: args.dueAt,
+      keepsLifetime: false,
+    };
+  }
+  const label = existing.mode === "classFocus" ? "in-class work" : "homework";
+  if (!existing.scholarIds?.length) {
+    throw new Error(
+      existing.mode === "classFocus"
+        ? "This activity is live in class for the whole cohort right now, so those scholars already have it. To give them longer, wrap it first, then give them more time."
+        : "This activity is already live as homework for the whole cohort, so those scholars already have it. Change its due date instead.",
+    );
+  }
+  if (existing.mode !== args.mode) {
+    throw new Error(
+      `This activity is live as ${label} for ${existing.scholarIds.length} scholar(s); switching it would change it for them too. Give more time as ${label}, or wrap it first.`,
+    );
+  }
+  return {
+    // applyPushActivity normalizes the union (dedupe; whole roster → everyone).
+    scholarIds: [...existing.scholarIds, ...named],
+    endsAt: existing.endsAt,
+    // The live entry's finish, with its lifetime (TRA-726).
+    openUntilKind: existing.openUntilKind,
+    dueAt:
+      existing.dueAt != null && args.dueAt != null
+        ? Math.max(existing.dueAt, args.dueAt)
+        : (existing.dueAt ?? args.dueAt),
+    keepsLifetime: true,
+  };
 }
 
 /**
@@ -3018,6 +4089,13 @@ export async function unmaterializePlannedActivity(
  * roster. Unlike applyScheduleActivity (which writes a *planned* entry,
  * setAt null), this stamps setAt=now so scholars see it at once. Shared
  * by the teacher-UI `pushActivity` and the aide `aidePushActivityNow`.
+ *
+ * `addToLiveAudience` is "give these scholars more time": the named
+ * scholars are ADDED to whoever already has the activity live, so the push
+ * can never take it away from anyone (see mergeIntoLiveAudience). An activity is one entry per
+ * assignment, so without it a one-scholar push replaces a live cohort entry
+ * and pulls the work off everyone else's screen. Each scholar lands back in
+ * their existing session, which is keyed by assignment + activity.
  */
 export async function applyPushActivity(
   ctx: MutationCtx,
@@ -3026,48 +4104,87 @@ export async function applyPushActivity(
     activityId: Id<"activities">;
     mode: "classFocus" | "homework";
     endsAt?: number;
+    /** A timed class focus: the teacher's finish (`ScheduleEntry.openUntilKind`). */
+    openUntilKind?: boolean;
     dueAt?: number;
     scholarIds?: Id<"users">[];
+    addToLiveAudience?: boolean;
+    /** Homework given for a named class (TRA-581). */
+    homeworkClassId?: Id<"classes">;
   },
+  classLinkCache?: ClassLinkReadCache,
 ) {
-  await assertSchedulableActivity(ctx, args.activityId, args.mode);
-  const now = Date.now();
-  if (
-    args.mode === "classFocus" &&
-    args.endsAt !== undefined &&
-    args.endsAt <= now
-  ) {
-    throw new Error(
-      `Can't start class focus: its end time ${new Date(args.endsAt).toISOString()} is in the past.`,
+  // A proposed Quest reaches only its proposer (TRA-685, as coreAssignWork).
+  if (a.unitId) {
+    assertProposedQuestRecipients(
+      await ctx.db.get(a.unitId),
+      args.scholarIds ?? a.scholarIds,
     );
   }
-  // Replacing the entry — cancel any pending activation job on it so a
-  // previously-planned push for this activity doesn't fire later.
-  await cancelPendingActivation(ctx, a, args.activityId);
-  const schedule = (a.activitySchedule ?? []).filter(
-    (e) => e.activityId !== args.activityId,
+  await assertSchedulableActivity(
+    ctx,
+    a,
+    args.activityId,
+    // Push-now goes live at once, so the window starts now.
+    { mode: args.mode, setAt: Date.now(), endsAt: args.endsAt, openUntilKind: args.openUntilKind },
+    {
+      alreadyLive: await isLiveOnAssignment(ctx, a, args.activityId),
+      classLinkCache,
+    },
   );
+  const now = Date.now();
+  const merged = args.addToLiveAudience
+    ? await mergeIntoLiveAudience(ctx, a, args, now)
+    : null;
+  const scholarIds = merged ? merged.scholarIds : args.scholarIds;
+  const endsAt = merged ? merged.endsAt : args.endsAt;
+  const openUntilKind = merged ? merged.openUntilKind : args.openUntilKind;
+  const dueAt = merged ? merged.dueAt : args.dueAt;
+  if (
+    args.mode === "classFocus" &&
+    endsAt !== undefined &&
+    endsAt <= now &&
+    !merged?.keepsLifetime
+  ) {
+    throw new ConvexError(
+      `Can't give it in class: its end time ${new Date(endsAt).toISOString()} is in the past.`,
+    );
+  }
+  const current = await readSchedule(ctx, a);
+  const existing = current.find((e) => e.activityId === args.activityId);
+  let scheduledFnId: Id<"_scheduled_functions"> | undefined;
+  if (merged?.keepsLifetime) {
+    // A merged entry kept its lifetime, and its auto-clear job with it.
+    scheduledFnId = existing?.scheduledFnId;
+  } else {
+    // Replacing the entry: cancel its job (a planned push's activation, or a
+    // live focus's auto-clear) so it can't fire later.
+    await cancelPendingActivation(ctx, a, args.activityId);
+    // None for open-until work, which keeps its row past the close.
+    scheduledFnId = await armFocusAutoClear(ctx, a, args.activityId, {
+      mode: args.mode,
+      setAt: now,
+      startsAt: now,
+      endsAt,
+      openUntilKind,
+    }, classLinkCache);
+  }
+  const schedule = current.filter((e) => e.activityId !== args.activityId);
   schedule.push({
     activityId: args.activityId,
     mode: args.mode,
     // Push-now: live immediately. startsAt mirrors now for agenda position.
     setAt: now,
     startsAt: now,
-    endsAt: args.mode === "classFocus" ? args.endsAt : undefined,
-    dueAt: args.mode === "homework" ? args.dueAt : undefined,
-    scholarIds: normalizeTargeting(a, args.scholarIds),
+    // The auto-clear job, stored so clear, archive and a re-time cancel it.
+    scheduledFnId,
+    endsAt: args.mode === "classFocus" ? endsAt : undefined,
+    ...openUntilKindFor(args.mode, endsAt, openUntilKind),
+    dueAt: args.mode === "homework" ? dueAt : undefined,
+    homeworkClassId: args.mode === "homework" ? args.homeworkClassId : undefined,
+    scholarIds: normalizeTargeting(a, scholarIds),
   });
-  await ctx.db.patch(a._id, { activitySchedule: schedule });
-  await syncScheduleMirror(ctx, a, args.activityId, schedule[schedule.length - 1]);
-  if (args.mode === "classFocus" && args.endsAt) {
-    const delay = args.endsAt - now;
-    if (delay > 0) {
-      await ctx.scheduler.runAfter(delay, internal.assignments.autoClearActivity, {
-        assignmentId: a._id,
-        activityId: args.activityId,
-      });
-    }
-  }
+  await writeSchedule(ctx, a, schedule, { activityId: args.activityId, classLinkCache });
 }
 
 /** Replace the roster outright (everyone not listed leaves the cohort). */
@@ -3076,6 +4193,8 @@ async function applySetScholars(
   a: Doc<"assignments">,
   scholarIds: Id<"users">[],
 ) {
+  // A proposed Quest's assignment holds only its proposer (TRA-685).
+  if (a.unitId) assertProposedQuestRecipients(await ctx.db.get(a.unitId), scholarIds);
   const nextRoster = Array.from(new Set(scholarIds.map((id) => String(id))));
   const rosterSet = new Set(nextRoster);
   // Keep per-scholar activity targeting in sync with the roster. For each
@@ -3085,9 +4204,8 @@ async function applySetScholars(
   //     it fall back to `scholarIds: undefined`, because absent = everyone
   //     — pruning a targeted activity to zero scholars must never silently
   //     re-broadcast it to the whole cohort.
-  const schedule = a.activitySchedule ?? [];
+  const schedule = await readSchedule(ctx, a);
   const nextSchedule: typeof schedule = [];
-  let scheduleChanged = false;
   for (const entry of schedule) {
     if (entry.scholarIds == null || entry.scholarIds.length === 0) {
       nextSchedule.push(entry);
@@ -3097,12 +4215,10 @@ async function applySetScholars(
     if (kept.length === 0) {
       // Drop this entry — cancel any pending activation so it can't fire.
       await cancelPendingActivation(ctx, a, entry.activityId);
-      scheduleChanged = true;
       continue;
     }
     if (kept.length !== entry.scholarIds.length) {
       nextSchedule.push({ ...entry, scholarIds: kept });
-      scheduleChanged = true;
     } else {
       nextSchedule.push(entry);
     }
@@ -3111,13 +4227,10 @@ async function applySetScholars(
     scholarIds: scholarIds.filter(
       (id, i) => scholarIds.findIndex((o) => String(o) === String(id)) === i,
     ),
-    ...(scheduleChanged ? { activitySchedule: nextSchedule } : {}),
   });
-  // Re-sync unconditionally rather than only when the array changed. A
-  // narrowed entry pruned to nothing is dropped here, and its mirror has to
-  // be cleared with it; a cohort-wide entry needs no rewrite at all, since
-  // its audience is the assignment itself and follows the roster live.
-  await syncScheduleMirrorAll(ctx, a, nextSchedule);
+  // A cohort-wide entry needs no rewrite: its audience is the assignment
+  // itself and follows the roster live.
+  await writeSchedule(ctx, a, nextSchedule);
 }
 
 // ── Ad-hoc dispatch (Q1 — "give this ONE scholar something to do right now") ──
@@ -3145,9 +4258,11 @@ async function coreDispatchActivity(
     targetSkillKeys?: string[];
     itemCount?: number;
     mode?: "classFocus" | "homework";
+    finish?: GiveFinish;
     live?: boolean;
     startsAt?: number;
     endsAt?: number;
+    openUntilKind?: boolean;
     dueAt?: number;
     /** The scholar's own question this dispatch carries (Prep "Assign…"). */
     seedId?: Id<"seeds">;
@@ -3165,13 +4280,23 @@ async function coreDispatchActivity(
   const title = args.title.trim();
   if (!title) throw new Error("Dispatch needs a title");
   let activityKind = args.activityKind ?? "online";
-  const mode = args.mode ?? "classFocus";
+  // No default mode: the give must say when it should be finished (TRA-571).
+  // The answer is checked after the content is validated, so a bad URL or a
+  // missing handout is reported first.
+  const startsAt = args.live === false ? (args.startsAt ?? now) : now;
+  const answeredMode: "classFocus" | "homework" | undefined = args.finish
+    ? finishIsHomework(args.finish)
+      ? "homework"
+      : "classFocus"
+    : args.mode;
   const description = args.description?.trim() || undefined;
   if (activityKind === "offline" && !description) {
     throw new Error("An offline dispatch needs complete instructions in description");
   }
-  if (activityKind === "offline" && mode !== "homework") {
-    throw new Error("An offline dispatch must use homework mode");
+  if (activityKind === "offline" && answeredMode === "classFocus") {
+    throw new Error(
+      "Offline work needs a due date: it can't be finished \"in that class\" or left \"open until\" a day.",
+    );
   }
 
   let webUrl: string | undefined;
@@ -3249,6 +4374,15 @@ async function coreDispatchActivity(
     }
   }
 
+  if (!answeredMode) throw new GiveQuestionError(MISSING_FINISH_QUESTION);
+  const window: GiveWindow = await windowForGive(ctx, {
+    roster: [args.scholarId],
+    institutionId: undefined,
+    startsAt,
+    answer: args.finish
+      ? { finish: args.finish }
+      : { mode: args.mode, endsAt: args.endsAt, openUntilKind: args.openUntilKind, dueAt: args.dueAt },
+  });
   const activityId = await ctx.db.insert("activities", {
     title,
     kind: activityKind,
@@ -3283,7 +4417,6 @@ async function coreDispatchActivity(
     title,
     kind: "adHocDispatch",
     startedAt: now,
-    activitySchedule: [],
   });
   if (args.seedId) {
     // Lets `liveQuestionHomework` go activity → its dispatch by id, never by
@@ -3291,22 +4424,33 @@ async function coreDispatchActivity(
     await ctx.db.patch(activityId, { dispatchAssignmentId: assignmentId });
   }
   const a = (await ctx.db.get(assignmentId))!;
-  if (args.live === false) {
+  if (args.finish) {
+    // An answered give: the same start rules as every other give (a start
+    // that passed during the aide turn goes live now, or is refused).
+    const finish = args.finish;
+    await applyGive(ctx, a, {
+      activityId,
+      startsAt: args.live === false ? startsAt : Date.now(),
+      resolve: (at) =>
+        windowForGive(ctx, {
+          roster: [args.scholarId],
+          institutionId: undefined,
+          startsAt: at,
+          answer: { finish },
+        }),
+    });
+  } else if (args.live === false) {
     // Add to their queue — planned for a future time (or now, agenda-only).
     await applyScheduleActivity(ctx, a, {
       activityId,
-      mode,
-      startsAt: args.startsAt ?? now,
-      endsAt: args.endsAt,
-      dueAt: args.dueAt,
+      ...window,
+      startsAt,
     });
   } else {
     // Right now — live immediately for the one scholar.
     await applyPushActivity(ctx, a, {
       activityId,
-      mode,
-      endsAt: args.endsAt,
-      dueAt: args.dueAt,
+      ...window,
     });
   }
   return {
@@ -3335,9 +4479,13 @@ export const dispatchActivity = teacherMutation({
     targetSkillKeys: v.optional(v.array(v.string())),
     itemCount: v.optional(v.number()),
     mode: v.optional(v.union(v.literal("classFocus"), v.literal("homework"))),
+    finish: v.optional(giveFinishValidator),
     live: v.optional(v.boolean()),
     startsAt: v.optional(v.number()),
     endsAt: v.optional(v.number()),
+    // "Open until" (true) or "in that class" (false) for a raw class-focus
+    // end (TRA-726). Optional: absent, the dates decide, as before.
+    openUntilKind: v.optional(v.boolean()),
     dueAt: v.optional(v.number()),
   },
   handler: (ctx, args) =>
@@ -3378,11 +4526,11 @@ export const assignQuestionAsHomework = teacherMutation({
     // A future OPEN school day for the scholar's institution: after today,
     // a weekday, not inside a calendar closure.
     if (!/^\d{4}-\d{2}-\d{2}$/.test(args.dueDayKey)) {
-      throw new Error("Pick a school day");
+      throw new ConvexError("Pick a school day");
     }
     const todayKey = dayKeyForTimezone(Date.now(), timeZone);
     if (args.dueDayKey <= todayKey) {
-      throw new Error("Pick a school day after today");
+      throw new ConvexError("Pick a school day after today");
     }
     const [openDay] = await findNextOpenSchoolDayKeys(
       ctx,
@@ -3392,14 +4540,14 @@ export const assignQuestionAsHomework = teacherMutation({
       1,
     );
     if (openDay !== args.dueDayKey) {
-      throw new Error("That day isn't a school day");
+      throw new ConvexError("That day isn't a school day");
     }
     const dueAt = schoolDayEndAt(args.dueDayKey, timeZone);
 
     // Cheap ownership check first: the seed must be this scholar's.
     const seed = await ctx.db.get(args.seedId);
     if (!seed || seed.scholarId !== args.scholarId) {
-      throw new Error("That question isn't open for this scholar");
+      throw new ConvexError("That question isn't open for this scholar");
     }
 
     // Idempotent per (scholar, seed, day); one live homework per question.
@@ -3415,7 +4563,7 @@ export const assignQuestionAsHomework = teacherMutation({
           created: false,
         };
       }
-      throw new Error("That question is already homework");
+      throw new ConvexError("That question is already homework");
     }
 
     // The question must be one of this scholar's OPEN questions — the same
@@ -3423,7 +4571,7 @@ export const assignQuestionAsHomework = teacherMutation({
     // (active, not yet started, not settled, not answered correctly).
     const row = await questionRowForSeed(ctx, args.scholarId, seed);
     if (!row) {
-      throw new Error("That question isn't open for this scholar");
+      throw new ConvexError("That question isn't open for this scholar");
     }
 
     const prompt = row.question.prompt;
@@ -3462,9 +4610,11 @@ export async function coreAideDispatchActivity(
     targetSkillKeys?: string[];
     itemCount?: number;
     mode?: "classFocus" | "homework";
+    finish?: GiveFinish;
     live?: boolean;
     startsAt?: number;
     endsAt?: number;
+    openUntilKind?: boolean;
     dueAt?: number;
   },
 ): Promise<{
@@ -3472,12 +4622,16 @@ export async function coreAideDispatchActivity(
   activityId: Id<"activities">;
   activityKind: "online" | "offline" | "web" | "problem_set";
   attachedVideoResource: boolean;
+  // From the stored row, not the request.
+  live: boolean;
 }> {
   const u = await ctx.db.get(callerUserId);
   if (!u || !isTeacherRole(u.role as never)) {
     throw new Error("Dispatch is teacher/admin only");
   }
-  return coreDispatchActivity(ctx, { ...args, teacherId: callerUserId });
+  const res = await coreDispatchActivity(ctx, { ...args, teacherId: callerUserId });
+  const stored = await storedEntry(ctx, res.assignmentId, res.activityId);
+  return { ...res, live: stored?.setAt != null };
 }
 
 /** Aide/MCP core: same as assignWork but role-gated on the verified caller
@@ -3491,8 +4645,9 @@ export async function coreAideAssignWork(
     title?: string;
     startsAt: number;
     target: AssignWorkTarget;
+    finish?: GiveFinish;
   },
-): Promise<{ assignmentId: Id<"assignments">; created: boolean }> {
+): Promise<{ assignmentId: Id<"assignments">; created: boolean; live: boolean }> {
   const u = await ctx.db.get(callerUserId);
   // Teacher/admin, or a curriculum:run holder — coreAssignWork then enforces
   // the runner's unit + same-school-assignee boundary itself.
@@ -3509,6 +4664,8 @@ async function applyAddScholars(
   a: Doc<"assignments">,
   scholarIds: Id<"users">[],
 ) {
+  // A proposed Quest's assignment holds only its proposer (TRA-685).
+  if (a.unitId) assertProposedQuestRecipients(await ctx.db.get(a.unitId), scholarIds);
   await ctx.db.patch(a._id, {
     scholarIds: Array.from(new Set([...a.scholarIds, ...scholarIds])),
   });
@@ -3517,7 +4674,7 @@ async function applyAddScholars(
 /** Archive (end) an assignment — also clears its schedule so nothing
  *  stays live or fires later. */
 async function applyArchive(ctx: MutationCtx, a: Doc<"assignments">) {
-  for (const entry of a.activitySchedule ?? []) {
+  for (const entry of await readSchedule(ctx, a)) {
     if (entry.scheduledFnId) {
       await ctx.scheduler.cancel(entry.scheduledFnId);
     }
@@ -3532,8 +4689,9 @@ async function applyArchive(ctx: MutationCtx, a: Doc<"assignments">) {
   for (const placement of placements) {
     await ctx.db.delete(placement._id);
   }
-  await ctx.db.patch(a._id, { archivedAt: Date.now(), activitySchedule: [] });
-  await syncScheduleMirrorAll(ctx, a, []);
+  await syncClassesForPlacements(ctx, placements);
+  await ctx.db.patch(a._id, { archivedAt: Date.now() });
+  await writeSchedule(ctx, a, []);
 }
 
 /**
@@ -3563,7 +4721,7 @@ async function assertActivityInUnit(
  * cadence layout in `assignWork`. Lessons and activities are sorted by
  * their `order` field (the FK indexes don't return ordered).
  */
-async function gatherUnitActivities(
+export async function gatherUnitActivities(
   ctx: { db: QueryCtx["db"] },
   unitId: Id<"units">,
   lessonId: Id<"lessons"> | null,
@@ -3596,8 +4754,9 @@ async function gatherUnitActivities(
 // ─── Aide tool wrappers (internal) ───────────────────────────────────
 // The teacher Aide runs in an HTTP action with a VERIFIED callerUserId
 // but no `ctx.user`, so it can't use the teacherMutation/teacherQuery
-// gate. These internal fns re-do the owner-only ownership check
-// explicitly against callerUserId, then share the exact reads/writes the
+// gate. These internal fns re-do the ownership check explicitly against
+// callerUserId (the owner, or an admin over the assignment's school; see
+// lib/assignmentAuthority.ts), then share the exact reads/writes the
 // teacher-UI uses. Tool gating to teacher/admin happens in lib/aideTools.
 
 async function requireOwnedAssignmentBy(
@@ -3608,17 +4767,29 @@ async function requireOwnedAssignmentBy(
 ): Promise<Doc<"assignments"> | null> {
   const a = await ctx.db.get(assignmentId);
   if (!a) return null;
-  if (a.teacherId !== callerUserId) throw new Error("Not your assignment");
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller || !(await mayActOnAssignment(ctx, caller, a))) {
+    throw new Error("Not your assignment");
+  }
   // A non-teacher owner is a curriculum:run holder (the aide only offers her
   // the run tools): she must still be able to run the unit, and any named
   // activity must be one of its lesson activities. Teachers are unchanged.
-  const caller = await ctx.db.get(callerUserId);
-  if (!caller) throw new Error("Not your assignment");
   if (!isTeacherRole(caller.role)) {
     await requireCanRunOwnedAssignment(ctx, caller, a);
     if (activityId) await assertActivityInUnitStrict(ctx, a.unitId!, activityId);
   }
   return a;
+}
+
+/** The aide's form of mayActOnAssignment: it holds a caller id, not a doc. */
+async function aideMayActOn(
+  ctx: QueryCtx,
+  callerUserId: Id<"users">,
+  a: Doc<"assignments">,
+): Promise<boolean> {
+  if (a.teacherId === callerUserId) return true;
+  const caller = await ctx.db.get(callerUserId);
+  return !!caller && (await mayActOnAssignment(ctx, caller, a));
 }
 
 /**
@@ -3658,17 +4829,23 @@ async function aideAssignmentReadRole(
 type AideScheduleArgs = {
   assignmentId: Id<"assignments">;
   activityId: Id<"activities">;
-  mode: "classFocus" | "homework";
+  mode?: "classFocus" | "homework";
+  finish?: GiveFinish;
   startsAt: number;
   endsAt?: number;
+  openUntilKind?: boolean;
   dueAt?: number;
 };
 type AidePushArgs = {
   assignmentId: Id<"assignments">;
   activityId: Id<"activities">;
-  mode: "classFocus" | "homework";
+  mode?: "classFocus" | "homework";
+  finish?: GiveFinish;
   endsAt?: number;
+  openUntilKind?: boolean;
   dueAt?: number;
+  // Named scholars are always added to the live audience, never swapped in.
+  scholarIds?: Id<"users">[];
 };
 
 /** Discovery: the caller's active assignments with roster + a count of
@@ -3722,7 +4899,7 @@ export async function coreAideListAssignments(
           ? (unit?.title ?? "(deleted unit)")
           : (a.title ?? "Ad-hoc dispatch"),
         roster,
-        scheduledCount: (a.activitySchedule ?? []).length,
+        scheduledCount: (await readSchedule(ctx, a)).length,
         startedAt: a.startedAt,
       };
     }),
@@ -3773,7 +4950,7 @@ export async function coreAideSchedule(
   }> = [];
   for (const a of rows) {
     if (a.archivedAt) continue;
-    const entries = a.activitySchedule ?? [];
+    const entries = await readSchedule(ctx, a);
     if (entries.length === 0) continue;
     // Ad-hoc dispatches (kind "adHocDispatch") DO carry an activitySchedule yet
     // are unitId-less, so a populated schedule no longer implies a unit —
@@ -3836,7 +5013,7 @@ export async function coreAideGetAssignment(
   assignmentId: Id<"assignments">,
 ) {
   const a = await ctx.db.get(assignmentId);
-  if (!a || a.teacherId !== callerUserId) return null;
+  if (!a || !(await aideMayActOn(ctx, callerUserId, a))) return null;
   if ((await aideAssignmentReadRole(ctx, callerUserId, a)) === null) return null;
   // A standing (unitId-less) assignment has no unit to resolve.
   const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
@@ -3852,11 +5029,12 @@ export async function coreAideGetAssignment(
       };
     }),
   );
+  const aideSchedule = await readSchedule(ctx, a);
   const scheduledIds = new Set(
-    (a.activitySchedule ?? []).map((e) => String(e.activityId)),
+    aideSchedule.map((e) => String(e.activityId)),
   );
   const schedule = await Promise.all(
-    (a.activitySchedule ?? []).map(async (e) => {
+    aideSchedule.map(async (e) => {
       const act = await ctx.db.get(e.activityId);
       return {
         activityId: e.activityId,
@@ -3882,7 +5060,6 @@ export async function coreAideGetAssignment(
     activityId: Id<"activities">;
     title: string;
     lessonTitle: string;
-    defaultMode: string | null;
     alreadyScheduled: boolean;
   }> = [];
   for (const l of lessons) {
@@ -3895,7 +5072,6 @@ export async function coreAideGetAssignment(
         activityId: act._id,
         title: act.title,
         lessonTitle: l.title,
-        defaultMode: act.defaultMode ?? null,
         alreadyScheduled: scheduledIds.has(String(act._id)),
       });
     }
@@ -3933,15 +5109,17 @@ export async function coreAideProgress(
   assignmentId: Id<"assignments">,
 ) {
   const a = await ctx.db.get(assignmentId);
-  if (!a || a.teacherId !== callerUserId) return null;
+  if (!a || !(await aideMayActOn(ctx, callerUserId, a))) return null;
   const readRole = await aideAssignmentReadRole(ctx, callerUserId, a);
   if (readRole === null) return null;
   const now = Date.now();
   // A standing (unitId-less) assignment has no unit to resolve.
   const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
 
-  const scheduleByActivity = new Map(
-    (a.activitySchedule ?? []).map((e) => [String(e.activityId), e]),
+  // One entry per activity, by the shared rule (never insertion order).
+  const scheduleByActivity = decidingEntryByActivity(
+    await readSchedule(ctx, a),
+    now,
   );
 
   // Projects for this cohort (exclude offline scanned-deliverable shells).
@@ -4105,13 +5283,35 @@ export async function coreAideScheduleActivity(
   ctx: MutationCtx,
   callerUserId: Id<"users">,
   args: AideScheduleArgs,
-): Promise<{ ok: true }> {
+): Promise<{ ok: true; stored: StoredGiveEntry | null }> {
   const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId, args.activityId);
   if (!a) throw new Error("Assignment not found");
   if (a.archivedAt) throw new Error("Assignment is archived");
   await assertActivityInUnit(ctx, a, args.activityId);
-  await applyScheduleActivity(ctx, a, args);
-  return { ok: true };
+  const resolve = (startsAt: number) =>
+    windowForAssignmentGive(ctx, a, {
+      startsAt,
+      answer: args,
+      activityId: args.activityId,
+    });
+  if (args.finish) {
+    await applyGive(ctx, a, {
+      activityId: args.activityId,
+      startsAt: args.startsAt,
+      resolve,
+    });
+  } else {
+    await detachPlacementsForGive(ctx, a._id, args.activityId);
+    const { finish: _finish, ...rest } = args;
+    await applyScheduleActivity(ctx, a, {
+      ...rest,
+      ...(await resolve(args.startsAt)),
+    });
+  }
+  return {
+    ok: true,
+    stored: await storedEntry(ctx, a._id, args.activityId),
+  };
 }
 
 export async function coreAideRescheduleActivity(
@@ -4147,13 +5347,45 @@ export async function coreAidePushActivityNow(
   ctx: MutationCtx,
   callerUserId: Id<"users">,
   args: AidePushArgs,
-): Promise<{ ok: true }> {
+): Promise<{ ok: true; stored: StoredGiveEntry | null }> {
   const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId, args.activityId);
   if (!a) throw new Error("Assignment not found");
   if (a.archivedAt) throw new Error("Assignment is archived");
   await assertActivityInUnit(ctx, a, args.activityId);
-  await applyPushActivity(ctx, a, args);
-  return { ok: true };
+  // Named scholars must be ones the caller can reach now, not merely names on
+  // an old roster (a transferred scholar stays on it). Same rule as the give
+  // choices: named scholars fail loudly.
+  if (args.scholarIds?.length) {
+    const caller = await ctx.db.get(callerUserId);
+    if (!caller) throw new Error("Caller not found");
+    if (isTeacherRole(caller.role)) {
+      await requireScholarsAccessible(ctx, caller, args.scholarIds);
+    } else if (a.unitId) {
+      const { institutionId } = await requireRunnableUnit(ctx, caller, a.unitId);
+      await requireScholarsAtInstitution(ctx, args.scholarIds, institutionId);
+    } else {
+      throw new Error("You can't give work to those scholars from here.");
+    }
+  }
+  const { finish: _finish, ...rest } = args;
+  await applyPushActivity(ctx, a, {
+    ...rest,
+    ...(await windowForAssignmentGive(ctx, a, {
+      startsAt: Date.now(),
+      answer: args,
+      scholarIds: args.scholarIds,
+      activityId: args.activityId,
+      reuseLiveFinish: args.scholarIds !== undefined,
+    })),
+    addToLiveAudience: args.scholarIds !== undefined,
+  });
+  await detachPlacementsForGive(ctx, a._id, args.activityId);
+  // What's stored, not what was asked: "more time" keeps a live focus's end
+  // and takes the later due date (mergeIntoLiveAudience).
+  return {
+    ok: true,
+    stored: await storedEntry(ctx, a._id, args.activityId),
+  };
 }
 
 export async function coreAideSetScholars(
@@ -4273,6 +5505,7 @@ export const aideAssignWork = internalMutation({
     title: v.optional(v.string()),
     startsAt: v.number(),
     target: assignWorkTargetValidator,
+    finish: v.optional(giveFinishValidator),
   },
   handler: (ctx, { callerUserId, ...args }) =>
     coreAideAssignWork(ctx, callerUserId, args),
@@ -4283,9 +5516,13 @@ export const aideScheduleActivity = internalMutation({
     callerUserId: v.id("users"),
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
-    mode: v.union(v.literal("classFocus"), v.literal("homework")),
+    mode: v.optional(v.union(v.literal("classFocus"), v.literal("homework"))),
+    finish: v.optional(giveFinishValidator),
     startsAt: v.number(),
     endsAt: v.optional(v.number()),
+    // "Open until" (true) or "in that class" (false) for a raw class-focus
+    // end (TRA-726). Optional: absent, the dates decide, as before.
+    openUntilKind: v.optional(v.boolean()),
     dueAt: v.optional(v.number()),
   },
   handler: (ctx, { callerUserId, ...args }) =>
@@ -4318,9 +5555,14 @@ export const aidePushActivityNow = internalMutation({
     callerUserId: v.id("users"),
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
-    mode: v.union(v.literal("classFocus"), v.literal("homework")),
+    mode: v.optional(v.union(v.literal("classFocus"), v.literal("homework"))),
+    finish: v.optional(giveFinishValidator),
     endsAt: v.optional(v.number()),
+    // "Open until" (true) or "in that class" (false) for a raw class-focus
+    // end (TRA-726). Optional: absent, the dates decide, as before.
+    openUntilKind: v.optional(v.boolean()),
     dueAt: v.optional(v.number()),
+    scholarIds: v.optional(v.array(v.id("users"))),
   },
   handler: (ctx, { callerUserId, ...args }) =>
     coreAidePushActivityNow(ctx, callerUserId, args),
@@ -4345,9 +5587,13 @@ export const aideDispatchActivity = internalMutation({
     targetSkillKeys: v.optional(v.array(v.string())),
     itemCount: v.optional(v.number()),
     mode: v.optional(v.union(v.literal("classFocus"), v.literal("homework"))),
+    finish: v.optional(giveFinishValidator),
     live: v.optional(v.boolean()),
     startsAt: v.optional(v.number()),
     endsAt: v.optional(v.number()),
+    // "Open until" (true) or "in that class" (false) for a raw class-focus
+    // end (TRA-726). Optional: absent, the dates decide, as before.
+    openUntilKind: v.optional(v.boolean()),
     dueAt: v.optional(v.number()),
   },
   handler: (ctx, { callerUserId, ...args }) =>
@@ -4374,6 +5620,101 @@ export const aideAddScholars = internalMutation({
     coreAideAddScholars(ctx, callerUserId, assignmentId, scholarIds),
 });
 
+/**
+ * REMOVE named scholars from an OWNED assignment's roster, keeping everyone
+ * else — the safe single-child edit that set_assignment_scholars (replace
+ * the whole roster) made error-prone. Names are matched against the
+ * assignment's OWN roster, not the caller's visible scholars, so a child who
+ * has since moved to another school can still be taken off. Removal grants
+ * nothing, and the owner already sees this roster, so it needs no access
+ * check on the removed scholars. Goes through applySetScholars, so targeted
+ * schedule entries are pruned exactly as a roster replace prunes them.
+ */
+export async function coreAideRemoveScholars(
+  ctx: MutationCtx,
+  callerUserId: Id<"users">,
+  assignmentId: Id<"assignments">,
+  scholarNames: string[],
+): Promise<
+  | { ok: true; removed: string[]; rosterSize: number }
+  | { ok: false; message: string }
+> {
+  const a = await requireOwnedAssignmentBy(ctx, assignmentId, callerUserId);
+  if (!a) throw new Error("Assignment not found");
+  if (a.archivedAt) throw new Error("Assignment is archived");
+  const caller = await ctx.db.get(callerUserId);
+  // Roster edits stay a teacher act; a curriculum:run owner is refused.
+  if (!caller || !isTeacherRole(caller.role)) {
+    throw new Error("Roster edits are teacher/admin only");
+  }
+  // The same label get_assignment shows (name, else username), plus the
+  // username so two children with one name can be told apart.
+  const roster: Array<{ id: Id<"users">; name: string; username: string | null }> = [];
+  for (const id of a.scholarIds) {
+    const u = await ctx.db.get(id);
+    roster.push({
+      id,
+      name: u?.name ?? u?.username ?? "",
+      username: u?.username ?? null,
+    });
+  }
+  const label = (r: (typeof roster)[number]) =>
+    r.username && r.username !== r.name ? `${r.name} (${r.username})` : r.name;
+  const remove = new Set<Id<"users">>();
+  const removed: string[] = [];
+  const problems: string[] = [];
+  for (const query of scholarNames) {
+    // Exact matches on EITHER the name or the username are weighed together,
+    // so one child's username can never silently win over another child whose
+    // display name is exactly the query; two different children → ambiguous.
+    // Only with no exact match does the partial name match apply.
+    const q = query.trim().toLowerCase();
+    const exact = roster.filter(
+      (r) => r.name.trim().toLowerCase() === q || r.username?.toLowerCase() === q,
+    );
+    const m =
+      exact.length === 1
+        ? ({ kind: "match", scholar: exact[0] } as const)
+        : exact.length > 1
+          ? ({ kind: "ambiguous", candidates: exact } as const)
+          : matchByName(query, roster);
+    if (m.kind === "match") {
+      if (!remove.has(m.scholar.id)) removed.push(m.scholar.name);
+      remove.add(m.scholar.id);
+    } else if (m.kind === "ambiguous") {
+      problems.push(
+        `"${query}" matches ${m.candidates.map(label).join(", ")}; name one by username`,
+      );
+    } else {
+      problems.push(`"${query}" isn't on this roster`);
+    }
+  }
+  if (problems.length > 0) {
+    return { ok: false, message: `${problems.join("; ")}. No change made.` };
+  }
+  if (remove.size === 0) return { ok: false, message: "No scholars given to remove." };
+  const next = a.scholarIds.filter((id) => !remove.has(id));
+  if (next.length === 0) {
+    return {
+      ok: false,
+      message:
+        "That would empty the roster. Archive the assignment instead (archive_assignment). No change made.",
+    };
+  }
+  await applySetScholars(ctx, a, next);
+  return { ok: true, removed, rosterSize: next.length };
+}
+
+export const aideRemoveScholars = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    assignmentId: v.id("assignments"),
+    scholarNames: v.array(v.string()),
+  },
+  handler: (ctx, { callerUserId, assignmentId, scholarNames }) =>
+    coreAideRemoveScholars(ctx, callerUserId, assignmentId, scholarNames),
+});
+
 export const aideArchiveAssignment = internalMutation({
   args: { callerUserId: v.id("users"), assignmentId: v.id("assignments") },
   handler: (ctx, { callerUserId, assignmentId }) =>
@@ -4396,76 +5737,107 @@ export const activateScheduledActivity = internalMutation({
     const a = await ctx.db.get(assignmentId);
     if (!a || a.archivedAt) return;
     const now = Date.now();
-    const schedule = a.activitySchedule ?? [];
+    const schedule = await readSchedule(ctx, a);
     const idx = schedule.findIndex((e) => e.activityId === activityId);
     if (idx === -1) return;
     const entry = schedule[idx];
-    if (!(await ctx.db.get(activityId))) {
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: schedule.filter((e) => e.activityId !== activityId),
-      });
-      await syncScheduleMirror(ctx, a, activityId, null);
+    const without = schedule.filter((e) => e.activityId !== activityId);
+    const act = await ctx.db.get(activityId);
+    if (!act) {
+      await writeSchedule(ctx, a, without, { activityId });
       return;
     }
     // Already live, or rescheduled to the future — don't activate.
     if (entry.setAt != null) return;
+    // An app activity with no app that scholars can't build either (planned
+    // before the give-time check, or changed since): it stays planned rather
+    // than going live with nothing in it.
+    if (await appActivityHasNothingToOpen(ctx, act)) {
+      console.warn(
+        `[activateScheduledActivity] ${activityId} has no app and scholars can't build one; left planned`,
+      );
+      return;
+    }
     if (entry.startsAt != null && entry.startsAt > now) return;
     if (
       entry.mode === "classFocus" &&
       entry.endsAt !== undefined &&
       entry.endsAt <= now
     ) {
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: schedule.filter((e) => e.activityId !== activityId),
+      await writeSchedule(ctx, a, without, {
+        activityId,
+        clearedReason: "expired",
       });
-      await syncScheduleMirror(ctx, a, activityId, null, "expired");
       return;
     }
-    schedule[idx] = { ...entry, setAt: now, scheduledFnId: undefined };
-    await ctx.db.patch(assignmentId, { activitySchedule: schedule });
-    await syncScheduleMirror(ctx, a, activityId, schedule[idx]);
-    if (entry.mode === "classFocus" && entry.endsAt) {
-      const delay = entry.endsAt - now;
-      if (delay > 0) {
-        await ctx.scheduler.runAfter(
-          delay,
-          internal.assignments.autoClearActivity,
-          { assignmentId, activityId },
-        );
-      }
-    }
+    // Live now: the row holds the auto-clear job in place of this one (none
+    // for open-until work, which keeps its row past the close).
+    // Goes live with the teacher's finish as planned (TRA-726): open-until
+    // work stays open until its day even when that day is today.
+    const live = { ...entry, setAt: now };
+    const autoClearId = await armFocusAutoClear(ctx, a, activityId, live);
+    schedule[idx] = { ...live, scheduledFnId: autoClearId };
+    await writeSchedule(ctx, a, schedule, { activityId });
   },
 });
 
+/**
+ * End a live class focus at its `endsAt`. It acts only on the LIVE occurrence
+ * it was armed for: `armedSetAt` is that occurrence's `setAt` (absent on a job
+ * queued before the write switch, which then accepts only a live focus). A
+ * planned entry, or a newer occurrence of the same activity, is never touched,
+ * and a `scheduledFnId` owned by another pending job is never overwritten.
+ */
 export const autoClearActivity = internalMutation({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
+    armedSetAt: v.optional(v.number()),
   },
-  handler: async (ctx, { assignmentId, activityId }) => {
+  handler: async (ctx, { assignmentId, activityId, armedSetAt }) => {
     const a = await ctx.db.get(assignmentId);
     if (!a) return;
-    const schedule = a.activitySchedule ?? [];
-    const entry = schedule.find((e) => e.activityId === activityId);
-    if (!entry || entry.mode !== "classFocus") return;
-    if (!entry.endsAt) return;
+    const schedule = await readSchedule(ctx, a);
+    const entry = schedule.find(
+      (e) => e.activityId === activityId && e.mode === "classFocus",
+    );
+    // Planned (not live), or gone: not the occurrence this was armed for.
+    if (!entry || entry.setAt == null || !entry.endsAt) return;
+    // A different live occurrence of the same activity.
+    if (armedSetAt !== undefined && entry.setAt !== armedSetAt) return;
+    // Open-until work keeps its row past the close (armFocusAutoClear).
+    // This covers a job queued before the entry became open-until.
+    if (await isOpenUntilEntry(ctx, a, entry)) return;
     if (entry.endsAt > Date.now()) {
-      // Re-timed later since this job was scheduled. Follow the new end
-      // rather than dropping the only clear the entry has — otherwise the
-      // focus stays on every scholar's ladder until someone clears it by
-      // hand (the ladder counts a live focus past `endsAt` by design).
-      await ctx.scheduler.runAt(
+      // The focus now ends later. When the row already holds a job, that job
+      // owns the new end (every re-time schedules its own); leave it alone.
+      if (entry.scheduledFnId !== undefined) return;
+      // Untracked (a focus from before the write switch, re-timed by a path
+      // that kept no handle): follow the new end so the focus still clears,
+      // and keep the handle on the row so it can be cancelled.
+      const rearmed = await ctx.scheduler.runAt(
         entry.endsAt,
         internal.assignments.autoClearActivity,
-        { assignmentId, activityId },
+        { assignmentId, activityId, armedSetAt: entry.setAt },
+      );
+      await writeSchedule(
+        ctx,
+        a,
+        schedule.map((e) =>
+          e === entry ? { ...e, scheduledFnId: rearmed } : e,
+        ),
+        { activityId },
       );
       return;
     }
-    await ctx.db.patch(assignmentId, {
-      activitySchedule: schedule.filter((e) => e.activityId !== activityId),
-    });
-    // The mirror closes rather than disappearing — `expired` is the whole
-    // reason the new table keeps the row instead of deleting it.
-    await syncScheduleMirror(ctx, a, activityId, null, "expired");
+    // The row closes rather than disappearing — `expired` is the whole
+    // reason the table keeps the row instead of deleting it.
+    await writeSchedule(
+      ctx,
+      a,
+      schedule.filter((e) => e.activityId !== activityId),
+      { activityId, clearedReason: "expired" },
+    );
+
   },
 });

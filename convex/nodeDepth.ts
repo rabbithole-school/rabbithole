@@ -41,7 +41,7 @@ import {
   buildNodeReadings,
   type NodeReading,
 } from "./lib/nodeDepthHelpers";
-import { openErrorPatterns, type ErrorEvent } from "./lib/practice/errorFlags";
+import { openPracticeFlags } from "./lib/practiceFlags";
 
 export type { NodeReading };
 
@@ -180,25 +180,16 @@ export const nodeReadingsForScholar = authedQuery({
     // isTeacher exactly like buildNodeReadings' redaction. nodeKey == skillKey
     // (a direct join — practice nodes need no label normalization).
     if (isTeacher) {
-      const events = (
-        await ctx.db
-          .query("practiceErrorEvents")
-          .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
-          .collect()
-      ).filter((e) => !args.domain || e.domain === args.domain);
+      const flags = await openPracticeFlags(
+        ctx,
+        args.scholarId,
+        args.domain ? { domain: args.domain } : {},
+        Date.now(),
+      );
 
-      if (events.length > 0) {
-        const now = Date.now();
-        const byNode = new Map<string, ErrorEvent[]>();
-        for (const e of events) {
-          const bucket = byNode.get(e.nodeKey) ?? [];
-          bucket.push({ pattern: e.pattern, createdAt: e.createdAt });
-          byNode.set(e.nodeKey, bucket);
-        }
-
+      if (flags.length > 0) {
         const readingByKey = new Map(readings.map((r) => [r.nodeKey, r]));
-        for (const [nodeKey, nodeEvents] of byNode) {
-          if (openErrorPatterns(nodeEvents, now).length === 0) continue;
+        for (const { nodeKey } of flags) {
           const existing = readingByKey.get(nodeKey);
           if (existing) {
             existing.hasOpenMisconception = true;

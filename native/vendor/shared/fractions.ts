@@ -22,6 +22,7 @@
  */
 
 import { hasStaticRadical, scanStaticRadicals, type StaticRadicalSegment } from "./staticRadicals";
+import { hasStemMath, stemMathToSpeech } from "./stemMath";
 
 // ─── Nodes (what the renderer consumes) ──────────────────────────────────────
 
@@ -175,7 +176,7 @@ export function parsePracticeText(input: string): PracticeTextNode[] {
 /** True when a label needs the shared static-practice renderer, not only the
  * historical stacked-fraction renderer. */
 export function hasPracticeMath(input: string): boolean {
-  return hasFraction(input) || hasStaticRadical(input);
+  return hasFraction(input) || hasStaticRadical(input) || hasStemMath(input);
 }
 
 // ─── Spoken form (accessibility) ─────────────────────────────────────────────
@@ -187,8 +188,14 @@ function speakPart(p: FracPart): string {
   return p.blank ? "blank" : p.value;
 }
 
-/** A screen-reader-friendly reading of a fraction string. */
+/** A screen-reader-friendly reading of a fraction string. Typeset `\( … \)`
+ *  spans (shared/stemMath) are read as plain words, never as backslashes. */
 export function fractionsToSpeech(input: string): string {
+  if (hasStemMath(input)) return stemMathToSpeech(input, proseToSpeech);
+  return proseToSpeech(input);
+}
+
+function proseToSpeech(input: string): string {
   const nodes = parsePracticeText(input);
   const parts: string[] = [];
   for (const n of nodes) {

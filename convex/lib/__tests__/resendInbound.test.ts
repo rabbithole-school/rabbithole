@@ -6,9 +6,13 @@ import {
   extractEmailAddress,
   extractNewReply,
   findThreadReplyAddress,
+  isAutoReply,
   verifyResendWebhook,
 } from "../resendInbound";
-import { replyAddressForThread } from "../parentMessageEmail";
+import {
+  parseThreadReplyAddress,
+  replyAddressForThread,
+} from "../parentMessageEmail";
 
 const SECRET = `whsec_${btoa("test-resend-secret")}`;
 const ID = "msg_test";
@@ -140,5 +144,38 @@ describe("Resend inbound email", () => {
       if (prior === undefined) delete process.env.PARENT_INBOUND_DOMAIN;
       else process.env.PARENT_INBOUND_DOMAIN = prior;
     }
+  });
+});
+
+describe("teacher reply addresses", () => {
+  test("a staff token rides after the thread id and is found and parsed", () => {
+    const address = "reply+k17abc.0123456789abcdef0123@inbound.example.com";
+    expect(findThreadReplyAddress({ receivedFor: [], to: [address], cc: [], bcc: [] })).toBe(
+      address,
+    );
+    expect(parseThreadReplyAddress(address)).toEqual({
+      threadId: "k17abc",
+      staffToken: "0123456789abcdef0123",
+    });
+    expect(parseThreadReplyAddress("reply+k17abc@inbound.example.com")).toEqual({
+      threadId: "k17abc",
+    });
+    expect(parseThreadReplyAddress("hello@inbound.example.com")).toBeNull();
+  });
+});
+
+describe("isAutoReply", () => {
+  test("only an explicit automatic-reply marker counts", () => {
+    expect(isAutoReply({ "Auto-Submitted": "auto-replied" })).toBe(true);
+    expect(isAutoReply([{ name: "auto-submitted", value: "auto-generated" }])).toBe(true);
+    expect(isAutoReply({ "X-Autoreply": "yes" })).toBe(true);
+    expect(isAutoReply({ Precedence: "auto_reply" })).toBe(true);
+    expect(isAutoReply({ "Auto-Submitted": "no" })).toBe(false);
+    expect(isAutoReply({ "auto-submitted": "no; x=y" })).toBe(false);
+    expect(isAutoReply({ "auto-submitted": "No (a person wrote this)" })).toBe(false);
+    expect(isAutoReply({ "auto-submitted": "auto-replied; reason=vacation" })).toBe(true);
+    expect(isAutoReply({ Precedence: "bulk" })).toBe(false);
+    expect(isAutoReply(undefined)).toBe(false);
+    expect(isAutoReply("garbage")).toBe(false);
   });
 });

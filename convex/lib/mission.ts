@@ -17,6 +17,8 @@
 //     locked until the nearest preceding learning step (a non-app online
 //     activity with a deliverable) is complete.
 import { isAppActivity } from "../../shared/appSurface";
+import { SCHOLAR_LED_APP_BUILDING } from "../../shared/missionCopy";
+import { isUnansweredOrDeclinedProposal } from "./questApproval";
 
 export type MissionActivity = {
   _id?: string;
@@ -42,11 +44,14 @@ export type MissionUnit = {
   /** "inspired" = designed by someone else for the scholar (a teacher offer). */
   authorRole?: string | null;
   mission?: { text: string; gate?: string } | null;
+  /** A scholar's Quest proposal (lib/questApproval.ts), when it is one. */
+  questApproval?: { state: string } | null;
 };
 
 export type SessionMission = {
   source: "authored" | "default" | "quest";
-  /** Always resolved: the authored gate, the kind's default, or the Quest's. */
+  /** The authored gate, the kind's default, or the Quest's. On an app it is
+   *  the open mission line scholars see, and may be empty. */
   gate: string;
   freedoms: string[];
   /** App activities only; [] otherwise. */
@@ -80,22 +85,84 @@ const DEFAULT_GATES: Record<string, string> = {
   artifact: "A first version of the thing they are making exists.",
 };
 
-export const DEFAULT_APP_GATE =
-  "A first working version of the app exists and has been run once.";
-
 /** The gate an activity gets when none is authored, or null for exploration
- * (no deliverable) and non-online kinds. */
+ * (no deliverable), non-online kinds, and app activities. An app's mission is
+ * one open line the teacher writes ("Understand escape velocity"); it never
+ * holds a build back, so an app has no default to fall back on. */
 export function defaultGateFor(activity: MissionActivity): string | null {
-  if (isAppActivity(activity)) return DEFAULT_APP_GATE;
+  if (isAppActivity(activity)) return null;
   if (activity.kind !== "online") return null;
   const kind = activity.deliverable?.kind;
   if (!kind) return null;
   return DEFAULT_GATES[kind] ?? DEFAULT_GATES.artifact;
 }
 
+/** Longest mission line shown whole as the builder chat's mission title. */
+export const MISSION_TITLE_MAX = 60;
+
+/**
+ * The mission title scholars see in the builder (the native chat drawer's
+ * MISSION eyebrow, the Workshop header): an app mission is one open line
+ * ("Understand escape velocity"), shown whole when short enough. A longer
+ * line with a short lead before its first colon shows that lead
+ * ("Understand escape velocity: the rocket leaves the planet once").
+ * Otherwise null, and the drawer keeps its own title.
+ */
+export function missionTitleFromGate(gate: string | null | undefined): string | null {
+  const line = gate?.trim();
+  if (!line) return null;
+  if (line.length <= MISSION_TITLE_MAX) return line;
+  const colon = line.indexOf(":");
+  if (colon < 0) return null;
+  const title = line.slice(0, colon).trim();
+  return title.length > 0 && title.length <= MISSION_TITLE_MAX ? title : null;
+}
+
 /** Whether the unit is a scholar's own Quest (scholar-authored). */
 export function isQuestUnit(unit: MissionUnit | null | undefined): boolean {
   return !!unit?.authorScholarId;
+}
+
+/**
+ * May the tutor build a NEW app (create_code) in this session? While
+ * SCHOLAR_LED_APP_BUILDING is off, only inside a teacher's activity: never in
+ * an activity-less chat or a Quest step. An app activity always may (a
+ * teacher's, or a Quest build step that already exists), and so may a
+ * teacher's rehearsal and an activity-less builder session that already
+ * exists (vibecode.createSession no longer opens new ones). Editing an app
+ * that exists is never gated here.
+ *
+ * Never, whatever else holds, when the session's activity doesn't really sit
+ * in the session's lesson and unit (`anchorsAgree`, lib/questStructure.ts
+ * sessionAnchorsAgree), or when its unit is a Quest proposal still waiting
+ * or declined (TRA-685): re-pointing a session's anchors opens nothing. In a
+ * proposed Quest, only for its proposer's own sessions and a teacher's
+ * rehearsal.
+ */
+export function mayCreateAppInSession(args: {
+  isTestDrive?: boolean | null;
+  /** The builder is the session's primary view (sessionAppContextFor). */
+  builderPrimary?: boolean;
+  activity: MissionActivity | null | undefined;
+  unit: MissionUnit | null | undefined;
+  /** The activity sits in the session's lesson and unit. Absent = true. */
+  anchorsAgree?: boolean;
+  /** The session's owner. A proposed Quest's builder is its proposer's only. */
+  sessionUserId?: unknown;
+}): boolean {
+  if (args.anchorsAgree === false) return false;
+  if (isUnansweredOrDeclinedProposal(args.unit)) return false;
+  if (SCHOLAR_LED_APP_BUILDING || args.isTestDrive === true) return true;
+  // An approval opened the builder for the scholar who proposed the Quest.
+  // Nobody else's session can open on it (sessions.ts refuses at the door);
+  // this is the backstop. After the rehearsal exemption: a teacher's
+  // rehearsal is the teacher's session.
+  if (args.unit?.questApproval && args.unit.authorScholarId !== args.sessionUserId) {
+    return false;
+  }
+  if (!args.activity) return args.builderPrimary === true;
+  if (isAppActivity(args.activity)) return true;
+  return !isQuestUnit(args.unit);
 }
 
 /**
@@ -127,20 +194,37 @@ export function resolveSessionMission(
     }
     return null;
   }
-  const fallback = defaultGateFor(activity);
-  if (fallback == null) return null;
-  const app = isAppActivity(activity);
   const contract = activity.buildContract ?? null;
   const authoredGate = contract?.gate?.trim();
+  if (isAppActivity(activity)) {
+    // An app's mission is the teacher's open line plus what the app must
+    // model; nothing in it holds a build back. With no contract the line is
+    // empty, but the app still resolves a mission so its builder keeps the
+    // safeguards and tools that ride on one (weapons, honesty, provocations,
+    // experiments, park_idea).
+    const ownQuest = isQuestUnit(unit);
+    return {
+      source: contract ? "authored" : "default",
+      gate: authoredGate || unit?.mission?.gate?.trim() || "",
+      freedoms: contract?.freedoms ?? [],
+      invariants: contract?.invariants ?? [],
+      questLine,
+      ownQuest,
+      unlocksBuild: null,
+      buildStepOpen: false,
+    };
+  }
+  const fallback = defaultGateFor(activity);
+  if (fallback == null) return null;
   return {
     source: contract ? "authored" : "default",
     gate: authoredGate || fallback,
     freedoms: contract?.freedoms ?? [],
-    invariants: app ? (contract?.invariants ?? []) : [],
+    invariants: [],
     questLine,
     ownQuest: isQuestUnit(unit),
-    unlocksBuild: app ? null : (opts.unlocksBuild ?? null),
-    buildStepOpen: app ? false : opts.buildStepOpen === true,
+    unlocksBuild: opts.unlocksBuild ?? null,
+    buildStepOpen: opts.buildStepOpen === true,
   };
 }
 

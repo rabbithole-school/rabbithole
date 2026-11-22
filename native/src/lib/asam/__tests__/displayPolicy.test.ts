@@ -14,14 +14,16 @@ describe("ASAM display activity policy", () => {
       inSingleAppMode: true,
       appIsActive: true,
       lastActivityAt: T0,
-      now: T0 + 15 * 60 * 1_000,
+      now: T0 + 4 * 60 * 1_000,
     };
 
     expect(shouldKeepAsamAwake(state)).toBe(true);
-    expect(remainingAsamAwakeMs(state)).toBe(45 * 60 * 1_000);
+    expect(remainingAsamAwakeMs(state)).toBe(
+      ASAM_AWAKE_WINDOW_MS - 4 * 60 * 1_000,
+    );
   });
 
-  it("expires exactly 60 minutes after the most recent activity", () => {
+  it("expires exactly one window after the most recent activity", () => {
     expect(
       shouldKeepAsamAwake({
         inSingleAppMode: true,

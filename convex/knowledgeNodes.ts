@@ -80,6 +80,12 @@ import {
   ALGEBRA_1_IMPLIES_EDGES,
 } from "./seed/algebra1Graph";
 import {
+  ALGEBRA_2_DOMAIN,
+  ALGEBRA_2_SKILLS,
+  ALGEBRA_2_EDGES,
+  ALGEBRA_2_IMPLIES_EDGES,
+} from "./seed/algebra2Graph";
+import {
   DISCRETE_MATH_DOMAIN,
   DISCRETE_MATH_SKILLS,
   DISCRETE_MATH_EDGES,
@@ -127,6 +133,7 @@ export const PRACTICE_GRAPHS: readonly {
   { domain: INTEGERS_COORDINATES_DOMAIN, skills: INTEGERS_COORDINATES_SKILLS, edges: INTEGERS_COORDINATES_EDGES },
   { domain: EARLY_ALGEBRA_DOMAIN, skills: EARLY_ALGEBRA_SKILLS, edges: EARLY_ALGEBRA_EDGES, impliesEdges: EARLY_ALGEBRA_IMPLIES_EDGES },
   { domain: ALGEBRA_1_DOMAIN, skills: ALGEBRA_1_SKILLS, edges: ALGEBRA_1_EDGES, impliesEdges: ALGEBRA_1_IMPLIES_EDGES },
+  { domain: ALGEBRA_2_DOMAIN, skills: ALGEBRA_2_SKILLS, edges: ALGEBRA_2_EDGES, impliesEdges: ALGEBRA_2_IMPLIES_EDGES },
   // ELECTIVE — enrichment territory: offered via the reachable new-territory
   // card once its WNA prereqs converge, never force-probed (see the flag doc).
   { domain: DISCRETE_MATH_DOMAIN, skills: DISCRETE_MATH_SKILLS, edges: DISCRETE_MATH_EDGES, elective: true },

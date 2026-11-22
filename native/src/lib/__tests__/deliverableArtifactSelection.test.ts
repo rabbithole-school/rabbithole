@@ -4,9 +4,11 @@ import {
   artifactIdForDeliverableLookup,
   artifactMatchesDeliverableKind,
   dedicatedDeliverableArtifact,
+  isWorkSurfaceArtifact,
   nextAutoSelect,
   pickDefaultArtifact,
   type SelectableArtifact,
+  sideDeckPlacement,
   workSurfaceFor,
 } from "../deliverableArtifactSelection";
 
@@ -261,31 +263,31 @@ describe("workSurfaceFor (TRA-463)", () => {
 
   it("shows a tutor-made document in an open exploration with no activity", () => {
     expect(
-      workSurfaceFor({ hasActivity: false, activity: undefined, textArtifactCount: 1 }),
+      workSurfaceFor({ hasActivity: false, activity: undefined, workArtifactCount: 1 }),
     ).toBe("documents");
   });
 
   it("shows documents for an activity that asks for no deliverable", () => {
     expect(
-      workSurfaceFor({ hasActivity: true, activity: noDeliverable, textArtifactCount: 2 }),
+      workSurfaceFor({ hasActivity: true, activity: noDeliverable, workArtifactCount: 2 }),
     ).toBe("documents");
   });
 
   it("renders nothing for a no-activity session with no documents (no empty panel)", () => {
     expect(
-      workSurfaceFor({ hasActivity: false, activity: undefined, textArtifactCount: 0 }),
+      workSurfaceFor({ hasActivity: false, activity: undefined, workArtifactCount: 0 }),
     ).toBe("none");
   });
 
   it("renders nothing, not a skeleton, while a no-activity session's artifacts load", () => {
     expect(
-      workSurfaceFor({ hasActivity: false, activity: undefined, textArtifactCount: undefined }),
+      workSurfaceFor({ hasActivity: false, activity: undefined, workArtifactCount: undefined }),
     ).toBe("none");
   });
 
   it("keeps the full deliverable surface even before any document exists", () => {
     expect(
-      workSurfaceFor({ hasActivity: true, activity: textDeliverable, textArtifactCount: 0 }),
+      workSurfaceFor({ hasActivity: true, activity: textDeliverable, workArtifactCount: 0 }),
     ).toBe("deliverable");
   });
 
@@ -293,13 +295,57 @@ describe("workSurfaceFor (TRA-463)", () => {
     // A deliverable activity must never flash the stripped-down documents view
     // (no prompt, no check) while its activity row is still in flight.
     expect(
-      workSurfaceFor({ hasActivity: true, activity: undefined, textArtifactCount: 1 }),
+      workSurfaceFor({ hasActivity: true, activity: undefined, workArtifactCount: 1 }),
     ).toBe("loading");
   });
 
   it("falls back to documents when the session's activity was deleted", () => {
     expect(
-      workSurfaceFor({ hasActivity: true, activity: null, textArtifactCount: 1 }),
+      workSurfaceFor({ hasActivity: true, activity: null, workArtifactCount: 1 }),
     ).toBe("documents");
+  });
+});
+
+describe("isWorkSurfaceArtifact", () => {
+  it("includes documents, apps, and the session's deck", () => {
+    for (const type of [undefined, "text", "code", "slides"]) {
+      expect(isWorkSurfaceArtifact({ type })).toBe(true);
+    }
+  });
+
+  it("leaves maps and manipulatives to their own cards", () => {
+    expect(isWorkSurfaceArtifact({ type: "map" })).toBe(false);
+    expect(isWorkSurfaceArtifact({ type: "manipulative" })).toBe(false);
+  });
+
+  it("mounts the work surface for a no-activity chat whose only artifact is a tutor-made deck", () => {
+    // A Quest or no-activity chat: the deck alone must open the documents surface.
+    const artifacts = [artifact("deck", 1, "slides")];
+    expect(
+      workSurfaceFor({
+        hasActivity: false,
+        activity: undefined,
+        workArtifactCount: artifacts.filter(isWorkSurfaceArtifact).length,
+      }),
+    ).toBe("documents");
+  });
+});
+
+describe("sideDeckPlacement", () => {
+  it("adds nothing on a slides deliverable, where the deck is already the work", () => {
+    expect(sideDeckPlacement("slides")).toBe("none");
+  });
+
+  it("puts the deck in the document switcher wherever documents show", () => {
+    expect(sideDeckPlacement(undefined)).toBe("switcher");
+    expect(sideDeckPlacement(null)).toBe("switcher");
+    expect(sideDeckPlacement("text")).toBe("switcher");
+    expect(sideDeckPlacement("artifact")).toBe("switcher");
+  });
+
+  it("puts the deck after work that has no switcher", () => {
+    expect(sideDeckPlacement("photo")).toBe("below");
+    expect(sideDeckPlacement("audio")).toBe("below");
+    expect(sideDeckPlacement("map")).toBe("below");
   });
 });

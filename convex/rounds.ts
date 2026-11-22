@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { isWithdrawn } from "./lib/enrollmentStanding";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { teacherMutation, teacherQuery } from "./lib/customFunctions";
@@ -155,7 +156,10 @@ async function rosterForInstitution(
     )
     .collect();
   return inInstitution
-    .filter((scholar) => scholar.enrollmentStanding !== "program_guest")
+    .filter(
+      (scholar) =>
+        scholar.enrollmentStanding !== "program_guest" && !isWithdrawn(scholar),
+    )
     .sort(
       (a, b) =>
         scholarLabel(a).localeCompare(scholarLabel(b)) ||

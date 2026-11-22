@@ -259,6 +259,89 @@ describe("markCompleteFromTool on an app activity", () => {
     );
     expect(rows).toHaveLength(1);
   });
+
+  test("a bare \"I'm done\" never closes it; a later real turn can", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, lessonId, activityId } = await seedActivity(t, teacherId, {
+      kind: "online" as const,
+      appActivity: true,
+      deliverable: APP_DELIVERABLE,
+    });
+    const sessionId = await seedSession(t, scholarId, {
+      unitId,
+      lessonId,
+      activityId,
+      sessionMode: "vibecode",
+    });
+    const say = (content: string) =>
+      t.run((ctx) =>
+        ctx.db.insert("messages", {
+          sessionId,
+          role: "user",
+          content,
+          flagged: false,
+        }),
+      );
+    for (const content of ["make a mole game", "the scale says 12 grams", "DONE WITH THE WHOLE THING"]) {
+      await say(content);
+    }
+    const complete = () =>
+      t.mutation(internal.activityCompletions.markCompleteFromTool, {
+        sessionId,
+        summary: "Finished every stone.",
+      });
+    expect(await complete()).toMatchObject({
+      ok: false,
+      reason: "bare_done_declaration",
+    });
+    // An app's own ask after it is not the scholar speaking: still refused.
+    await t.run((ctx) =>
+      ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "Level 5 cleared",
+        inputModality: "app",
+        flagged: false,
+      }),
+    );
+    expect(await complete()).toMatchObject({ reason: "bare_done_declaration" });
+    await say("the heavy ones weigh more because their atoms are bigger");
+    expect(await complete()).toMatchObject({ ok: true, alreadyComplete: false });
+  });
+});
+
+describe("isBareDoneDeclaration", () => {
+  test("only a declaration of being done, with nothing of their own", async () => {
+    const { isBareDoneDeclaration } = await import("../lib/activityCompletionTool");
+    for (const bare of [
+      "DONE WITH THE WHOLE THING",
+      "done",
+      "im done!!!",
+      "I’m finished",
+      "i beat it",
+      "ok done with the game now",
+      "finally finished every level",
+      "i won",
+      "i did it",
+      "ive finished",
+      "we're done",
+      "done. now what?",
+    ]) {
+      expect(isBareDoneDeclaration(bare)).toBe(true);
+    }
+    for (const said of [
+      "done, the mole weighs 12 grams",
+      "I'm done with the game, it was fun",
+      "is it done?",
+      "make it done faster",
+      "",
+      "the heavy ones weigh more",
+    ]) {
+      expect(isBareDoneDeclaration(said)).toBe(false);
+    }
+  });
 });
 
 describe("sendMessage thread stamping in a chat-primary session", () => {

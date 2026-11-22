@@ -99,7 +99,7 @@
  * Crypto note: runs in the DEFAULT Convex runtime (Web Crypto via
  * lib/oauthCrypto) — no "use node" — matching the auth provider's `authorize`.
  */
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   internalMutation,
   internalQuery,
@@ -108,7 +108,12 @@ import {
   type QueryCtx,
 } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { requireUser } from "./lib/auth";
+import {
+  assertCanWrite,
+  READ_ONLY_ACCOUNT_ERROR,
+  requireUser,
+} from "./lib/auth";
+import type { AgentTransport } from "./lib/deviceOpsTools";
 import { internal } from "./_generated/api";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { sha256Hex, randomToken } from "./lib/oauthCrypto";
@@ -227,7 +232,7 @@ type RegisterResult = {
   managedDeviceId?: Id<"managedDeviceClaims">;
 };
 
-async function requireManagedDeviceInstitutionAccessible(
+export async function requireManagedDeviceInstitutionAccessible(
   ctx: MutationCtx,
   user: Doc<"users">,
   row: Doc<"managedDeviceClaims">,
@@ -453,34 +458,107 @@ export const assignScholarToManagedDevice = authedMutation({
     managedDeviceId: v.id("managedDeviceClaims"),
     scholarId: v.id("users"),
   },
-  handler: async (ctx, args): Promise<MintResult> => {
-    const row = await ctx.db.get(args.managedDeviceId);
-    if (!row) throw new Error("That device is no longer on the roster.");
-    await requireManagedDeviceInstitutionAccessible(ctx, ctx.user, row);
+  handler: async (ctx, args): Promise<MintResult> =>
+    await assignScholarToDevice(ctx, ctx.user, args),
+});
 
-    const scholar = await ctx.db.get(args.scholarId);
-    if (
-      !scholar ||
-      scholar.role !== ROLES.SCHOLAR ||
-      !scholar.institutionId
-    ) {
-      throw new Error("Scholar not found.");
-    }
-    if (scholar.institutionId !== row.institutionId) {
-      throw new Error("That scholar is not in this device's school.");
-    }
-    // Deliberately NOT gated by requireScholarWithoutAnotherManagedDevice: a
-    // staffer manually assigning from the device drawer may intentionally give
-    // one scholar a second device. Bulk auto-assign still enforces one-to-one.
+/** The one body behind the devices drawer's assign and the agent tool's. */
+async function assignScholarToDevice(
+  ctx: MutationCtx,
+  actor: Doc<"users">,
+  args: {
+    managedDeviceId: Id<"managedDeviceClaims">;
+    scholarId: Id<"users">;
+    via?: AgentTransport;
+  },
+): Promise<MintResult> {
+  const row = await ctx.db.get(args.managedDeviceId);
+  if (!row) throw new Error("That device is no longer on the roster.");
+  await requireManagedDeviceInstitutionAccessible(ctx, actor, row);
 
-    const result = await mintForSerial(ctx, {
-      serial: row.serial,
-      scholar,
-      actorId: ctx.user._id,
-      auditAction: "managed-claim.assign",
-    });
-    if (!result.ok) throw new Error(result.error ?? "Couldn't assign that device.");
-    return result;
+  const scholar = await ctx.db.get(args.scholarId);
+  if (
+    !scholar ||
+    scholar.role !== ROLES.SCHOLAR ||
+    !scholar.institutionId
+  ) {
+    throw new Error("Scholar not found.");
+  }
+  if (scholar.institutionId !== row.institutionId) {
+    throw new Error("That scholar is not in this device's school.");
+  }
+  // Deliberately NOT gated by requireScholarWithoutAnotherManagedDevice: a
+  // staffer manually assigning from the device drawer may intentionally give
+  // one scholar a second device. Bulk auto-assign still enforces one-to-one.
+
+  const result = await mintForSerial(ctx, {
+    serial: row.serial,
+    scholar,
+    actorId: actor._id,
+    auditAction: "managed-claim.assign",
+    via: args.via,
+  });
+  if (!result.ok) throw new Error(result.error ?? "Couldn't assign that device.");
+  return result;
+}
+
+export type AgentAssignResult =
+  | {
+      ok: true;
+      serial: string;
+      scholarName: string | null;
+      reassignedFrom: string | null;
+    }
+  | { ok: false; message: string };
+
+/**
+ * The agent transports' assign/reassign (`reassign_managed_device`, via
+ * `simplemdm.assignDeviceFromAgent`). Same body as the drawer's
+ * `assignScholarToManagedDevice`, with the caller re-read from CURRENT state:
+ * a deleted user, a read-only account, or a lost school:operations grant stops
+ * it here, before anything is minted.
+ *
+ * Returns no claim token. The drawer's result carries one so a staffer can
+ * enrol an iPad by hand; a model has no use for it, and a token in a chat
+ * transcript is a credential in a chat transcript.
+ */
+export const assignFromAgent = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    source: v.union(v.literal("slack"), v.literal("mcp"), v.literal("app")),
+    managedDeviceId: v.id("managedDeviceClaims"),
+    scholarId: v.id("users"),
+  },
+  handler: async (ctx, args): Promise<AgentAssignResult> => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) {
+      return { ok: false, message: "Forbidden: school staff role required" };
+    }
+    if (caller.readOnly) return { ok: false, message: READ_ONLY_ACCOUNT_ERROR };
+    // The in-app aide runs inside the browser session, which may be an
+    // impersonation overlay; a no-op for Slack and MCP (no session).
+    await assertCanWrite(ctx);
+    try {
+      const result = await assignScholarToDevice(ctx, caller, {
+        managedDeviceId: args.managedDeviceId,
+        scholarId: args.scholarId,
+        via: args.source,
+      });
+      return {
+        ok: true,
+        serial: result.serial,
+        scholarName: result.scholarName ?? result.scholarUsername ?? null,
+        reassignedFrom: result.reassignedFrom ?? null,
+      };
+    } catch (error) {
+      // Rethrow rather than return: a throw rolls the mutation back, so a
+      // failure partway through the mint cannot commit half a reassignment.
+      // ConvexError keeps the reason readable past prod's error redaction.
+      if (error instanceof ConvexError) throw error;
+      throw new ConvexError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   },
 });
 
@@ -613,6 +691,8 @@ export async function mintForSerial(
     scholar: Doc<"users">;
     actorId: Id<"users">;
     auditAction?: string;
+    /** The agent transport that asked, recorded in the audit line. */
+    via?: AgentTransport;
   },
 ): Promise<MintResult> {
   const { serial, scholar, actorId } = opts;
@@ -719,7 +799,7 @@ export async function mintForSerial(
       actorId,
       opts.auditAction ?? "managed-claim.mint",
       scholar._id,
-      `serial ${serial} (reassign/rotate)`,
+      `serial ${serial} (reassign/rotate)${opts.via ? ` from ${opts.via}` : ""}`,
       existing.institutionId,
     );
     return mintSuccess(existing._id, serial, scholar, claimToken, reassignedFrom);
@@ -744,7 +824,7 @@ export async function mintForSerial(
     actorId,
     opts.auditAction ?? "managed-claim.mint",
     scholar._id,
-    `serial ${serial} (new)`,
+    `serial ${serial} (new)${opts.via ? ` from ${opts.via}` : ""}`,
     scholar.institutionId ?? null,
   );
   return mintSuccess(managedDeviceId, serial, scholar, claimToken, null);
@@ -1517,6 +1597,9 @@ export const listForAgent = internalQuery({
         // scholar, and staff need to reassign it, exactly as the console
         // shows it.
         scholarDeleted: row.scholarDeleted,
+        // The handle reassign_managed_device takes. Present on every row,
+        // including an iPad that has never signed in.
+        managedDeviceId: row._id,
         claimState: row.claimState,
         hasLiveSession: row.hasLiveSession,
         // The handle every write tool takes. Null means this iPad has never
@@ -1537,6 +1620,13 @@ export const listForAgent = internalQuery({
           tiled: app.tiled,
           onDevice: app.onDevice,
           blocker: app.blocker,
+          // The two facts the console states beside "no grant" (TRA-444),
+          // passed through so the aide reads them too (TRA-448). Without
+          // `schedule`, a block-scoped app outside its window read here as
+          // plain `blocker: "grant"`, the misreading behind the 2026-09-21
+          // Scratch incident.
+          grantThroughDay: app.grantThroughDay,
+          schedule: app.schedule,
         })),
       }));
     return { ok: true as const, devices };

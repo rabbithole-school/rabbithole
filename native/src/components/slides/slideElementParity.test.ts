@@ -53,6 +53,11 @@ vi.mock("@/contexts/AsamControllerContext", () => ({
     restoreAfterSystemUI: vi.fn(),
   }),
 }));
+// The presenter's microphone loads expo-audio and expo-file-system, which need
+// the app runtime; this suite only renders slide elements.
+vi.mock("@/hooks/usePresentingMic", () => ({
+  usePresentingMic: () => ({ status: "off", stop: vi.fn(), subscribe: () => () => {} }),
+}));
 vi.mock("@/lib/presentationExternalDisplay", () => ({
   getPresentationDisplayState: () => ({
     externalScreenId: null,

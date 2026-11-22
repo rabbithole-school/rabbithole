@@ -13,7 +13,7 @@ import {
   proficiencyFromReps,
   retention as retainedProbability,
 } from "./lib/practice/scheduler";
-import { openErrorPatterns } from "./lib/practice/errorFlags";
+import { openPracticeFlags } from "./lib/practiceFlags";
 import { normalizeLabel } from "./lib/nodeDepthHelpers";
 import { strandHeadlineFor } from "../shared/practiceDomainLabels";
 
@@ -97,7 +97,7 @@ export const subjectRollup = teacherQuery({
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
     const now = Date.now();
 
-    const [nodes, masteryRows, errorEvents, allObservations] = await Promise.all([
+    const [nodes, masteryRows, practiceFlags, allObservations] = await Promise.all([
       ctx.db
         .query("knowledgeNodes")
         .withIndex("by_domain", (q) => q.eq("domain", args.domain))
@@ -108,12 +108,7 @@ export const subjectRollup = teacherQuery({
           q.eq("scholarId", args.scholarId).eq("domain", args.domain),
         )
         .collect(),
-      ctx.db
-        .query("practiceErrorEvents")
-        .withIndex("by_scholar_domain", (q) =>
-          q.eq("scholarId", args.scholarId).eq("domain", args.domain),
-        )
-        .collect(),
+      openPracticeFlags(ctx, args.scholarId, { domain: args.domain }, now),
       ctx.db
         .query("masteryObservations")
         .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
@@ -172,15 +167,9 @@ export const subjectRollup = teacherQuery({
         confirmingCount: summary.confirmingCount,
       }));
 
-    const eventsByNode = new Map<string, typeof errorEvents>();
-    for (const event of errorEvents) {
-      const bucket = eventsByNode.get(event.nodeKey);
-      if (bucket) bucket.push(event);
-      else eventsByNode.set(event.nodeKey, [event]);
-    }
-    const openMisconceptions = [...eventsByNode.entries()]
-      .flatMap(([nodeKey, events]) =>
-        openErrorPatterns(events, now).map((open) => ({
+    const openMisconceptions = practiceFlags
+      .flatMap(({ nodeKey, patterns }) =>
+        patterns.map((open) => ({
           nodeKey,
           skillLabel: nodeByKey.get(nodeKey)?.label ?? nodeKey,
           pattern: open.pattern,

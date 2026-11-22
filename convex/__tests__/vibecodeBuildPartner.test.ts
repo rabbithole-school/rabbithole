@@ -38,7 +38,6 @@ function vibecodeCtx(
     ...activity,
   };
   return {
-    teacherWhisper: null,
     readingLevel: null,
     scholarName: "Reference Scholar",
     sessionMode: "vibecode",

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "convex/react";
 import { useSignOut } from "@/hooks/useSignOut";
+import { ViewingAsBar } from "@/components/ViewingAsBar";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Box, Flex, HStack, Spinner, Text } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
@@ -13,6 +14,7 @@ import { AppLogo } from "@/components/AppLogo";
 import { AppHeader } from "@/components/AppHeader";
 import { AccountMenu } from "@/components/AccountMenu";
 import { BotIconButton } from "@/components/BotIconButton";
+import { PasskeyPill } from "@/components/PasskeyPill";
 import { ParentDashboard } from "@/components/ParentDashboard";
 import { ParentAideDock } from "@/components/parent/ParentAideDock";
 import {
@@ -54,9 +56,11 @@ export default function ParentPage() {
  * (≥1 guardianship), so a non-guardian is bounced to their own home.
  *
  * TEACHER PREVIEW — `/parent?remote=<scholarId>` ("View as parent" on the
- * teacher dashboard, the twin of `/scholar?remote=`): a teacher stays
- * themselves and renders this same portal for ONE scholar whose learning
- * record they can already read, so they see what that family sees. The preview is read-only and
+ * teacher dashboard, the twin of `/scholar?remote=`; the Slack bot's
+ * `parent_view_link` tool hands out the same URL): a teacher stays
+ * themselves and renders this same portal for that scholar and the
+ * brothers and sisters they can also read, so they see what that family
+ * sees. The preview is read-only and
  * non-sensitive by construction: the backend reads accept staff-with-access
  * (`requireGuardianOrStaffPreview`), while the family-only surfaces (health
  * forms, library card, messages, the parent chat) stay guardian-gated and
@@ -75,37 +79,25 @@ function ParentView() {
   const isPreview = !!(
     remoteParam && user && isTeacherRole(user.role as Role | undefined)
   );
-  const hasParentContext = useQuery(
-    api.parents.hasParentContext,
+  // One read decides the shell: guardianship, applicant-only mode (a parent
+  // with no linked child whose family applied to the primary institution;
+  // they see only Admissions) and the children, so the tab bar draws once.
+  const portal = useQuery(
+    api.parents.portalContext,
     user && !isPreview ? {} : "skip",
   );
-  // Applicant-only mode is decided on the server (parents.applicantContext):
-  // a parent with no linked child whose family applied to the primary
-  // institution. They see only Admissions.
-  const applicantContext = useQuery(
-    api.parents.applicantContext,
-    user && !isPreview ? {} : "skip",
-  );
-  const applicantOnly = !isPreview && applicantContext?.applicantOnly === true;
-  const ownChildren = useQuery(
-    api.parents.listMyChildren,
-    user && !isPreview ? {} : "skip",
-  );
-  const previewChild = useQuery(
-    api.parents.previewChildForStaff,
+  const hasParentContext = portal?.hasParentContext;
+  const applicantOnly = !isPreview && portal?.applicantOnly === true;
+  const ownChildren = portal?.children;
+  const previewFamily = useQuery(
+    api.parents.previewFamilyForStaff,
     isPreview ? { scholarId: remoteParam } : "skip",
   );
   const threads = useQuery(
     api.parentMessages.listMyGuardianThreads,
     user && !isPreview ? {} : "skip",
   );
-  const children = isPreview
-    ? previewChild === undefined
-      ? undefined
-      : previewChild
-        ? [previewChild]
-        : []
-    : ownChildren;
+  const children = isPreview ? previewFamily : ownChildren;
   const currentQuery = searchParams.toString();
   const currentPath = `${pathname}${currentQuery ? `?${currentQuery}` : ""}`;
   const requestedChild = searchParams.get("child");
@@ -123,9 +115,12 @@ function ParentView() {
   const courseSegment = pathname.split("/")[3] ?? null;
   const activeCourseId = activeTab === "portfolio" ? courseSegment : null;
   // In preview every in-portal navigation carries the remote scholar so the
-  // tabs keep rendering the same family's view.
+  // tabs keep rendering the same family's view, plus the sibling picked in
+  // the child switcher when it isn't the remote scholar.
   const childQuery = isPreview
-    ? `?remote=${remoteParam}`
+    ? `?remote=${remoteParam}${
+        activeChild && activeChild !== remoteParam ? `&child=${activeChild}` : ""
+      }`
     : activeChild
       ? `?child=${activeChild}`
       : "";
@@ -133,9 +128,9 @@ function ParentView() {
   // Remember applicant mode for this tab, so an expired session sends the
   // family back to the school-branded sign-in (see parentSignInHref).
   useEffect(() => {
-    if (isPreview || applicantContext === undefined) return;
+    if (isPreview || portal === undefined) return;
     try {
-      if (applicantContext.applicantOnly) {
+      if (portal.applicantOnly) {
         window.sessionStorage.setItem(APPLICANT_PORTAL_MARKER, "1");
       } else {
         window.sessionStorage.removeItem(APPLICANT_PORTAL_MARKER);
@@ -143,7 +138,7 @@ function ParentView() {
     } catch {
       // Storage blocked: the /parent/admissions path rule still applies.
     }
-  }, [applicantContext, isPreview]);
+  }, [portal, isPreview]);
 
 
   useEffect(() => {
@@ -170,9 +165,7 @@ function ParentView() {
     isLoading ||
     !user ||
     (!isPreview &&
-      (hasParentContext === undefined ||
-        hasParentContext === false ||
-        applicantContext === undefined)) ||
+      (portal === undefined || hasParentContext === false)) ||
     children === undefined
   ) {
     return (
@@ -204,6 +197,33 @@ function ParentView() {
 
   return (
     <Shell>
+      {/* Above the nav, the same bar as a platform admin's View As in its
+          own color: the teacher is still themselves, seeing the family's
+          view, and Exit takes them back to where they came from. */}
+      {isPreview && activeChildRecord && (
+        <ViewingAsBar
+          tone="preview"
+          label="Previewing a family's parent view"
+          exitLabel="Exit preview"
+          onExit={() => {
+            if (window.history.length > 1) router.back();
+            else router.push("/teacher");
+          }}
+        >
+          <Text as="span" fontFamily="heading" fontWeight="700" fontSize="sm">
+            Previewing {activeChildRecord.name}&apos;s parent view · read-only
+          </Text>
+          <Text
+            as="span"
+            display={{ base: "none", lg: "inline" }}
+            fontSize="sm"
+            opacity={0.85}
+          >
+            the family&apos;s messages, health forms, library card and chat
+            aren&apos;t shown
+          </Text>
+        </ViewingAsBar>
+      )}
       <Flex h={VIEWPORT_SHELL_HEIGHT} bg="gray.50" flexDir="column">
         <AppHeader>
           {applicantOnly ? (
@@ -232,42 +252,32 @@ function ParentView() {
           />
           <HStack ml="auto" gap={1}>
             {/* The parent chat streams AS a guardian — not part of a staff
-                preview. The account menu carries the "Viewing as / Exit"
-                pill for the preview, the same as the scholar remote view. */}
+                preview. The ViewingAsBar above the nav marks the preview. */}
             {showAide && <ParentAideToggle />}
             <ParentChildSwitcher
               childOptions={children}
               activeChild={activeChild}
               onSelect={(childId) =>
-                router.replace(`${pathname}?child=${childId}`, {
-                  scroll: false,
-                })
+                router.replace(
+                  isPreview
+                    ? `${pathname}?remote=${remoteParam}&child=${childId}`
+                    : `${pathname}?child=${childId}`,
+                  { scroll: false },
+                )
               }
             />
-            <AccountMenu onSignOut={signOut} applicantMode={applicantOnly} />
+            {/* The passkey nudge is about the viewer's own account, so it
+                sits beside the account menu and stays out of a staff
+                preview and applicant-only mode. */}
+            {!isPreview && !applicantOnly && <PasskeyPill />}
+            <AccountMenu
+              onSignOut={signOut}
+              applicantMode={applicantOnly}
+              siblingApplication={mode === "family" && !isPreview}
+              parentSettings={mode === "family" && !isPreview}
+            />
           </HStack>
         </AppHeader>
-        {isPreview && activeChildRecord && (
-          <Box
-            bg="amber.50"
-            borderBottomWidth="1px"
-            borderColor="amber.200"
-            px={4}
-            py={2}
-          >
-            <Text
-              fontFamily="body"
-              fontSize="sm"
-              color="charcoal.600"
-              textAlign="center"
-            >
-              Previewing the parent view for {activeChildRecord.name}. This is
-              what {activeChildRecord.name}&apos;s family sees. Family-only
-              surfaces (health forms, library card, messages, chat) aren&apos;t
-              shown.
-            </Text>
-          </Box>
-        )}
         {/* Body + docked aide as a flex row (the teacher dashboard's idiom):
             opening the aide PUSHES the body rather than covering it; closed,
             the dock renders nothing and the body takes the full width. The

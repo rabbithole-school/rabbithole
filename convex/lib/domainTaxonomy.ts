@@ -58,6 +58,7 @@ const TAXONOMY: Record<string, DomainClass> = {
   "integers-coordinates": { domain: "integers-coordinates" },
   "early-algebra": { domain: "early-algebra" },
   "algebra-1": { domain: "algebra-1" },
+  "algebra-2": { domain: "algebra-2" },
   "discrete-math": { domain: "discrete-math" },
 
   // ── ELA/Literacy (content) — strands un-flattened ──

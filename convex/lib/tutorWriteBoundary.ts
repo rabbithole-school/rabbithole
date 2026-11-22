@@ -115,6 +115,7 @@ export function checkSlideOpsLayoutOnly(
       case "removeElement":
       case "moveElement":
       case "removeSlide":
+      case "moveSlide":
       case "setBackground":
         break;
       default:
@@ -124,3 +125,14 @@ export function checkSlideOpsLayoutOnly(
 
   return { ok: true };
 }
+
+// The model relays this to a child almost verbatim, so it is worded as a
+// choice plus a remedy, never as breakage ("I can't type words onto your
+// slides" reads to a kid as a broken tool). Every remedy named here is
+// one edit_slides really performs: an empty scaffold deck, empty text boxes,
+// adding/removing slides, layout + style + background, and moving text
+// already in the deck, and reordering slides (moveSlide). Titles, notes, alt
+// text, or chat text pasted onto a slide are refused by the checks above, so
+// none of those may be offered.
+export const SLIDES_WRITING_REFUSAL =
+  "Nothing was changed, on purpose: the words on the slides are the scholar's to write. That is how they do the thinking, and nothing is broken. Don't say you can't or that the tool won't let you; say that part is theirs, then offer something you can do right now: set up slides with empty text boxes where their words will go, add, remove, or reorder slides, lay out and restyle what's there, change backgrounds, or move words already on one slide to another. If they want notes from this chat on a slide, read those notes back to them in chat so they can type from them. Then ask one question that gets them started.";

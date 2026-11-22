@@ -548,14 +548,12 @@ describe("external-apps aide tools (end-to-end)", () => {
       async (ctx) => (await ctx.db.query("externalApps").first())!._id,
     );
 
-    // The real writer: the staff aide's make-focus runs the same createFocus
-    // as the web dialog. Its default window is 60 minutes.
-    const pushed = await t.mutation(internal.pushes.makeFocusFromAide, {
-      callerUserId: teacher,
-      appId,
-      groupId,
-    });
-    if (!pushed.ok) throw new Error(pushed.message);
+    // The real writer: the web dialog's make-focus, which runs the same
+    // createFocus as the aide's give. Its default window is 60 minutes.
+    const pushId = await (await signedIn(t, teacher)).mutation(
+      api.pushes.makeFocus,
+      { groupId, target: { kind: "app", externalAppId: appId } },
+    );
 
     // Positive control: the scholar's tile shows it.
     const asKai = await signedIn(t, kai);
@@ -600,7 +598,7 @@ describe("external-apps aide tools (end-to-end)", () => {
     // Wrapped up, it leaves the tile and this read together.
     await t.mutation(internal.pushes.clearFocusFromAide, {
       callerUserId: teacher,
-      pushId: pushed.pushId,
+      pushId,
     });
     expect(await tiles()).toEqual([]);
     expect(
@@ -1480,12 +1478,10 @@ describe("external-apps aide tools (end-to-end)", () => {
         appId: (await ctx.db.query("externalApps").first())!._id,
         groupId: (await ctx.db.query("scholarGroups").first())!._id,
       }));
-      const pushed = await t.mutation(internal.pushes.makeFocusFromAide, {
-        callerUserId: moliTeacher,
-        appId,
+      await (await signedIn(t, moliTeacher)).mutation(api.pushes.makeFocus, {
         groupId,
+        target: { kind: "app", externalAppId: appId },
       });
-      if (!pushed.ok) throw new Error(pushed.message);
 
       const own = parse(
         await moliTools.get_external_app_access.run({ appName: "Typing Club" }),

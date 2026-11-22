@@ -159,7 +159,7 @@ export function ShareBackSection({
                     </Text>
                     <Text fontSize="2xs" color="charcoal.400" fontFamily="heading">
                       {s.exists
-                        ? `${s.deliverableCount} submission${s.deliverableCount === 1 ? "" : "s"}${s.hasScholarAngles ? " · per-scholar angles" : ""}`
+                        ? `${s.deliverableCount}${s.deliverableCountCapped ? "+" : ""} submission${s.deliverableCount === 1 ? "" : "s"}${s.hasScholarAngles ? " · per-scholar angles" : ""}`
                         : "deleted — remove this source"}
                     </Text>
                   </Stack>
@@ -530,7 +530,8 @@ function SourcePickerDialog({
                             fontWeight="600"
                             whiteSpace="nowrap"
                           >
-                            {c.deliverableCount} submitted
+                            {c.deliverableCount}
+                            {c.deliverableCountCapped ? "+" : ""} submitted
                           </Text>
                         </Flex>
                       ))}

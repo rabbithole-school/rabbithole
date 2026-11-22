@@ -41,14 +41,14 @@ export type DriveLinkFormat = "slack" | "markdown";
  * URL of the app's one-click Google connect flow. `returnTo` is where the
  * person lands after consent.
  */
-export function buildGoogleConnectUrl(returnTo = "/teacher"): string {
+export function buildGoogleConnectUrl(returnTo = "/teacher", purpose?: "sheets"): string {
   const site = appBaseUrl().replace(/\/+$/, "");
-  return `${site}/connect-google?returnTo=${encodeURIComponent(returnTo)}`;
+  return `${site}/connect-google?returnTo=${encodeURIComponent(returnTo)}${purpose ? `&purpose=${purpose}` : ""}`;
 }
 
 /** A link to the connect flow, in the transport's link format. */
-function connectCta(label: string, links: DriveLinkFormat): string {
-  const url = buildGoogleConnectUrl();
+export function connectCta(label: string, links: DriveLinkFormat, purpose?: "sheets"): string {
+  const url = buildGoogleConnectUrl("/teacher", purpose);
   return links === "slack" ? `<${url}|${label}>` : `[${label}](${url})`;
 }
 

@@ -176,4 +176,70 @@ describe("peer trails (social proof)", () => {
     const sky = await asMe.query(api.seeds.skyForSelf, {});
     expect(sky.seeds.some((s) => s.topic === "Game Theory")).toBe(true);
   });
+
+  // TRA-666: a trail is shown to OTHER scholars, so it carries only
+  // scholar-facing copy, never a teacher's description of a pod-mate's Quest.
+  test("a trail shows the scholar-facing blurb, never the teacher description", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await t.run(async (ctx) =>
+      ctx.db.insert("users", { name: "T", username: "t", role: "teacher" }),
+    );
+    const me = await scholar(t, "me", "Me");
+    const mate = await scholar(t, "mate", "Mate");
+    await t.run(async (ctx) => {
+      await ctx.db.insert("scholarGroups", {
+        teacherId: teacher,
+        name: "Pod",
+        scholarIds: [me, mate],
+      });
+    });
+    const teacherNote = "Mate avoids writing — teacher note about this child.";
+    const { offered, offeredWithBlurb, authored } = await t.run(async (ctx) => ({
+      // A Quest a teacher offered the pod-mate (createAndOfferQuestForScholar's
+      // shape): teacher-written description, with and without scholar copy.
+      offered: await ctx.db.insert("units", {
+        teacherId: mate,
+        title: "Comics",
+        description: teacherNote,
+        isActive: true,
+        authorScholarId: mate,
+        authorRole: "inspired",
+      }),
+      offeredWithBlurb: await ctx.db.insert("units", {
+        teacherId: mate,
+        title: "Volcanoes",
+        description: teacherNote,
+        scholarDescription: "Find out what makes a volcano blow.",
+        isActive: true,
+        authorScholarId: mate,
+        authorRole: "inspired",
+      }),
+      // A Quest the pod-mate wrote themselves (mintIndependentStudyUnit's
+      // shape): their words in both fields.
+      authored: await ctx.db.insert("units", {
+        teacherId: mate,
+        title: "Paper Planes",
+        description: "I want to make a plane that flies across the room.",
+        scholarDescription: "I want to make a plane that flies across the room.",
+        isActive: true,
+        authorScholarId: mate,
+        authorRole: "author",
+      }),
+    }));
+    await badge(t, mate, offered, 100);
+    await badge(t, mate, offeredWithBlurb, 110);
+    await badge(t, mate, authored, 120);
+
+    const asMe = await asScholar(t, me);
+    const { trails } = await asMe.query(api.trophyCase.trailsForScholar, {});
+    const blurbOf = (title: string) =>
+      trails.find((tr) => tr.unitTitle === title)?.unitDescription;
+    expect(trails).toHaveLength(3);
+    expect(blurbOf("Comics")).toBeNull();
+    expect(blurbOf("Volcanoes")).toBe("Find out what makes a volcano blow.");
+    expect(blurbOf("Paper Planes")).toBe(
+      "I want to make a plane that flies across the room.",
+    );
+    expect(JSON.stringify(trails)).not.toContain(teacherNote);
+  });
 });

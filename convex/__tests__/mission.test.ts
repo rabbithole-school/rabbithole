@@ -2,14 +2,37 @@
 // Quest build lock (convex/lib/mission.ts).
 import { describe, expect, test } from "vitest";
 import {
-  DEFAULT_APP_GATE,
   defaultGateFor,
   isScholarBuildKickoff,
   questBuildLock,
   questBuildPrerequisite,
   lockedQuestBuildTitle,
+  missionTitleFromGate,
   resolveSessionMission,
 } from "../lib/mission";
+
+describe("missionTitleFromGate", () => {
+  test("returns the whole trimmed mission line when it fits", () => {
+    expect(
+      missionTitleFromGate("  Understand escape velocity: the rocket leaves once  "),
+    ).toBe("Understand escape velocity: the rocket leaves once");
+  });
+
+  test("uses a short prefix before a colon only when a long mission needs one", () => {
+    expect(
+      missionTitleFromGate(
+        "Understand escape velocity: the rocket leaves only after reaching the speed gravity requires.",
+      ),
+    ).toBe("Understand escape velocity");
+  });
+
+  test("returns null for an empty line or a long line without a usable prefix", () => {
+    expect(missionTitleFromGate("   ")).toBeNull();
+    expect(missionTitleFromGate(": starts with a colon")).toBe(": starts with a colon");
+    expect(missionTitleFromGate(`${"x".repeat(61)}: too long`)).toBeNull();
+    expect(missionTitleFromGate(undefined)).toBeNull();
+  });
+});
 import { questBuildLockLabel } from "../../shared/missionCopy";
 
 const essay = {
@@ -37,12 +60,12 @@ const quest = { authorScholarId: "scholar1" };
 const teacherUnit = {};
 
 describe("defaultGateFor", () => {
-  test("each deliverable kind gets its first-form gate", () => {
+  test("each non-app deliverable kind gets its first-form gate", () => {
     expect(defaultGateFor(essay)).toMatch(/first draft/);
     expect(defaultGateFor({ kind: "online", deliverable: { kind: "slides" } })).toMatch(/slides/);
     expect(defaultGateFor({ kind: "online", deliverable: { kind: "map" } })).toMatch(/map/);
-    expect(defaultGateFor(build)).toBe(DEFAULT_APP_GATE);
-    expect(defaultGateFor(legacyBuild)).toBe(DEFAULT_APP_GATE);
+    expect(defaultGateFor(build)).toBeNull();
+    expect(defaultGateFor(legacyBuild)).toBeNull();
   });
 
   test("exploration and non-online kinds get none", () => {
@@ -59,7 +82,7 @@ describe("resolveSessionMission", () => {
     expect(m?.gate).toMatch(/first draft/);
   });
 
-  test("an authored gate wins; invariants only for app activities", () => {
+  test("an authored gate wins; app contracts carry their authored mission line", () => {
     const authored = resolveSessionMission(
       {},
       { ...essay, buildContract: { invariants: ["x"], freedoms: ["topic"], gate: "Two paragraphs" } },
@@ -68,10 +91,28 @@ describe("resolveSessionMission", () => {
     expect(authored).toMatchObject({ source: "authored", gate: "Two paragraphs", freedoms: ["topic"], invariants: [] });
     const app = resolveSessionMission(
       {},
-      { ...build, buildContract: { invariants: ["ball falls"], freedoms: [] } },
+      {
+        ...build,
+        buildContract: {
+          invariants: ["ball falls"],
+          freedoms: [],
+          gate: "Understand gravity",
+        },
+      },
       teacherUnit,
     );
-    expect(app).toMatchObject({ source: "authored", gate: DEFAULT_APP_GATE, invariants: ["ball falls"] });
+    expect(app).toMatchObject({
+      source: "authored",
+      gate: "Understand gravity",
+      invariants: ["ball falls"],
+    });
+  });
+
+  test("an app without a contract keeps an empty default mission", () => {
+    expect(resolveSessionMission({}, build, teacherUnit)).toMatchObject({
+      source: "default",
+      gate: "",
+    });
   });
 
   test("no mission for exploration, free play, non-online and open chat", () => {
@@ -97,8 +138,12 @@ describe("resolveSessionMission", () => {
   });
 
   test("ownQuest marks a scholar's own Quest, never a teacher unit", () => {
-    expect(resolveSessionMission({}, build, quest)?.ownQuest).toBe(true);
-    expect(resolveSessionMission({}, build, teacherUnit)?.ownQuest).toBe(false);
+    const appWithMission = {
+      ...build,
+      buildContract: { invariants: [], freedoms: [], gate: "Understand gravity" },
+    };
+    expect(resolveSessionMission({}, appWithMission, quest)?.ownQuest).toBe(true);
+    expect(resolveSessionMission({}, appWithMission, teacherUnit)?.ownQuest).toBe(false);
     expect(
       resolveSessionMission({}, null, { ...quest, mission: { text: "A clicker", gate: "g" } })?.ownQuest,
     ).toBe(true);

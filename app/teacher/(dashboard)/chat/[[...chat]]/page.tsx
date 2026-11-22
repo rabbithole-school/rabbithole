@@ -5,6 +5,11 @@
  * stream alive when switching threads. This optional catch-all just makes
  * `/teacher/chat` and `/teacher/chat/<chatId>` resolve to a route.
  */
+import type { Metadata } from "next";
+
+// The tab title for this route (the surface itself renders from the layout).
+export const metadata: Metadata = { title: "Chat" };
+
 export default function ChatStubPage() {
   return null;
 }

@@ -189,8 +189,8 @@ export function bindingMatchesItem(binding: GameBindingLike, item: RunItemLike):
  *  2. Otherwise the first served item that is in an eligible lane, is covered
  *     by an active binding, and whose game is not cooling down or capped out.
  *
- * Advisory, exactly like the Launchpad: a Convex query cannot write, so the
- * claim mutation re-checks the cap authoritatively.
+ * Advisory: a Convex query cannot write, so the claim mutation re-checks the
+ * cap authoritatively.
  */
 export function selectRunGameBeat(params: {
   items: RunItemLike[];
@@ -224,10 +224,9 @@ export function selectRunGameBeat(params: {
     ) {
       continue;
     }
-    // The <=1/day governor, evaluated LAST and scoped to OTHER keys — the same
-    // subtlety `selectRunLaunchpad` documents. The doorway claims its own
-    // impression on mount, which writes `lastOfferedDayBucket` for exactly this
-    // key; a blanket "anything offered today" test would flip true the instant
+    // The <=1/day governor, evaluated LAST and scoped to OTHER keys. The
+    // doorway claims its own impression on mount, which writes
+    // `lastOfferedDayBucket` for exactly this key; a blanket "anything offered today" test would flip true the instant
     // the card rendered and retract the offer being shown, yanking it
     // off-screen mid-decision. Excluding this key also gives the behaviour we
     // want on its own merits: an untaken doorway survives a reload, while the

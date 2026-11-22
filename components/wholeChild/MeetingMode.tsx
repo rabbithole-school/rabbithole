@@ -207,7 +207,7 @@ export function MeetingMode({
   }, [drafts[activeCategory], activeCategory, narrative, saveSection]);
 
   // Flush ALL pending edits on unmount (navigating prev/next/away, or switching
-  // scholars) — mirrors NarrativeSectionEditor. Without this, an edit made in a
+  // scholars) — mirrors ReportProseEditor. Without this, an edit made in a
   // category then left before its debounce fires (e.g. tab-switch clears the
   // timer) would be lost on navigation even though the UI showed it as edited.
   const flushPendingEdits = useEffectEvent(() => {

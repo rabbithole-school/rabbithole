@@ -63,7 +63,9 @@ function WaveBar({
  * The recording bar — replaces the composer row while the scholar is speaking.
  *
  * States:
- *  - isConnecting: spinner + "Getting ready…" + cancel — audio isn't flowing yet
+ *  - isConnecting: spinner + "Getting ready…" + cancel — the microphone is
+ *    still starting. Audio is kept from the first captured sample, so this
+ *    covers only local mic start-up, never the network handshake.
  *  - recording: live waveform + timer + cancel (✕) / stop (✓) buttons
  *  - isMaxed: 2-min cap reached; waveform replaced with a prompt to tap ✓
  *  - isTranscribing: native spinner + "Transcribing…" text
@@ -84,7 +86,7 @@ export function RecordingBar({
   level: number;
   durationMs: number;
   isTranscribing: boolean;
-  /** Streaming dictation is still starting up (useStreamingDictation). */
+  /** The microphone is still starting (useStreamingDictation). */
   isConnecting?: boolean;
   isMaxed?: boolean;
   onCancel: () => void;
@@ -126,7 +128,7 @@ export function RecordingBar({
   }
 
   // ── Connecting ───────────────────────────────────────────────────────────────
-  // Tapped, but audio isn't reaching the transcriber yet — never show the
+  // Tapped, but the microphone hasn't produced a sample yet — never show the
   // waveform here, or a scholar starts talking and loses their first words.
   if (isConnecting) {
     return (
