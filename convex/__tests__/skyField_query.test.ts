@@ -410,7 +410,9 @@ describe("concepts.skyFieldForScholar", () => {
         seedIds.push(
           await ctx.db.insert("seeds", {
             scholarId,
-            origin: "ai",
+            // A keepsake. An `ai` seed active with no teacher is a live
+            // observer idea, read in its own smaller budget (TRA-679).
+            origin: "story",
             status: "active",
             topic: `Kept star ${String(i).padStart(3, "0")}`,
             domain: `domain-${i % 7}`,

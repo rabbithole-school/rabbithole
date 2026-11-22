@@ -20,7 +20,7 @@ export const KID_SAFE_PRINCIPLES = [
   {
     title: "Ask before answering",
     blurb:
-      "For big why/how questions, Rabbithole tries to ask what you think first, so your brain gets the first turn.",
+      "In an activity, Rabbithole asks what you think about a big why or how question first, so your brain gets the first turn. In a chat you start, it answers first.",
   },
   {
     title: "Make struggle useful",

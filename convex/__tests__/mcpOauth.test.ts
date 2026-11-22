@@ -261,6 +261,36 @@ describe("mcpOauth — remembered consent (skip the click on reconnect)", () => 
     expect(await asB.query(api.mcpOauth.hasConsent, { clientId })).toBe(false);
   });
 
+  test("a consent remembered on the pre-TRA-635 screen no longer auto-approves", async () => {
+    // That screen could say "read-only" for a token that also works on the
+    // full connector, so a consent given there must not skip the corrected
+    // screen. Re-approving with remember upgrades the row.
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "teach");
+    const asTeacher = await withUser(t, teacher);
+    const { clientId } = await registerTestClient(t);
+    await t.run(async (ctx) =>
+      ctx.db.insert("mcpOauthConsents", {
+        userId: teacher,
+        clientId,
+        createdAt: 1,
+        lastUsedAt: 1,
+      }),
+    );
+    expect(await asTeacher.query(api.mcpOauth.hasConsent, { clientId })).toBe(
+      false,
+    );
+
+    await asTeacher.mutation(api.mcpOauth.approve, approveArgs(clientId, true));
+    expect(await asTeacher.query(api.mcpOauth.hasConsent, { clientId })).toBe(
+      true,
+    );
+    const rows = await t.run(async (ctx) =>
+      ctx.db.query("mcpOauthConsents").collect(),
+    );
+    expect(rows).toHaveLength(1);
+  });
+
   test("revoking a connection forgets its remembered consent", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", "teach");
@@ -269,7 +299,7 @@ describe("mcpOauth — remembered consent (skip the click on reconnect)", () => 
 
     // Consent + an active session for the same client.
     await asTeacher.mutation(api.mcpOauth.approve, approveArgs(clientId, true));
-    await asTeacher.mutation(api.mcpOauth.recordMySession, { clientId });
+    await t.mutation(internal.mcpOauth.openSession, { userId: teacher, clientId });
     expect(await asTeacher.query(api.mcpOauth.hasConsent, { clientId })).toBe(
       true,
     );
@@ -299,7 +329,7 @@ describe("mcpOauth — remembered consent (skip the click on reconnect)", () => 
 
     // An unrelated live connection for the same client, which is what
     // revokeMySession actually targets.
-    await asTeacher.mutation(api.mcpOauth.recordMySession, { clientId });
+    await t.mutation(internal.mcpOauth.openSession, { userId: teacher, clientId });
     const list = await asTeacher.query(api.mcpOauth.listMySessions, {});
     expect(list).toHaveLength(1);
 
@@ -343,7 +373,7 @@ describe("mcpOauth — remembered consent (skip the click on reconnect)", () => 
       api.mcpOauth.approve,
       approveArgs(clientId),
     );
-    await asTeacher.mutation(api.mcpOauth.recordMySession, { clientId });
+    await t.mutation(internal.mcpOauth.openSession, { userId: teacher, clientId });
     const list = await asTeacher.query(api.mcpOauth.listMySessions, {});
     await asTeacher.mutation(api.mcpOauth.revokeMySession, { id: list[0]._id });
 
@@ -376,7 +406,8 @@ describe("mcpOauth — remembered consent (skip the click on reconnect)", () => 
       },
     );
 
-    await asTeacher.mutation(api.mcpOauth.recordMySession, {
+    await t.mutation(internal.mcpOauth.openSession, {
+      userId: teacher,
       clientId: revokedClientId,
     });
     const list = await asTeacher.query(api.mcpOauth.listMySessions, {});

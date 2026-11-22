@@ -10,6 +10,14 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { insertCodeRevision } from "./codeArtifactRevisions";
 import { pickFocusApp } from "./lib/focusApp";
+import { isAppActivity } from "../shared/appSurface";
+import {
+  BENCH_IS_THE_APP_REFUSAL,
+  FIXED_APP_WRITE_REFUSAL,
+  PYTHON_BENCH_FIXED_APP,
+  isFixedApp,
+  pythonBenchArtifactRow,
+} from "./lib/pythonBench";
 import { isTeacherRole, ROLES } from "./lib/roles";
 import { resolveWorkshopPolicy } from "./lib/workshopPolicy";
 import { requireTeacherOrSelf } from "./lib/auth";
@@ -60,6 +68,7 @@ import {
 } from "./lib/slideAssetUrls";
 import { isTextArtifact } from "../shared/textArtifacts";
 import { SCHOLAR_WRITING_REFUSAL } from "./lib/tutorCodeEditor";
+import { rehearsalBuildRequest } from "./lib/appActivity";
 
 function artifactState(artifact: {
   _id: Id<"artifacts">;
@@ -69,6 +78,7 @@ function artifactState(artifact: {
   type?: "text" | "code" | "map" | "slides" | "manipulative";
   language?: string;
   revision?: number;
+  fixedApp?: "python-bench";
 }) {
   return {
     _id: artifact._id,
@@ -78,6 +88,7 @@ function artifactState(artifact: {
     type: artifact.type,
     language: artifact.language,
     revision: artifact.revision ?? 0,
+    ...(artifact.fixedApp ? { fixedApp: artifact.fixedApp } : {}),
   };
 }
 
@@ -93,6 +104,17 @@ function refuseScholarWriting(artifact: Parameters<typeof artifactState>[0]) {
     kind: "refused" as const,
     reason: "scholar_writing" as const,
     error: SCHOLAR_WRITING_REFUSAL,
+    artifact: artifactState(artifact),
+  };
+}
+
+/** The Python bench (lib/pythonBench.ts): no AI tool writes its code. */
+function refuseFixedApp(artifact: Parameters<typeof artifactState>[0]) {
+  if (!isFixedApp(artifact)) return null;
+  return {
+    kind: "refused" as const,
+    reason: "fixed_app" as const,
+    error: FIXED_APP_WRITE_REFUSAL,
     artifact: artifactState(artifact),
   };
 }
@@ -180,6 +202,19 @@ export const scholarUpdate = authedMutation({
     if (!isTextArtifact(artifact)) {
       throw new Error("Structured artifacts must be edited with their own tool.");
     }
+    // A fixed app (the Python bench) is a tool whose HTML only the server
+    // writes (TRA-687). Without this, a scholar could swap the bench for any
+    // page, which is app building with no teacher approval. Restore goes
+    // through here too. The scholar's program lives in app state, not here.
+    // A teacher keeps Edit on it, as the Play-only rule has it.
+    if (
+      !isTeacher &&
+      isFixedApp(artifact) &&
+      args.content !== undefined &&
+      args.content !== artifact.content
+    ) {
+      throw new Error("Edit is not available: this app is fixed.");
+    }
     // App designer (TRA-301): a code app's html only changes in Edit. The same
     // server verdict that clamps a forged stream `mode` gates this direct write
     // (History → Restore, a manual code edit), so a scholar under `never` or a
@@ -259,9 +294,10 @@ export const scholarUpdate = authedMutation({
         // a Restore on the teacher's OWN test-drive build session must reach
         // the activity starter — the streamed-turn path is not the only writer
         // (G3). Same derivation `recordTurnRevision` uses to compute the
-        // autosave target (test-drive session whose activity carries an
-        // appRequest). Play never reaches here (the editor is removed in Play,
-        // G2), but guard on the owner + test-drive shape anyway. Scheduled so
+        // autosave target (a test-drive session with a build request,
+        // lib/appActivity.ts rehearsalBuildRequest). Play never reaches here
+        // (the editor is removed in Play, G2), but guard on the owner +
+        // test-drive shape anyway. Scheduled so
         // the blob-copying promotion runs after this mutation commits, off the
         // scholar's write path; the helper stamps success/failure on the
         // session and never throws.
@@ -273,7 +309,7 @@ export const scholarUpdate = authedMutation({
           session.activityId
         ) {
           const buildActivity = await ctx.db.get(session.activityId);
-          if (buildActivity?.appRequest != null) {
+          if ((await rehearsalBuildRequest(ctx, buildActivity, session)) != null) {
             await ctx.scheduler.runAfter(
               0,
               internal.vibecodeStarterActions.autosaveStarterFromArtifact,
@@ -442,6 +478,18 @@ export const aiCreate = internalMutation({
   handler: async (ctx, args) => {
     // The tutor never writes into an app a teacher put away.
     await assertSessionNotTeacherArchived(ctx, args.sessionId);
+    // The Python bench is the session's one app: no second app beside it.
+    // Checked here, in the same transaction as the insert, so a bench opened
+    // earlier in the same turn (or concurrently) is always seen.
+    if (args.type === "code") {
+      const artifacts = await ctx.db
+        .query("artifacts")
+        .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+        .collect();
+      if (artifacts.some((a) => isFixedApp(a))) {
+        throw new Error(BENCH_IS_THE_APP_REFUSAL);
+      }
+    }
     const id = await ctx.db.insert("artifacts", {
       sessionId: args.sessionId,
       title: args.title,
@@ -452,6 +500,49 @@ export const aiCreate = internalMutation({
       ...(args.language ? { language: args.language } : {}),
     });
     return id;
+  },
+});
+
+/**
+ * open_python_bench (lib/pythonBench.ts): attach the canonical Python bench to
+ * the session as its live app, byte-identical to the generated source. It
+ * takes no content from the caller, so no tutor input reaches the bench. A
+ * session holds one app: when it already has one (the bench included), nothing
+ * is written and the reason comes back for the tool to relay.
+ */
+export const aiOpenPythonBench = internalMutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, args) => {
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) throw new Error("Session not found");
+    // Defense in depth behind the tool-list gate (mayOpenPythonBench): never
+    // in a builder or Workbench session, whose screen is not a chat.
+    const activity = session.activityId ? await ctx.db.get(session.activityId) : null;
+    if (
+      (session.sessionMode ?? "conversation") !== "conversation" ||
+      session.freePlay === true ||
+      isAppActivity(activity)
+    ) {
+      return { kind: "refused" as const, reason: "not_offered" as const };
+    }
+    const apps = (
+      await ctx.db
+        .query("artifacts")
+        .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+        .collect()
+    ).filter((a) => a.type === "code");
+    if (apps.some((a) => a.fixedApp === PYTHON_BENCH_FIXED_APP)) {
+      return { kind: "refused" as const, reason: "has_bench" as const };
+    }
+    if (apps.length > 0) {
+      return { kind: "refused" as const, reason: "has_app" as const };
+    }
+    const artifactId = await ctx.db.insert(
+      "artifacts",
+      pythonBenchArtifactRow(args.sessionId),
+    );
+    return { kind: "opened" as const, artifactId };
   },
 });
 
@@ -471,7 +562,14 @@ export const aiFocusApp = internalQuery({
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
       .collect();
     const app = pickFocusApp(artifacts, args.sessionId, args.focusArtifactId);
-    return app ? { _id: app._id, title: app.title, revision: app.revision ?? 0 } : null;
+    return app
+      ? {
+          _id: app._id,
+          title: app.title,
+          revision: app.revision ?? 0,
+          fixed: isFixedApp(app),
+        }
+      : null;
   },
 });
 
@@ -496,6 +594,10 @@ export const aiReplaceApp = internalMutation({
     assertArtifactBelongsToSession(artifact, args.sessionId);
     if (!artifact || artifact.type !== "code") {
       return { kind: "refused" as const, error: "Error: that document is not an app." };
+    }
+    // No AI writes into a fixed app (the Python bench): its code is not theirs.
+    if (isFixedApp(artifact)) {
+      return { kind: "refused" as const, error: FIXED_APP_WRITE_REFUSAL };
     }
     const result = editResult(artifact, args.baseRevision);
     if (result.kind !== "ready") return result;
@@ -551,6 +653,8 @@ export const aiStrReplace = internalMutation({
     }
     const writingBox = refuseScholarWriting(artifact);
     if (writingBox) return writingBox;
+    const fixed = refuseFixedApp(artifact);
+    if (fixed) return fixed;
     const result = editResult(artifact, args.baseRevision);
     if (result.kind !== "ready") return result;
     const match = findExactlyOneLiteral(artifact.content, args.oldStr);
@@ -619,6 +723,8 @@ export const aiInsert = internalMutation({
     if (!artifact) return { kind: "refused" as const, reason: "missing" as const, error: "Error: No document exists yet. Use create first." };
     const writingBox = refuseScholarWriting(artifact);
     if (writingBox) return writingBox;
+    const fixed = refuseFixedApp(artifact);
+    if (fixed) return fixed;
     const result = editResult(artifact, args.baseRevision);
     if (result.kind !== "ready") return result;
     const lines = artifact.content.split("\n");
@@ -1299,6 +1405,13 @@ export const aiApplySlideOps = internalMutation({
  * The scholar's own direct-manipulation edits. Owner-only — mirrors
  * `scholarSetMapPins`: a teacher can READ a scholar's work but never edit it.
  * Same op language as the AI path, so there is exactly one way to mutate a deck.
+ *
+ * A slide paste arrives here as `addSlide` ops carrying `uniqueElementIds`
+ * (shared/slideClipboard.ts), and `applySlideOps` gives colliding element ids
+ * new ones the same way the editor predicted, so both sides agree on the ids.
+ * The engine lives in shared/, which the Convex deploy workflow does not
+ * watch: a change to how ops apply must also touch this directory, or prod
+ * keeps the old engine while the clients ship the new one.
  */
 export const scholarApplySlideOps = authedMutation({
   args: {

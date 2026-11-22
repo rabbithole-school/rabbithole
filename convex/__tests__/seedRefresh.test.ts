@@ -46,6 +46,7 @@ async function directSeed(
     origin?: SeedOrigin;
     status?: SeedStatus;
     rationale?: string;
+    teacherId?: Id<"users">;
   },
 ) {
   return await t.run(async (ctx) =>
@@ -57,6 +58,7 @@ async function directSeed(
       domain: fields.domain ?? "Biology",
       suggestionType: "frontier",
       rationale: fields.rationale ?? `rationale: ${fields.topic}`,
+      teacherId: fields.teacherId,
     }),
   );
 }
@@ -150,13 +152,19 @@ describe("observer seed declared refresh", () => {
     expect(await seedsFor(t, otherScholarId)).toHaveLength(1);
   });
 
-  test("non-pending and non-ai declared seed ids are ignored", async () => {
+  test("a teacher-pinned or non-ai declared seed id is ignored", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedUser(t);
+    const teacherId = await t.run((ctx) =>
+      ctx.db.insert("users", { name: "Pinner", username: "pinner", role: "teacher" }),
+    );
+    // A teacher's pin (seeds.setStatus "active") stamps the teacher: the
+    // idea has left the observer's pool.
     const active = await directSeed(t, scholarId, {
       topic: "Solar oven engineering",
       domain: "Engineering",
       status: "active",
+      teacherId,
     });
     const teacher = await directSeed(t, scholarId, {
       topic: "Ancient trade routes",
@@ -178,6 +186,61 @@ describe("observer seed declared refresh", () => {
     expect(activeResult).not.toBe(active);
     expect(teacherResult).not.toBe(teacher);
     expect(await seedsFor(t, scholarId)).toHaveLength(4);
+  });
+
+  test("a live observer idea (active, no teacher) can be refreshed (TRA-679)", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const live = await directSeed(t, scholarId, {
+      topic: "How do bat colonies share food",
+      status: "active",
+    });
+
+    const id = await recordObserverSeed(t, scholarId, {
+      topic: "Why do vampire bats share blood",
+      refreshesSeedId: live,
+    });
+
+    expect(id).toBe(live);
+    const rows = await seedsFor(t, scholarId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      topic: "Why do vampire bats share blood",
+      status: "active",
+    });
+  });
+
+  test("a teacher-touched pending idea is never overwritten: the refresh is a new idea (TRA-679)", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const teacherId = await t.run((ctx) =>
+      ctx.db.insert("users", { name: "Editor", username: "editor", role: "teacher" }),
+    );
+    // A teacher edited or unpinned this idea (seeds.setStatus stamps the
+    // teacher) while the observer was writing.
+    const curated = await directSeed(t, scholarId, {
+      topic: "How do bat colonies share food",
+      rationale: "teacher's wording",
+      teacherId,
+    });
+
+    const id = await recordObserverSeed(t, scholarId, {
+      topic: "Why do vampire bats share blood",
+      refreshesSeedId: curated,
+    });
+
+    expect(id).not.toBe(curated);
+    const rows = await seedsFor(t, scholarId);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((seed) => seed._id === curated)).toMatchObject({
+      topic: "How do bat colonies share food",
+      rationale: "teacher's wording",
+      status: "pending",
+    });
+    expect(rows.find((seed) => seed._id === id)).toMatchObject({
+      topic: "Why do vampire bats share blood",
+      status: "active",
+    });
   });
 
   test("visited pending seed id is ignored", async () => {

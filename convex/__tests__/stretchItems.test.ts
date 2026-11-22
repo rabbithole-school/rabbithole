@@ -652,8 +652,10 @@ describe("STRETCH_SEED_ITEMS — wave-5 algebra-1 + discrete-math insight lane c
 
   test("the node lists above ARE the two domain graphs (drift guard)", () => {
     expect([...algebra1Nodes].sort()).toEqual(ALGEBRA_1_SKILLS.map((s) => s.skillKey).sort());
+    // The algorithms strand (2026-11-21) has no insight items yet, so it is
+    // outside this wave's lists.
     expect([...discreteMathNodes, "gt_path_vs_circuit"].sort()).toEqual(
-      DISCRETE_MATH_SKILLS.map((s) => s.skillKey).sort(),
+      DISCRETE_MATH_SKILLS.filter((s) => s.strand !== "algorithms").map((s) => s.skillKey).sort(),
     );
   });
 

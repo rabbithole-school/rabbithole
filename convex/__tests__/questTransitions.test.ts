@@ -1,9 +1,17 @@
 import { convexTest } from "convex-test";
+import { ConvexError } from "convex/values";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
-import { questStateForPair } from "../lib/questLifecycle";
+import {
+  isRetractedQuestSession,
+  questStateForPair,
+} from "../lib/questLifecycle";
+import {
+  isTeacherArchived,
+  TEACHER_ARCHIVE_COPY,
+} from "../../shared/teacherArchive";
 import {
   seedScholarInInstitution,
   seedStaffWithMembership,
@@ -614,5 +622,145 @@ describe("quests.listForScholar", () => {
     await expect(
       asScholar.query(api.quests.listForScholar, { scholarId: scholar }),
     ).rejects.toThrow();
+  });
+});
+
+// ── a retracted quest stays put away ─────────────────────────────────────
+//
+// A scholar's Workshop report (2026-11-11): a teacher retracted a quest, the
+// scholar tapped it in Archived ("Keep working on this"), which un-archived the
+// session while the unit stayed retracted. Home drops a retracted quest and
+// Archived lists only archived sessions, so the work then showed up nowhere.
+
+describe("a retracted quest stays put away from its scholar", () => {
+  async function retractedQuest(username: string) {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar", { username });
+    const unitId = await seedScholarQuestUnit(t, scholar, {
+      title: "Creature Stories",
+    });
+    // A quest's planning chat: no activity, like the report's session.
+    const sessionId = await seedSession(t, {
+      userId: scholar,
+      unitId,
+      title: "Creature Stories",
+      lastMessageAt: Date.now(),
+    });
+    const asTeacher = await withUser(t, teacher);
+    await asTeacher.mutation(api.quests.retract, { unitId });
+    const asScholar = await withUser(t, scholar);
+    const archivedRow = async () =>
+      (await asScholar.query(api.sessions.finishedForScholar, {})).find(
+        (r) => String(r._id) === String(sessionId),
+      );
+    const onHome = async () =>
+      (await asScholar.query(api.scholarPlate.activeForMe, {})).rows.some(
+        (r) => String(r.sessionId ?? "") === String(sessionId),
+      );
+    return { t, unitId, sessionId, asTeacher, asScholar, archivedRow, onHome };
+  }
+
+  test("Archived shows it as put away by the teacher; Keep working and Unarchive refuse", async () => {
+    const { t, unitId, sessionId, asScholar, archivedRow, onHome } =
+      await retractedQuest("retracted1");
+
+    const row = await archivedRow();
+    expect(row?.finishedKind).toBe("archived");
+    expect(row?.questRetracted).toBe(true);
+    expect(row && isTeacherArchived(row)).toBe(true);
+
+    // The refusal's data is the sentence itself, the only shape web and the
+    // iPad show (serverErrorMessage / serverRefusal read string data only).
+    for (const attempt of [
+      asScholar.mutation(api.sessions.reopen, { id: sessionId }),
+      asScholar.mutation(api.sessions.unarchive, { id: sessionId }),
+    ]) {
+      const error = await attempt.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConvexError);
+      expect((error as ConvexError<string>).data).toBe(
+        TEACHER_ARCHIVE_COPY.scholarExplain,
+      );
+    }
+    // The badge's "Keep working" has nothing to offer.
+    expect(
+      await asScholar.query(api.sessions.reopenableForUnit, { unitId }),
+    ).toBeNull();
+
+    const session = await t.run((ctx) => ctx.db.get(sessionId));
+    expect(session?.isArchived).toBe(true);
+    expect(session?.reopenedAt).toBeUndefined();
+    expect(await onHome()).toBe(false);
+    expect(await archivedRow()).toBeTruthy();
+  });
+
+  test("work un-archived before the guard still lists in Archived", async () => {
+    const { t, sessionId, archivedRow, onHome } =
+      await retractedQuest("retracted2");
+    // The state the report left behind: session live, unit still retracted.
+    await t.run((ctx) =>
+      ctx.db.patch(sessionId, { isArchived: false, reopenedAt: Date.now() }),
+    );
+
+    expect(await onHome()).toBe(false);
+    const row = await archivedRow();
+    expect(row?.questRetracted).toBe(true);
+  });
+
+  test("the teacher's reopen brings it back to Home and out of Archived", async () => {
+    const { unitId, asTeacher, archivedRow, onHome } =
+      await retractedQuest("retracted3");
+
+    await asTeacher.mutation(api.quests.reopen, { unitId });
+
+    expect(await onHome()).toBe(true);
+    expect(await archivedRow()).toBeUndefined();
+  });
+
+  test("only unassigned work on an inactive scholar-authored unit counts as retracted", () => {
+    const unitId = "u" as Id<"units">;
+    const assignmentId = "a" as Id<"assignments">;
+    const authorScholarId = "s" as Id<"users">;
+    const retracted = { isActive: false, authorScholarId };
+    expect(isRetractedQuestSession({ unitId }, retracted)).toBe(true);
+    expect(
+      isRetractedQuestSession({ unitId }, { isActive: true, authorScholarId }),
+    ).toBe(false);
+    expect(isRetractedQuestSession({ unitId, assignmentId }, retracted)).toBe(
+      false,
+    );
+    expect(isRetractedQuestSession({}, retracted)).toBe(false);
+    expect(isRetractedQuestSession({ unitId }, null)).toBe(false);
+    // An archived catalog unit is retired curriculum, not a retracted quest.
+    expect(isRetractedQuestSession({ unitId }, { isActive: false })).toBe(false);
+  });
+
+  test("work on an archived catalog unit can still be reopened", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar", { username: "catalog1" });
+    const unitId = await t.run((ctx) =>
+      ctx.db.insert("units", {
+        teacherId: teacher,
+        title: "Retired Catalog Unit",
+        isActive: false,
+      }),
+    );
+    const sessionId = await seedSession(t, {
+      userId: scholar,
+      unitId,
+      isArchived: true,
+      lastMessageAt: Date.now(),
+    });
+    const asScholar = await withUser(t, scholar);
+
+    const row = (
+      await asScholar.query(api.sessions.finishedForScholar, {})
+    ).find((r) => String(r._id) === String(sessionId));
+    expect(row?.questRetracted).toBe(false);
+    await asScholar.mutation(api.sessions.reopen, { id: sessionId });
+    expect((await t.run((ctx) => ctx.db.get(sessionId)))?.isArchived).toBe(
+      false,
+    );
   });
 });

@@ -60,7 +60,7 @@ const SECTION_META: Record<
   { heading: string; badge: string; palette: string }
 > = {
   onboarding: { heading: "Onboarding", badge: "Onboarding", palette: "teal" },
-  classFocus: { heading: "Class focus", badge: "Class focus", palette: "violet" },
+  classFocus: { heading: "In class", badge: "In class", palette: "violet" },
   homework: { heading: "Homework", badge: "Homework", palette: "orange" },
   is: { heading: "Quests", badge: "Quest", palette: "cyan" },
 };
@@ -224,7 +224,7 @@ export function ScholarHomeMirrorCard({
       {isEmpty ? (
         <EmptyState
           title="Nothing on their Home right now"
-          hint="Class focus, homework, and quests this scholar has going will mirror here."
+          hint="In-class work, homework, and quests this scholar has going will mirror here."
         />
       ) : (
         <VStack gap={4} align="stretch">
@@ -695,14 +695,14 @@ function buildConfirmCopy(
         assignment?.title ?? assignment?.unitTitle ?? pending.row.unitTitle ?? "this assignment";
       return {
         title: "Remove from assignment?",
-        body: `This scholar will be dropped from the roster of "${label}", so its class-focus and homework pushes stop appearing on their Home. Other scholars on the assignment are unaffected.`,
+        body: `This scholar will be dropped from the roster of "${label}", so its in-class work and homework stop appearing on their Home. Other scholars on the assignment are unaffected.`,
         cta: "Remove from assignment",
       };
     }
     case "clearActivity":
       return {
         title: "Clear this activity?",
-        body: `"${name}" will be removed from the assignment's schedule (both class-focus and homework state), so it stops appearing on the scholar's Home.`,
+        body: `"${name}" will be removed from the assignment's schedule, in class and as homework, so it stops appearing on the scholar's Home.`,
         cta: "Clear activity",
       };
   }

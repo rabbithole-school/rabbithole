@@ -16,12 +16,19 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import { isStructurallyDraft } from "@/convex/lib/unitMaturity";
 import {
   isSimulatorRunBudgetValid,
   type SimulatorRunBudgetValue,
 } from "@/components/simulatorTeacher/SimulatorRunBudgetFields";
-import type { ActivityMode } from "@/lib/activityMode";
+import {
+  showsUpAt,
+  useGiveChoices,
+  useMinuteNow,
+  type GiveFinish,
+  type ShowsUp,
+} from "@/components/GiveWindowFields";
 import {
   initialRosterSelectionState,
   rosterSelectionReducer,
@@ -30,7 +37,6 @@ import type { RosterScholar } from "@/hooks/useScholarRoster";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isTeacherRole } from "@/convex/lib/roles";
 import { buildTeacherAssignmentPlan } from "./submitPlans";
-import { DAY, nextNineAm, toLocalInputValue } from "./scheduling";
 import type { StartAssignmentProgramTarget } from "./types";
 
 type UnitsList = NonNullable<
@@ -92,23 +98,14 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
   );
   const scholarSel = roster.selection;
   const [forSel, setForSel] = useState<Set<string> | null>(null);
-  // Scheduling — assigning ALWAYS picks a time now (no more dateless,
-  // inert assignments). Mode/duration/due apply to a single-activity
-  // assign; cadence applies when laying out a whole unit/lesson.
+  // Giving work asks two questions (TRA-571): when it shows up, and when
+  // they should finish it. "Now" delivers a single activity live; a unit or
+  // lesson plans at the chosen time. The finish starts unanswered, and the
+  // Assign button stays disabled until the teacher picks one.
   const [now0, setNow0] = useState(() => Date.now());
-  const [mode, setMode] = useState<ActivityMode>("classFocus");
-  // Single-activity delivery: start it live right now vs plan it on the
-  // calendar (the classic behaviour). Only consulted when the picked target
-  // is one activity; unit/lesson always plan. Defaults to "now" — the whole
-  // point of assigning an activity from here is to reach scholars.
-  const [deliverNow, setDeliverNow] = useState(true);
-  const [startsAt, setStartsAt] = useState<string>(() =>
-    toLocalInputValue(nextNineAm(Date.now())),
-  );
-  const [durationMin, setDurationMin] = useState(60);
-  const [dueAt, setDueAt] = useState<string>(() =>
-    toLocalInputValue(nextNineAm(Date.now()) + 7 * DAY),
-  );
+  const nowMs = useMinuteNow();
+  const [showsUp, setShowsUp] = useState<ShowsUp>({ kind: "now" });
+  const [finish, setFinish] = useState<GiveFinish | null>(null);
   const [worldBudget, setWorldBudget_] = useState<SimulatorRunBudgetValue>({
     perBlock: 3,
     perWeek: 12,
@@ -129,11 +126,9 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
     // settle below drops any id absent from the loaded roster.
     dispatchRoster({ type: "opened", initialScholarIds });
     setForSel(null);
-    setMode("classFocus");
-    setDeliverNow(true);
+    setShowsUp({ kind: "now" });
+    setFinish(null);
     setNow0(now);
-    setStartsAt(toLocalInputValue(nextNineAm(now)));
-    setDueAt(toLocalInputValue(nextNineAm(now) + 7 * DAY));
     setWorldBudget_({ perBlock: 3, perWeek: 12, seasonTicks: null });
   }, [open, initialScholarIds]);
 
@@ -204,7 +199,6 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
   // query): the budget block shows when the picked lesson/activity is a World.
   // Whole-unit assigns set the budget on the Run page (its canonical home).
   const setWorldBudget = useMutation(api.simulatorTeacher.setAssignmentWorldBudget);
-  const pushActivity = useMutation(api.assignments.pushActivity);
 
   // World detection from already-loaded lesson activities: true when the picked
   // activity is a World, or the picked lesson contains one. (Whole-unit assigns
@@ -215,14 +209,37 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
       : a.kind === "simulator",
   );
 
-  const startsMs = useMemo(() => new Date(startsAt).getTime(), [startsAt]);
-  const isPast = Number.isFinite(startsMs) && startsMs <= now0;
+  const deliverNow = showsUp.kind === "now";
+  const startsMs = showsUpAt(showsUp, nowMs);
+  const isPast = showsUp.kind === "at" && startsMs <= now0;
   const forScholarIds = useMemo(() => Array.from(scholarSel), [scholarSel]);
   const effectiveForSel = useMemo(() => {
     if (forSel === null) return null;
     const allowed = new Set(forScholarIds);
     return new Set(Array.from(forSel).filter((id) => allowed.has(id)));
   }, [forSel, forScholarIds]);
+
+  // The give form's choices: this roster's bell blocks, when "in that class"
+  // ends, and what "the end of the unit" means for the assignment this give
+  // would land on.
+  const giveScholarIds = useMemo(
+    () =>
+      (isSingleActivity && effectiveForSel && effectiveForSel.size > 0
+        ? Array.from(effectiveForSel)
+        : forScholarIds) as Id<"users">[],
+    [isSingleActivity, effectiveForSel, forScholarIds],
+  );
+  const giveChoices = useGiveChoices(
+    open && !programTarget && pickedUnitId && giveScholarIds.length > 0
+      ? {
+          unitId: pickedUnitId,
+          scholarIds: giveScholarIds,
+          activityId: pickedActivityId ?? undefined,
+          startsAt: startsMs,
+        }
+      : "skip",
+    nowMs,
+  );
 
   const handleForSelChange = (next: Set<string>) => {
     const allowed = new Set(scholarSel);
@@ -259,7 +276,7 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
   const canStart =
     scholarSel.size > 0 &&
     !!pickedUnitId &&
-    ((isSingleActivity && deliverNow) || Number.isFinite(startsMs)) &&
+    !!finish &&
     (!isSingleActivity || !!pickedActivityId) &&
     worldBudgetValid &&
     !viewingAsReadOnly &&
@@ -284,7 +301,7 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
   }, [pickedUnitId, units, lessons]);
 
   const submit = async () => {
-    if (viewingAsReadOnly || !canStart || !pickedUnitId) {
+    if (viewingAsReadOnly || !canStart || !pickedUnitId || !finish) {
       return;
     }
     setSubmitting(true);
@@ -297,9 +314,7 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
         targetKind,
         isSingleActivity,
         deliverNow,
-        mode,
-        durationMin,
-        dueAt,
+        finish,
         scholarSel,
         effectiveForSel,
         startsMs,
@@ -308,8 +323,8 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
         worldBudget,
         worldBudgetIsValid: isSimulatorRunBudgetValid(worldBudget),
       });
-      // A single activity can be delivered live now; unit/lesson always plan.
-      const liveNow = plan.pushActivity !== null;
+      // An answered give goes live inside assignWork when it shows up now.
+      const liveNow = plan.liveNow;
 
       const newId = await assignWork(plan.assignWork);
 
@@ -330,32 +345,7 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
         }
       }
 
-      // Live delivery: stamp the activity live now so scholars see it
-      // immediately (assignWork alone only PLANS it). Mirrors the Schedule
-      // page's "Assign now" path (assignWork → pushActivity). A push failure
-      // after assignWork succeeded is a PARTIAL result — the assignment
-      // exists, planned — so it must not be reported as "nothing happened".
-      if (plan.pushActivity) {
-        try {
-          await pushActivity({
-            assignmentId: newId,
-            ...plan.pushActivity,
-          });
-        } catch (pushErr) {
-          toaster.error({
-            title: "Assigned, but couldn't start it live",
-            description: `The assignment was created (planned) — use Start now on its Run page. ${pushErr instanceof Error ? pushErr.message : String(pushErr)}`,
-          });
-          onStarted?.();
-          onClose();
-          router.push(`/teacher/schedule/${newId}`);
-          return;
-        }
-      }
-
-      const pushCount = plan.pushActivity?.scholarIds
-        ? plan.pushActivity.scholarIds.length
-        : scholarSel.size;
+      const pushCount = plan.liveScholarCount;
       toaster.success(
         liveNow
           ? {
@@ -378,7 +368,7 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
       toaster.error({
         title:
           isSingleActivity && deliverNow ? "Failed to start" : "Failed to assign",
-        description: e instanceof Error ? e.message : String(e),
+        description: serverErrorMessage(e, "Check your connection and try again."),
       });
     } finally {
       setSubmitting(false);
@@ -398,16 +388,13 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
     handleForSelChange,
     /** Reset the per-activity "For" subset on a generic hierarchy pick. */
     onPickReset: () => setForSel(null),
-    mode,
-    setMode,
+    nowMs,
+    giveChoices,
+    showsUp,
+    setShowsUp,
+    finish,
+    setFinish,
     deliverNow,
-    setDeliverNow,
-    startsAt,
-    setStartsAt,
-    durationMin,
-    setDurationMin,
-    dueAt,
-    setDueAt,
     worldBudget,
     setWorldBudget: setWorldBudget_,
     hasWorldTarget,

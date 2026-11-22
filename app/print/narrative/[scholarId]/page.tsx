@@ -194,15 +194,18 @@ function PrintNarrativeSection({
       <Stack gap={4}>
         {narrative.sections.map((s) => (
           <Box key={s.key}>
-            <Text
-              fontFamily="heading"
-              fontWeight="600"
-              fontSize="sm"
-              color="charcoal.600"
-              mb={1}
-            >
-              {s.title}
-            </Text>
+            {/* A prose report is one untitled body; legacy rubric sections keep their titles. */}
+            {s.key !== "report" && (
+              <Text
+                fontFamily="heading"
+                fontWeight="600"
+                fontSize="sm"
+                color="charcoal.600"
+                mb={1}
+              >
+                {s.title}
+              </Text>
+            )}
             <Text
               fontFamily="body"
               fontSize="sm"

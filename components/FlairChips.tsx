@@ -1,13 +1,15 @@
 "use client";
 
 import { Button, Box, HStack, Image, Popover, Portal, Stack, Text } from "@chakra-ui/react";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { useState } from "react";
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { flairChipDelayMs } from "@/shared/flairMotion";
+import { withSpottedFlair } from "@/shared/spottedFlair";
 import { useFlairArrivals } from "@/shared/useFlairArrivals";
+import { toaster } from "@/lib/toaster";
 
 import { FLAIR_MOTION_CSS } from "./flairMotionCss";
 
@@ -35,6 +37,9 @@ interface FlairChipsProps {
   animateArrivals?: boolean;
   /** Enriches the immediate initial fallback with art scoped to this deliverable. */
   deliverableId?: Id<"deliverables"> | null;
+  /** The session whose spotted flair (the observer's award for an idea no
+   *  criterion listed) joins this strip. Null where there is no session. */
+  sessionId: Id<"sessions"> | null;
 }
 
 /**
@@ -53,27 +58,44 @@ export function FlairChips({
   resolved,
   animateArrivals = true,
   deliverableId,
+  sessionId,
 }: FlairChipsProps) {
+  const spotted = useQuery(
+    api.spottedFlair.forSession,
+    sessionId ? { sessionId } : "skip",
+  );
+  const removeSpotted = useMutation(api.spottedFlair.remove);
+  const merged = withSpottedFlair(flairEarned, criteria, spotted);
+  const spottedById = new Map((spotted ?? []).map((flair) => [flair.id, flair]));
   // Baseline off the raw earned ids, not the rendered chips: criteria and the
   // generated art can resolve after the deliverable does, and baselining on what
   // happens to be renderable would replay every existing award when they land.
-  const arriving = useFlairArrivals(
+  // Deliverable and spotted flair resolve separately, so each keeps its own
+  // baseline: waiting for both would fold an award that lands in between
+  // into the first baseline and swallow its entrance.
+  const arrivingEarned = useFlairArrivals(
     resolved ? (flairEarned ?? []).map((flair) => flair.criterionId) : undefined,
   );
+  const arrivingSpotted = useFlairArrivals(
+    sessionId === null
+      ? []
+      : spotted?.map((flair) => flair.id),
+  );
+  const arriving = [...arrivingEarned, ...arrivingSpotted];
   const art = useQuery(
     api.flairArt.forDeliverable,
     deliverableId ? { deliverableId } : "skip",
   );
 
-  if (!flairEarned || flairEarned.length === 0) return null;
+  if (merged.flairEarned.length === 0) return null;
 
   const criterionById = new Map(
-    criteria.map((criterion) => [criterion.id, criterion]),
+    merged.criteria.map((criterion) => [criterion.id, criterion]),
   );
   const artByCriterionId = new Map(
     (art ?? []).map((item) => [item.criterionId, item]),
   );
-  const chips = flairEarned.flatMap((flair) => {
+  const chips = merged.flairEarned.flatMap((flair) => {
     const criterion = criterionById.get(flair.criterionId);
     if (!criterion) return [];
     const generated = artByCriterionId.get(flair.criterionId);
@@ -89,6 +111,10 @@ export function FlairChips({
         note: flair.note ?? generated?.note,
         initial: generated?.initial ?? flairInitial(criterion.label),
         imageUrl: generated?.imageUrl ?? null,
+        // Only teaching staff receive the excerpt, so its presence is what
+        // turns on the evidence line and the take-back control.
+        excerpt: spottedById.get(flair.criterionId)?.excerpt,
+        canRemove: spottedById.get(flair.criterionId)?.canRemove === true,
       },
     ];
   });
@@ -160,6 +186,34 @@ export function FlairChips({
                           <Text fontSize="sm" color="fg.muted" lineHeight="1.4">
                             {chip.note}
                           </Text>
+                        ) : null}
+                        {chip.excerpt && sessionId ? (
+                          <>
+                            <Text fontSize="sm" color="fg.muted" lineHeight="1.4">
+                              Spotted in their words: &ldquo;{chip.excerpt}&rdquo;
+                            </Text>
+                            {chip.canRemove ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                alignSelf="flex-start"
+                                onClick={() => {
+                                  removeSpotted({
+                                    sessionId,
+                                    flairId: chip.key,
+                                  }).catch((error: unknown) => {
+                                    console.error("Removing spotted flair failed:", error);
+                                    toaster.error({
+                                      title: "Couldn't remove this flair",
+                                      description: "Try again in a moment.",
+                                    });
+                                  });
+                                }}
+                              >
+                                Remove this flair
+                              </Button>
+                            ) : null}
+                          </>
                         ) : null}
                       </Stack>
                     </Popover.Body>

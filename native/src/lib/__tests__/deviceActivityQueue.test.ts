@@ -12,6 +12,7 @@ import {
   PENDING_LAUNCH_MAX_AGE_MS,
   PRESENCE_IDLE_TIMEOUT_MS,
   recordInteraction,
+  setAsamTransitionObserver,
   setInteractionSink,
   shouldEmitHeartbeat,
 } from "../deviceActivityQueue";
@@ -372,7 +373,17 @@ describe("StuckInactiveWatch (TRA-331)", () => {
 describe("recordAsamTransition", () => {
   afterEach(() => {
     deviceActivityQueue.reset();
+    setAsamTransitionObserver(null);
     vi.useRealTimers();
+  });
+
+  test("tells the app-health observer about the lock change too", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const observer = vi.fn();
+    setAsamTransitionObserver(observer);
+    recordAsamTransition("asam_enter", "reassert", false);
+    expect(observer).toHaveBeenCalledWith("asam_enter", "reassert", false, T0);
   });
 
   test("queues the lock change with its reason and result", () => {

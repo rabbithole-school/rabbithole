@@ -1,12 +1,19 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { ONBOARDING_UNIT_SLUG } from "../onboardingData";
-import { dayStartForTimezone } from "../../shared/institutionDay";
-import { effectiveInstitutionTimeZone } from "../lib/institutionTime";
+import {
+  dayStartForDayKey,
+  dayStartForTimezone,
+  shiftDayKey,
+} from "../../shared/institutionDay";
+import {
+  DAY_KEY_CLOCK_SKEW_MS,
+  effectiveInstitutionTimeZone,
+} from "../lib/institutionTime";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -434,6 +441,45 @@ describe("dailyRecap.forScholar — institution day", () => {
     });
     expect(recap.hasAny).toBe(false);
     expect(recap.practiced).toEqual([]);
+  });
+
+  test("yesterday's key is answered just after midnight and blanked later", async () => {
+    // Around midnight the client's clock and the server's can sit on either
+    // side of it. Blanking every mismatch cached an empty recap under the new
+    // key until some write re-ran it (T11), so a neighbouring key is answered
+    // near midnight. Later in the day it is stale, and stays empty as before.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const timeZone = effectiveInstitutionTimeZone(undefined);
+      const today = "2026-11-17";
+      const yesterday = shiftDayKey(today, -1);
+      const midnight = dayStartForDayKey(today, timeZone);
+      vi.setSystemTime(midnight + DAY_KEY_CLOCK_SKEW_MS / 3);
+
+      const t = convexTest(schema, modules);
+      const scholar = await seedUser(t, "scholar");
+      await seedNode(t, "add_within_20", "Adding within 20");
+      await seedMastery(t, scholar, {
+        skillKey: "add_within_20",
+        frontierAdvancedAt: dayStartForDayKey(yesterday, timeZone) + 12 * 60 * 60 * 1000,
+      });
+      const asScholar = await withUser(t, scholar);
+
+      const justAfter = await asScholar.query(api.dailyRecap.forScholar, {
+        scholarId: scholar,
+        dayKey: yesterday,
+      });
+      expect(justAfter.newOnMap).toEqual(["Adding within 20"]);
+
+      vi.setSystemTime(midnight + 10 * 60 * 60 * 1000);
+      const midMorning = await asScholar.query(api.dailyRecap.forScholar, {
+        scholarId: scholar,
+        dayKey: yesterday,
+      });
+      expect(midMorning.hasAny).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("legacy device-local dayStart cannot override the school calendar", async () => {

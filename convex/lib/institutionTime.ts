@@ -4,6 +4,7 @@ import { resolveActiveMembership } from "./access";
 import { scholarInstitutionId } from "./scholarEnrollment";
 import {
   DEFAULT_TIMEZONE,
+  dayKeyForTimezone,
   isValidTimeZone,
 } from "../../shared/institutionDay";
 
@@ -35,6 +36,42 @@ export async function timeZoneForScholar(
     ctx,
     await scholarInstitutionId(ctx, scholarId),
   );
+}
+
+/** How far a device clock may sit from the server's at institution midnight. */
+export const DAY_KEY_CLOCK_SKEW_MS = 15 * 60 * 1000;
+
+/**
+ * The institution-local day a day-scoped query answers for, given the `dayKey`
+ * its client sent (T11, TRA-420).
+ *
+ * Clients compute `dayKey` with `useInstitutionDay`: the institution's time zone
+ * read on the device clock, re-armed at institution midnight. A query that
+ * answers for THAT day returns a function of its args, so its subscription
+ * cannot hold yesterday's answer under today's key. That happened when the
+ * server derived the day itself: a client whose midnight landed a moment before
+ * the server's re-subscribed while the server still saw yesterday, and that
+ * result stayed cached until some unrelated write happened to re-run it.
+ *
+ * The server clock only bounds the request: the server's own day, or the
+ * neighbouring day within {@link DAY_KEY_CLOCK_SKEW_MS} of institution
+ * midnight. So tomorrow's planned work leaves the server at most a few minutes
+ * early, and a hand-made key can read nothing further. An awake client with a
+ * sane clock always lands inside the bound, so the clock never decides its
+ * answer. Outside it, `honored` is false and `dayKey` is the server's own day;
+ * the caller picks whichever fallback suits it.
+ */
+export function institutionDayForRequest(
+  requested: string,
+  timeZone: string,
+): { dayKey: string; honored: boolean } {
+  const now = Date.now();
+  const serverDayKey = dayKeyForTimezone(now, timeZone);
+  const honored =
+    requested === serverDayKey ||
+    requested === dayKeyForTimezone(now - DAY_KEY_CLOCK_SKEW_MS, timeZone) ||
+    requested === dayKeyForTimezone(now + DAY_KEY_CLOCK_SKEW_MS, timeZone);
+  return { dayKey: honored ? requested : serverDayKey, honored };
 }
 
 /** Resolve timezone for work performed in the caller's staff context. */

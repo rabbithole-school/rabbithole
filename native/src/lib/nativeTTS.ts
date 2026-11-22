@@ -36,6 +36,19 @@ import { spokenWordInText } from "../../vendor/shared/beginnerReading";
 
 export type TTSState = "idle" | "loading" | "speaking" | "paused";
 
+/**
+ * The signed-in user's Convex auth token, sent with every `/tts` request so
+ * the server can start refusing anonymous callers (TRA-491). This engine is a
+ * module singleton that speaks from outside React, so the root layout keeps
+ * the token current via `setTTSAuthToken`.
+ */
+let ttsAuthToken: string | null = null;
+
+/** Called from the root layout whenever the Convex auth token changes. */
+export function setTTSAuthToken(token: string | null | undefined): void {
+  ttsAuthToken = token ?? null;
+}
+
 let audioModeReady = false;
 async function ensureAudioMode(): Promise<void> {
   if (audioModeReady) return;
@@ -111,6 +124,13 @@ class NativeTTSEngine {
    * before playback starts. Subscribe with `subscribePlayback`.
    */
   playback: PlaybackPosition | null = null;
+  /**
+   * When the engine last stopped being audible (left "speaking"), in
+   * Date.now() ms; null if it never spoke. The live mic reads it through
+   * `audibleWithin` so it doesn't record the tutor's own voice, or the echo
+   * still in the room after it stops (TRA-706).
+   */
+  private lastAudibleAtMs: number | null = null;
 
   private player: AudioPlayer | null = null;
   private sub: { remove: () => void } | null = null;
@@ -139,8 +159,19 @@ class NativeTTSEngine {
     return () => this.listeners.delete(fn);
   }
 
+  /**
+   * Whether the tutor's voice is playing now, or stopped less than `tailMs`
+   * ago. The iPad mic is raw (no OS echo cancellation), so whatever this
+   * engine plays reaches the transcriber unless the mic ignores it.
+   */
+  audibleWithin(nowMs: number, tailMs: number): boolean {
+    if (this.state === "speaking") return true;
+    return this.lastAudibleAtMs !== null && nowMs - this.lastAudibleAtMs < tailMs;
+  }
+
   private setState(s: TTSState): void {
     if (this.state === s) return;
+    if (this.state === "speaking") this.lastAudibleAtMs = Date.now();
     this.state = s;
     this.listeners.forEach((fn) => fn(s));
   }
@@ -275,7 +306,10 @@ class NativeTTSEngine {
       await ensureAudioMode();
       const res = await fetch(`${convexSiteUrl}/tts`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(ttsAuthToken ? { Authorization: `Bearer ${ttsAuthToken}` } : {}),
+        },
         body: JSON.stringify({ text }),
       });
       if (!res.ok) throw new Error(`tts ${res.status}`);

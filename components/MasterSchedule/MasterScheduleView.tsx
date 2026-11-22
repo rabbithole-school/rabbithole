@@ -14,6 +14,13 @@
  * (±1 day) / reshelve / quick-add / stamp a week live. Web-only planning
  * surface (teacher/admin); no scholar-facing native gap.
  */
+import { railedClassTitle } from "./railedClassTitle";
+import {
+  applyOptimisticDueMove,
+  applyOptimisticMove,
+  linkedPlacementIdForProjection,
+} from "./optimisticMove";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
@@ -24,29 +31,26 @@ import {
   Menu,
   Portal,
   Text,
+  Tooltip,
   VStack,
   chakra,
 } from "@chakra-ui/react";
 import {
   CalendarBlank,
   CaretDown,
-  CaretRight,
-  ChatCircle,
   Check,
-  DotsSixVertical,
-  LockSimple,
-  LockSimpleOpen,
   MagnifyingGlass,
   Plus,
-  Printer,
   Warning,
 } from "@phosphor-icons/react";
 import {
   DndContext,
   DragOverlay,
+  MeasuringStrategy,
   PointerSensor,
   closestCenter,
   pointerWithin,
+  useDndContext,
   useDraggable,
   useDroppable,
   useSensor,
@@ -63,24 +67,37 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { Avatar } from "@/components/Avatar";
 import { PlacementChip as EnrichedChip, isAwaitingActivity } from "@/components/MasterSchedule/PlacementChip";
 import {
+  givenMeetingKeys,
+  onePerGive,
+  withGiveClock,
+} from "@/components/MasterSchedule/giveClock";
+import {
+  GiveCard,
+  GiveRowLabel,
+  GiveStripCell,
+  UpNextButton,
+  giveGroupMark,
+  activeGive,
+  giveInLens,
+  type GridClassMeeting,
+  type GridGive,
+} from "@/components/MasterSchedule/GiveCard";
+import {
   PlacementDetailDrawer,
   type DrawerTarget,
 } from "@/components/MasterSchedule/PlacementDetailDrawer";
-import {
-  ClassDrawer,
-  type ClassDrawerTarget,
-  type FlowAnotherUnitAnchor,
-} from "@/components/MasterSchedule/ClassDrawer";
-import { fmtTime, fmtTimeRange } from "@/components/MasterSchedule/timeFormat";
-import { DateTermPicker, type ReportingPeriodOption } from "@/components/MasterSchedule/DateTermPicker";
+import { fmtTimeRange } from "@/components/MasterSchedule/timeFormat";
+import { DateTermPicker } from "@/components/MasterSchedule/DateTermPicker";
 import { useScholarRoster } from "@/hooks/useScholarRoster";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { ROLES } from "@/convex/lib/roles";
 import { useAideDock } from "@/components/aide/AideDockProvider";
 import { toaster } from "@/lib/toaster";
+import { useNow } from "@/hooks/useNow";
+import { withClosedWindows } from "@/components/MasterSchedule/closedWindows";
 import { EmptyState as PrimitiveEmptyState } from "@/components/ui/EmptyState";
-import { CreatePeriodDialog } from "@/components/narrative/NarrativeQueue";
+import { CreatePeriodDialog } from "@/components/narrative/CreatePeriodDialog";
 import { StartAssignmentDialog } from "@/components/StartAssignmentDialog";
 import { computeScheduleLoadingState } from "@/components/MasterSchedule/scheduleLoadingState";
 import { BirthdayRosterDialog } from "@/components/MasterSchedule/BirthdayRosterDialog";
@@ -88,14 +105,11 @@ import {
   clampToWeekday,
   initialAnchorMs,
   todayAnchorMs,
+  termForMs,
 } from "@/components/MasterSchedule/scheduleAnchor";
 import { closuresForWeek, type SchoolClosure } from "@/shared/schoolClosures";
 import { scheduleWeekStartMs } from "@/shared/scheduleWeek";
-import { DEFAULT_TIMEZONE } from "@/shared/institutionDay";
-import {
-  deriveClassMeetingPattern,
-  generateMeetingSlots,
-} from "@/shared/meetingSlots";
+import { DEFAULT_TIMEZONE, dayKeyForTimezone } from "@/shared/institutionDay";
 
 type Lens = "group" | "teacher";
 type ScheduleMode = "week" | "day";
@@ -118,9 +132,18 @@ function defaultDayIndex(): number {
 
 type GridData = NonNullable<ReturnType<typeof useQuery<typeof api.masterSchedule.grid>>>;
 type Placement = GridData["placements"][number];
+
+/** A placement that pushes something to scholars (an activity or an app), so
+ *  only a class block takes it. A bare row is a staffing marker. */
+const carriesWork = (p: Placement) =>
+  Boolean(p.activityId || p.assignmentId || p.externalAppId);
 type HomeworkDueProjection = GridData["homeworkDue"][number];
 type Block = GridData["blocks"][number];
 const NO_SENSORS: [] = [];
+// The All day row appears when a give drag starts, which shifts every row
+// below it; re-measure drop targets during the drag so drops land where the
+// pointer is.
+const DROP_MEASURING = { droppable: { strategy: MeasuringStrategy.Always } };
 type CurriculumUnit = NonNullable<ReturnType<typeof useQuery<typeof api.units.list>>>[number];
 type CurriculumActivity = NonNullable<
   ReturnType<typeof useQuery<typeof api.activities.listByUnitPublic>>
@@ -180,10 +203,6 @@ function moveWeekday(ms: number, delta: -1 | 1): number {
   return next;
 }
 
-function termForMs(terms: ReportingPeriodOption[], ms: number) {
-  return terms.find((term) => ms >= term.startsAt && ms <= term.endsAt) ?? null;
-}
-
 function monthDay(ms: number): string {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(ms));
 }
@@ -229,18 +248,19 @@ function cellId(blockId: string, weekday: number) {
   return `cell:${blockId}:${weekday}`;
 }
 
-// The shelf is one tall target, so pointer containment must outrank the much
-// nearer centers of adjacent grid cells.
 const scheduleCollisionDetection: CollisionDetection = (args) => {
-  const shelfCollisions = pointerWithin({
-    ...args,
-    droppableContainers: args.droppableContainers.filter(({ id }) => id === "shelf"),
-  });
-  if (shelfCollisions.length > 0) return shelfCollisions;
-  return closestCenter({
-    ...args,
-    droppableContainers: args.droppableContainers.filter(({ id }) => id !== "shelf"),
-  });
+  // A give from the Homework due row lands only where the pointer is: a
+  // nearest-centre guess would turn a drop on a (refusing) class cell into a
+  // move to whichever due day happens to be closest.
+  if ((args.active.data.current as { kind?: string } | undefined)?.kind === "give") {
+    return pointerWithin({
+      ...args,
+      droppableContainers: args.droppableContainers.filter(
+        ({ data }) => data.current?.zone === "homework",
+      ),
+    });
+  }
+  return closestCenter(args);
 };
 
 /** The standard class identity key — (groupId, subject) with subject trimmed +
@@ -344,9 +364,19 @@ export function MasterScheduleView({
         }
       : "skip",
   );
-  const grid = programScoped ? programGrid : teacherGrid;
-  // `placements` is the term-wide source feed for drawers, the shelf, and
-  // meeting-pattern tools. Cells render the backend's layered target-week feed.
+  // The grid returns each open-until window's boundary; this page's minute
+  // clock decides which have closed (closedWindows.ts, T11).
+  const rawGrid = programScoped ? programGrid : teacherGrid;
+  const nowMs = useNow(60_000);
+  const grid = useMemo(
+    () =>
+      rawGrid
+        ? withClosedWindows(rawGrid, nowMs, rawGrid.closureTimeZone ?? DEFAULT_TIMEZONE)
+        : rawGrid,
+    [rawGrid, nowMs],
+  );
+  // `placements` is the term-wide source feed for drawers and meeting-pattern
+  // tools. Cells render the backend's layered target-week feed.
   const weekPlacements = useMemo(
     () => grid?.weekPlacements ?? [],
     [grid?.weekPlacements],
@@ -367,12 +397,6 @@ export function MasterScheduleView({
   const [groupKey, setGroupKey] = useState<string>(initialUrl.groupKey);
   const [teacherKey, setTeacherKey] = useState<string>(initialUrl.teacherKey);
   const [urlStateReady, setUrlStateReady] = useState(false);
-  // "Edit blocks" mode — locked by default. When on, bare-class blocks (a
-  // subject with no linked activity, e.g. "Science") stop rendering as passive
-  // titles and become draggable/removable chips, so a teacher can re-time or
-  // delete the block's structure. Off = the everyday "fill blocks with
-  // activities" view. Transient (not persisted).
-  const [editBlocks, setEditBlocks] = useState(false);
   const [programDialogTarget, setProgramDialogTarget] = useState<{
     groupId: string;
     subject?: string;
@@ -548,34 +572,70 @@ export function MasterScheduleView({
   }, [anchorMs, groupKey, lens, teacherKey, urlStateReady]);
 
   // ── Mutations ─────────────────────────────────────────────────────────────
-  const placeClass = useMutation(api.masterSchedule.placeClass);
-  const movePlacement = useMutation(api.masterSchedule.movePlacement);
-  const removePlacement = useMutation(api.masterSchedule.removePlacement);
+  // The grid's actions are give actions (TRA-582).
+  const giveToClass = useMutation(api.gridGiveActions.giveToClass);
+  const giveHomework = useMutation(api.gridGiveActions.giveHomework);
+  const moveGive = useMutation(api.gridGiveActions.moveGive);
+  // A drop lands at once: the grid's cached result takes the move locally and
+  // the server's answer reconciles it (or rolls it back if the move failed).
+  const movePlacement = useMutation(
+    api.masterSchedule.movePlacement,
+  ).withOptimisticUpdate((localStore, { weekday, blockId, ...args }) => {
+    // The grid only drops into a cell; a move off its day has no local guess.
+    if (weekday == null || blockId == null) return;
+    for (const { args: queryArgs, value } of localStore.getAllQueries(
+      api.masterSchedule.grid,
+    )) {
+      if (!value || queryArgs.weekStartMs == null) continue;
+      const next = applyOptimisticMove(
+        value,
+        { ...args, weekday, blockId },
+        queryArgs.weekStartMs,
+      );
+      if (next !== value) localStore.setQuery(api.masterSchedule.grid, queryArgs, next);
+    }
+  });
+  // A Homework due card with no grid placement is a give made outside the
+  // grid: dropping it on another day re-gives it "by" that day through the
+  // Run page's own path (scheduleActivity keeps it live and keeps its
+  // scholars), landing at once like a placement move.
+  const regive = useMutation(api.assignments.scheduleActivity).withOptimisticUpdate(
+    (localStore, args) => {
+      const finish = args.finish;
+      if (!finish || (finish.kind !== "by" && finish.kind !== "openUntil")) return;
+      for (const { args: queryArgs, value } of localStore.getAllQueries(
+        api.masterSchedule.grid,
+      )) {
+        if (!value || queryArgs.weekStartMs == null) continue;
+        const zone = value.closureTimeZone ?? DEFAULT_TIMEZONE;
+        const weekDayKeys = [0, 1, 2, 3, 4].map((i) =>
+          dayKeyForTimezone(queryArgs.weekStartMs! + i * DAY_MS + DAY_MS / 2, zone),
+        );
+        const next = applyOptimisticDueMove(
+          value,
+          { assignmentId: args.assignmentId, activityId: args.activityId, dayKey: finish.dayKey },
+          weekDayKeys,
+          queryArgs.weekStartMs + Math.max(0, weekDayKeys.indexOf(finish.dayKey)) * DAY_MS,
+        );
+        if (next !== value) localStore.setQuery(api.masterSchedule.grid, queryArgs, next);
+      }
+    },
+  );
   const removeProgramHandoutPlacement = useMutation(
     api.masterSchedule.removeProgramHandoutPlacement,
   );
-  const updatePlacement = useMutation(api.masterSchedule.updatePlacement);
-  const scheduleSkill = useMutation(api.masterSchedule.scheduleSkill);
-  const cascadeUnitForGroup = useMutation(api.masterSchedule.cascadeUnitForGroup);
-  const dismissFlagMut = useMutation(api.masterSchedule.dismissFlag);
-  const acceptReorderMut = useMutation(api.masterSchedule.acceptReorder);
   const ensureHomeworkRail = useMutation(api.masterSchedule.ensureHomeworkRail);
 
-  // The aide dock — flags ("overloaded", "out of order") offer an "ask bot"
-  // door that seeds the composer, DRY with the conflict→chat pattern.
+  // The aide dock — the conflict section offers an "ask bot" door that seeds
+  // the composer.
   const aide = useAideDock();
 
   // ── DnD ───────────────────────────────────────────────────────────────────
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const [dragId, setDragId] = useState<string | null>(null);
-  // When a whole cell is grabbed in edit mode, the block fuses into one draggable
-  // card; we track the placement ids it carries so a single drop moves them all.
-  const [dragCellIds, setDragCellIds] = useState<string[] | null>(null);
 
-  // Built from the term-wide feed, not `weekPlacements`: the shelf can hold
-  // placements whose stamped `weekStartMs` is outside the viewed week, and those
-  // items are still draggable. Resolving the DragOverlay against a week-scoped
-  // map would render an empty overlay for such a drag.
+  // Built from the term-wide feed, not `weekPlacements`, so the DragOverlay
+  // and the drawer resolve any placement id the grid hands them.
   const placementsById = useMemo(() => {
     const m = new Map<string, Placement>();
     for (const p of grid?.placements ?? []) m.set(String(p._id), p);
@@ -588,32 +648,147 @@ export function MasterScheduleView({
   // starts a drag, so it opens the drawer normally).
   const justDraggedRef = useRef(false);
 
+  const isJustDragged = useCallback(() => justDraggedRef.current, []);
+
   const onDragStart = (e: DragStartEvent) => {
     justDraggedRef.current = true;
     setDragId(String(e.active.id));
-    const data = e.active.data.current as { kind?: string; placementIds?: string[] } | undefined;
-    setDragCellIds(data?.kind === "cell" ? data.placementIds ?? [] : null);
   };
+  // The give being dragged, when the card is a Homework due projection with
+  // no grid placement (its overlay; class cells refuse it).
+  const draggedGive = useMemo(() => {
+    if (!dragId?.startsWith("give:")) return null;
+    const key = dragId.slice("give:".length);
+    return (grid?.homeworkDue ?? []).find((item) => item.key === key) ?? null;
+  }, [dragId, grid?.homeworkDue]);
+  // Class meetings this week, by cell, for drops, Up next and adding work.
+  const meetingByCellGroup = useMemo(() => {
+    const m = new Map<string, GridClassMeeting>();
+    for (const meeting of grid?.classMeetings ?? []) {
+      m.set(`${meeting.blockId}|${meeting.weekday}|${meeting.groupId}`, meeting);
+    }
+    return m;
+  }, [grid?.classMeetings]);
+  const meetingFor = useCallback(
+    (groupId: string, blockId: string, weekday: number) =>
+      meetingByCellGroup.get(`${blockId}|${weekday}|${groupId}`) ?? null,
+    [meetingByCellGroup],
+  );
+  // The classes the Homework due row's "+" can give homework for: this
+  // week's meeting classes, one entry per class.
+  const classOptions = useMemo(() => {
+    const seen = new Map<string, QuickAddClassOption>();
+    for (const m of grid?.classMeetings ?? []) {
+      const key = String(m.classId);
+      if (!seen.has(key)) {
+        seen.set(key, { classId: key, groupId: String(m.groupId), subject: m.subject });
+      }
+    }
+    return [...seen.values()].sort((x, y) => x.subject.localeCompare(y.subject));
+  }, [grid?.classMeetings]);
+  const draggedGridGive = useMemo(() => {
+    if (!dragId?.startsWith("grid-give:")) return null;
+    const key = dragId.slice("grid-give:".length);
+    return (grid?.gives ?? []).find((g) => g.key === key) ?? null;
+  }, [dragId, grid?.gives]);
   const onDragEnd = async (e: DragEndEvent) => {
     requestAnimationFrame(() => {
       justDraggedRef.current = false;
     });
     setDragId(null);
-    setDragCellIds(null);
     const over = e.over?.id ? String(e.over.id) : null;
     if (!over) return;
-    // Destination: the shelf, or a specific cell.
+    const activeData = e.active.data.current as
+      | { kind?: string; item?: HomeworkDueProjection }
+      | undefined;
+    const give = activeGive(e.active.data.current);
+    if (give) {
+      const overData = e.over?.data.current as
+        | { zone?: DropZone | "allDay"; dayKey?: string }
+        | undefined;
+      const dayKeyFor = (weekday: number) =>
+        dayKeyForTimezone(
+          anchorWeekStartMs + (weekday - 1) * DAY_MS + DAY_MS / 2,
+          grid?.closureTimeZone ?? DEFAULT_TIMEZONE,
+        );
+      let to:
+        | { kind: "class"; classId: Id<"classes">; dayKey: string }
+        | { kind: "allDay"; dayKey: string }
+        | { kind: "homework"; dayKey: string }
+        | null = null;
+      if (overData?.zone === "allDay" && overData.dayKey) {
+        to = { kind: "allDay", dayKey: overData.dayKey };
+      } else if (over.startsWith("cell:")) {
+        const [, blockId, weekdayText] = over.split(":");
+        const weekday = Number(weekdayText);
+        if (overData?.zone === "homework") {
+          to = { kind: "homework", dayKey: dayKeyFor(weekday) };
+        } else {
+          const meeting = meetingFor(give.groupId, blockId, weekday);
+          if (meeting) {
+            to = { kind: "class", classId: meeting.classId, dayKey: meeting.dayKey };
+          }
+        }
+      }
+      if (
+        !to ||
+        (to.kind === "class" &&
+          // Where it is drawn: a slot it was scheduled into, else its class.
+          to.classId === (give.slotClassId ?? give.classId) &&
+          to.dayKey === give.dayKey)
+      ) {
+        return;
+      }
+      try {
+        await moveGive({ pushId: give.pushId, to });
+      } catch (err) {
+        toaster.create({
+          title: "Move failed",
+          description: serverErrorMessage(err, "Check your connection and try again."),
+          type: "error",
+        });
+      }
+      return;
+    }
+    if (activeData?.kind === "give" && activeData.item) {
+      // Only another day's Homework due row takes a give: it moves the
+      // finish to that day. Class cells refuse it (their droppables are
+      // disabled during this drag), so anything else is a no-op.
+      const zone = (e.over?.data.current as { zone?: DropZone } | undefined)?.zone;
+      if (zone !== "homework" || !over.startsWith("cell:")) return;
+      const weekday = Number(over.split(":")[2]);
+      const item = activeData.item;
+      if (weekday === item.weekday) return;
+      const dayKey = dayKeyForTimezone(
+        anchorWeekStartMs + (weekday - 1) * DAY_MS + DAY_MS / 2,
+        grid?.closureTimeZone ?? DEFAULT_TIMEZONE,
+      );
+      try {
+        await regive({
+          assignmentId: item.assignmentId,
+          activityId: item.activityId,
+          startsAt: item.startsAt,
+          finish: { kind: "by", dayKey },
+        });
+      } catch (err) {
+        toaster.create({
+          title: "Move failed",
+          description: serverErrorMessage(err, "Check your connection and try again."),
+          type: "error",
+        });
+      }
+      return;
+    }
+    // Destination: a specific cell (work never moves to a day-less shelf).
     let dest:
       | {
-          weekday: number | null;
-          blockId: Id<"scheduleBlocks"> | null;
+          weekday: number;
+          blockId: Id<"scheduleBlocks">;
           weekStartMs?: number;
           mode?: "classFocus" | "homework";
         }
       | null = null;
-    if (over === "shelf") {
-      dest = { weekday: null, blockId: null };
-    } else if (over.startsWith("cell:")) {
+    if (over.startsWith("cell:")) {
       const [, blockId, weekday] = over.split(":");
       // Zone integrity: a cross-zone drop (class grid ↔ homework due-rail)
       // patches `mode` to match its destination, so a placement's location and
@@ -630,34 +805,28 @@ export function MasterScheduleView({
       };
     }
     if (!dest) return;
-    // A fused whole-cell grab carries every placement in the block; a plain chip
-    // carries just itself. Either way, move them all to the destination together.
-    const data = e.active.data.current as { kind?: string; placementIds?: string[] } | undefined;
-    const ids =
-      data?.kind === "cell" && data.placementIds?.length ? data.placementIds : [String(e.active.id)];
     try {
-      await Promise.all(
-        ids.map((id) =>
-          movePlacement({
-            placementId: id as Id<"schedulePlacements">,
-            ...dest,
-          }),
-        ),
-      );
+      await movePlacement({
+        placementId: String(e.active.id) as Id<"schedulePlacements">,
+        ...dest,
+      });
     } catch (err) {
-      toaster.create({ title: "Move failed", description: String(err), type: "error" });
+      toaster.create({
+        title: "Move failed",
+        description: serverErrorMessage(err, "Check your connection and try again."),
+        type: "error",
+      });
     }
   };
   const onDragCancel = () => {
     justDraggedRef.current = false;
     setDragId(null);
-    setDragCellIds(null);
   };
 
   // ── Detail drawer (click reveals; drag moves) ──────────────────────────────
   const [drawerTarget, setDrawerTarget] = useState<DrawerTarget | null>(null);
   // Focus returns to the originating chip on close — chips stamp
-  // data-detail-trigger with their placement id (fused cells: their drag id).
+  // data-detail-trigger with their placement id.
   const detailTriggerTokenRef = useRef<string | null>(null);
   const openDetail = useCallback((t: DrawerTarget, triggerToken: string) => {
     if (justDraggedRef.current) return; // a completed drag, not a click
@@ -676,42 +845,24 @@ export function MasterScheduleView({
     }
   }, []);
 
-  // ── Class drawer (the queue made visible — §7) ──────────────────────────────
-  // A discreet chevron on any class cell opens a drawer for that (groupId,
-  // subject) class: its whole spine (past + upcoming meetings) derived from the
-  // grid's own placements. Distinct from the per-placement detail drawer above.
-  const [classDrawer, setClassDrawer] = useState<ClassDrawerTarget | null>(null);
-  const openClassDrawer = useCallback((groupId: string, subject: string) => {
-    if (justDraggedRef.current) return; // a completed drag, not a click
-    setClassDrawer({ groupId, subject });
-  }, []);
-
   // ── Quick-add ──────────────────────────────────────────────────────────────
-  // Entry points are the shelf "Quick Add" control + the per-cell hover "+".
-  // We deliberately do NOT bind ⌘K here — that's the app's global command
-  // palette (jump-to-scholar/curriculum); hijacking it would double-open.
-  const [quickAdd, setQuickAdd] = useState<{
-    weekday?: number;
-    blockId?: string;
-    // When set, the palette FILLS this existing (empty) slot with an activity
-    // instead of creating a new class — the everyday "put work in a slot" action.
-    fill?: { placementId: string; subject: string; groupId: string; teacherId: string };
-  } | null>(null);
+  // Two entry points, both gives (TRA-582): clicking a class cell adds work to
+  // that class on that day, and the Homework due row's "+" gives homework due
+  // that day. We deliberately do NOT bind ⌘K here — that's the app's global
+  // command palette (jump-to-scholar/curriculum); hijacking it would
+  // double-open.
+  const [quickAdd, setQuickAdd] = useState<QuickAddTarget | null>(null);
 
-  // Clicking an EMPTY slot opens the quick picker scoped to that slot, so the
-  // chosen activity fills the slot in place (updatePlacement) rather than adding a
-  // sibling class. Suppressed right after a drag (same guard as the detail drawer).
+  // Clicking an EMPTY class cell opens the picker scoped to that class
+  // meeting. Suppressed right after a drag (same guard as the detail drawer).
   const openFillSlot = useCallback((p: Placement) => {
-    if (justDraggedRef.current) return;
+    if (justDraggedRef.current || typeof p.weekday !== "number" || !p.blockId) return;
     setQuickAdd({
-      weekday: typeof p.weekday === "number" ? p.weekday : undefined,
-      blockId: p.blockId ? String(p.blockId) : undefined,
-      fill: {
-        placementId: String(p._id),
-        subject: p.subject,
-        groupId: String(p.groupId),
-        teacherId: p.teacherId ? String(p.teacherId) : "",
-      },
+      kind: "class",
+      weekday: p.weekday,
+      blockId: String(p.blockId),
+      subject: p.subject,
+      groupId: String(p.groupId),
     });
   }, []);
   const openProgramWork = useCallback(
@@ -748,26 +899,6 @@ export function MasterScheduleView({
     },
     [anchorWeekStartMs, grid?.blocks],
   );
-  // "Flow another unit" from the class drawer: reuse the EXISTING flow palette
-  // (no new flow UI). The class drawer resolves the class's first FREE meeting;
-  // we jump the grid to that week (so the cascade's start week — anchorWeekStartMs
-  // — lines up) and open the palette in fill mode anchored on the class's
-  // recurring slot there, so the flow lands end-to-end after the current queue.
-  const openFlowForClass = useCallback((a: FlowAnotherUnitAnchor) => {
-    setClassDrawer(null);
-    setAnchorMs(a.weekStartMs + (a.weekday - 1) * DAY_MS);
-    setQuickAdd({
-      weekday: a.weekday,
-      blockId: a.blockId,
-      fill: {
-        placementId: a.anchorPlacementId,
-        subject: a.subject,
-        groupId: a.groupId,
-        teacherId: a.teacherId,
-      },
-    });
-  }, []);
-
   // ── Derived: coverage / conflict lookups + visible placements ──────────────
   const coverageByCell = useMemo(() => {
     const m = new Map<string, GridData["coverage"][number]>();
@@ -789,6 +920,11 @@ export function MasterScheduleView({
     return s;
   }, [grid?.conflicts]);
 
+  const homeworkBlockIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const b of grid?.blocks ?? []) if (b.kind === "homework") s.add(String(b._id));
+    return s;
+  }, [grid?.blocks]);
   // Placements in the current lens, indexed by `${blockId}|${weekday}`.
   const cellPlacements = useMemo(() => {
     const m = new Map<string, Placement[]>();
@@ -797,28 +933,152 @@ export function MasterScheduleView({
       const inLens =
         lens === "group" ? String(p.groupId) === groupKey : String(p.teacherId) === teacherKey;
       if (!inLens) continue;
+      // A chip whose finish is a date (or open until a date) sits in the
+      // Homework due row instead, and its class keeps its block title here:
+      // the class still met.
+      let item =
+        p.railWeekday != null
+          ? (railedClassTitle(p, (id) => homeworkBlockIds.has(id)) as Placement | null)
+          : p;
+      if (!item) continue;
+      // Activity cards retired from the teacher grid (TRA-582): the work they
+      // carried draws as gives, and the card leaves only its class's title.
+      // The title keeps the card's real id (the conflict badge and the
+      // drawer key off it) and opens that card's drawer (`railedFrom`), where
+      // it can be removed. The program grid still draws its handout cards.
+      if (!programScoped && item.activityId) {
+        item = {
+          ...item,
+          assignmentId: null,
+          activityId: null,
+          activityTitle: null,
+          unitTitle: null,
+          mode: null,
+          linkState: "none",
+          railedFrom: String(item._id),
+        } as Placement;
+      }
       const key = `${p.blockId}|${p.weekday}`;
       if (!m.has(key)) m.set(key, []);
-      m.get(key)!.push(p);
+      const cell = m.get(key)!;
+      // One title per class in a cell, preferring the class's own row (a
+      // click there adds work) over a retired card's title.
+      if (!programScoped && isAwaitingActivity(item)) {
+        const at = cell.findIndex(
+          (other) => isAwaitingActivity(other) && classKey(other) === classKey(item!),
+        );
+        if (at >= 0) {
+          const isCardTitle = (x: Placement) => "railedFrom" in x;
+          if (isCardTitle(cell[at]) && !isCardTitle(item)) cell[at] = item;
+          continue;
+        }
+      }
+      cell.push(item);
     }
     return m;
-  }, [weekPlacements, lens, groupKey, teacherKey]);
+  }, [weekPlacements, lens, groupKey, teacherKey, homeworkBlockIds, programScoped]);
 
-  const shelfItems = useMemo(() => {
-    return (grid?.shelf ?? []).filter((p) =>
-      lens === "group" ? String(p.groupId) === groupKey : String(p.teacherId) === teacherKey,
-    );
-  }, [grid?.shelf, lens, groupKey, teacherKey]);
+  // Gives (TRA-582): linked ones by class cell, unlinked ones by day for the
+  // All day row and the Other times strip. All in the current lens.
+  const { givesByCell, allDayByDay, otherByDay } = useMemo(() => {
+    const byCell = new Map<string, GridGive[]>();
+    const allDay = new Map<number, GridGive[]>();
+    const other = new Map<number, GridGive[]>();
+    const lensKey = lens === "group" ? groupKey : teacherKey;
+    const clocked = withGiveClock(grid?.gives ?? [], nowMs, grid?.closureTimeZone ?? DEFAULT_TIMEZONE);
+    // The teacher lens doesn't separate groups: one card per give there.
+    const visible = lens === "teacher" ? onePerGive(clocked) : clocked;
+    for (const give of visible) {
+      if (!giveInLens(give, lens, lensKey)) continue;
+      const [map, key] =
+        give.place === "class"
+          ? [byCell, `${give.blockId}|${give.weekday}`]
+          : [give.place === "allDay" ? allDay : other, give.weekday];
+      const m = map as Map<typeof key, GridGive[]>;
+      if (!m.has(key)) m.set(key, []);
+      m.get(key)!.push(give);
+    }
+    return { givesByCell: byCell, allDayByDay: allDay, otherByDay: other };
+  }, [grid?.gives, grid?.closureTimeZone, lens, groupKey, teacherKey, nowMs]);
+  // Up next shows on a meeting in the lens that hasn't ended and has no gives.
+  const upNextByCell = useMemo(() => {
+    const m = new Map<string, GridClassMeeting[]>();
+    const lensKey = lens === "group" ? groupKey : teacherKey;
+    const given = givenMeetingKeys(grid?.gives ?? []);
+    for (const meeting of grid?.classMeetings ?? []) {
+      if (!meeting.upNext || meeting.endsAt <= nowMs) continue;
+      const inLens =
+        lens === "group"
+          ? String(meeting.groupId) === lensKey
+          : String(meeting.teacherId) === lensKey;
+      if (!inLens || given.has(`${meeting.classId}|${meeting.dayKey}`)) continue;
+      const key = `${meeting.blockId}|${meeting.weekday}`;
+      if (!m.has(key)) m.set(key, []);
+      m.get(key)!.push(meeting);
+    }
+    return m;
+  }, [grid?.classMeetings, grid?.gives, lens, groupKey, teacherKey, nowMs]);
+  const myId = currentUser?._id ? String(currentUser._id) : null;
+  const canDragGive = useCallback(
+    (give: GridGive) =>
+      !programScoped &&
+      give.movable &&
+      myId != null &&
+      String(give.assignmentTeacherId) === myId,
+    [programScoped, myId],
+  );
+  const onGiveUpNext = useCallback(
+    async (meeting: GridClassMeeting) => {
+      if (!meeting.upNext) return;
+      try {
+        await giveToClass({
+          classId: meeting.classId,
+          dayKey: meeting.dayKey,
+          work: { kind: "activity", activityId: meeting.upNext.activityId },
+        });
+      } catch (err) {
+        toaster.create({
+          title: "Couldn't give it",
+          description: serverErrorMessage(err, "Check your connection and try again."),
+          type: "error",
+        });
+      }
+    },
+    [giveToClass],
+  );
+  // The All day row takes a dragged give on a day that hasn't started.
+  const allDayDropKey = useCallback(
+    (weekday: number) => {
+      const tz = grid?.closureTimeZone ?? DEFAULT_TIMEZONE;
+      const dayKey = dayKeyForTimezone(
+        anchorWeekStartMs + (weekday - 1) * DAY_MS + DAY_MS / 2,
+        tz,
+      );
+      return dayKey > dayKeyForTimezone(nowMs, tz) ? dayKey : null;
+    },
+    [anchorWeekStartMs, grid?.closureTimeZone, nowMs],
+  );
+  const hasOtherTimes = useMemo(
+    // A closed day draws as closed, so its gives don't open the row.
+    () =>
+      visibleDays.some(
+        (d) => !closuresByWeekday.has(d.n) && (otherByDay.get(d.n) ?? []).length > 0,
+      ),
+    [visibleDays, otherByDay, closuresByWeekday],
+  );
+  const hasAllDay = useMemo(
+    // A closed day draws as closed, so its gives don't open the row.
+    () =>
+      visibleDays.some(
+        (d) => !closuresByWeekday.has(d.n) && (allDayByDay.get(d.n) ?? []).length > 0,
+      ),
+    [visibleDays, allDayByDay, closuresByWeekday],
+  );
 
   // ── Homework due rail (Q3) ─────────────────────────────────────────────────
   // Homework lives on a virtual per-term block (kind "homework"); it renders as
   // a top-of-day DUE RAIL, not a bell-schedule row. Split the blocks so the rail
   // holds those placements and the grid shows only real class blocks.
-  const homeworkBlockIds = useMemo(() => {
-    const s = new Set<string>();
-    for (const b of grid?.blocks ?? []) if (b.kind === "homework") s.add(String(b._id));
-    return s;
-  }, [grid?.blocks]);
   const homeworkBlockId = useMemo(
     () => [...homeworkBlockIds][0] ?? null,
     [homeworkBlockIds],
@@ -872,6 +1132,19 @@ export function MasterScheduleView({
     }
     return m;
   }, [grid?.homeworkDue, lens, groupKey, teacherKey]);
+  // Each Homework due card drags as the grid placement it stands in for, so
+  // a drop moves that placement like any other card. Work given from its
+  // assignment page has no placement (null) and doesn't drag.
+  const homeworkDueLinks = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const item of grid?.homeworkDue ?? []) {
+      m.set(
+        item.key,
+        linkedPlacementIdForProjection(grid?.placements ?? [], item, anchorWeekStartMs),
+      );
+    }
+    return m;
+  }, [grid?.homeworkDue, grid?.placements, anchorWeekStartMs]);
   const homeworkByDay = useMemo(() => {
     const m = new Map<number, Placement[]>();
     const projectedKeys = new Set(
@@ -882,7 +1155,16 @@ export function MasterScheduleView({
     );
     for (const p of weekPlacements) {
       if (p.onShelf || p.weekday == null) continue;
-      if (!homeworkBlockIds.has(String(p.blockId))) continue;
+      // The server places each chip by its give's finish (`railWeekday`): the
+      // homework block's own chips, and class-cell chips due by a date. An
+      // older backend without the field keeps the homework-block rule.
+      const railDay =
+        p.railWeekday !== undefined
+          ? p.railWeekday
+          : homeworkBlockIds.has(String(p.blockId))
+            ? p.weekday
+            : null;
+      if (railDay == null) continue;
       if (
         p.assignmentId &&
         p.activityId &&
@@ -893,8 +1175,8 @@ export function MasterScheduleView({
       const inLens =
         lens === "group" ? String(p.groupId) === groupKey : String(p.teacherId) === teacherKey;
       if (!inLens) continue;
-      if (!m.has(p.weekday)) m.set(p.weekday, []);
-      m.get(p.weekday)!.push(p);
+      if (!m.has(railDay)) m.set(railDay, []);
+      m.get(railDay)!.push(p);
     }
     return m;
   }, [
@@ -906,65 +1188,7 @@ export function MasterScheduleView({
     teacherKey,
   ]);
 
-  // ── Flags: overloaded slots + out-of-order sequence chips (Q2) ──────────────
-  // A cell shows an "overloaded" tag only when ≥2 of the chips the teacher can
-  // actually SEE in it (current lens) belong to one derived overload flag.
-  const overloadByCell = useMemo(() => {
-    const m = new Map<string, { flagId: string; placementIds: string[] }>();
-    for (const f of grid?.overloaded ?? []) {
-      const key = `${f.blockId}|${f.weekday}`;
-      const ids = f.placementIds.map(String);
-      const visible = (cellPlacements.get(key) ?? []).filter((it) =>
-        ids.includes(String(it._id)),
-      );
-      if (visible.length >= 2) m.set(key, { flagId: f.flagId, placementIds: ids });
-    }
-    return m;
-  }, [grid?.overloaded, cellPlacements]);
-  const outOfOrderChips = useMemo(() => {
-    const m = new Map<string, { sequenceId: string; flagId: string }>();
-    for (const f of grid?.outOfOrder ?? [])
-      m.set(String(f.placementId), { sequenceId: f.sequenceId, flagId: f.flagId });
-    return m;
-  }, [grid?.outOfOrder]);
-
   const askBot = useCallback((text: string) => aide.seedComposer(text), [aide]);
-  const onDismissOverload = useCallback(
-    async (flagId: string, placementIds: string[]) => {
-      try {
-        await dismissFlagMut({
-          flagId,
-          placementIds: placementIds as Id<"schedulePlacements">[],
-        });
-      } catch (err) {
-        toaster.create({ title: "Couldn't dismiss", description: String(err), type: "error" });
-      }
-    },
-    [dismissFlagMut],
-  );
-  const onAcceptReorder = useCallback(
-    async (sequenceId: string) => {
-      try {
-        await acceptReorderMut({ sequenceId });
-      } catch (err) {
-        toaster.create({ title: "Couldn't accept", description: String(err), type: "error" });
-      }
-    },
-    [acceptReorderMut],
-  );
-
-  // Remove — reached from the detail drawer's destructive footer (movement is
-  // drag-only, so this is the one placement action left outside dnd).
-  const handleRemove = useCallback(
-    async (placementId: string) => {
-      try {
-        await removePlacement({ placementId: placementId as Id<"schedulePlacements"> });
-      } catch (err) {
-        toaster.create({ title: "Remove failed", description: String(err), type: "error" });
-      }
-    },
-    [removePlacement],
-  );
   const handleProgramHandoutRemove = useCallback(
     async (placementId: string) => {
       const placement = grid?.placements.find(
@@ -1000,8 +1224,6 @@ export function MasterScheduleView({
     null;
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const blocks = grid?.blocks ?? [];
-
   return (
     <Flex direction="column" h="full" overflow="hidden" bg="white">
       {/* Header rail: view toggle · date/term · span · lens · stamp (one bar) */}
@@ -1079,55 +1301,6 @@ export function MasterScheduleView({
           <BirthdayRosterDialog institutionScope={scopeParam} />
         )}
 
-        {!programScoped && (
-          <Button
-            size="xs"
-            variant="outline"
-            colorPalette="violet"
-            asChild
-          >
-            <a
-              href="/print/special-delivery"
-              target="_blank"
-              rel="noreferrer"
-            >
-              <Printer size={14} />
-              Special delivery
-            </a>
-          </Button>
-        )}
-
-        {/* Edit-blocks lock — unlocks re-timing/removing bare class blocks. */}
-        {!programScoped && (
-        <chakra.button
-          type="button"
-          onClick={() => setEditBlocks((v) => !v)}
-          display="inline-flex"
-          alignItems="center"
-          gap={1.5}
-          px={3}
-          py={1.5}
-          borderRadius="full"
-          borderWidth="1px"
-          borderStyle="solid"
-          borderColor={editBlocks ? "violet.300" : "gray.200"}
-          bg={editBlocks ? "violet.50" : "white"}
-          color={editBlocks ? "violet.700" : "charcoal.400"}
-          fontSize="xs"
-          fontWeight="700"
-          cursor="pointer"
-          aria-pressed={editBlocks}
-          title={
-            editBlocks
-              ? "Blocks unlocked — drag to re-time, ⋯ to remove. Click to lock."
-              : "Class blocks are locked. Unlock to re-time or remove them."
-          }
-          _hover={{ borderColor: editBlocks ? "violet.400" : "gray.300" }}
-        >
-          {editBlocks ? <LockSimpleOpen size={14} weight="bold" /> : <LockSimple size={14} weight="bold" />}
-          <Text>{editBlocks ? "Editing blocks" : "Edit blocks"}</Text>
-        </chakra.button>
-        )}
       </Flex>
 
       {loading ? (
@@ -1164,7 +1337,7 @@ export function MasterScheduleView({
       ) : bellBlocks.length === 0 && !hasAnyHomework ? (
         <EmptyState programScoped={programScoped} />
       ) : (
-        <DndContext sensors={programScoped ? NO_SENSORS : sensors} collisionDetection={scheduleCollisionDetection} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
+        <DndContext sensors={programScoped ? NO_SENSORS : sensors} collisionDetection={scheduleCollisionDetection} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={onDragCancel} measuring={DROP_MEASURING}>
           <Flex flex={1} overflow="hidden">
             {/* Grid */}
             <Box flex={1} overflow="auto" p={3}>
@@ -1241,10 +1414,11 @@ export function MasterScheduleView({
                           fusable={false}
                           items={homeworkByDay.get(d.n) ?? []}
                           homeworkDueItems={homeworkDueByDay.get(d.n) ?? []}
+                          homeworkDueLinks={homeworkDueLinks}
+                          draggable={!programScoped}
+                          isJustDragged={isJustDragged}
                           lens={lens}
-                          editBlocks={editBlocks}
-                          groupEmojiById={groupEmojiById}
-                          outOfOrderChips={outOfOrderChips}
+                                          groupEmojiById={groupEmojiById}
                           onQuickAdd={() => {
                             if (programScoped && selectedGroup) {
                               setProgramDialogTarget({
@@ -1258,16 +1432,37 @@ export function MasterScheduleView({
                               });
                               return;
                             }
-                            setQuickAdd({
-                              weekday: d.n,
-                              blockId: homeworkBlockId,
-                            });
+                            setQuickAdd({ kind: "homework", weekday: d.n });
                           }}
                           onOpenDetail={openDetail}
                           onFillSlot={
                             programScoped ? openProgramWork : openFillSlot
                           }
-                          onAskBot={askBot}
+                        />
+                      ),
+                    )}
+                  </>
+                )}
+
+                {/* All day row: unlinked gives whose window covers the
+                    school day (TRA-582). Shown in a week that has some, and
+                    while a give is dragged, since it takes a drop. */}
+                {(hasAllDay || draggedGridGive != null) && (
+                  <>
+                    <GiveRowLabel title="All day" hint="the whole school day" />
+                    {visibleDays.map((d) =>
+                      closuresByWeekday.has(d.n) ? (
+                        <ClosedCell key={`allday-${d.n}`} />
+                      ) : (
+                        <GiveStripCell
+                          key={`allday-${d.n}`}
+                          gives={allDayByDay.get(d.n) ?? []}
+                          lens={lens}
+                          groupEmojiById={groupEmojiById}
+                          dropId={`allday:${d.n}`}
+                          dropDayKey={programScoped ? null : allDayDropKey(d.n)}
+                          canDragGive={canDragGive}
+                          isJustDragged={isJustDragged}
                         />
                       ),
                     )}
@@ -1282,56 +1477,73 @@ export function MasterScheduleView({
                     days={visibleDays}
                     closedByWeekday={closuresByWeekday}
                     cellPlacements={cellPlacements}
+                    givesByCell={givesByCell}
+                    upNextByCell={upNextByCell}
+                    meetingFor={meetingFor}
+                    canDragGive={canDragGive}
+                    onGiveUpNext={programScoped ? undefined : onGiveUpNext}
+                    isJustDragged={isJustDragged}
+                    nowMs={nowMs}
                     coverageByCell={coverageByCell}
                     conflictedPlacementIds={conflictedPlacementIds}
-                    overloadByCell={overloadByCell}
-                    outOfOrderChips={outOfOrderChips}
                     groupEmojiById={groupEmojiById}
                     lens={lens}
-                    editBlocks={editBlocks}
-                    draggable={!programScoped}
-                    onQuickAdd={(weekday) => setQuickAdd({ weekday, blockId: String(block._id) })}
+                              draggable={!programScoped}
                     onOpenDetail={openDetail}
-                    onFillSlot={programScoped ? openProgramWork : openFillSlot}
-                    onOpenClass={programScoped ? undefined : openClassDrawer}
-                    onDismissOverload={onDismissOverload}
-                    onAskBot={askBot}
+                    onFillSlot={(p) => {
+                      // A railed card's class title opens the real card's
+                      // drawer; the class is already filled.
+                      const railedFrom = (p as Placement & { railedFrom?: string }).railedFrom;
+                      if (railedFrom) {
+                        openDetail({ kind: "placement", placementId: railedFrom }, railedFrom);
+                        return;
+                      }
+                      (programScoped ? openProgramWork : openFillSlot)(p);
+                    }}
                   />
                 ))}
+
+                {/* Other times: gives at a time outside any class. Shown only
+                    in a week that has some. */}
+                {hasOtherTimes && (
+                  <>
+                    <GiveRowLabel title="Other times" hint="outside any class" />
+                    {visibleDays.map((d) =>
+                      closuresByWeekday.has(d.n) ? (
+                        <ClosedCell key={`other-${d.n}`} />
+                      ) : (
+                      <GiveStripCell
+                        key={`other-${d.n}`}
+                        dropId={`other:${d.n}`}
+                        gives={otherByDay.get(d.n) ?? []}
+                        lens={lens}
+                        groupEmojiById={groupEmojiById}
+                        canDragGive={canDragGive}
+                        isJustDragged={isJustDragged}
+                      />
+                      ),
+                    )}
+                  </>
+                )}
               </Box>
             </Box>
 
-            {/* Shelf */}
-            {!programScoped && (
-              <ShelfTray
-                items={shelfItems}
-                groupEmojiById={groupEmojiById}
-                lens={lens}
-                onQuickAdd={() => setQuickAdd({})}
-                onOpenDetail={openDetail}
-              />
-            )}
           </Flex>
 
           <DragOverlay dropAnimation={null}>
-            {dragCellIds ? (
-              <Box
-                bg="white"
-                border="1px solid"
-                borderColor="gray.200"
-                borderRadius="lg"
-                boxShadow="xl"
-                w="full"
-                overflow="hidden"
-              >
-                <FusedCellBody
-                  placements={dragCellIds
-                    .map((id) => placementsById.get(id))
-                    .filter((p): p is Placement => Boolean(p))}
-                  lens={lens}
-                  groupEmojiById={groupEmojiById}
-                />
-              </Box>
+            {draggedGridGive ? (
+              <GiveCard
+                give={draggedGridGive}
+                lens={lens}
+                groupEmoji={groupEmojiById.get(String(draggedGridGive.groupId))}
+              />
+            ) : draggedGive ? (
+              <EnrichedChip
+                p={draggedGive}
+                lens={lens}
+                groupEmoji={groupEmojiById.get(String(draggedGive.groupId))}
+                dragging
+              />
             ) : dragId && placementsById.get(dragId) ? (
               isAwaitingActivity(placementsById.get(dragId)!) ? (
                 <Box bg="white" borderRadius="md" boxShadow="lg" w="full">
@@ -1350,125 +1562,57 @@ export function MasterScheduleView({
         </DndContext>
       )}
 
-      {!programScoped && quickAdd && termId && (
+      {!programScoped && quickAdd && (
         <QuickAddPalette
           onClose={() => setQuickAdd(null)}
-          blocks={blocks}
-          placements={grid?.placements ?? []}
-          closures={grid?.closures ?? []}
-          closureTimeZone={grid?.closureTimeZone ?? DEFAULT_TIMEZONE}
-          anchorWeekStartMs={anchorWeekStartMs}
+          target={quickAdd}
+          dayLabel={new Date(anchorWeekStartMs + (quickAdd.weekday - 1) * DAY_MS + DAY_MS / 2)
+            .toLocaleDateString("en-US", {
+              weekday: "long",
+              timeZone: grid?.closureTimeZone ?? DEFAULT_TIMEZONE,
+            })}
           groupOptions={groupOptions}
-          teacherOptions={teacherOptions}
+          classOptions={classOptions}
           defaultGroupId={
-            quickAdd.fill
-              ? quickAdd.fill.groupId
+            quickAdd.kind === "class"
+              ? quickAdd.groupId
               : lens === "group"
                 ? groupKey
                 : groupOptions[0]?.id ?? ""
           }
-          defaultTeacherId={
-            quickAdd.fill ? quickAdd.fill.teacherId : lens === "teacher" ? teacherKey : ""
-          }
-          initial={{ weekday: quickAdd.weekday, blockId: quickAdd.blockId }}
-          fillTarget={quickAdd.fill ?? null}
-          onRemove={
-            quickAdd.fill && editBlocks
-              ? async () => {
-                  try {
-                    await removePlacement({
-                      placementId: quickAdd.fill!.placementId as Id<"schedulePlacements">,
-                    });
-                    setQuickAdd(null);
-                  } catch (err) {
-                    toaster.create({
-                      title: "Couldn't remove slot",
-                      description: String(err),
-                      type: "error",
-                    });
-                  }
-                }
-              : undefined
-          }
-          onSubmit={async ({ subject, groupId, teacherId, weekday, blockId, activityId, unitId, skillKey, layout }) => {
+          onSubmit={async ({ work, classId }) => {
+            const dayKey = dayKeyForTimezone(
+              anchorWeekStartMs + (quickAdd.weekday - 1) * DAY_MS + DAY_MS / 2,
+              grid?.closureTimeZone ?? DEFAULT_TIMEZONE,
+            );
             try {
-              if (unitId) {
-                // Unit pick → flow the whole unit's activities into the grid.
-                if (weekday == null || !blockId) {
-                  toaster.create({
-                    title: "Pick a day + block first",
-                    description: "A unit flows onto the grid starting from a placed slot.",
-                    type: "error",
-                  });
-                  return;
-                }
-                await cascadeUnitForGroup({
-                  periodId: termId,
-                  groupId: groupId as Id<"scholarGroups">,
-                  unitId,
-                  startWeekday: weekday,
-                  startBlockId: blockId as Id<"scheduleBlocks">,
-                  // "flow" spreads one activity per class meeting; "sameDay"
-                  // stacks the whole unit on the chosen day (the secondary choice).
-                  layout,
-                  // Anchor on the clicked class slot: its class supplies the
-                  // subject + weekly meeting pattern (class-anchored flow). The
-                  // on-screen week is the flow's start week.
-                  ...(quickAdd.fill
-                    ? { anchorPlacementId: quickAdd.fill.placementId as Id<"schedulePlacements"> }
-                    : {}),
-                  weekStartMs: anchorWeekStartMs,
-                  ...(teacherId ? { teacherId: teacherId as Id<"users"> } : {}),
-                });
-                // Keep the clicked class slot: it's the recurring class
-                // STRUCTURE (weekStartMs == null), not a throwaway placeholder —
-                // deleting it would permanently remove the class. The cascade's
-                // concrete week-1 chip and this recurring slot now coexist in the
-                // cell (rendered as class header + chip); the week filter + the
-                // `filled` cell styling keep that reading as one full slot.
-                setQuickAdd(null);
-                return;
-              }
-              if (skillKey) {
-                await scheduleSkill({
-                  periodId: termId,
-                  groupId: groupId as Id<"scholarGroups">,
-                  subject,
-                  nodeKey: skillKey,
-                  ...(teacherId ? { teacherId: teacherId as Id<"users"> } : {}),
-                  ...(weekday != null ? { weekday } : {}),
-                  ...(blockId ? { blockId: blockId as Id<"scheduleBlocks"> } : {}),
-                  ...(quickAdd.fill
-                    ? {
-                        placementId:
-                          quickAdd.fill.placementId as Id<"schedulePlacements">,
-                      }
-                    : {}),
+              if (quickAdd.kind === "homework") {
+                await giveHomework({
+                  classId: classId as Id<"classes">,
+                  dueDayKey: dayKey,
+                  work,
                 });
                 setQuickAdd(null);
                 return;
               }
-              if (quickAdd.fill) {
-                await updatePlacement({
-                  placementId: quickAdd.fill.placementId as Id<"schedulePlacements">,
-                  ...(activityId ? { activityId: activityId as Id<"activities"> } : {}),
+              // Adding work to a class meeting gives it to that class on that
+              // day (TRA-582), the same write as Up next.
+              const meeting = meetingFor(quickAdd.groupId, quickAdd.blockId, quickAdd.weekday);
+              if (!meeting) {
+                // A one-week move leaves this cell with no meeting that day.
+                toaster.create({
+                  title: "This class doesn't meet then",
+                  description: "Give it from a class meeting on the grid, or from the unit's Run page.",
+                  type: "info",
                 });
               } else {
-                await placeClass({
-                  periodId: termId,
-                  groupId: groupId as Id<"scholarGroups">,
-                  subject,
-                  ...(activityId ? { activityId: activityId as Id<"activities"> } : {}),
-                  ...(teacherId ? { teacherId: teacherId as Id<"users"> } : {}),
-                  ...(weekday != null ? { weekday } : {}),
-                  ...(blockId ? { blockId: blockId as Id<"scheduleBlocks"> } : {}),
-                });
+                await giveToClass({ classId: meeting.classId, dayKey: meeting.dayKey, work });
               }
               setQuickAdd(null);
             } catch (err) {
               toaster.create({
-                title: quickAdd.fill ? "Couldn't add work" : "Add failed",
-                description: String(err),
+                title: quickAdd.kind === "homework" ? "Couldn't give homework" : "Couldn't add work",
+                description: serverErrorMessage(err, "Check your connection and try again."),
                 type: "error",
               });
             }
@@ -1491,23 +1635,9 @@ export function MasterScheduleView({
         grid={grid ?? undefined}
         lens={lens}
         variant={programScoped ? "program" : "teacher"}
-        editBlocks={editBlocks}
         onClose={closeDetail}
-        outOfOrderByPlacement={
-          programScoped ? undefined : outOfOrderChips
-        }
-        onAcceptReorder={programScoped ? undefined : onAcceptReorder}
         onAskBot={programScoped ? undefined : askBot}
-        onRemove={programScoped ? handleProgramHandoutRemove : handleRemove}
-      />
-
-      {/* Class drawer — the (groupId, subject) queue view. Stably mounted at the
-          view root (never keyed/remounted while open; the Ark body-lock rule). */}
-      <ClassDrawer
-        target={programScoped ? null : classDrawer}
-        grid={grid ?? undefined}
-        onClose={() => setClassDrawer(null)}
-        onFlowUnit={openFlowForClass}
+        onRemove={programScoped ? handleProgramHandoutRemove : undefined}
       />
 
       <StartAssignmentDialog
@@ -1566,41 +1696,47 @@ function BlockRow({
   days,
   closedByWeekday,
   cellPlacements,
+  givesByCell,
+  upNextByCell,
+  meetingFor,
+  canDragGive,
+  onGiveUpNext,
+  isJustDragged,
+  nowMs,
   coverageByCell,
   conflictedPlacementIds,
-  overloadByCell,
-  outOfOrderChips,
   groupEmojiById,
   lens,
-  editBlocks,
   draggable,
-  onQuickAdd,
   onOpenDetail,
   onFillSlot,
-  onOpenClass,
-  onDismissOverload,
-  onAskBot,
 }: {
   block: Block;
   days: Weekday[];
   closedByWeekday: Map<number, SchoolClosure>;
   cellPlacements: Map<string, Placement[]>;
+  givesByCell: Map<string, GridGive[]>;
+  upNextByCell: Map<string, GridClassMeeting[]>;
+  meetingFor: (groupId: string, blockId: string, weekday: number) => GridClassMeeting | null;
+  canDragGive: (give: GridGive) => boolean;
+  /** Absent on the program grid: its staff give through their own dialog. */
+  onGiveUpNext?: (meeting: GridClassMeeting) => void;
+  isJustDragged: () => boolean;
+  nowMs: number;
   coverageByCell: Map<string, GridData["coverage"][number]>;
   conflictedPlacementIds: Set<string>;
-  overloadByCell: Map<string, { flagId: string; placementIds: string[] }>;
-  outOfOrderChips: Map<string, { sequenceId: string; flagId: string }>;
   groupEmojiById: Map<string, string | null>;
   lens: Lens;
-  editBlocks: boolean;
   draggable: boolean;
-  onQuickAdd: (weekday: number) => void;
   onOpenDetail: (t: DrawerTarget, triggerToken: string) => void;
   onFillSlot: (p: Placement) => void;
-  onOpenClass?: (groupId: string, subject: string) => void;
-  onDismissOverload: (flagId: string, placementIds: string[]) => void;
-  onAskBot: (text: string) => void;
 }) {
   const isBreak = block.kind === "recess" || block.kind === "lunch";
+  // Only a class block takes an activity or an app; recess, lunch and prep
+  // rows keep bare staffing rows only (assertBlockTakesPlacement). So they
+  // refuse a dropped card and don't offer to fill a slot. Anything already in
+  // one still shows.
+  const takesClasses = (block.kind ?? "class") === "class";
   return (
     <>
       {/* Row label */}
@@ -1619,29 +1755,30 @@ function BlockRow({
         const key = `${block._id}|${d.n}`;
         const items = cellPlacements.get(key) ?? [];
         const coverage = coverageByCell.get(key);
-        const overload = overloadByCell.get(key);
         return (
           <ScheduleCell
             key={d.n}
             dropId={cellId(String(block._id), d.n)}
             zone="class"
             isBreak={isBreak}
+            takesClasses={takesClasses}
             items={items}
+            gives={givesByCell.get(key) ?? []}
+            upNext={upNextByCell.get(key) ?? []}
+            takesGive={(give) => {
+              const meeting = meetingFor(String(give.groupId), String(block._id), d.n);
+              return meeting != null && meeting.endsAt > nowMs;
+            }}
+            canDragGive={canDragGive}
+            onGiveUpNext={onGiveUpNext}
+            isJustDragged={isJustDragged}
             coverage={coverage}
             conflictedPlacementIds={conflictedPlacementIds}
-            overload={overload}
-            outOfOrderChips={outOfOrderChips}
-            overloadContext={`${block.label} on ${d.full}`}
             lens={lens}
-            editBlocks={editBlocks}
-            draggable={draggable}
+              draggable={draggable}
             groupEmojiById={groupEmojiById}
-            onQuickAdd={() => onQuickAdd(d.n)}
             onOpenDetail={onOpenDetail}
             onFillSlot={onFillSlot}
-            onOpenClass={onOpenClass}
-            onDismissOverload={onDismissOverload}
-            onAskBot={onAskBot}
           />
         );
       })}
@@ -1655,54 +1792,83 @@ function ScheduleCell({
   dropId,
   zone,
   isBreak,
+  takesClasses = true,
   fusable = true,
   items,
+  gives = [],
+  upNext = [],
+  takesGive,
+  canDragGive,
+  onGiveUpNext,
   homeworkDueItems = [],
+  homeworkDueLinks,
+  isJustDragged,
   coverage,
   conflictedPlacementIds,
-  overload,
-  outOfOrderChips,
-  overloadContext,
   lens,
-  editBlocks,
   draggable = true,
   groupEmojiById,
   onQuickAdd,
   onOpenDetail,
   onFillSlot,
-  onOpenClass,
-  onDismissOverload,
-  onAskBot,
 }: {
   dropId: string;
   zone: DropZone;
   isBreak: boolean;
+  /** False for a recess, lunch or prep row: refuses a dragged card that
+   *  carries work, and offers no slot fill. */
+  takesClasses?: boolean;
   fusable?: boolean;
   items: Placement[];
+  /** The gives linked to this class meeting (TRA-582). */
+  gives?: GridGive[];
+  /** Meetings here that offer their class's next activity. */
+  upNext?: GridClassMeeting[];
+  /** Whether a dragged give can land here: a class cell takes only a
+   *  meeting of the give's own group that hasn't ended. The Homework due
+   *  row takes any. */
+  takesGive?: (give: GridGive) => boolean;
+  canDragGive?: (give: GridGive) => boolean;
+  onGiveUpNext?: (meeting: GridClassMeeting) => void;
   homeworkDueItems?: HomeworkDueProjection[];
+  /** Homework due card key → the placement it drags as (null: not movable). */
+  homeworkDueLinks?: Map<string, string | null>;
+  /** True right after a drag, so its trailing click doesn't open the link. */
+  isJustDragged?: () => boolean;
   coverage?: GridData["coverage"][number];
   /** Ids of every placement party to a double-booking (union of grid.conflicts'
    *  placementIds). The cell shows the conflict badge iff one of ITS rendered
    *  items is in this set — so the badge coincides with the drawer's per-chip
    *  conflict section. Omitted by the homework rail (no conflict badge there). */
   conflictedPlacementIds?: Set<string>;
-  overload?: { flagId: string; placementIds: string[] };
-  outOfOrderChips: Map<string, { sequenceId: string; flagId: string }>;
-  overloadContext?: string;
   lens: Lens;
-  editBlocks: boolean;
   draggable?: boolean;
   groupEmojiById: Map<string, string | null>;
-  onQuickAdd: () => void;
+  /** The homework rail's add flow (absent on class rows, which only fill an
+   *  existing class slot; class slots are edited on School › Classes & times). */
+  onQuickAdd?: () => void;
   onOpenDetail: (t: DrawerTarget, triggerToken: string) => void;
   onFillSlot?: (p: Placement) => void;
   /** Opens the class drawer for this cell's class. Absent on the homework rail
    *  (not a class) — its presence is what shows the class-open chevron. */
-  onOpenClass?: (groupId: string, subject: string) => void;
-  onDismissOverload?: (flagId: string, placementIds: string[]) => void;
-  onAskBot?: (text: string) => void;
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id: dropId, data: { zone } });
+  // A give dragged from the Homework due row only moves between days: class
+  // cells stop being targets and fade while it's in the air.
+  const { active } = useDndContext();
+  const draggedGive = activeGive(active?.data.current);
+  const refusesDrag =
+    (draggedGive != null &&
+      zone === "class" &&
+      !(takesGive?.(draggedGive) ?? false)) ||
+    (!takesClasses &&
+      (active?.data.current as { carriesWork?: boolean } | undefined)?.carriesWork === true) ||
+    (zone === "class" &&
+      (active?.data.current as { kind?: string } | undefined)?.kind === "give");
+  const { setNodeRef, isOver } = useDroppable({
+    id: dropId,
+    data: { zone },
+    disabled: refusesDrag,
+  });
   const understaffed = coverage && !coverage.ok;
   // This cell is in conflict iff one of the chips IT renders is party to a
   // double-booking (not merely because some other group shares the slot). Name
@@ -1733,39 +1899,49 @@ function ScheduleCell({
   // as block titles). An activity card whose class matches drops its own subject
   // eyebrow so the class isn't named twice stacked (T3 — see the compact chip).
   const headerClassKeys = new Set(blockTitles.map((p) => classKey(p)));
-  const isEmpty = items.length === 0 && homeworkDueItems.length === 0;
-  // "Edit blocks" fuses an occupied cell into ONE draggable card so re-timing a
-  // block moves its class + activity together. Empty cells become dashed drop
-  // targets. The homework due-rail (fusable=false) keeps its per-item cards.
-  const fused = editBlocks && fusable && !isEmpty;
-  const emptyUnlocked = editBlocks && fusable && isEmpty;
+  const isEmpty =
+    items.length === 0 && homeworkDueItems.length === 0 && gives.length === 0;
 
-  // The Overloaded flag is a wide text pill, so it renders in NORMAL FLOW at the
-  // top of the cell (reserving its own row) rather than overlapping content —
-  // placed before the content stack in both the fused and the locked renderings.
-  const overloadTag = overload && (
-    <OverloadTag
-      onDismiss={() => onDismissOverload?.(overload.flagId, overload.placementIds)}
-      onAskBot={() =>
-        onAskBot?.(
-          `${overloadContext ?? "This slot"} has more than one activity scheduled at once. Help me spread them out or resolve the overlap.`,
-        )
-      }
-    />
-  );
   // Coverage / conflict badges — small icons that stay as absolute top-right
-  // overlays, shared by both the fused and the borderless (locked) renderings.
+  // overlays.
   const cornerBadges = (understaffed || hasConflict) && (
     <HStack position="absolute" top={1} right={1} gap={1}>
       {hasConflict && (
-        <Box
-          role="img"
-          aria-label={conflictLabel}
-          title={conflictLabel}
-          color="red.500"
-        >
-          <Warning size={13} weight="fill" />
-        </Box>
+        // A real control, not a bare `title`: the native tooltip took a second
+        // of stillness, never appeared on touch, and nothing said the icon
+        // meant anything. Hover/focus names the problem at once; a click
+        // opens the conflicted card's drawer, whose conflict section says who
+        // else the teacher is booked with and offers the aide.
+        <Tooltip.Root openDelay={100} closeDelay={0}>
+          <Tooltip.Trigger asChild>
+            <chakra.button
+              type="button"
+              aria-label={`${conflictLabel}. Show details`}
+              color="red.500"
+              cursor="pointer"
+              display="flex"
+              borderRadius="sm"
+              _hover={{ color: "red.600" }}
+              _focusVisible={{ outline: "2px solid", outlineColor: "red.400" }}
+              // Keep the press from starting a drag.
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                const id = String(conflictedItems[0]._id);
+                onOpenDetail({ kind: "placement", placementId: id }, id);
+              }}
+            >
+              <Warning size={13} weight="fill" />
+            </chakra.button>
+          </Tooltip.Trigger>
+          <Portal>
+            <Tooltip.Positioner>
+              <Tooltip.Content fontFamily="heading" fontSize="xs">
+                {conflictLabel}. Click for details
+              </Tooltip.Content>
+            </Tooltip.Positioner>
+          </Portal>
+        </Tooltip.Root>
       )}
       {understaffed && (
         <Box
@@ -1783,42 +1959,13 @@ function ScheduleCell({
     </HStack>
   );
 
-  // Unlocked + occupied: the whole block is one grab target.
-  if (fused) {
-    return (
-      <Box
-        ref={setNodeRef}
-        position="relative"
-        minH="64px"
-        display="flex"
-        flexDirection="column"
-        gap={1}
-        borderRadius="lg"
-        outline="2px solid"
-        outlineColor={isOver ? "violet.400" : "transparent"}
-        outlineOffset="1px"
-        transition="outline-color 0.1s"
-      >
-        {overloadTag}
-        <FusedCell
-          placements={items}
-          dragId={dropId.replace(/^cell:/, "cellgrab:")}
-          lens={lens}
-          groupEmojiById={groupEmojiById}
-          onOpenDetail={onOpenDetail}
-        />
-        {cornerBadges}
-      </Box>
-    );
-  }
-
-  // Locked (view): borderless — the page shows through and the activity card is
-  // the one solid object. Empty cells get a hairline baseline + hover ＋; when
-  // unlocked-but-empty they become a dashed drop target.
+  // Borderless — the page shows through and the activity card is the one solid
+  // object. Empty cells get a hairline baseline.
   // A cell holding only bare slots (no activity card) is an OPEN target: it reads
   // as an empty, dashed placeholder — distinct from a filled cell's solid card — so
   // full vs empty is legible at a glance.
-  const awaitingOnly = activityCards.length === 0 && blockTitles.length > 0;
+  const awaitingOnly =
+    activityCards.length === 0 && gives.length === 0 && blockTitles.length > 0;
   const isHomeworkRail = !fusable;
   // A filled class cell reads as full: the CELL itself becomes the solid white
   // card (border + bg live on the shell), mirroring how an awaiting slot's dashed
@@ -1828,13 +1975,15 @@ function ScheduleCell({
   // chip (a cascaded class slot keeps its recurring structure alongside the
   // concrete chip): any content that includes an activity card reads as filled,
   // never the borderless fallback. Not for the compact homework rail.
-  const filled = !isHomeworkRail && activityCards.length > 0;
-  const filledLive = filled && activityCards.some((p) => p.linkState === "live");
+  const filled =
+    !isHomeworkRail && (activityCards.length > 0 || gives.length > 0);
+  const filledLive =
+    filled &&
+    (activityCards.some((p) => p.linkState === "live") ||
+      gives.some((g) => g.state === "live"));
   const shell = isOver
     ? { border: "1px solid", borderColor: "violet.400", borderRadius: "md", bg: "violet.50" }
-    : emptyUnlocked
-      ? { border: "1px dashed", borderColor: "violet.200", borderRadius: "md", bg: "violet.50" }
-      : awaitingOnly
+    : awaitingOnly
         ? {
             border: "1px dashed",
             borderColor: "gray.200",
@@ -1860,35 +2009,38 @@ function ScheduleCell({
                 borderRadius: "md",
                 bg: isBreak ? "gray.50" : "transparent",
               };
-  // Normal (locked) mode is for putting ACTIVITIES into existing class slots —
-  // not for creating slots (that's Edit blocks). So the cell has ONE click target,
+  // The grid is for putting ACTIVITIES into existing class slots — creating or
+  // moving slots happens on School › Classes & times. So the cell has ONE click target,
   // derived from what it holds:
   //  • a class slot awaiting work → fill THAT slot. The whole cell is the target
   //    and it inherits the slot's own group, so it never defaults to the wrong
   //    group (the "asks me to add for Honu" bug).
-  //  • an empty class cell → inert in locked mode: you can't add an assignment
-  //    where there's no class slot. It only invites adding while Edit blocks is
-  //    on, or on the homework rail (fusable === false), which owns its add flow.
+  //  • an empty class cell → inert: you can't add an assignment where there's
+  //    no class slot. Only the homework rail (fusable === false) owns an add flow.
   //  • a filled activity cell → defers to its card (which opens the detail drawer).
   const firstAwaiting = blockTitles[0];
+  // A class meeting that already has gives still takes more work.
   const fillCell =
-    awaitingOnly && onFillSlot && firstAwaiting ? () => onFillSlot(firstAwaiting) : undefined;
-  const addHere = isHomeworkRail || (isEmpty && editBlocks) ? onQuickAdd : undefined;
+    activityCards.length === 0 &&
+    blockTitles.length > 0 &&
+    takesClasses &&
+    onFillSlot &&
+    firstAwaiting
+      ? () => onFillSlot(firstAwaiting)
+      : undefined;
+  const addHere = isHomeworkRail ? onQuickAdd : undefined;
   const cellClick = fillCell ?? addHere;
   const hoverable =
     activityCards.length === 0 &&
+    gives.length === 0 &&
     homeworkDueItems.length === 0 &&
     Boolean(cellClick);
-  // The class this cell belongs to (bare or filled) — its recurring/concrete rows
-  // all share (groupId, subject). A discreet chevron opens the class drawer for
-  // it WITHOUT stealing the cell's fill click or a chip's detail click. Not shown
-  // on the homework rail (which never passes onOpenClass) or empty cells.
-  const classItem = onOpenClass && items.length > 0 ? items[0] : null;
   return (
     <Box
       ref={setNodeRef}
       position="relative"
       minH="64px"
+      opacity={refusesDrag ? 0.45 : undefined}
       p={1}
       display="flex"
       flexDirection="column"
@@ -1902,11 +2054,11 @@ function ScheduleCell({
         fillCell
           ? `Add work to ${firstAwaiting!.subject}`
           : addHere
-            ? "Add a class here"
+            ? "Give homework due this day"
             : undefined
       }
       cursor={cellClick ? "pointer" : "default"}
-      _hover={hoverable ? { bg: emptyUnlocked ? "violet.100" : "gray.50" } : undefined}
+      _hover={hoverable ? { bg: "gray.50" } : undefined}
       onClick={cellClick}
       onKeyDown={(e) => {
         if (e.target !== e.currentTarget) return;
@@ -1916,20 +2068,17 @@ function ScheduleCell({
         }
       }}
     >
-      {overloadTag}
       <VStack align="stretch" gap={filled ? 0 : 1} flex={1}>
         {homeworkDueItems.map((item) => (
-          <Link
+          <HomeworkDueCard
             key={item.key}
-            href={`/teacher/schedule/${item.assignmentId}`}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <EnrichedChip
-              p={item}
-              lens={lens}
-              groupEmoji={groupEmojiById.get(String(item.groupId))}
-            />
-          </Link>
+            item={item}
+            placementId={homeworkDueLinks?.get(item.key) ?? null}
+            draggable={draggable}
+            lens={lens}
+            groupEmojiById={groupEmojiById}
+            isJustDragged={isJustDragged}
+          />
         ))}
         {blockTitles.map((p, index) => (
           <PlacementChip
@@ -1938,13 +2087,11 @@ function ScheduleCell({
             lens={lens}
             groupEmojiById={groupEmojiById}
             enableBlockTitle
-            editBlocks={editBlocks}
-            draggable={draggable}
+              draggable={draggable}
             compound={filled}
             separated={filled && index > 0}
-            outOfOrder={outOfOrderChips.get(String(p._id))}
             onOpenDetail={onOpenDetail}
-            onFillSlot={onFillSlot}
+            onFillSlot={takesClasses ? onFillSlot : undefined}
           />
         ))}
         {activityCards.map((p, index) => (
@@ -1957,55 +2104,39 @@ function ScheduleCell({
             compound={filled}
             separated={filled && (blockTitles.length > 0 || index > 0)}
             suppressSubjectEyebrow={headerClassKeys.has(classKey(p))}
-            outOfOrder={outOfOrderChips.get(String(p._id))}
             draggable={draggable}
             onOpenDetail={onOpenDetail}
           />
         ))}
+        {gives.map((give, index) => (
+          <GiveCard
+            key={give.key}
+            give={give}
+            lens={lens}
+            groupEmoji={giveGroupMark(give, groupEmojiById)}
+            fill={filled}
+            inClassCell
+            separated={
+              filled &&
+              (blockTitles.length > 0 || activityCards.length > 0 || index > 0)
+            }
+            draggable={canDragGive?.(give) ?? false}
+            isJustDragged={isJustDragged}
+          />
+        ))}
+        {onGiveUpNext &&
+          upNext.map((meeting) => (
+            <UpNextButton
+              key={`${meeting.classId}|${meeting.dayKey}`}
+              meeting={meeting}
+              onGive={onGiveUpNext}
+            />
+          ))}
       </VStack>
 
       {cornerBadges}
 
-      {/* Class-open chevron — a discreet, always-present affordance on the
-          class's right edge. stopPropagation keeps it off the cell's fill click
-          and the chip's detail click (the two existing actions the plan says not
-          to steal). */}
-      {classItem && (
-        <chakra.button
-          type="button"
-          position="absolute"
-          top="50%"
-          right={0.5}
-          transform="translateY(-50%)"
-          zIndex={1}
-          display="flex"
-          alignItems="center"
-          justifyContent="center"
-          w={4}
-          h={5}
-          borderRadius="sm"
-          color="charcoal.300"
-          opacity={0.5}
-          cursor="pointer"
-          aria-label={`Open the ${classItem.subject} class`}
-          title="Open class"
-          _hover={{ opacity: 1, bg: "gray.100", color: "charcoal.600" }}
-          _focusVisible={{
-            opacity: 1,
-            outline: "2px solid",
-            outlineColor: "violet.400",
-            outlineOffset: "1px",
-          }}
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpenClass!(String(classItem.groupId), classItem.subject);
-          }}
-        >
-          <CaretRight size={13} weight="bold" />
-        </chakra.button>
-      )}
-
-      {cellClick && activityCards.length === 0 && (
+      {cellClick && activityCards.length === 0 && gives.length === 0 && (
         <HStack
           position="absolute"
           bottom={1}
@@ -2024,144 +2155,63 @@ function ScheduleCell({
   );
 }
 
-// ── Fused cell (edit mode) ───────────────────────────────────────────────────
-// When "Edit blocks" is on, an occupied cell lifts off the grid as ONE elevated,
-// draggable card. Its bare-class title(s) and activity fuse into a single object
-// with one grab target (a grip), so a drag re-times the whole block together.
-// A click opens the detail drawer in block scope (per-row tap-through to each
-// placement's detail); a drag (>5px) moves the block. Movement is drag-only.
+// ── Homework due card ────────────────────────────────────────────────────────
 
-function FusedCellBody({
-  placements,
+/** A Homework due projection: a link to its assignment's Run page that
+ *  drags like any card. With a grid placement it drags as that placement;
+ *  without one (work given outside the grid) it drags as the give itself,
+ *  and a drop on another day moves its finish there. The anchor's native
+ *  link drag is always off, so a press-and-move never drags a URL ghost. */
+function HomeworkDueCard({
+  item,
+  placementId,
+  draggable,
   lens,
   groupEmojiById,
+  isJustDragged,
 }: {
-  placements: Placement[];
+  item: HomeworkDueProjection;
+  placementId: string | null;
+  draggable: boolean;
   lens: Lens;
   groupEmojiById: Map<string, string | null>;
+  isJustDragged?: () => boolean;
 }) {
-  const blockTitles = placements.filter((p) => isAwaitingActivity(p));
-  const activityCards = placements.filter((p) => !isAwaitingActivity(p));
-  // Same T3 suppression as the locked cell: an activity card drops its subject
-  // eyebrow when a header in this fused block already names its class.
-  const headerClassKeys = new Set(blockTitles.map((p) => classKey(p)));
-  return (
-    <VStack align="stretch" gap={0}>
-      {blockTitles.map((p) => (
-        <ChipBody key={String(p._id)} p={p} lens={lens} groupEmojiById={groupEmojiById} asBlockTitle />
-      ))}
-      {activityCards.map((p, i) => (
-        <Box
-          key={String(p._id)}
-          borderTop={blockTitles.length > 0 || i > 0 ? "1px solid" : undefined}
-          borderColor="gray.100"
-        >
-          <ChipBody
-            p={p}
-            lens={lens}
-            groupEmojiById={groupEmojiById}
-            flat
-            suppressSubjectEyebrow={headerClassKeys.has(classKey(p))}
-          />
-        </Box>
-      ))}
-    </VStack>
-  );
-}
-
-function FusedCell({
-  placements,
-  dragId,
-  lens,
-  groupEmojiById,
-  onOpenDetail,
-}: {
-  placements: Placement[];
-  dragId: string;
-  lens: Lens;
-  groupEmojiById: Map<string, string | null>;
-  onOpenDetail: (t: DrawerTarget, triggerToken: string) => void;
-}) {
-  const placementIds = placements.map((p) => String(p._id));
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: dragId,
-    data: { kind: "cell", placementIds },
+    id: placementId ?? `give:${item.key}`,
+    data: placementId ? undefined : { kind: "give", item },
+    disabled: !draggable,
   });
-  const subjects = placements.map((p) => p.subject).join(", ");
+  const canDrag = draggable;
   return (
-    <chakra.button
-      type="button"
-      ref={setNodeRef}
-      {...attributes}
-      {...listeners}
-      w="full"
-      flex="1"
-      p={0}
-      border="1px solid"
-      borderColor="gray.200"
-      bg="white"
-      borderRadius="lg"
-      boxShadow={isDragging ? "xl" : "lg"}
-      textAlign="left"
-      overflow="hidden"
-      position="relative"
-      cursor={isDragging ? "grabbing" : "grab"}
-      touchAction="none"
+    <Box
+      ref={canDrag ? setNodeRef : undefined}
+      {...(canDrag ? attributes : {})}
+      {...(canDrag ? listeners : {})}
+      display="block"
       opacity={isDragging ? 0.4 : 1}
-      aria-label={`Details for block: ${subjects}`}
-      data-detail-trigger={dragId}
-      onClick={(e) => {
-        e.stopPropagation();
-        onOpenDetail({ kind: "cell", placementIds }, dragId);
-      }}
+      cursor={canDrag ? (isDragging ? "grabbing" : "grab") : "pointer"}
+      touchAction={canDrag ? "none" : undefined}
+      data-detail-trigger={placementId ?? undefined}
     >
-      <Box position="absolute" top={1} right={1} color="gray.300" pointerEvents="none" zIndex={1}>
-        <DotsSixVertical size={14} weight="bold" />
-      </Box>
-      <FusedCellBody placements={placements} lens={lens} groupEmojiById={groupEmojiById} />
-    </chakra.button>
-  );
-}
-
-// ── Dismissible flag tags ────────────────────────────────────────────────────
-
-function OverloadTag({ onDismiss, onAskBot }: { onDismiss: () => void; onAskBot: () => void }) {
-  return (
-    <Menu.Root positioning={{ placement: "bottom-start" }}>
-      <Menu.Trigger asChild>
-        <HStack
-          as="button"
-          alignSelf="flex-start"
-          gap={0.5}
-          bg="amber.50"
-          color="amber.700"
-          borderRadius="sm"
-          px={1}
-          py={0.5}
-          fontSize="2xs"
-          fontWeight="700"
-          cursor="pointer"
-          _hover={{ bg: "amber.100" }}
-          onClick={(e) => e.stopPropagation()}
-          title="More than one activity in this slot"
-        >
-          <Warning size={11} weight="fill" />
-          <Text>Overloaded</Text>
-        </HStack>
-      </Menu.Trigger>
-      <Portal>
-        <Menu.Positioner>
-          <Menu.Content minW="180px" onClick={(e) => e.stopPropagation()}>
-            <Menu.Item value="ask" onClick={onAskBot}>
-              <ChatCircle size={15} /> Ask the bot to resolve
-            </Menu.Item>
-            <Menu.Item value="dismiss" onClick={onDismiss}>
-              <Check size={15} /> It&apos;s fine — dismiss
-            </Menu.Item>
-          </Menu.Content>
-        </Menu.Positioner>
-      </Portal>
-    </Menu.Root>
+      <Link
+        href={`/teacher/schedule/${item.assignmentId}`}
+        draggable={false}
+        // The card's grab hand, not the link's pointer: a press moves it.
+        style={{ cursor: "inherit" }}
+        onDragStart={(event) => event.preventDefault()}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (isJustDragged?.()) event.preventDefault();
+        }}
+      >
+        <EnrichedChip
+          p={item}
+          lens={lens}
+          groupEmoji={groupEmojiById.get(String(item.groupId))}
+        />
+      </Link>
+    </Box>
   );
 }
 
@@ -2171,9 +2221,7 @@ function PlacementChip({
   p,
   lens,
   groupEmojiById,
-  outOfOrder,
   enableBlockTitle,
-  editBlocks,
   draggable = true,
   fill = false,
   compound = false,
@@ -2185,9 +2233,7 @@ function PlacementChip({
   p: Placement;
   lens: Lens;
   groupEmojiById: Map<string, string | null>;
-  outOfOrder?: { sequenceId: string; flagId: string };
   enableBlockTitle?: boolean;
-  editBlocks?: boolean;
   /** Whether this card can be dragged to re-time it. */
   draggable?: boolean;
   /** Stretch the filled activity card to fill its cell so a full block reads as
@@ -2204,20 +2250,19 @@ function PlacementChip({
   onOpenDetail: (t: DrawerTarget, triggerToken: string) => void;
   onFillSlot?: (p: Placement) => void;
 }) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: String(p._id) });
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: String(p._id),
+    data: { carriesWork: carriesWork(p) },
+  });
   const placementId = String(p._id);
   // A bare class (no linked activity) reads as the block's TITLE, not an activity
   // card — an EMPTY slot rendered as a flat, full-bleed placeholder in its cell.
-  //  - Locked: flat + non-draggable; a click opens the quick activity picker to
-  //    FILL the slot (onFillSlot). Editing the slot itself (rename, re-time) stays
-  //    an Edit-blocks affordance.
-  //  - Unlocked ("Edit blocks"): the SAME flat title lifts off the grid with a drop
-  //    shadow and becomes draggable (drag re-times; click opens the drawer).
-  // The shelf keeps every item a draggable card so it can be dropped onto the grid.
+  // Flat + non-draggable; a click opens the quick activity picker to FILL the
+  // slot (onFillSlot). Editing the slot itself happens on School › Classes & times.
   const asBlock = Boolean(enableBlockTitle) && isAwaitingActivity(p);
-  if (asBlock && !editBlocks) {
-    // stopPropagation keeps this off the cell's generic add-a-class target; clicking
-    // the slot fills THAT slot, while empty cell space still adds a new class.
+  if (asBlock) {
+    // stopPropagation keeps this off the cell's own click target; clicking the
+    // slot adds work to THAT class.
     if (onFillSlot) {
       return (
         <chakra.button
@@ -2261,7 +2306,7 @@ function PlacementChip({
   // (or Enter/Space — it's a real <button>) opens the detail drawer; a >5px drag
   // moves the placement (the view suppresses the drag's trailing click). A
   // non-draggable card keeps the same button as a detail-drawer trigger.
-  const canDrag = draggable || asBlock;
+  const canDrag = draggable;
   return (
     <Box
       position="relative"
@@ -2280,11 +2325,7 @@ function PlacementChip({
         h={fill ? "full" : undefined}
         p={0}
         border={0}
-        // An unlocked block keeps its flat title but lifts off the grid with a
-        // white fill + drop shadow — the affordance that it's now draggable.
-        bg={asBlock ? "white" : "transparent"}
-        borderRadius={asBlock ? "md" : undefined}
-        boxShadow={asBlock ? (isDragging ? "lg" : "md") : undefined}
+        bg="transparent"
         textAlign="left"
         cursor={canDrag ? (isDragging ? "grabbing" : "grab") : "pointer"}
         touchAction={canDrag ? "none" : undefined}
@@ -2311,11 +2352,8 @@ function PlacementChip({
           p={p}
           lens={lens}
           groupEmojiById={groupEmojiById}
-          asBlockTitle={asBlock}
           fill={fill}
-          flagged={!asBlock && Boolean(outOfOrder)}
-          outOfOrder={!asBlock && Boolean(outOfOrder)}
-          suppressSubjectEyebrow={!asBlock && suppressSubjectEyebrow}
+          suppressSubjectEyebrow={suppressSubjectEyebrow}
         />
       </chakra.button>
     </Box>
@@ -2328,7 +2366,6 @@ function ChipBody({
   groupEmojiById,
   dragging,
   flagged,
-  outOfOrder,
   asBlockTitle,
   fill,
   flat,
@@ -2339,7 +2376,6 @@ function ChipBody({
   groupEmojiById: Map<string, string | null>;
   dragging?: boolean;
   flagged?: boolean;
-  outOfOrder?: boolean;
   asBlockTitle?: boolean;
   fill?: boolean;
   flat?: boolean;
@@ -2352,7 +2388,6 @@ function ChipBody({
       groupEmoji={groupEmojiById.get(String(p.groupId))}
       dragging={dragging}
       flagged={flagged}
-      outOfOrder={outOfOrder}
       asBlockTitle={asBlockTitle}
       fill={fill}
       flat={flat}
@@ -2361,138 +2396,49 @@ function ChipBody({
   );
 }
 
-// ── Shelf tray ───────────────────────────────────────────────────────────────
-
-function ShelfTray({
-  items,
-  groupEmojiById,
-  lens,
-  onQuickAdd,
-  onOpenDetail,
-}: {
-  items: Placement[];
-  groupEmojiById: Map<string, string | null>;
-  lens: Lens;
-  onQuickAdd: () => void;
-  onOpenDetail: (t: DrawerTarget, triggerToken: string) => void;
-}) {
-  const { setNodeRef, isOver } = useDroppable({ id: "shelf" });
-  return (
-    <Box
-      ref={setNodeRef}
-      w="220px"
-      flexShrink={0}
-      borderLeft="1px solid"
-      borderColor="gray.100"
-      bg={isOver ? "violet.50" : "gray.50"}
-      p={2.5}
-      overflow="auto"
-      transition="background 0.1s"
-    >
-      <Text fontFamily="heading" fontWeight="700" fontSize="xs" color="charcoal.400" textTransform="uppercase" letterSpacing="0.04em" mb={2}>
-        Not yet scheduled
-      </Text>
-      <chakra.button
-        type="button"
-        w="full"
-        display="flex"
-        alignItems="center"
-        gap={1.5}
-        px={2}
-        py={1.5}
-        mb={2}
-        border={0}
-        borderRadius="md"
-        bg="transparent"
-        color="charcoal.400"
-        fontSize="xs"
-        fontWeight="700"
-        cursor="pointer"
-        aria-label="Quick add a class"
-        onClick={onQuickAdd}
-        _hover={{ bg: "white", color: "navy.600" }}
-        _focusVisible={{ outline: "2px solid", outlineColor: "violet.300", outlineOffset: "2px" }}
-      >
-        <Plus size={14} weight="bold" />
-        <Text>Quick add</Text>
-      </chakra.button>
-      {items.length === 0 ? (
-        <Text fontSize="xs" color="charcoal.300">
-          Classes &amp; one-offs that don&apos;t have a day yet. Drag one onto the grid to place it.
-        </Text>
-      ) : (
-        <VStack align="stretch" gap={1.5}>
-          {items.map((p) => (
-            <PlacementChip key={String(p._id)} p={p} lens={lens} groupEmojiById={groupEmojiById} onOpenDetail={onOpenDetail} />
-          ))}
-        </VStack>
-      )}
-    </Box>
-  );
-}
-
-// ── Quick-add palette ────────────────────────────────────────────────────────
+/** What the quick-add picker gives to (TRA-582): a class meeting on a day,
+ *  or homework due on a day. */
+type QuickAddTarget =
+  | { kind: "class"; weekday: number; blockId: string; subject: string; groupId: string }
+  | { kind: "homework"; weekday: number };
+type QuickAddClassOption = { classId: string; groupId: string; subject: string };
+type QuickAddWork =
+  | { kind: "activity"; activityId: Id<"activities"> }
+  | { kind: "skill"; nodeKey: string };
 
 function QuickAddPalette({
   onClose,
-  blocks,
-  placements,
-  closures,
-  closureTimeZone,
-  anchorWeekStartMs,
+  target,
+  dayLabel,
   groupOptions,
-  teacherOptions,
+  classOptions,
   defaultGroupId,
-  defaultTeacherId,
-  initial,
-  fillTarget,
-  onRemove,
   onSubmit,
 }: {
   onClose: () => void;
-  blocks: Block[];
-  placements: GridData["placements"];
-  closures: GridData["closures"];
-  closureTimeZone: string;
-  anchorWeekStartMs: number;
+  target: QuickAddTarget;
+  dayLabel: string;
   groupOptions: { id: string; name: string; emoji: string | null }[];
-  teacherOptions: GridData["teachers"];
+  /** The classes homework can be for (homework mode). */
+  classOptions: QuickAddClassOption[];
   defaultGroupId: string;
-  defaultTeacherId: string;
-  initial: { weekday?: number; blockId?: string };
-  /** When set, the palette FILLS this existing empty slot with a chosen activity
-   *  (the class's subject/teacher/time are already the slot's) — so it's a pure
-   *  activity picker, not the full add-a-class form. */
-  fillTarget?: { placementId: string; subject: string } | null;
-  /** Fill mode only: clear this (empty) slot entirely. */
-  onRemove?: () => void;
-  onSubmit: (v: {
-    subject: string;
-    groupId: string;
-    teacherId: string;
-    weekday: number | null;
-    blockId: string | null;
-    activityId: Id<"activities"> | null;
-    unitId: Id<"units"> | null;
-    skillKey: string | null;
-    /** Unit picks only: "flow" spreads one activity per class meeting; "sameDay"
-     *  stacks the whole unit on the chosen day. Ignored for non-unit adds. */
-    layout: "flow" | "sameDay";
-  }) => void;
+  onSubmit: (v: { work: QuickAddWork; classId: string | null }) => void;
 }) {
   const [subject, setSubject] = useState("");
   const [selectedActivityId, setSelectedActivityId] = useState<Id<"activities"> | null>(null);
-  // When a UNIT is picked, the palette flows the whole unit onto the class's
-  // weekly meetings (cascade). There is no pacing toggle — one activity per
-  // meeting is the only rhythm (resolved 2026-07-23).
-  const [selectedUnitId, setSelectedUnitId] = useState<Id<"units"> | null>(null);
   const [selectedSkillKey, setSelectedSkillKey] = useState<string | null>(null);
   const [suggestionsVisible, setSuggestionsVisible] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const [groupId, setGroupId] = useState(defaultGroupId);
-  const [teacherId, setTeacherId] = useState(defaultTeacherId);
-  const [weekday, setWeekday] = useState<number | null>(initial.weekday ?? null);
-  const [blockId, setBlockId] = useState<string | null>(initial.blockId ?? null);
+  const groupClasses = classOptions.filter((c) => c.groupId === groupId);
+  const [classId, setClassId] = useState<string | null>(null);
+  // A group with one class needs no pick.
+  const pickedClassId =
+    classId && groupClasses.some((c) => c.classId === classId)
+      ? classId
+      : groupClasses.length === 1
+        ? groupClasses[0].classId
+        : null;
   const inputRef = useRef<HTMLInputElement>(null);
   const units = useQuery(api.units.list, {});
   const query = subject.trim().toLowerCase();
@@ -2521,13 +2467,6 @@ function QuickAddPalette({
   }, [activeUnit, activities, query, queryReady]);
   const suggestions = useMemo<CurriculumSuggestion[]>(() => {
     if (!queryReady) return [];
-    const unitSuggestions: CurriculumSuggestion[] = unitMatches.map((unit) => ({
-      type: "unit",
-      key: `unit:${String(unit._id)}`,
-      label: unit.title,
-      unitId: unit._id,
-      subtitle: "Unit",
-    }));
     const activitySuggestions: CurriculumSuggestion[] = activeUnit
       ? activityMatches.map((activity) => ({
           type: "activity",
@@ -2548,8 +2487,9 @@ function QuickAddPalette({
         subtitle: `Math skill · ${skill.domainLabel}`,
       }),
     );
+    // A unit search lists the unit's activities; a unit itself isn't given from
+    // the grid (unit flow retired, TRA-582).
     return [
-      ...unitSuggestions,
       ...activitySuggestions,
       ...skillSuggestions,
     ].slice(0, 12);
@@ -2558,7 +2498,6 @@ function QuickAddPalette({
     activityMatches,
     queryReady,
     skills,
-    unitMatches,
   ]);
   const curriculumLoading =
     units === undefined ||
@@ -2584,158 +2523,21 @@ function QuickAddPalette({
     setHighlightedIndex(suggestions.length > 0 ? 0 : -1);
   }, [query, suggestions.length]);
 
-  const isFill = Boolean(fillTarget);
-  const isUnit = Boolean(selectedUnitId);
-  // A unit pick flows the whole unit (needs a group + a placed start slot);
-  // fill mode needs a concrete activity/skill pick; add-a-class mode just needs
-  // a label.
-  const canSubmit = isUnit
-    ? Boolean(groupId)
-    : isFill
-      ? Boolean(selectedActivityId || selectedSkillKey)
-      : subject.trim().length > 0 && Boolean(groupId);
-  // Block-order map + lookup for the meeting generator and labels.
-  const blockOrder = useMemo(
-    () => new Map(blocks.map((b) => [String(b._id), b.order])),
-    [blocks],
-  );
-  const blockById = useMemo(
-    () => new Map(blocks.map((b) => [String(b._id), b])),
-    [blocks],
-  );
-
-  // The class we're flowing into = (groupId, subject). Its weekly meeting
-  // pattern is derived from the schedule's recurring rows — the SAME pure helper
-  // the backend uses, so the preview can't drift from what gets written.
-  const flowSubject = isFill ? fillTarget!.subject : subject.trim();
-  const meetingPattern = useMemo(
-    () =>
-      deriveClassMeetingPattern({
-        placements: placements.map((p) => ({
-          weekStartMs: p.weekStartMs ?? null,
-          weekday: p.weekday ?? null,
-          blockId: p.blockId ? String(p.blockId) : null,
-          groupId: String(p.groupId),
-          subject: p.subject,
-          mode: p.mode ?? null,
-        })),
-        groupId,
-        subject: flowSubject,
-        blockOrder,
-      }),
-    [placements, groupId, flowSubject, blockOrder],
-  );
-  // Human "Meets Mon Wed Fri 9:00" label for the discovered pattern.
-  const meetingLabel = useMemo(() => {
-    if (meetingPattern.length === 0) return null;
-    const days = meetingPattern
-      .map((m) => WEEKDAYS.find((d) => d.n === m.weekday)?.label ?? "")
-      .filter(Boolean);
-    const startTimes = Array.from(
-      new Set(
-        meetingPattern
-          .map((m) => blockById.get(m.blockId)?.startLocal)
-          .filter((t): t is string => Boolean(t)),
-      ),
-    );
-    const time = startTimes.length === 1 ? ` ${fmtTime(startTimes[0])}` : "";
-    return `Meets ${days.join(" ")}${time}`;
-  }, [meetingPattern, blockById]);
-
-  // Preview where each of the unit's activities lands, from the shared
-  // meeting-slot generator — one activity per meeting, chronological from the
-  // clicked slot, skipping no-school days. Only computable once a start slot is
-  // chosen.
-  const previewActivities =
-    isUnit && activeUnit && String(activeUnit._id) === String(selectedUnitId)
-      ? activities
-      : undefined;
-  const selectedUnitActivityCount = previewActivities?.length;
-  const cascadePreview = useMemo(() => {
-    if (!previewActivities || previewActivities.length === 0) return null;
-    if (weekday == null || !blockId) return null;
-    const dayLabel = (n: number) => WEEKDAYS.find((d) => d.n === n)?.label ?? "—";
-    const blockLabel = (id: string) => blockById.get(id)?.label ?? "—";
-    const blockMinutes = (id: string): number | null => {
-      const b = blockById.get(id);
-      if (!b) return null;
-      const parse = (hhmm: string) => {
-        const [h, m] = hhmm.split(":").map(Number);
-        return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
-      };
-      const start = parse(b.startLocal);
-      const end = parse(b.endLocal);
-      if (start == null || end == null) return null;
-      return end - start;
-    };
-    const slots = generateMeetingSlots({
-      pattern: meetingPattern,
-      blockOrder,
-      startWeekStartMs: anchorWeekStartMs,
-      startWeekday: weekday,
-      startBlockId: String(blockId),
-      count: previewActivities.length,
-      closures,
-      timeZone: closureTimeZone,
-    });
-    const rows = previewActivities.map((a, i) => {
-      const s = slots[i];
-      const dateMs = s.weekStartMs + (s.weekday - 1) * DAY_MS;
-      const blockMin = blockMinutes(s.blockId);
-      const dur = a.durationMinutes ?? null;
-      // Duration lint: the block's own length is the calibration (§6) — no
-      // invented threshold. Flag only when the activity clearly overruns.
-      const durationLint =
-        dur != null && blockMin != null && dur > blockMin
-          ? `${dur} min planned · this block is ${blockMin} min`
-          : null;
-      return {
-        title: a.title,
-        dateLabel: `${dayLabel(s.weekday)} ${monthDay(dateMs)}`,
-        block: blockLabel(s.blockId),
-        durationLint,
-      };
-    });
-    // Closures that fall inside the flow's span (shown as "skips"), so the dates
-    // jumping over a holiday reads as intentional, not a glitch.
-    const last = slots[slots.length - 1];
-    const spanEnd = last.weekStartMs + (last.weekday - 1) * DAY_MS;
-    const spanStartKey = toDayKey(anchorWeekStartMs);
-    const spanEndKey = toDayKey(spanEnd);
-    const skipped = closures
-      .filter((c) => c.endDayKey >= spanStartKey && c.startDayKey <= spanEndKey)
-      .map((c) => c.label);
-    const finishes = last ? monthDay(spanEnd) : null;
-    return { rows, skipped, finishes };
-  }, [
-    previewActivities,
-    weekday,
-    blockId,
-    meetingPattern,
-    blockOrder,
-    blockById,
-    anchorWeekStartMs,
-    closures,
-    closureTimeZone,
-  ]);
-  const submit = (layout: "flow" | "sameDay" = "flow") => {
-    if (!canSubmit) return;
-    onSubmit({
-      subject: isFill ? fillTarget!.subject : subject.trim(),
-      groupId,
-      teacherId,
-      weekday,
-      blockId,
-      activityId: selectedActivityId,
-      unitId: selectedUnitId,
-      skillKey: selectedSkillKey,
-      layout,
-    });
+  const isHomework = target.kind === "homework";
+  const work: QuickAddWork | null = selectedActivityId
+    ? { kind: "activity", activityId: selectedActivityId }
+    : selectedSkillKey
+      ? { kind: "skill", nodeKey: selectedSkillKey }
+      : null;
+  // A concrete activity or skill, and for homework, the class it's for.
+  const canSubmit = work != null && (!isHomework || pickedClassId != null);
+  const submit = () => {
+    if (!canSubmit || !work) return;
+    onSubmit({ work, classId: isHomework ? pickedClassId : null });
   };
   const selectSuggestion = (suggestion: CurriculumSuggestion) => {
     setSubject(suggestion.label);
     setSelectedActivityId(suggestion.type === "activity" ? suggestion.activityId : null);
-    setSelectedUnitId(suggestion.type === "unit" ? suggestion.unitId : null);
     setSelectedSkillKey(
       suggestion.type === "skill" ? suggestion.nodeKey : null,
     );
@@ -2744,8 +2546,7 @@ function QuickAddPalette({
   };
 
   const selGroup = groupOptions.find((g) => g.id === groupId);
-  const selTeacher = teacherOptions.find((t) => String(t._id) === teacherId);
-  const selBlock = blocks.find((b) => String(b._id) === blockId);
+  const selClass = groupClasses.find((c) => c.classId === pickedClassId);
 
   return (
     <Portal>
@@ -2758,16 +2559,16 @@ function QuickAddPalette({
           overflow="hidden"
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Fill mode: the class + time are the slot's already, so show just the
-              target and go straight to the activity search. */}
-          {isFill && (
-            <Box px={4} pt={3} pb={2.5} borderBottom="1px solid" borderColor="gray.100">
-              <Text fontSize="2xs" fontWeight="700" textTransform="uppercase" letterSpacing="0.04em" color="charcoal.300">
-                {isUnit ? "Flow a unit into" : "Add an activity to"}
-              </Text>
+          {/* What it's given to, pinned at top so it doesn't bounce as
+              suggestions appear/resize. */}
+          <Box px={4} pt={3} pb={2.5} borderBottom="1px solid" borderColor="gray.100">
+            <Text fontSize="2xs" fontWeight="700" textTransform="uppercase" letterSpacing="0.04em" color="charcoal.300">
+              {isHomework ? `Homework due ${dayLabel}` : `Add to ${dayLabel}'s class`}
+            </Text>
+            {target.kind === "class" ? (
               <HStack gap={2} mt={0.5} align="center">
                 <Text fontFamily="heading" fontWeight="700" fontSize="md" color="navy.700" lineClamp={1}>
-                  {fillTarget!.subject}
+                  {target.subject}
                 </Text>
                 {selGroup && (
                   <HStack gap={1} px={2} py={0.5} bg="gray.100" borderRadius="full" flexShrink={0}>
@@ -2778,67 +2579,25 @@ function QuickAddPalette({
                   </HStack>
                 )}
               </HStack>
-            </Box>
-          )}
-          {/* Context pinned at top so it doesn't bounce as suggestions appear/resize */}
-          {!isFill && (
-          <Box px={4} pt={3} pb={2.5} borderBottom="1px solid" borderColor="gray.100">
-            <HStack gap={2} flexWrap="wrap">
-              <FieldPicker label="Group" value={selGroup ? `${selGroup.emoji ? selGroup.emoji + " " : ""}${selGroup.name}` : "—"}>
-                {groupOptions.map((g) => (
-                  <Menu.Item key={g.id} value={g.id} cursor="pointer" onClick={() => setGroupId(g.id)}>
-                    {g.emoji ? `${g.emoji} ` : ""}{g.name}
-                  </Menu.Item>
-                ))}
-              </FieldPicker>
-
-              <FieldPicker label="Teacher" value={selTeacher ? selTeacher.name : "Unassigned"}>
-                <TeacherMenuItems
-                  teachers={teacherOptions}
-                  selectedId={teacherId}
-                  onSelect={setTeacherId}
-                  includeUnassigned
-                />
-              </FieldPicker>
-
-              <FieldPicker label="Day" value={weekday ? WEEKDAYS.find((d) => d.n === weekday)?.label ?? "—" : "Shelf"}>
-                <Menu.Item
-                  value="shelf"
-                  cursor="pointer"
-                  onClick={() => {
-                    setWeekday(null);
-                    setBlockId(null);
-                  }}
-                >
-                  Shelf (no day)
-                </Menu.Item>
-                {WEEKDAYS.map((d) => (
-                  <Menu.Item key={d.n} value={String(d.n)} cursor="pointer" onClick={() => setWeekday(d.n)}>
-                    {d.label}
-                  </Menu.Item>
-                ))}
-              </FieldPicker>
-
-              <FieldPicker label="Block" value={selBlock ? selBlock.label : "Shelf"}>
-                <Menu.Item
-                  value="shelf"
-                  cursor="pointer"
-                  onClick={() => {
-                    setWeekday(null);
-                    setBlockId(null);
-                  }}
-                >
-                  Shelf (no block)
-                </Menu.Item>
-                {blocks.map((b) => (
-                  <Menu.Item key={String(b._id)} value={String(b._id)} cursor="pointer" onClick={() => setBlockId(String(b._id))}>
-                    {b.label} · {fmtTime(b.startLocal)}
-                  </Menu.Item>
-                ))}
-              </FieldPicker>
-            </HStack>
+            ) : (
+              <HStack gap={2} mt={1.5} flexWrap="wrap">
+                <FieldPicker label="Group" value={selGroup ? `${selGroup.emoji ? selGroup.emoji + " " : ""}${selGroup.name}` : "—"}>
+                  {groupOptions.map((g) => (
+                    <Menu.Item key={g.id} value={g.id} cursor="pointer" onClick={() => setGroupId(g.id)}>
+                      {g.emoji ? `${g.emoji} ` : ""}{g.name}
+                    </Menu.Item>
+                  ))}
+                </FieldPicker>
+                <FieldPicker label="Class" value={selClass ? selClass.subject : groupClasses.length ? "Pick one" : "None this week"}>
+                  {groupClasses.map((c) => (
+                    <Menu.Item key={c.classId} value={c.classId} cursor="pointer" onClick={() => setClassId(c.classId)}>
+                      {c.subject}
+                    </Menu.Item>
+                  ))}
+                </FieldPicker>
+              </HStack>
+            )}
           </Box>
-          )}
 
           <Flex align="center" gap={2} px={4} py={3} borderBottom="1px solid" borderColor="gray.100">
             <MagnifyingGlass size={16} />
@@ -2846,11 +2605,7 @@ function QuickAddPalette({
               ref={inputRef}
               variant="flushed"
               border="none"
-              placeholder={
-                isFill
-                  ? "Search activities or math skills…"
-                  : "Search units, activities, or math skills…"
-              }
+              placeholder="Search units, activities, or math skills…"
               value={subject}
               role="combobox"
               aria-autocomplete="list"
@@ -2863,7 +2618,6 @@ function QuickAddPalette({
               onChange={(e) => {
                 setSubject(e.target.value);
                 setSelectedActivityId(null);
-                setSelectedUnitId(null);
                 setSelectedSkillKey(null);
                 setSuggestionsVisible(true);
               }}
@@ -2947,123 +2701,22 @@ function QuickAddPalette({
             </Box>
           )}
 
-          {/* Unit pick → choose how its activities flow onto the grid. */}
-          {isUnit && (
-            <Box px={4} py={3} borderBottom="1px solid" borderColor="gray.100" bg="violet.50">
-              <HStack justify="space-between" align="start" mb={2} gap={3}>
-                <VStack align="start" gap={0.5} minW={0}>
-                  <Text fontSize="2xs" fontWeight="700" textTransform="uppercase" letterSpacing="0.04em" color="violet.700">
-                    Flow a unit into {flowSubject || "this class"}
-                  </Text>
-                  {meetingLabel ? (
-                    <Text fontSize="2xs" color="charcoal.400" fontWeight="600">
-                      {meetingLabel} · one activity per meeting
-                    </Text>
-                  ) : (
-                    <Text fontSize="2xs" color="charcoal.400">
-                      No recurring class here — lands one activity per week from
-                      this slot.
-                    </Text>
-                  )}
-                </VStack>
-                {typeof selectedUnitActivityCount === "number" && (
-                  <Text fontSize="2xs" color="charcoal.400" fontWeight="600" flexShrink={0}>
-                    {selectedUnitActivityCount} {selectedUnitActivityCount === 1 ? "activity" : "activities"}
-                  </Text>
-                )}
-              </HStack>
-              {cascadePreview && (
-                <Box mt={1} borderTop="1px solid" borderColor="violet.100" pt={2.5}>
-                  <Text fontSize="2xs" fontWeight="700" textTransform="uppercase" letterSpacing="0.04em" color="violet.700" mb={1.5}>
-                    Preview
-                  </Text>
-                  <VStack align="stretch" gap={1} maxH="180px" overflowY="auto" pr={1}>
-                    {cascadePreview.rows.map((row, i) => (
-                      <VStack key={i} align="stretch" gap={0}>
-                        <HStack justify="space-between" gap={3} align="center">
-                          <HStack gap={2} minW={0}>
-                            <Text fontSize="2xs" fontWeight="700" color="charcoal.300" w="16px" flexShrink={0} textAlign="right">
-                              {i + 1}
-                            </Text>
-                            <Text fontSize="xs" color="navy.700" lineClamp={1}>
-                              {row.title}
-                            </Text>
-                          </HStack>
-                          <HStack gap={1.5} flexShrink={0}>
-                            <Text fontSize="2xs" fontWeight="700" color="charcoal.500">
-                              {row.dateLabel}
-                            </Text>
-                            <Text fontSize="2xs" color="charcoal.300">·</Text>
-                            <Text fontSize="2xs" color="charcoal.400" lineClamp={1} maxW="120px">
-                              {row.block}
-                            </Text>
-                          </HStack>
-                        </HStack>
-                        {row.durationLint && (
-                          <Text fontSize="2xs" color="orange.600" pl="26px" lineClamp={1}>
-                            ⚠ {row.durationLint}
-                          </Text>
-                        )}
-                      </VStack>
-                    ))}
-                  </VStack>
-                  {cascadePreview.skipped.length > 0 && (
-                    <Text fontSize="2xs" color="charcoal.400" mt={2}>
-                      Skips no-school days: {cascadePreview.skipped.join(", ")}
-                    </Text>
-                  )}
-                  {cascadePreview.finishes && (
-                    <Text fontSize="2xs" color="charcoal.500" fontWeight="700" mt={1.5}>
-                      At this pace: finishes {cascadePreview.finishes}
-                    </Text>
-                  )}
-                </Box>
-              )}
-              <Text fontSize="2xs" color="charcoal.400" mt={2.5} fontStyle="italic">
-                A projection at the current pace — you can drag activities, or if a
-                class falls behind, push the rest from a past meeting.
-              </Text>
-            </Box>
-          )}
-
           <HStack justify="space-between" px={4} py={3}>
-            {isFill && onRemove ? (
-              <Button size="sm" variant="ghost" colorPalette="red" onClick={onRemove} fontFamily="heading">
-                Remove slot
-              </Button>
-            ) : (
-              <Text fontSize="2xs" color="charcoal.300">
-                {isUnit
-                  ? weekday && blockId
-                    ? "Flow across meetings, or stack it all on this day."
-                    : "Pick a day + block to flow a unit."
-                  : weekday && blockId
-                    ? "Places on the grid."
-                    : "Parks on the shelf (pick a day + block to place it)."}
-              </Text>
-            )}
+            <Text fontSize="2xs" color="charcoal.300">
+              {isHomework
+                ? "On their list from the start of that school week, and late after that day."
+                : "Shows up when the class starts and finishes in it."}
+            </Text>
             <HStack gap={2}>
               <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
-              {isUnit && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  colorPalette="violet"
-                  disabled={!canSubmit || weekday == null || !blockId}
-                  onClick={() => submit("sameDay")}
-                  fontFamily="heading"
-                >
-                  All on one day
-                </Button>
-              )}
               <Button
                 size="sm"
                 colorPalette="violet"
-                disabled={!canSubmit || (isUnit && (weekday == null || !blockId))}
-                onClick={() => submit("flow")}
+                disabled={!canSubmit}
+                onClick={submit}
                 fontFamily="heading"
               >
-                {isUnit ? "Flow unit" : isFill ? "Add activity" : "Add class"}
+                {isHomework ? "Give homework" : "Give to class"}
               </Button>
             </HStack>
           </HStack>
@@ -3210,7 +2863,7 @@ function EmptyState({ programScoped = false }: { programScoped?: boolean }) {
       <Text fontSize="sm" maxW="360px">
         {programScoped
           ? "A teacher sets up the school timetable. Your assigned programs will appear here when they are placed."
-          : "Add bell-schedule blocks (Morning Circle, Block A–D, Recess, Lunch…) for this term, then place classes into them — by drag, Quick add, or by asking the aide."}
+          : "Set this term's bell schedule and each group's classes on School › Classes & times, or ask the aide."}
       </Text>
     </Flex>
   );

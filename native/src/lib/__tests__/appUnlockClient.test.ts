@@ -1,7 +1,10 @@
 import { getFunctionName } from "convex/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { nudgeDeviceAppProjection } from "../appUnlockClient";
+import {
+  nudgeDeviceAppProjection,
+  readManagedAppInstallState,
+} from "../appUnlockClient";
 
 describe("nudgeDeviceAppProjection", () => {
   it("asks the backend to converge THIS iPad, and names no app", async () => {
@@ -48,5 +51,46 @@ describe("nudgeDeviceAppProjection", () => {
     ).resolves.toBe(false);
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe("readManagedAppInstallState", () => {
+  it("binds the backend query by name and passes the device and app", async () => {
+    const query = vi.fn().mockResolvedValue("missing");
+
+    await expect(
+      readManagedAppInstallState({ query }, "device-uuid", "app-id"),
+    ).resolves.toBe("missing");
+    expect(getFunctionName(query.mock.calls[0]?.[0])).toBe(
+      "deviceAppUnlock:managedAppInstallState",
+    );
+    expect(query.mock.calls[0]?.[1]).toEqual({
+      deviceId: "device-uuid",
+      externalAppId: "app-id",
+    });
+  });
+
+  it("reads a failure as unknown, which keeps the Home Screen handoff", async () => {
+    const query = vi.fn().mockRejectedValue(new Error("no claim"));
+
+    await expect(
+      readManagedAppInstallState({ query }, "device-uuid", "app-id"),
+    ).resolves.toBe("unknown");
+  });
+
+  it("gives up after the timeout instead of holding the tap", async () => {
+    const query = vi.fn().mockReturnValue(new Promise(() => {}));
+
+    await expect(
+      readManagedAppInstallState({ query }, "device-uuid", "app-id", 5),
+    ).resolves.toBe("unknown");
+  });
+
+  it("reads an unexpected answer (an older backend) as unknown", async () => {
+    const query = vi.fn().mockResolvedValue(null);
+
+    await expect(
+      readManagedAppInstallState({ query }, "device-uuid", "app-id"),
+    ).resolves.toBe("unknown");
   });
 });

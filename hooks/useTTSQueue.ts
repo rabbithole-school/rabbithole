@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useAuthToken } from "@convex-dev/auth/react";
 import {
   SentenceAccumulator,
   stripMarkdownForSpeech,
@@ -30,6 +31,22 @@ type EngineState = "idle" | "speaking" | "paused";
 const FETCH_LOOKAHEAD = 2;
 /** How long a sentence waits on a suspended (gesture-locked) AudioContext. */
 const SUSPENDED_GIVE_UP_MS = 1500;
+
+/**
+ * The signed-in user's Convex auth token, sent with every `/tts` request so
+ * the server can start refusing anonymous callers (TRA-491). The engine is a
+ * module singleton that speaks from callbacks outside React, so the token is
+ * kept here by `useSyncTTSAuthToken`, mounted once at the app root.
+ */
+let ttsAuthToken: string | null = null;
+
+/** Keep the engine's auth token current. Mount once, inside the auth provider. */
+export function useSyncTTSAuthToken(): void {
+  const token = useAuthToken();
+  useEffect(() => {
+    ttsAuthToken = token ?? null;
+  }, [token]);
+}
 
 interface QueueItem {
   text: string;
@@ -194,7 +211,10 @@ export class TTSEngine {
       const convexUrl = convexSiteUrl();
       const res = await fetch(`${convexUrl}/tts`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(ttsAuthToken ? { Authorization: `Bearer ${ttsAuthToken}` } : {}),
+        },
         body: JSON.stringify({ text }),
       });
       if (!res.ok) return null;

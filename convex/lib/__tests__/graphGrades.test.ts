@@ -46,6 +46,12 @@ import {
   ALGEBRA_1_IMPLIES_EDGES,
 } from "../../seed/algebra1Graph";
 import {
+  ALGEBRA_2_DOMAIN,
+  ALGEBRA_2_SKILLS,
+  ALGEBRA_2_EDGES,
+  ALGEBRA_2_IMPLIES_EDGES,
+} from "../../seed/algebra2Graph";
+import {
   DISCRETE_MATH_SKILLS,
   DISCRETE_MATH_EDGES,
 } from "../../seed/discreteMathGraph";
@@ -55,15 +61,16 @@ import { validateCombinedGraph } from "../practice/graphValidation";
  * Grade-tag completeness drift test (PR4 — placement-v2 graph audit).
  *
  * Every practice knowledge-graph node MUST carry a `grade` tag in the valid
- * K–9 set. This is load-bearing, not cosmetic: placement's affect-safe FIRST
+ * K–11 set. This is load-bearing, not cosmetic: placement's affect-safe FIRST
  * probe (`affectSafeFirstProbeIndex`) and the placement result label
  * (`derivePlacedThroughGrade`) both resolve a node's grade through `gradeRank`,
- * which returns -1 for any grade outside {K,1,…,9}. A node with a missing or
+ * which returns -1 for any grade outside {K,1,…,11}. A node with a missing or
  * malformed grade silently drops out of first-probe anchoring and the result
  * label — so this test locks the audit's invariant against future drift.
  */
 
-const VALID_GRADES = new Set(["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+// "10"/"11" added 2026-11-20 with the algebra-2 domain (the K–9 ceiling moved to 11).
+const VALID_GRADES = new Set(["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]);
 
 const DOMAINS: { label: string; skills: readonly SeedSkill[] }[] = [
   { label: "whole-number-arithmetic", skills: WHOLE_NUMBER_ARITHMETIC_SKILLS },
@@ -74,11 +81,12 @@ const DOMAINS: { label: string; skills: readonly SeedSkill[] }[] = [
   { label: "integers-coordinates", skills: INTEGERS_COORDINATES_SKILLS },
   { label: "early-algebra", skills: EARLY_ALGEBRA_SKILLS },
   { label: "algebra-1", skills: ALGEBRA_1_SKILLS },
+  { label: "algebra-2", skills: ALGEBRA_2_SKILLS },
   { label: "discrete-math", skills: DISCRETE_MATH_SKILLS },
 ];
 
 describe("practice graph — grade-tag completeness", () => {
-  test("every node has a grade in the valid K–9 set", () => {
+  test("every node has a grade in the valid K–11 set", () => {
     const bad: string[] = [];
     for (const { label, skills } of DOMAINS) {
       for (const s of skills) {
@@ -177,6 +185,7 @@ describe("cross-domain entrance prerequisite edges — drift lock", () => {
     { domain: INTEGERS_COORDINATES_DOMAIN, skills: INTEGERS_COORDINATES_SKILLS, edges: INTEGERS_COORDINATES_EDGES, implies: [] },
     { domain: EARLY_ALGEBRA_DOMAIN, skills: EARLY_ALGEBRA_SKILLS, edges: EARLY_ALGEBRA_EDGES, implies: EARLY_ALGEBRA_IMPLIES_EDGES },
     { domain: ALGEBRA_1_DOMAIN, skills: ALGEBRA_1_SKILLS, edges: ALGEBRA_1_EDGES, implies: ALGEBRA_1_IMPLIES_EDGES },
+    { domain: ALGEBRA_2_DOMAIN, skills: ALGEBRA_2_SKILLS, edges: ALGEBRA_2_EDGES, implies: ALGEBRA_2_IMPLIES_EDGES },
     { domain: "discrete-math", skills: DISCRETE_MATH_SKILLS, edges: DISCRETE_MATH_EDGES, implies: [] },
   ];
   const gradeByKey = new Map<string, string>();

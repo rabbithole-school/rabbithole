@@ -1,14 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, test } from "vitest";
 
 import {
   applyAsamAction,
   asamTransitionReason,
   decideAsamAction,
   decideOneTimeDisarmAction,
+  isAsamLockSettled,
   isManagedAsamEnabled,
   isAppReentry,
   selectAsamLockStatus,
   shouldUseOfflineRecoveryBypass,
+  withSystemUIHolder,
   type AsamAction,
   type AsamInputs,
   type AsamReasonInputs,
@@ -462,4 +464,45 @@ describe("asamTransitionReason (TRA-331 lock-change telemetry)", () => {
       expect(asamTransitionReason("enter", settled, previous)).toBe(reason);
     });
   }
+});
+
+describe("system-UI release holders", () => {
+  test("one owner ending doesn't end another's", () => {
+    let holders = withSystemUIHolder(new Set(), "presentation", true);
+    holders = withSystemUIHolder(holders, "photo_resync", true);
+    holders = withSystemUIHolder(holders, "photo_resync", false);
+    expect([...holders]).toEqual(["presentation"]);
+    holders = withSystemUIHolder(holders, "presentation", false);
+    expect(holders.size).toBe(0);
+  });
+
+  test("ending a release you don't hold changes nothing", () => {
+    const holders = withSystemUIHolder(new Set(), "presentation", true);
+    expect([...withSystemUIHolder(holders, "photo_resync", false)]).toEqual([
+      "presentation",
+    ]);
+  });
+});
+
+describe("isAsamLockSettled", () => {
+  const base = { isOnline: true, paired: true, armed: true, inSam: false };
+
+  test("armed and not locked is not settled", () => {
+    expect(isAsamLockSettled(base)).toBe(false);
+  });
+  test("iOS reporting the lock on is settled", () => {
+    expect(isAsamLockSettled({ ...base, inSam: true })).toBe(true);
+  });
+  test("a staff disarm wins", () => {
+    expect(isAsamLockSettled({ ...base, armed: false })).toBe(true);
+  });
+  test("the offline exit wins", () => {
+    expect(isAsamLockSettled({ ...base, isOnline: false })).toBe(true);
+  });
+  test("unpaired wins", () => {
+    expect(isAsamLockSettled({ ...base, paired: false })).toBe(true);
+  });
+  test("unknown pairing is no answer", () => {
+    expect(isAsamLockSettled({ ...base, paired: "unknown" })).toBe(false);
+  });
 });

@@ -8,7 +8,13 @@
  * `NativePracticeControls`.
  */
 export {
+  createAlgebraTemplateState,
   createExpressionTemplateState,
+  expressionTemplateInsertGroup,
+  expressionTemplateInsertLog,
+  expressionTemplateInsertRoot,
+  expressionTemplateInsertSquare,
+  expressionTemplateInsertSquareRoot,
   expressionTemplateInsertToken,
   expressionTemplateInsertFraction,
   expressionTemplateInsertExponent,
@@ -23,12 +29,16 @@ export {
   expressionTemplateSetActiveSlot,
   expressionTemplateSetCaret,
   expressionTemplateSeedFromSkeleton,
+  itemSlots,
 } from "../../vendor/shared/expressionTemplateInput";
 export type {
   SlotId,
   TokenItem,
   FractionItem,
   PowerItem,
+  LogItem,
+  GroupItem,
+  GroupFn,
   Item,
   Slot,
   ExpressionTemplateState,

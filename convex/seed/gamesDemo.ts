@@ -28,6 +28,7 @@ import type { MutationCtx } from "../_generated/server";
 import { internalMutation } from "../_generated/server";
 import { v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
+import { writeSchedule } from "../lib/scheduleStore";
 
 const UNIT_SLUG = "games-platform-demo";
 
@@ -276,7 +277,7 @@ export const assignGamesDemo = internalMutation({
         a.scholarIds[0] === scholar._id,
     );
     if (match) {
-      await ctx.db.patch(match._id, { activitySchedule: schedule });
+      await writeSchedule(ctx, match._id, schedule);
       return { assigned: 1, assignmentId: match._id, mode: "updated" as const };
     }
     const assignmentId = await ctx.db.insert("assignments", {
@@ -284,8 +285,8 @@ export const assignGamesDemo = internalMutation({
       unitId: unit._id,
       scholarIds: [scholar._id],
       startedAt: now,
-      activitySchedule: schedule,
     });
+    await writeSchedule(ctx, assignmentId, schedule);
     return { assigned: 1, assignmentId, mode: "created" as const };
   },
 });

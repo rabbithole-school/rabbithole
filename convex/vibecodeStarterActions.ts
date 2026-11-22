@@ -1,22 +1,16 @@
 // Node/action half of vibecode starter promotion. The transactional validation
 // and customApps write remain in activities.ts; this action only copies the
-// referenced storage blobs and rewrites the promoted HTML to those copies.
+// referenced storage blobs (lib/appAssetCopy.ts) and commits the rewritten HTML.
 
-import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
-import { action, internalAction } from "./_generated/server";
+import { internalAction } from "./_generated/server";
 import type { ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { MAX_STATIC_HTML_BYTES } from "./customApps";
 import {
-  MAX_APP_ASSETS,
-  MAX_APP_ASSET_BYTES,
-  requestedAppAssetIds,
-  rewriteAppAssetRefs,
-} from "../shared/appAssets";
-import { sniffImageMime } from "./lib/imageBytes";
-import { assertWritableAction } from "./lib/auth";
+  copyArtifactAppAssets,
+  deleteAppAssetCopies,
+} from "./lib/appAssetCopy";
 
 type StarterPromotionResult = {
   id: Id<"customApps">;
@@ -29,8 +23,7 @@ type StarterPromotionResult = {
  * an EXPLICIT caller (never read from auth). The internal queries/mutations it
  * calls re-verify that `callerUserId` has unit-edit access AND owns the
  * test-drive session, so this is safe to run in a scheduled (no-identity)
- * context. Shared by the public "Use as activity starter" action and the
- * server-side autosave helper below.
+ * context. Reached only through the server-side autosave helper below.
  */
 async function promoteStarterFromArtifactImpl(
   ctx: ActionCtx,
@@ -64,49 +57,12 @@ async function promoteStarterFromArtifactImpl(
     },
   );
   if (alreadyPromoted) return alreadyPromoted;
-  const sourceBytes = new TextEncoder().encode(source.html).length;
-  if (sourceBytes > MAX_STATIC_HTML_BYTES) {
-    throw new Error(
-      `HTML is too large (${sourceBytes} bytes; max ${MAX_STATIC_HTML_BYTES}).`,
-    );
-  }
-  const requested = requestedAppAssetIds(source.html);
-  if (requested.length > MAX_APP_ASSETS) {
-    throw new Error(`Apps may use at most ${MAX_APP_ASSETS} assets.`);
-  }
-  const authorized = await ctx.runQuery(
-    internal.appAssets.authorizeArtifactAssets,
-    {
-      artifactId,
-      callerUserId,
-      // The internal validator is the runtime guard for storage-id strings
-      // parsed from the rehearsal HTML.
-      assetIds: requested as Id<"_storage">[],
-    },
-  );
-
-  const copied: Id<"_storage">[] = [];
+  const { html, copied } = await copyArtifactAppAssets(ctx, {
+    artifactId,
+    callerUserId,
+    html: source.html,
+  });
   try {
-    const replacements = new Map<string, string>();
-    for (const { id } of authorized) {
-      const blob = await ctx.storage.get(id);
-      if (!blob) throw new Error("An app asset is no longer available.");
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      if (bytes.byteLength > MAX_APP_ASSET_BYTES) {
-        throw new Error(
-          `App assets must be ${MAX_APP_ASSET_BYTES} bytes or smaller.`,
-        );
-      }
-      const mime = sniffImageMime(bytes);
-      if (!mime || mime === "image/gif") {
-        throw new Error("App assets must be JPEG, PNG, or WebP images.");
-      }
-      const copy = await ctx.storage.store(
-        new Blob([bytes as BlobPart], { type: mime }),
-      );
-      copied.push(copy);
-      replacements.set(String(id), String(copy));
-    }
     return await ctx.runMutation(
       internal.activities.commitVibecodeStarterFromArtifact,
       {
@@ -114,38 +70,16 @@ async function promoteStarterFromArtifactImpl(
         artifactId,
         callerUserId,
         sourceRevision: source.revision,
-        html: rewriteAppAssetRefs(source.html, replacements),
+        html,
         appAssetIds: copied,
       },
     );
   } catch (error) {
-    for (const id of copied) {
-      try {
-        await ctx.storage.delete(id);
-      } catch {
-        // The failed promotion has no durable reference to this copy.
-      }
-    }
+    // The failed promotion has no durable reference to these copies.
+    await deleteAppAssetCopies(ctx, copied);
     throw error;
   }
 }
-
-export const setVibecodeStarterFromArtifact = action({
-  args: {
-    activityId: v.id("activities"),
-    artifactId: v.id("artifacts"),
-  },
-  handler: async (ctx, args): Promise<StarterPromotionResult> => {
-    const callerUserId = await getAuthUserId(ctx);
-    if (!callerUserId) throw new Error("Not authenticated");
-    await assertWritableAction(ctx);
-    return await promoteStarterFromArtifactImpl(ctx, {
-      callerUserId,
-      activityId: args.activityId,
-      artifactId: args.artifactId,
-    });
-  },
-});
 
 /**
  * The ONE "autosave this artifact to the starter, stamp failure" unit, shared

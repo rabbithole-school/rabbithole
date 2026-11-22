@@ -24,6 +24,9 @@ export const STAFF_CAPABILITIES = [
   // staffCapabilityInstitutionIds.
   "admissions:full",
   "admissions:scheduling",
+  // Finance lane reads (lib/financeLane.ts). Institution-wide; like the
+  // admissions grants, it confers no institution lens.
+  "finance:read",
 ] as const;
 
 export type StaffCapability = (typeof STAFF_CAPABILITIES)[number];
@@ -61,7 +64,7 @@ function isActive(grant: Doc<"staffCapabilityGrants">) {
   return grant.revokedAt === undefined;
 }
 
-function hasValidScope(
+export function hasValidScope(
   capability: StaffCapability,
   scholarGroupId: Id<"scholarGroups"> | undefined,
 ) {
@@ -71,7 +74,8 @@ function hasValidScope(
       capability === "school:operations" ||
       capability === "health:manage" ||
       capability === "admissions:full" ||
-      capability === "admissions:scheduling") &&
+      capability === "admissions:scheduling" ||
+      capability === "finance:read") &&
       scholarGroupId === undefined) ||
     ((capability === "program:publish" || capability === "captures:review") &&
       scholarGroupId !== undefined) ||
@@ -145,7 +149,8 @@ export async function hasActiveInstitutionCapability(
     capability !== "school:operations" &&
     capability !== "health:manage" &&
     capability !== "admissions:full" &&
-    capability !== "admissions:scheduling"
+    capability !== "admissions:scheduling" &&
+    capability !== "finance:read"
   ) {
     return false;
   }
@@ -460,6 +465,8 @@ export async function staffCapabilityInstitutionIds(
     // never be the thing that gives a staffer a school lens. Its holder's
     // lens, if any, comes from curriculum:edit, which it always rides beside.
     if (capability === "curriculum:run") continue;
+    // A finance grant reads the finance lane and nothing else.
+    if (capability === "finance:read") continue;
     for (const grant of await activeGrantsFor(ctx, userId, capability)) {
       if (
         await hasActiveStaffMembershipAtInstitution(
@@ -622,6 +629,21 @@ export async function mentorInstitutionIds(
  * Institution-neutral. Which institution admissions runs at is the caller's
  * business (the first-party CRM pins it to the primary school).
  */
+/**
+ * Finance lane access. A platform admin holds it, as with admissions; everyone
+ * else needs the grant and staff standing here, which the capability check
+ * requires. There is no staff-role default: "staff" never means finance.
+ */
+export async function hasFinanceAccessAtInstitution(
+  ctx: CapabilityCtx,
+  user: Pick<Doc<"users">, "_id" | "role">,
+  institutionId: Id<"institutions">,
+): Promise<boolean> {
+  if (!(await hasActiveInstitution(ctx, institutionId))) return false;
+  if (user.role === "platform_admin") return true;
+  return await hasActiveInstitutionCapability(ctx, user._id, institutionId, "finance:read");
+}
+
 export async function admissionsTierAtInstitution(
   ctx: CapabilityCtx,
   user: Pick<Doc<"users">, "_id" | "role">,

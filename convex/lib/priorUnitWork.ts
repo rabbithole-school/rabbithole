@@ -1,12 +1,14 @@
 /**
- * The scholar's own prior work in the current unit, for the App designer.
+ * The scholar's own prior work in the current unit, for the tutor in any unit
+ * activity.
  *
- * A vibecode session is usually the last stop in a unit: the scholar has
- * already written the mechanism, answered questions, or generated questions of
- * their own in earlier sessions. Without this section the designer starts cold
- * ("I don't have your design in front of me") and re-asks what the scholar
- * already said. This module reads that work and renders one bounded prompt
- * section from it.
+ * Units build: an activity leans on notes the scholar wrote the night before,
+ * and a vibecode session is usually the last stop, after the scholar has
+ * written the mechanism or generated questions of their own. Without this
+ * section the tutor starts cold ("I don't have your design in front of me"),
+ * re-asks what the scholar already said, and can't tell that the earlier work
+ * this activity needs is thin. This module reads that work and renders one
+ * bounded prompt section from it.
  *
  * What it reads, all keyed on ONE scholar (other scholars' work can never
  * enter — every read goes through that scholar's sessions):
@@ -23,11 +25,14 @@
  *   3. When a session left no usable submitted deliverable, its writing box:
  *      the most recently created plain-text document the scholar last edited
  *      (one a tutor last touched, even by a rename, is skipped). A scholar who designed something and moved on
- *      without pressing Send is the common case, and the builder starting
+ *      without pressing Send is the common case, and the tutor starting
  *      cold on a finished design is the failure this section exists to stop.
  *   4. When a session left no writing at all, the scholar's own turns in it
  *      (role "user", never tool/system/notebook/instruction rows or app-button
  *      presses), most recent kept.
+ *
+ * A session with a welfare alert is left out whole: what a scholar disclosed
+ * there must not resurface in a later math activity.
  *
  * Deliberately absent: the observer's engagement scores, concern flags,
  * dashboard summary and suggested interventions (teacher-facing), and teacher
@@ -37,9 +42,9 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx } from "../_generated/server";
 import { resolveDeliverableContent } from "../classDigests";
+import { PRIOR_UNIT_WORK_HEADER } from "../prompts";
 
-export const PRIOR_UNIT_WORK_HEADER =
-  "SCHOLAR'S PRIOR WORK IN THIS UNIT (their own words — build on it, never re-ask what is already here; refer to it specifically when it bears on the build)";
+export { PRIOR_UNIT_WORK_HEADER };
 
 /** Budget for the rendered items (the header is not counted). */
 export const PRIOR_UNIT_WORK_CHAR_CAP = 2500;
@@ -49,6 +54,8 @@ const MAX_SESSIONS = 12;
 const MAX_DELIVERABLE_CHARS = 900;
 const MAX_MESSAGE_CHARS = 240;
 const MAX_MESSAGES_PER_SESSION = 6;
+/** Newest user rows fetched per session; filtering then keeps the last few. */
+const MAX_MESSAGE_ROWS_SCANNED = 40;
 /** Shorter turns ("ok", "idk", "next") carry no thinking worth replaying. */
 const MIN_MESSAGE_CHARS = 12;
 
@@ -123,6 +130,10 @@ function isScholarSpeech(m: Doc<"messages">): boolean {
     !m.notebookEntry &&
     !m.instruction &&
     !m.toolAction &&
+    // A teacher typing in Remote Mode, and a beginner reading the tutor's own
+    // line aloud, are not the scholar's language (schema: byStaff, readAloudOf).
+    !m.byStaff &&
+    !m.readAloudOf &&
     m.content.trim().length >= MIN_MESSAGE_CHARS
   );
 }
@@ -192,6 +203,14 @@ export async function loadPriorUnitWork(
 
   const items = await Promise.all(
     sessions.map(async (session): Promise<PriorUnitWorkItem | null> => {
+      const welfareAlert = await ctx.db
+        .query("alerts")
+        .withIndex("by_dedup", (q) =>
+          q.eq("dedupKey", `welfare:${args.scholarId}:${session._id}`),
+        )
+        .first();
+      if (welfareAlert) return null;
+
       const [deliverables, latestAnalysis, activity] = await Promise.all([
         ctx.db
           .query("deliverables")
@@ -266,15 +285,16 @@ export async function loadPriorUnitWork(
             .withIndex("by_session_role", (q) =>
               q.eq("sessionId", session._id).eq("role", "user"),
             )
-            .collect()
+            .order("desc")
+            .take(MAX_MESSAGE_ROWS_SCANNED)
         ).filter(isScholarSpeech);
-        for (const m of userTurns.slice(-MAX_MESSAGES_PER_SESSION)) {
+        for (const m of userTurns.slice(0, MAX_MESSAGES_PER_SESSION).reverse()) {
           lines.push({ kind: "said", text: clip(m.content, MAX_MESSAGE_CHARS) });
         }
       }
 
       if (lines.length === 0) return null;
-      return { label: activity?.title ?? session.title, at, lines };
+      return { label: clip(activity?.title ?? session.title, 120), at, lines };
     }),
   );
 

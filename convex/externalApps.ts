@@ -28,6 +28,7 @@ import {
 import {
   externalAppWithinLens,
   liveReachOfExternalApp,
+  deviceReachOfExternalApp,
 } from "./lib/externalAppReach";
 import { normalizeAppTileEmoji } from "../shared/appTileMark";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -472,7 +473,7 @@ async function coreUpdateApp(
   // no longer names.
   const affectedScholarIds =
     patch.nativeUrlScheme !== undefined || patch.nativeBundleId !== undefined
-      ? Array.from(await liveReachOfExternalApp(ctx, appId))
+      ? Array.from(await deviceReachOfExternalApp(ctx, appId, Date.now()))
       : [];
   const updates: Partial<Doc<"externalApps">> = {};
   if (patch.name !== undefined) {
@@ -580,7 +581,7 @@ async function coreSetArchived(
   // un-archive edge because it is the same set.
   const flipping = archived !== !!app.archived;
   const affectedScholarIds = flipping
-    ? Array.from(await liveReachOfExternalApp(ctx, appId))
+    ? Array.from(await deviceReachOfExternalApp(ctx, appId, Date.now()))
     : [];
   await ctx.db.patch(appId, { archived: archived ? true : undefined });
   if (affectedScholarIds.length > 0) {

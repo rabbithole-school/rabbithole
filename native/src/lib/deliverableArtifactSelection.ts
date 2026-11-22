@@ -239,16 +239,76 @@ export type WorkSurface = "loading" | "deliverable" | "documents" | "none";
 export function workSurfaceFor({
   hasActivity,
   activity,
-  textArtifactCount,
+  workArtifactCount,
 }: {
   /** Whether the session is attached to an activity at all. */
   hasActivity: boolean;
   /** The activity query result: `undefined` while loading, `null` if missing. */
   activity: { deliverable?: unknown } | null | undefined;
-  /** Text/code artifacts in the session; `undefined` while loading. */
-  textArtifactCount: number | undefined;
+  /**
+   * Artifacts the work surface can show (`isWorkSurfaceArtifact`: text/code
+   * documents and the session's deck); `undefined` while loading.
+   */
+  workArtifactCount: number | undefined;
 }): WorkSurface {
   if (hasActivity && activity === undefined) return "loading";
   if (hasActivity && activity?.deliverable) return "deliverable";
-  return (textArtifactCount ?? 0) > 0 ? "documents" : "none";
+  return (workArtifactCount ?? 0) > 0 ? "documents" : "none";
+}
+
+/**
+ * Whether the native work surface (DeliverablePanel / DeliverableCard) can
+ * show this artifact: a text/code document, or the session's slide deck.
+ *
+ * The tutor's `edit_slides` can make a deck in ANY session — a Quest, a chat
+ * with no activity, a writing activity — and tells the model the deck is on
+ * screen. Web's ArtifactPanel shows every `slides` artifact; native used to
+ * show a deck only when the activity's deliverable kind was `slides`, so a
+ * tutor-made deck anywhere else existed on the server and never appeared on
+ * the BunnyPad. Maps and manipulatives keep their own cards, so they are not
+ * work-surface artifacts.
+ */
+export function isWorkSurfaceArtifact(
+  artifact: { type?: string } | null | undefined,
+): boolean {
+  return (
+    artifact?.type === undefined ||
+    artifact.type === "text" ||
+    artifact.type === "code" ||
+    artifact.type === "slides"
+  );
+}
+
+/**
+ * Where the work surface puts a deck that is NOT the activity's deliverable —
+ * a deck the tutor made on the side.
+ *
+ *  - `"none"`     — a `slides` deliverable: the deck IS the work and already
+ *                   renders through the deliverable's slides branch.
+ *  - `"switcher"` — the surface shows documents (no deliverable, a `text` or
+ *                   `artifact` deliverable): the deck is one more entry in the
+ *                   document switcher, the way web's ArtifactPanel lists it
+ *                   beside the writing. One artifact shows at a time.
+ *  - `"below"`    — a `photo` / `audio` / `map` deliverable, whose primary
+ *                   work is not a document and has no switcher: the deck
+ *                   renders after that work.
+ *
+ * An unknown kind (no deliverable, or the activity still loading) is
+ * `"switcher"`; the caller's loading state covers the latter.
+ */
+export type SideDeckPlacement = "none" | "switcher" | "below";
+
+export function sideDeckPlacement(
+  deliverableKind: DeliverableKind | null | undefined,
+): SideDeckPlacement {
+  switch (deliverableKind) {
+    case "slides":
+      return "none";
+    case "photo":
+    case "audio":
+    case "map":
+      return "below";
+    default:
+      return "switcher";
+  }
 }

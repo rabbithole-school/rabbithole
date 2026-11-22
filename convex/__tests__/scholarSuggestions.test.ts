@@ -12,8 +12,11 @@ import type { Doc, Id } from "../_generated/dataModel";
 import {
   suggestionIdFromDeliveryId,
   workshopDeliveryId,
-  workshopIdeaSlackText,
+  workshopIdeaSlackParts,
+  workshopScholarReplySlackParts,
 } from "../scholarSuggestions";
+import { attachmentOwnsBlob } from "../lib/parentMessageAttachmentStorage";
+import { greyLineMessage } from "../lib/slackGreyLine";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -225,21 +228,78 @@ describe("createMine", () => {
     const longIdea =
       "When there is a math problem, show what happened there because I want to understand every step instead of only seeing a shortened title.\nAlso keep my second line <exactly>.";
 
-    expect(workshopIdeaSlackText("Kai Nakamura", longIdea)).toBe(
+    expect(workshopIdeaSlackParts("Kai Nakamura", longIdea)).toEqual([
       "💡 **Kai N.** filed a Workshop idea:\n" +
         "> When there is a math problem, show what happened there because I want to understand every step instead of only seeing a shortened title.\n" +
         "> Also keep my second line &lt;exactly&gt;.",
+      // "Kai N." already ends the sentence: no doubled full stop.
+      { grey: "Reply in this thread to write back to Kai N." },
+    ]);
+    expect(workshopIdeaSlackParts(null, "An idea").at(-1)).toEqual({
+      grey: "Reply in this thread to write back to the scholar.",
+    });
+  });
+
+  test("clips a very long idea in the Slack rendering only, with a grey marker", () => {
+    const hugeIdea = "a".repeat(10_000);
+    const parts = workshopIdeaSlackParts("Kai Nakamura", hugeIdea);
+    expect(parts[0]).not.toContain("truncated");
+    expect(parts[0]).toMatch(/a…$/);
+    expect(parts.slice(1)).toEqual([
+      { grey: "(truncated — the full idea is in Rabbithole)" },
+      { grey: "Reply in this thread to write back to Kai N." },
+    ]);
+    // The whole message still fits Slack's fallback-text cap beside blocks.
+    const message = greyLineMessage(parts, { markdown: true });
+    expect(message.text.length).toBeGreaterThan(0);
+    expect(message.text.length).toBeLessThan(4_000);
+    // The clip happens before escaping, so an entity can never be cut mid-way.
+    const [clippedAmp] = workshopIdeaSlackParts("Kai Nakamura", `${"b".repeat(3_499)}&tail`);
+    expect(clippedAmp).not.toMatch(/&(?!amp;|lt;|gt;)[a-z]*$/m);
+  });
+
+  test("a bug-report root keeps the scholar's words full size and its asides grey", () => {
+    const message = greyLineMessage(
+      workshopIdeaSlackParts("Pip Juniper", "The timer skipped a minute", "bug_report"),
+      { markdown: true },
+    );
+    expect(message.blocks).toEqual([
+      { type: "markdown", text: "🐛 **Pip J.** reported a bug:\n> The timer skipped a minute" },
+      {
+        type: "context",
+        block_id: "rh_grey_0",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: "(triage is in the bug-report channel)\nReply in this thread to write back to Pip J.",
+          },
+        ],
+      },
+    ]);
+    expect(message.text).toBe(
+      "🐛 *Pip J.* reported a bug:\n> The timer skipped a minute\n\n" +
+        "(triage is in the bug-report channel)\n\n" +
+        "Reply in this thread to write back to Pip J.",
     );
   });
 
-  test("clips a very long idea in the Slack rendering only, with a marker", () => {
-    const hugeIdea = "a".repeat(10_000);
-    const text = workshopIdeaSlackText("Kai Nakamura", hugeIdea);
-    expect(text.length).toBeLessThan(4_000);
-    expect(text).toContain("truncated — the full idea is in Rabbithole");
-    // The clip happens before escaping, so an entity can never be cut mid-way.
-    const clippedAmp = workshopIdeaSlackText("Kai Nakamura", `${"b".repeat(3_499)}&tail`);
-    expect(clippedAmp).not.toMatch(/&(?!amp;|lt;|gt;)[a-z]*$/m);
+  test("a scholar's in-app reply puts the attachment count in the grey line", () => {
+    const message = greyLineMessage(
+      workshopScholarReplySlackParts("Pip Juniper", "still happens", 2),
+      { markdown: true },
+    );
+    expect(message.blocks).toEqual([
+      { type: "markdown", text: "↩ **Pip J.** replied in the app:\n> still happens" },
+      {
+        type: "context",
+        block_id: "rh_grey_0",
+        elements: [{ type: "mrkdwn", text: "_2 attachments — open it in Rabbithole_" }],
+      },
+    ]);
+    // No attachments, no grey line.
+    expect(workshopScholarReplySlackParts("Pip Juniper", "still happens", 0)).toEqual([
+      "↩ **Pip J.** replied in the app:\n> still happens",
+    ]);
   });
 
   test("files an idea for the caller — scholarId is the caller, not spoofable", async () => {
@@ -281,53 +341,42 @@ describe("createMine", () => {
     ).rejects.toThrow(/few words/);
   });
 
-  test("rejects a 6th open idea with the friendly cap error", async () => {
+  test("has no cap on open ideas, and a staff reply never archives one", async () => {
     const t = convexTest(schema, modules);
     const scholar = await seedUser(t, "scholar", { username: "kai3" });
     await enrollAtSchool(t, scholar);
     const asKai = await withUser(t, scholar);
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       await asKai.mutation(api.scholarSuggestions.createMine, {
         text: `Idea number ${i}`,
       });
     }
-    await expect(
-      asKai.mutation(api.scholarSuggestions.createMine, { text: "One too many" }),
-    ).rejects.toThrow(/5 ideas open/);
 
-    const open = await t.run(async (ctx) =>
+    const teacher = await seedUser(t, "teacher", { username: "lehua3" });
+    await teachAtSchool(t, teacher);
+    const [first] = await t.run(async (ctx) =>
       ctx.db
         .query("scholarSuggestions")
         .withIndex("by_scholar", (q) => q.eq("scholarId", scholar))
         .collect(),
     );
-    expect(open).toHaveLength(5);
-
-    // A STAFF REPLY DOES NOT FREE A SLOT. This is the whole point of retiring
-    // the staff-set state: the cap is a prioritization lesson aimed at the kid,
-    // so an adult answering an idea must not quietly decide it's off the plate.
-    const teacher = await seedUser(t, "teacher", { username: "lehua3" });
-    await teachAtSchool(t, teacher);
     await t.run(async (ctx) =>
       ctx.runMutation(internal.scholarSuggestions.respond, {
-        suggestionId: open[0]._id,
+        suggestionId: first._id,
         authorId: teacher,
         body: "Thanks!",
         scholarLensResolved: true,
       }),
     );
-    await expect(
-      asKai.mutation(api.scholarSuggestions.createMine, { text: "Still full" }),
-    ).rejects.toThrow(/5 ideas open/);
 
-    // The SCHOLAR putting one away is what makes room.
-    await asKai.mutation(api.scholarSuggestions.setArchivedMine, {
-      suggestionId: open[0]._id,
-      archived: true,
-    });
-    await expect(
-      asKai.mutation(api.scholarSuggestions.createMine, { text: "Room again" }),
-    ).resolves.toBeDefined();
+    const open = await t.run(async (ctx) =>
+      ctx.db
+        .query("scholarSuggestions")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", scholar))
+        .filter((q) => q.eq(q.field("archivedAt"), undefined))
+        .collect(),
+    );
+    expect(open).toHaveLength(8);
   });
 
   test("routes Workshop ideas to the institution inbox, not the class EOD digest", async () => {
@@ -374,11 +423,22 @@ describe("createMine", () => {
     const [, request] = fetchMock.mock.calls[1]!;
     const posted = JSON.parse(String((request as RequestInit).body));
     expect(posted.channel).toBe("C-WORKSHOP");
-    expect(posted.markdown_text).toBe(
-      `💡 **Kai N.** filed a Workshop idea:\n> ${fullIdea}`,
+    expect(posted.markdown_text).toBeUndefined();
+    expect(posted.text).toBe(
+      `💡 *Kai N.* filed a Workshop idea:\n> ${fullIdea}\n\nReply in this thread to write back to Kai N.`,
     );
-    expect(posted.metadata).toMatchObject({
+    expect(posted.blocks).toEqual([
+      { type: "markdown", text: `💡 **Kai N.** filed a Workshop idea:\n> ${fullIdea}` },
+      {
+        type: "context",
+        block_id: "rh_grey_0",
+        elements: [{ type: "mrkdwn", text: "Reply in this thread to write back to Kai N." }],
+      },
+    ]);
+    // The thread binding is the metadata, which the grey line leaves alone.
+    expect(posted.metadata).toEqual({
       event_type: "rabbithole_workshop_idea",
+      event_payload: { delivery_id: expect.stringMatching(/^workshop-idea:/) },
     });
 
     // Ordinary group notifications remain on their linked class channel.
@@ -562,9 +622,9 @@ describe("listMine", () => {
     await asKai.mutation(api.scholarSuggestions.createMine, {
       text: "Star Map time travel",
     });
-    const asLehua = await withUser(t, lehua);
-    await asLehua.mutation(api.scholarSuggestions.respondAsStaff, {
+    await t.mutation(internal.scholarSuggestions.respondFromSlackThread, {
       suggestionId,
+      authorId: lehua,
       body: "Great idea — thanks!",
     });
 
@@ -583,64 +643,6 @@ describe("listMine", () => {
     expect(open?.answered).toBe(false);
     expect(open?.lastMessage).toMatchObject({ authorName: "You", mine: true });
     expect(open?.unread).toBe(false);
-  });
-});
-
-describe("listOpenForStaff", () => {
-  test("a teacher sees all open ideas, oldest first, joined with scholar identity", async () => {
-    const t = convexTest(schema, modules);
-    const teacher = await seedUser(t, "teacher", { username: "lehua5" });
-    const kai = await seedUser(t, "scholar", {
-      name: "Kai Nakamura",
-      username: "kai5",
-    });
-    const lani = await seedUser(t, "scholar", {
-      name: "Lani Kealoha",
-      username: "lani5",
-    });
-    // In-lens context: both scholars share the teacher's institution (the
-    // boundary filter is applied before joining scholar identity).
-    await t.run(async (ctx) => {
-      const institutionId = await ctx.db.insert("institutions", {
-        name: "Moli School",
-        slug: "moli5",
-        kind: "school",
-        isPrimary: true,
-      });
-      await ctx.db.patch(kai, { institutionId });
-      await ctx.db.patch(lani, { institutionId });
-      await ctx.db.insert("memberships", {
-        userId: teacher,
-        role: "teacher",
-        institutionId,
-      });
-    });
-    await withUser(t, kai).then((a) =>
-      a.mutation(api.scholarSuggestions.createMine, { text: "Kai idea" }),
-    );
-    await withUser(t, lani).then((a) =>
-      a.mutation(api.scholarSuggestions.createMine, { text: "Lani idea" }),
-    );
-
-    const asTeacher = await withUser(t, teacher);
-    const open = await asTeacher.query(
-      api.scholarSuggestions.listOpenForStaff,
-      {},
-    );
-    expect(open).toHaveLength(2);
-    expect(open[0].scholarName).toBe("Kai Nakamura");
-    expect(open[0].scholarUsername).toBe("kai5");
-    expect(open[0].title).toBe("Kai idea");
-    expect(open[1].scholarName).toBe("Lani Kealoha");
-  });
-
-  test("a scholar calling the staff queue is Forbidden", async () => {
-    const t = convexTest(schema, modules);
-    const scholar = await seedUser(t, "scholar", { username: "kai6" });
-    const asKai = await withUser(t, scholar);
-    await expect(
-      asKai.query(api.scholarSuggestions.listOpenForStaff, {}),
-    ).rejects.toThrow(/Forbidden/);
   });
 });
 
@@ -779,73 +781,6 @@ describe("respond (the aide tool's backing mutation)", () => {
   });
 });
 
-describe("respondAsStaff (teacher-dashboard wrapper)", () => {
-  async function seedIdea(
-    t: ReturnType<typeof convexTest>,
-    username = "kaiRS",
-  ): Promise<{
-    suggestionId: Id<"scholarSuggestions">;
-    institutionId: Id<"institutions">;
-  }> {
-    const scholar = await seedUser(t, "scholar", { username });
-    const institutionId = await t.run(async (ctx) => {
-      const institutionId = await ctx.db.insert("institutions", {
-        name: "Moli School",
-        slug: `moli-${username}`,
-        kind: "school",
-      });
-      await ctx.db.patch(scholar, { institutionId });
-      return institutionId;
-    });
-    const asKai = await withUser(t, scholar);
-    const { suggestionId } = await asKai.mutation(
-      api.scholarSuggestions.createMine,
-      { text: "Dark mode for the Sky" },
-    );
-    return { suggestionId, institutionId };
-  }
-
-  test("a teacher replies as themselves (author = caller)", async () => {
-    const t = convexTest(schema, modules);
-    const { suggestionId, institutionId } = await seedIdea(t);
-    const teacher = await seedUser(t, "teacher", { username: "lehuaRS" });
-    // Same institution as the idea's scholar → in the teacher's context.
-    await t.run((ctx) =>
-      ctx.db.insert("memberships", {
-        userId: teacher,
-        role: "teacher",
-        institutionId,
-      }),
-    );
-    const asTeacher = await withUser(t, teacher);
-
-    await asTeacher.mutation(
-      api.scholarSuggestions.respondAsStaff,
-      { suggestionId, body: "Sharing this with the team." },
-    );
-
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.archivedAt).toBeUndefined();
-    const replies = await staffReplies(t, suggestionId);
-    expect(replies.map((m) => [m.authorUserId, m.body])).toEqual([
-      [teacher, "Sharing this with the team."],
-    ]);
-  });
-
-  test("a scholar calling respondAsStaff is Forbidden", async () => {
-    const t = convexTest(schema, modules);
-    const { suggestionId } = await seedIdea(t, "kaiRS3");
-    const scholar = await seedUser(t, "scholar", { username: "malloryRS" });
-    const asScholar = await withUser(t, scholar);
-    await expect(
-      asScholar.mutation(api.scholarSuggestions.respondAsStaff, {
-        suggestionId,
-        body: "closing my own",
-      }),
-    ).rejects.toThrow(/Forbidden/);
-  });
-});
-
 // Cross-tenant isolation for the Workshop staff surface (CLAUDE.md
 // § Multi-tenancy): the role gate alone is a leak, so every read/write is
 // scoped to the caller's institution lens. Mirrors mcp.test.ts's institution
@@ -885,21 +820,6 @@ describe("institution boundary (cross-tenant lens)", () => {
     expect(rows).toEqual([]);
   });
 
-  test("listOpenForStaff hides an out-of-lens scholar's idea from a teacher at another institution", async () => {
-    const t = convexTest(schema, modules);
-    const { teacher, scholarA, scholarB } = await seedBoundaryWorld(t);
-    await fileIdeaAs(t, scholarA, "Idea from A");
-    await fileIdeaAs(t, scholarB, "Idea from B");
-
-    const asTeacher = await withUser(t, teacher);
-    const open = await asTeacher.query(
-      api.scholarSuggestions.listOpenForStaff,
-      {},
-    );
-    expect(open).toHaveLength(1);
-    expect(open[0].scholarUsername).toBe("scholar-b");
-  });
-
   test("respond (aide path) refuses an out-of-lens suggestion and leaves the row unchanged", async () => {
     const t = convexTest(schema, modules);
     const { teacher, scholarA, scholarB } = await seedBoundaryWorld(t);
@@ -924,18 +844,18 @@ describe("institution boundary (cross-tenant lens)", () => {
     expect(row?.staffResponse).toBeUndefined();
   });
 
-  test("respondAsStaff refuses an out-of-lens suggestion and leaves the row unchanged", async () => {
+  test("respondFromSlackThread refuses an out-of-lens suggestion and leaves the row unchanged", async () => {
     const t = convexTest(schema, modules);
     const { teacher, scholarA } = await seedBoundaryWorld(t);
     const suggestionId = await fileIdeaAs(t, scholarA, "Idea from A");
 
-    const asTeacher = await withUser(t, teacher);
-    await expect(
-      asTeacher.mutation(api.scholarSuggestions.respondAsStaff, {
+    expect(
+      await t.mutation(internal.scholarSuggestions.respondFromSlackThread, {
         suggestionId,
+        authorId: teacher,
         body: "cross-tenant reply",
       }),
-    ).rejects.toThrow(/Suggestion not found/);
+    ).toEqual({ status: "not_found" });
 
     const row = await t.run((ctx) => ctx.db.get(suggestionId));
     expect(row?.archivedAt).toBeUndefined();
@@ -987,11 +907,13 @@ describe("institution boundary (cross-tenant lens)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].scholarUsername).toBe("scholar-b");
 
-    const asTeacher = await withUser(t, teacher);
-    await asTeacher.mutation(
-      api.scholarSuggestions.respondAsStaff,
-      { suggestionId, body: "Sharing with the team." },
-    );
+    expect(
+      await t.mutation(internal.scholarSuggestions.respondFromSlackThread, {
+        suggestionId,
+        authorId: teacher,
+        body: "Sharing with the team.",
+      }),
+    ).toMatchObject({ status: "recorded" });
   });
 
   test("a platform admin (scholarLensResolved, no id set) still sees everything", async () => {
@@ -1010,11 +932,10 @@ describe("institution boundary (cross-tenant lens)", () => {
 
   // DEFECT 1 regression guard: an UNASSIGNED scholar (institutionId undefined)
   // rides the PRIMARY institution's lens during the pre-backfill window — the
-  // aide includes them, so the dashboard MUST too, or a child's idea silently
-  // vanishes from the queue that owes them a reply. This fails if the dashboard
-  // reverts to canUserAccessScholar (which returns false for institutionId ===
-  // undefined).
-  test("an unassigned scholar's idea is visible AND answerable on the dashboard for a primary-institution teacher", async () => {
+  // aide includes them, so the Slack reply path MUST too, or a child's idea
+  // can't be answered. This fails if the user-lens path reverts to
+  // canUserAccessScholar (which returns false for institutionId === undefined).
+  test("an unassigned scholar's idea is answerable by a primary-institution teacher", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", { username: "primary-teach" });
     const unassigned = await seedUser(t, "scholar", {
@@ -1038,25 +959,21 @@ describe("institution boundary (cross-tenant lens)", () => {
     });
     const suggestionId = await fileIdeaAs(t, unassigned, "Idea from an unassigned kid");
 
-    const asTeacher = await withUser(t, teacher);
-    const open = await asTeacher.query(
-      api.scholarSuggestions.listOpenForStaff,
-      {},
-    );
-    expect(open.map((r) => r.scholarUsername)).toContain("unassigned-nova");
-
-    await asTeacher.mutation(
-      api.scholarSuggestions.respondAsStaff,
-      { suggestionId, body: "I hear you — sharing with the team." },
-    );
+    expect(
+      await t.mutation(internal.scholarSuggestions.respondFromSlackThread, {
+        suggestionId,
+        authorId: teacher,
+        body: "I hear you — sharing with the team.",
+      }),
+    ).toMatchObject({ status: "recorded" });
     const row = await t.run((ctx) => ctx.db.get(suggestionId));
     expect(row?.archivedAt).toBeUndefined();
   });
 
   // DEFECT 2 regression guard: an out-of-lens id and a nonexistent id must
-  // produce the IDENTICAL error, so respondAsStaff can't be used as an
+  // produce the IDENTICAL error, so a reply can't be used as an
   // existence oracle for another school's suggestions.
-  test("respondAsStaff gives the SAME error for an out-of-lens id and a nonexistent id", async () => {
+  test("respond gives the SAME error for an out-of-lens id and a nonexistent id", async () => {
     const t = convexTest(schema, modules);
     const { teacher, scholarA, scholarB } = await seedBoundaryWorld(t);
     const outOfLensId = await fileIdeaAs(t, scholarA, "Idea from A");
@@ -1064,14 +981,16 @@ describe("institution boundary (cross-tenant lens)", () => {
     const deletedId = await fileIdeaAs(t, scholarB, "temp");
     await t.run((ctx) => ctx.db.delete(deletedId));
 
-    const asTeacher = await withUser(t, teacher);
     const messageFor = async (
       suggestionId: Id<"scholarSuggestions">,
     ): Promise<string> => {
       try {
-        await asTeacher.mutation(api.scholarSuggestions.respondAsStaff, {
+        await t.mutation(internal.scholarSuggestions.respond, {
           suggestionId,
+          authorId: teacher,
           body: "probe",
+          allowedScholarIds: [scholarB],
+          scholarLensResolved: true,
         });
         throw new Error("expected the mutation to reject");
       } catch (err) {
@@ -1242,7 +1161,7 @@ describe("captureFromChat (send_idea_to_teacher backing)", () => {
     expect(rows).toHaveLength(0);
   });
 
-  test("at the open-ideas cap (5) → status 'at_cap', nothing written (a prioritization moment, not a wall)", async () => {
+  test("captures past five open ideas — there is no cap", async () => {
     const t = convexTest(schema, modules);
     const kai = await seedUser(t, "scholar", { username: "kaiC6" });
     await t.run(async (ctx) => {
@@ -1258,55 +1177,14 @@ describe("captureFromChat (send_idea_to_teacher backing)", () => {
     });
     const res = await t.mutation(internal.scholarSuggestions.captureFromChat, {
       scholarId: kai,
-      title: "One too many",
+      title: "Another",
       scholarWords: "another great idea",
     });
-    expect(res.status).toBe("at_cap");
-    if (res.status === "at_cap") expect(res.cap).toBe(5);
+    expect(res.status).toBe("captured");
     const rows = await t.run(async (ctx) =>
       ctx.db.query("scholarSuggestions").collect(),
     );
-    expect(rows).toHaveLength(5);
-  });
-
-  test("a reply does not free a cap slot — only the scholar archiving does", async () => {
-    const t = convexTest(schema, modules);
-    const kai = await seedUser(t, "scholar", { username: "kaiC7" });
-    await t.run(async (ctx) => {
-      for (let i = 0; i < 5; i++) {
-        await ctx.db.insert("scholarSuggestions", {
-          scholarId: kai,
-          title: `Answered ${i}`,
-          scholarWords: "...",
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
-      }
-    });
-    // Five ideas on the board, every one of them already replied to — still
-    // full, because a reply is a comment, not a filing decision.
-    const full = await t.mutation(internal.scholarSuggestions.captureFromChat, {
-      scholarId: kai,
-      title: "No room",
-      scholarWords: "a fresh idea",
-    });
-    expect(full.status).toBe("at_cap");
-
-    const rows = await t.run(async (ctx) =>
-      ctx.db
-        .query("scholarSuggestions")
-        .withIndex("by_scholar", (q) => q.eq("scholarId", kai))
-        .collect(),
-    );
-    await t.run((ctx) =>
-      ctx.db.patch(rows[0]._id, { archivedAt: Date.now() }),
-    );
-    const res = await t.mutation(internal.scholarSuggestions.captureFromChat, {
-      scholarId: kai,
-      title: "Still room",
-      scholarWords: "a fresh idea",
-    });
-    expect(res.status).toBe("captured");
+    expect(rows).toHaveLength(6);
   });
 });
 
@@ -1536,11 +1414,131 @@ describe("respondFromSlackThread (a plain Slack thread reply)", () => {
     const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
     expect(row?.staffResponse).toBeUndefined();
   });
+
+  test("a photo-only reply is a message the scholar can open", async () => {
+    const t = convexTest(schema, modules);
+    const { scholar, teacher, suggestionId } = await seedIdeaAndTeacher(t);
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], {
+          type: "image/png",
+        }),
+      ),
+    );
+
+    const result = await t.run((ctx) =>
+      ctx.runMutation(internal.scholarSuggestions.respondFromSlackThread, {
+        suggestionId,
+        authorId: teacher,
+        body: "",
+        attachments: [{ storageId, fileName: "lucky-guess.png", mimeType: "image/png" }],
+      }),
+    );
+    expect(result).toMatchObject({ status: "recorded" });
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ body: "", source: "slack" });
+    const attachment = await t.run(async (ctx) =>
+      ctx.db
+        .query("parentMessageAttachments")
+        .withIndex("by_storage", (q) => q.eq("storageId", storageId))
+        .unique(),
+    );
+    expect(attachment).toMatchObject({
+      messageId: replies[0]._id,
+      uploaderId: teacher,
+      fileName: "lucky-guess.png",
+      mimeType: "image/png",
+      source: "upload",
+    });
+    // Retracting the reply in the app may delete the blob, as for an upload.
+    expect(
+      await t.run((ctx) => attachmentOwnsBlob(ctx, attachment!)),
+    ).toBe(true);
+
+    // The scholar's own Messages read hands them the photo.
+    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
+    const asScholar = await withUser(t, scholar);
+    const visible = await asScholar.query(
+      api.scholarMessages.getThreadAttachments,
+      { threadId: row!.threadId! },
+    );
+    expect(visible).toHaveLength(1);
+    expect(visible[0]).toMatchObject({
+      messageId: replies[0]._id,
+      fileName: "lucky-guess.png",
+      retracted: false,
+    });
+    expect(visible[0].url).toBeTruthy();
+  });
+
+  test("a stored file the app can't carry is refused server-side too", async () => {
+    // The handler screens files first; this is the backstop behind it. A
+    // refusal here is a bug, not "no such idea", so it throws and the whole
+    // write rolls back rather than leaving a half-sent reply.
+    const t = convexTest(schema, modules);
+    const { teacher, suggestionId } = await seedIdeaAndTeacher(t);
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(new Blob([new Uint8Array([1, 2, 3])], { type: "video/quicktime" })),
+    );
+
+    await expect(
+      t.run((ctx) =>
+        ctx.runMutation(internal.scholarSuggestions.respondFromSlackThread, {
+          suggestionId,
+          authorId: teacher,
+          body: "look at this",
+          attachments: [{ storageId, fileName: "clip.mov", mimeType: "video/quicktime" }],
+        }),
+      ),
+    ).rejects.toThrow("Choose a supported, non-empty attachment");
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("parentMessageAttachments")
+        .withIndex("by_storage", (q) => q.eq("storageId", storageId))
+        .collect(),
+    );
+    expect(rows).toEqual([]);
+  });
+
+  test("a blob another feature holds is never vouched for", async () => {
+    // Vouching makes the blob the replier's, visible to this child and
+    // deletable with the reply. A scholar's practice photo must never be.
+    const t = convexTest(schema, modules);
+    const { scholar, teacher, suggestionId } = await seedIdeaAndTeacher(t);
+    const storageId = await t.run(async (ctx) => {
+      const id = await ctx.storage.store(
+        new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }),
+      );
+      await ctx.db.insert("practiceWorkImages", {
+        scholarId: scholar,
+        itemId: "item-1",
+        storageId: id,
+        source: "hint",
+        createdAt: Date.now(),
+      });
+      return id;
+    });
+
+    await expect(
+      t.run((ctx) =>
+        ctx.runMutation(internal.scholarSuggestions.respondFromSlackThread, {
+          suggestionId,
+          authorId: teacher,
+          body: "",
+          attachments: [{ storageId, fileName: "work.png", mimeType: "image/png" }],
+        }),
+      ),
+    ).rejects.toThrow("Attachment is not available");
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+  });
 });
 
 // ── The scholar's own lever ─────────────────────────────────────────────
-// The five-open cap's message asks the kid "which one matters most to you?" —
-// so the kid, not a staffer, has to be the one who frees a slot.
+// The board is the kid's, so the kid — not a staffer — decides what is
+// still on their plate.
 describe("setArchivedMine (the scholar puts an idea away)", () => {
   async function seedMine(t: ReturnType<typeof convexTest>, username = "kaiAR") {
     const scholar = await seedUser(t, "scholar", { username });
@@ -1636,12 +1634,12 @@ describe("setArchivedMine (the scholar puts an idea away)", () => {
     ).rejects.toThrow(/not found/i);
   });
 
-  test("bringing one back over the cap is refused with the friendly message", async () => {
+  test("bringing one back is never refused, however many are open", async () => {
     const t = convexTest(schema, modules);
     const scholar = await seedUser(t, "scholar", { username: "kaiAR5" });
     const asScholar = await withUser(t, scholar);
     const ids: Array<Id<"scholarSuggestions">> = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       const { suggestionId } = await asScholar.mutation(
         api.scholarSuggestions.createMine,
         { text: `Idea number ${i}` },
@@ -1652,52 +1650,29 @@ describe("setArchivedMine (the scholar puts an idea away)", () => {
       suggestionId: ids[0],
       archived: true,
     });
-    // Room made, room used.
-    await asScholar.mutation(api.scholarSuggestions.createMine, {
-      text: "Room again",
+    await asScholar.mutation(api.scholarSuggestions.setArchivedMine, {
+      suggestionId: ids[0],
+      archived: false,
     });
-    await expect(
-      asScholar.mutation(api.scholarSuggestions.setArchivedMine, {
-        suggestionId: ids[0],
-        archived: false,
-      }),
-    ).rejects.toThrow(/Archive one first/);
     expect(
       (await t.run(async (ctx) => ctx.db.get(ids[0])))?.archivedAt,
-    ).toEqual(expect.any(Number));
+    ).toBeUndefined();
   });
 
   test("an archived idea leaves the staff queue", async () => {
     const t = convexTest(schema, modules);
-    const { scholar, asScholar, suggestionId } = await seedMine(t, "kaiAR6");
-    const institutionId = await t.run(async (ctx) => {
-      const id = await ctx.db.insert("institutions", {
-        name: "Moli School",
-        slug: "moli-archive-queue",
-        kind: "school",
+    const { asScholar, suggestionId } = await seedMine(t, "kaiAR6");
+    const needsReply = () =>
+      t.query(internal.scholarSuggestions.listForStaffInternal, {
+        filter: "needs_reply",
+        scholarLensResolved: true,
       });
-      await ctx.db.patch(scholar, { institutionId: id });
-      return id;
-    });
-    const teacher = await seedUser(t, "teacher", { username: "lehuaAR6" });
-    await t.run((ctx) =>
-      ctx.db.insert("memberships", {
-        userId: teacher,
-        role: "teacher",
-        institutionId,
-      }),
-    );
-    const asTeacher = await withUser(t, teacher);
-    expect(
-      await asTeacher.query(api.scholarSuggestions.listOpenForStaff, {}),
-    ).toHaveLength(1);
+    expect(await needsReply()).toHaveLength(1);
 
     await asScholar.mutation(api.scholarSuggestions.setArchivedMine, {
       suggestionId,
       archived: true,
     });
-    expect(
-      await asTeacher.query(api.scholarSuggestions.listOpenForStaff, {}),
-    ).toHaveLength(0);
+    expect(await needsReply()).toHaveLength(0);
   });
 });

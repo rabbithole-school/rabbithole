@@ -44,6 +44,7 @@ import {
   type ScholarParticipationSelection,
 } from "@/shared/scholarParticipation";
 import { EXTENDED_EDUCATION_LABEL } from "@/shared/scholarGroupRouting";
+import { formatWithdrawalDate } from "@/shared/scholarWithdrawal";
 import type { EnrollmentStanding } from "@/convex/lib/enrollmentStanding";
 import {
   type FamiliesDirectoryView,
@@ -158,6 +159,7 @@ export function AdminParentsManager({ view }: { view: FamiliesDirectoryView }) {
         image?: string | null;
         username?: string | null;
         enrollmentStanding: EnrollmentStanding;
+        withdrawnOn?: string | null;
         hasCredential?: boolean;
       }[]
     | undefined;
@@ -511,6 +513,15 @@ export function AdminParentsManager({ view }: { view: FamiliesDirectoryView }) {
                                   color="violet.600"
                                 >
                                   {EXTENDED_EDUCATION_LABEL}
+                                </Text>
+                              )}
+                              {scholar.withdrawnOn && (
+                                <Text
+                                  fontFamily="body"
+                                  fontSize="xs"
+                                  color="charcoal.400"
+                                >
+                                  Withdrawn {formatWithdrawalDate(scholar.withdrawnOn)}
                                 </Text>
                               )}
                             </VStack>

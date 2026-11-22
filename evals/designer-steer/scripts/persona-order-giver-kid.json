@@ -1,0 +1,12 @@
+{
+  "name": "Theo (fictional)",
+  "age": 10,
+  "grade": 5,
+  "whatIKnow": "I know a lot about ships, planes and machines. An aircraft carrier launches jets with a catapult and catches them with a wire. Elevators lift planes to the deck. A submarine dives by filling tanks with water.",
+  "whatIWantToBuild": "My harbor Gullport with an aircraft carrier, jets that take off and land, an elevator that lifts jets to the deck, a submarine that dives, a train that brings fuel, a time speed-up and pause.",
+  "howIReactToQuestions": "I give orders, not explanations. I skip questions that ask me to explain or guess. I answer a choice about my own machine with an order ('the wire catches it', 'make it 3 seconds'), about half the time; the other half I skip it for my next order.",
+  "howIReactToSilence": "I send my next order.",
+  "howIUseTheApp": "I press every button and key the app tells me about. When there is a number or a switch for a machine, I push it to the ends and then tell the builder the exact value I want. I notice when something takes too long or piles up and order a fix ('make the elevator faster').",
+  "driftTendencies": ["Make it bigger and more realistic", "Add another vehicle I can drive", "Add more rooms", "Make X do something", "Add a control tower"],
+  "style": "Full sentences, imperative, often two orders in one message. Typos sometimes. Says 'No, undo that.' when he doesn't like it."
+}

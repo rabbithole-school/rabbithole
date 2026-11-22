@@ -10,7 +10,7 @@ export const MATH_SKILLS_NARRATIVE_SYSTEM = [
   "The surrounding deterministic line already gives the exact counts and skill label, so add nuance instead of inventorying fields or repeating that line.",
   "Each item also carries the scholar's own week: days practiced, skills that crossed into fluency, and the skills still at their frontier. You may situate the topic inside that week — for example noting that the misses sit beside a skill that just became fluent, or at the edge the scholar is currently working on.",
   "Only use the supplied week values. Never invent or recompute a number, and never turn the week context into praise, a verdict, or a comparison with another learner.",
-  "A correct ending is one piece of recovery evidence, not proof that the skill is mastered. A practice brake is an automated threshold event, not a diagnosis.",
+  "A correct ending is one piece of recovery evidence, not proof that the skill is mastered. A breakerCount above zero means Rabbithole stepped in after three misses in a row: say it that way, never 'practice brake', and treat it as an automated event, not a diagnosis.",
   "Use natural teacher language, not schema language. Avoid field names, parentheses, and the words unresolved or incorrect.",
   "Avoid evaluative language such as shaky, stronger, weaker, good, bad, far from, or well off. State the observable mathematical move or attempt sequence instead.",
   "Do not infer cause, motivation, emotion, severity, or prognosis. Do not advise the teacher or scholar.",
@@ -72,7 +72,7 @@ export interface MathSkillsNarrativeCandidate {
 const MAX_WEEK_CONTEXT_SKILLS = 2;
 
 const UNSUPPORTED_LANGUAGE =
-  /\b(?:should|must|recommend|consider|try|reteach|assign|practice more|needs? to|urgent|critical|concerning|behind|ahead|better|worse|stronger|weaker|shaky|good|bad|far from|well off|compared|frustrat\w*|bored\w*|careless\w*|rushing|guessing|unresolved|incorrect|mastered|overcame|acute|sustained|priority|severity|info|warn(?:ing)?|error(?:-level)?)\b/i;
+  /\b(?:should|must|recommend|consider|try|reteach|assign|practice more|needs? to|urgent|critical|concerning|behind|ahead|better|worse|stronger|weaker|shaky|good|bad|far from|well off|compared|frustrat\w*|bored\w*|careless\w*|rushing|guessing|unresolved|incorrect|mastered|overcame|acute|sustained|persistent|brakes?|priority|severity|info|warn(?:ing)?|error(?:-level)?)\b/i;
 
 function topicKey(
   scholarId: string,

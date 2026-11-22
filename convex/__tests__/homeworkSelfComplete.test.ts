@@ -1,4 +1,6 @@
 import { convexTest } from "convex-test";
+import { readSchedule } from "../lib/scheduleStore";
+import { insertAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 import type { TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
@@ -213,12 +215,10 @@ describe("markHomeworkDoneForSelf (offline container's I did it)", () => {
     // Ended by the teacher → legible refusal, no write.
     await t.run(async (ctx) => {
       const a = await ctx.db.get(offline.assignmentId);
-      await ctx.db.patch(offline.assignmentId, {
-        activitySchedule: a!.activitySchedule!.map((e) => ({
+      await setSchedule(ctx, offline.assignmentId, (await readSchedule(ctx, { _id: a!._id })).map((e) => ({
           ...e,
           endsAt: Date.now() - 1000,
-        })),
-      });
+        })));
     });
     expect(
       await asKai.mutation(api.activityCompletions.markHomeworkDoneForSelf, offline),
@@ -238,7 +238,7 @@ describe("markHomeworkDoneForSelf (offline container's I did it)", () => {
         order: 0,
         scholarDescription: "Ask a grown-up about a family tradition.",
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         scholarIds: [kaiId, mayaId],
         title: "Family stories",
@@ -292,7 +292,7 @@ describe("the Run page Done line (unit assignment)", () => {
         order: 0,
         scholarDescription: "Read chapters 5–8 aloud.",
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [kaiId, mayaId],
@@ -387,12 +387,10 @@ describe("undo is scoped to the scholar's own mark", () => {
 
     await t.run(async (ctx) => {
       const a = await ctx.db.get(assignmentId);
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: a!.activitySchedule!.map((e) => ({
+      await setSchedule(ctx, assignmentId, (await readSchedule(ctx, { _id: a!._id })).map((e) => ({
           ...e,
           endsAt: Date.now() - 1000,
-        })),
-      });
+        })));
     });
     expect(
       await asKai.mutation(api.activityCompletions.undoHomeworkDoneForSelf, {
@@ -451,12 +449,10 @@ describe("webActivitySessions.finalize — the existing Done, made honest", () =
     });
     await t.run(async (ctx) => {
       const a = await ctx.db.get(assignmentId);
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: a!.activitySchedule!.map((e) => ({
+      await setSchedule(ctx, assignmentId, (await readSchedule(ctx, { _id: a!._id })).map((e) => ({
           ...e,
           endsAt: Date.now() - 1000,
-        })),
-      });
+        })));
     });
     const result = await asKai.mutation(api.webActivitySessions.finalize, {
       sessionId,
@@ -682,7 +678,7 @@ describe("finalize on lessoned web homework (the refactor off the hand-rolled in
         webUrl: "https://example.test/tide-pools",
         order: 1,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [kaiId],

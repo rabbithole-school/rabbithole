@@ -5,6 +5,7 @@ import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { emptyHealthRecordFields } from "../lib/healthRecord";
 import {
+  grantStaffCapability,
   seedOperationsStaff,
   seedScholarInInstitution,
   seedStaffWithMembership,
@@ -458,5 +459,147 @@ describe("teachers and guardians keep their access", () => {
         itemId: f.filedId,
       }),
     ).toEqual(expect.any(String));
+  });
+});
+
+// A staffer who also RUNS a unit (curriculum:edit + curriculum:run) files her
+// own class's scans. A scan filed to an assignment she owns is a hand-in on
+// her run, which curriculum:run already lets her read — so its image comes
+// back. Nothing else about the scholar opens.
+describe("operations staff who run the assignment — its filed scans", () => {
+  async function seedRunner(t: TestConvex<typeof schema>) {
+    const f = await seedFixture(t);
+    await grantStaffCapability(t, f.opsId, f.institutionId, "curriculum:edit");
+    await grantStaffCapability(t, f.opsId, f.institutionId, "curriculum:run");
+    const { unitId, ownAssignmentId, teacherAssignmentId } = await t.run(
+      async (ctx) => {
+        const unitId = await ctx.db.insert("units", {
+          teacherId: f.teacherId,
+          institutionId: f.institutionId,
+          title: "Rainforest art",
+          isActive: true,
+        } as Doc<"units">);
+        const ownAssignmentId = await ctx.db.insert("assignments", {
+          teacherId: f.opsId,
+          unitId,
+          scholarIds: [f.scholarId],
+          startedAt: Date.now(),
+        } as Doc<"assignments">);
+        const teacherAssignmentId = await ctx.db.insert("assignments", {
+          teacherId: f.teacherId,
+          unitId,
+          scholarIds: [f.scholarId],
+          startedAt: Date.now(),
+        } as Doc<"assignments">);
+        return { unitId, ownAssignmentId, teacherAssignmentId };
+      },
+    );
+    return { ...f, unitId, ownAssignmentId, teacherAssignmentId };
+  }
+
+  async function fileTo(
+    t: TestConvex<typeof schema>,
+    itemId: Id<"portfolioItems">,
+    assignmentId: Id<"assignments">,
+  ) {
+    await t.run((ctx) =>
+      ctx.db.patch(itemId, { assignmentId, assignmentStatus: "confirmed" }),
+    );
+  }
+
+  test("sees the image of a scan filed to her own assignment", async () => {
+    const t = convexTest(schema, modules);
+    const f = await seedRunner(t);
+    await fileTo(t, f.filedId, f.ownAssignmentId);
+    const asRunner = await withUser(t, f.opsId);
+
+    expect(
+      await asRunner.query(api.portfolio.getFileUrl, { itemId: f.filedId }),
+    ).toEqual(expect.any(String));
+    const feed = await asRunner.query(api.portfolio.scannerFeed, {});
+    const row = feed.processed.find((item) => item._id === f.filedId);
+    expect(row?.thumbUrl).toEqual(expect.any(String));
+
+    // Still no portfolio browsing: the scholar's record stays closed.
+    await expect(
+      asRunner.query(api.portfolio.listForScholar, { scholarId: f.scholarId }),
+    ).rejects.toThrow(/teaching access/i);
+  });
+
+  test("not for a scan filed to someone else's run of the same unit", async () => {
+    const t = convexTest(schema, modules);
+    const f = await seedRunner(t);
+    await fileTo(t, f.filedId, f.teacherAssignmentId);
+    const asRunner = await withUser(t, f.opsId);
+    expect(
+      await asRunner.query(api.portfolio.getFileUrl, { itemId: f.filedId }),
+    ).toBeNull();
+  });
+
+  test("cannot move a teacher's filed scan onto her own run to see it", async () => {
+    const t = convexTest(schema, modules);
+    const f = await seedRunner(t);
+    await fileTo(t, f.filedId, f.teacherAssignmentId);
+    const asRunner = await withUser(t, f.opsId);
+
+    await expect(
+      asRunner.mutation(api.portfolio.setAssignment, {
+        itemId: f.filedId,
+        assignmentId: f.ownAssignmentId,
+      }),
+    ).rejects.toThrow(/only teaching staff/i);
+    await expect(
+      asRunner.mutation(api.portfolio.setAssignments, {
+        itemIds: [f.filedId],
+        assignmentId: f.ownAssignmentId,
+      }),
+    ).rejects.toThrow(/only teaching staff/i);
+    const item = await t.run((ctx) => ctx.db.get(f.filedId));
+    expect(item?.assignmentId).toBe(f.teacherAssignmentId);
+    expect(
+      await asRunner.query(api.portfolio.getFileUrl, { itemId: f.filedId }),
+    ).toBeNull();
+
+    // An inbox scan she files straight to her run is fine — she could see it.
+    await asRunner.mutation(api.portfolio.assignScholar, {
+      itemId: f.inboxId,
+      scholarId: f.scholarId,
+    });
+    await asRunner.mutation(api.portfolio.setAssignment, {
+      itemId: f.inboxId,
+      assignmentId: f.ownAssignmentId,
+    });
+    expect(
+      await asRunner.query(api.portfolio.getFileUrl, { itemId: f.inboxId }),
+    ).toEqual(expect.any(String));
+  });
+
+  test("not for a scholar who is off her assignment's roster", async () => {
+    const t = convexTest(schema, modules);
+    const f = await seedRunner(t);
+    await fileTo(t, f.filedId, f.ownAssignmentId);
+    await t.run((ctx) => ctx.db.patch(f.ownAssignmentId, { scholarIds: [] }));
+    const asRunner = await withUser(t, f.opsId);
+    expect(
+      await asRunner.query(api.portfolio.getFileUrl, { itemId: f.filedId }),
+    ).toBeNull();
+  });
+
+  test("ends when her curriculum:run grant is revoked", async () => {
+    const t = convexTest(schema, modules);
+    const f = await seedRunner(t);
+    await fileTo(t, f.filedId, f.ownAssignmentId);
+    await t.run(async (ctx) => {
+      const grants = await ctx.db.query("staffCapabilityGrants").collect();
+      for (const g of grants) {
+        if (g.granteeUserId === f.opsId && g.capability === "curriculum:run") {
+          await ctx.db.patch(g._id, { revokedAt: Date.now() });
+        }
+      }
+    });
+    const asRunner = await withUser(t, f.opsId);
+    expect(
+      await asRunner.query(api.portfolio.getFileUrl, { itemId: f.filedId }),
+    ).toBeNull();
   });
 });

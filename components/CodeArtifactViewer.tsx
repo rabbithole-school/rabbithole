@@ -3,16 +3,10 @@
 import { useCallback, useState, useRef, useEffect, useMemo } from "react";
 import { Box, Flex, Text, Button, IconButton, Textarea, HStack } from "@chakra-ui/react";
 import { Code, Eye, Trash, ArrowClockwise } from "@phosphor-icons/react";
-import { useAction, useConvex, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import {
-  commitResolvedRoomSelection,
-  isRoomAppStateRateLimitErrorData,
-  ROOM_PRESENCE_HEARTBEAT_MS,
-  type RequestedRoom,
-} from "@/shared/roomAppState";
 import {
   useAppStateIframeBridge,
   useAppStateIframeSrcDoc,
@@ -20,6 +14,8 @@ import {
   type CaptureAppSnapshot,
   type AppStateHostUpdate,
 } from "@/hooks/useAppStateIframeBridge";
+import { useAppPlaySession } from "@/hooks/useAppPlaySession";
+import { createAppPlayInteractionSource } from "@/shared/appPlaySession";
 import type { AppTutorRequest } from "@/shared/appTutorRequest";
 import {
   routeAppBridgeRequest,
@@ -34,6 +30,9 @@ import {
   hasIncomingArtifactConflict,
 } from "@/shared/artifactDraftStore";
 import { appAssetRef, requestedAppAssetIds } from "@/shared/appAssets";
+import { APP_STATE_DEFAULTS_KEY } from "@/shared/appStateDefaults";
+import type { AppRuleEntry } from "@/shared/appCodeMap";
+import { AppCodeReader } from "./AppCodeReader";
 import {
   effectiveWorkshopView,
   snapshotCaptureForView,
@@ -86,6 +85,9 @@ export function CodeArtifactViewer({
   appOnly = false,
 }: CodeArtifactViewerProps) {
   const [view, setView] = useState<WorkshopView>("preview");
+  // The Code view opens as a reader (AppCodeReader: the rules and the code
+  // that uses them open, the rest folded); "Edit code" swaps in the textarea.
+  const [codeEditing, setCodeEditing] = useState(false);
   const effectiveView = effectiveWorkshopView(readOnly, view);
   const [draftController] = useState(() =>
     createArtifactDraftController(String(artifact._id)),
@@ -139,70 +141,33 @@ export function CodeArtifactViewer({
   }, [draftController]);
   const [previewKey, setPreviewKey] = useState(0);
   const artifactId = artifact._id as Id<"artifacts">;
-  const activeArtifactIdRef = useRef(artifactId);
-  useEffect(() => {
-    activeArtifactIdRef.current = artifactId;
-  }, [artifactId]);
-  const nextRoomSelectionRequestIdRef = useRef(0);
-  const [roomSelectionVersion, setRoomSelectionVersion] = useState(0);
-  const convex = useConvex();
+  // Touches, key presses and scrolls inside the app frame → play active time.
+  const [appPlayInteractions] = useState(createAppPlayInteractionSource);
   const appState = useQuery(api.appStates.getSessionState, { artifactId });
+  // The rules now, and as the app's code first wrote them: the app-state SDK
+  // keeps boot-time values under __rhDefaults, which is how the reader finds
+  // each rule's starting value in the source without help from the builder.
+  // Keyed on the rules' text, not the snapshot: a running game saves its
+  // state a few times a second, and the reader should only re-parse when a
+  // rule actually changed.
+  const codeDoc = appState?.doc as
+    | { rules?: unknown; [APP_STATE_DEFAULTS_KEY]?: { rules?: unknown } }
+    | undefined;
+  const codeRulesJson = JSON.stringify(codeDoc?.rules ?? null);
+  const codeStartingRulesJson = JSON.stringify(codeDoc?.[APP_STATE_DEFAULTS_KEY]?.rules ?? null);
+  const { codeRules, codeStartingRules } = useMemo(() => {
+    const list = (json: string) => {
+      const v: unknown = JSON.parse(json);
+      return Array.isArray(v) ? (v as AppRuleEntry[]) : undefined;
+    };
+    return { codeRules: list(codeRulesJson), codeStartingRules: list(codeStartingRulesJson) };
+  }, [codeRulesJson, codeStartingRulesJson]);
   const resolveAppAssets = useAction(
     api.appAssetHostActions.resolveArtifactAssets,
   );
   const updateAppState = useMutation(api.appStates.updateSessionState);
   const appAiSay = useAction(api.appAiActions.say);
   const appAiJudge = useAction(api.appAiActions.judge);
-  const defaultRoom = useQuery(api.rooms.defaultForArtifact, { artifactId });
-  const [requestedRoom, setRequestedRoom] = useState<
-    RequestedRoom<Id<"artifacts">, Id<"rooms">> | null
-  >(null);
-  const requestedRoomId =
-    requestedRoom?.artifactId === artifactId ? requestedRoom.roomId : null;
-  const activeRoomId: Id<"rooms"> | null | undefined =
-    requestedRoomId ??
-    (defaultRoom === undefined ? undefined : (defaultRoom?._id ?? null));
-  const sharedState = useQuery(
-    api.appStates.getRoomState,
-    activeRoomId ? { roomId: activeRoomId } : "skip",
-  );
-  const roomPresence = useQuery(
-    api.appStates.getRoomPresence,
-    activeRoomId ? { roomId: activeRoomId } : "skip",
-  );
-  const updateRoomState = useMutation(api.appStates.updateRoomState);
-  const joinRoomPresence = useMutation(api.appStates.joinRoomPresence);
-  const leaveRoomPresence = useMutation(api.appStates.leaveRoomPresence);
-
-  const resolveRoomSelection = useCallback(
-    (rawRoomId: string) => {
-      const requestId = nextRoomSelectionRequestIdRef.current++;
-      void convex
-        .query(api.rooms.resolveAccessibleForArtifact, {
-          artifactId,
-          roomId: rawRoomId,
-        })
-        .then((room) => {
-          if (
-            nextRoomSelectionRequestIdRef.current !== requestId + 1 ||
-            activeArtifactIdRef.current !== artifactId
-          ) {
-            return;
-          }
-          if (!room) {
-            // Re-send the committed room so the iframe abandons its rejected raw ID.
-            setRoomSelectionVersion((version) => version + 1);
-          }
-          setRequestedRoom((current) =>
-            commitResolvedRoomSelection(current, artifactId, room?._id ?? null),
-          );
-        })
-        .catch((error) =>
-          console.error("[rabbithole] failed to resolve shared room", error),
-        );
-    },
-    [artifactId, convex],
-  );
   const isSynced = localCode === artifact.content;
 
   // An empty (or whitespace-only) code artifact's Preview is a featureless
@@ -211,6 +176,9 @@ export function CodeArtifactViewer({
   // editable textarea (with a kid-appropriate placeholder) so an empty
   // artifact is still hand-typeable and never unmounts under the cursor.
   const isEmpty = localCode.trim() === "";
+  // The reader maps an HTML app's parts; other code (a tutor's Python
+  // snippet) keeps the plain editor.
+  const isHtml = (artifact.language ?? "html").toLowerCase() === "html";
 
   useEffect(() => {
     onSyncChange?.(isSynced);
@@ -254,28 +222,6 @@ export function CodeArtifactViewer({
       ),
     [appAiEnabled, appAiJudge, appAiSay, artifactId],
   );
-  const persistSharedState = useCallback(
-    async (roomId: Id<"rooms">, patch: Record<string, unknown>) => {
-      while (true) {
-        try {
-          return await updateRoomState({
-            roomId,
-            patch,
-          });
-        } catch (error) {
-          const data =
-            error && typeof error === "object" && "data" in error
-              ? (error as { data?: unknown }).data
-              : undefined;
-          if (!isRoomAppStateRateLimitErrorData(data)) throw error;
-          await new Promise((resolve) =>
-            setTimeout(resolve, data.retryAfterMs),
-          );
-        }
-      }
-    },
-    [updateRoomState],
-  );
   const {
     iframeRef,
     onLoad: onAppFrameLoad,
@@ -288,14 +234,7 @@ export function CodeArtifactViewer({
     onAskTutor,
     onRequest: answerAppRequest,
     onAppAiTurn,
-    shared: {
-      roomId: activeRoomId,
-      selectionVersion: roomSelectionVersion,
-      snapshot: sharedState,
-      presence: roomPresence,
-      persist: persistSharedState,
-      onSelect: resolveRoomSelection,
-    },
+    onActivity: appPlayInteractions.emit,
   });
   const requestedAssetIds = useMemo(
     () => requestedAppAssetIds(localCode),
@@ -338,6 +277,13 @@ export function CodeArtifactViewer({
       ? (assetResolution.urls ?? null)
       : null;
   const sandbox = useAppStateIframeSrcDoc(localCode, appState, assetUrls);
+  // The scholar's own app on screen is play time (owner-only; the server
+  // ignores everyone else). Code view is building, not playing.
+  useAppPlaySession(
+    artifactId,
+    effectiveView === "preview" && !isEmpty && sandbox !== null,
+    appPlayInteractions,
+  );
   if (
     assetResolution.key === assetRequestKey &&
     assetResolution.error !== undefined
@@ -366,18 +312,6 @@ export function CodeArtifactViewer({
     onSnapshotCaptureReady,
     effectiveView,
   ]);
-
-  useEffect(() => {
-    if (!activeRoomId) return;
-    void joinRoomPresence({ roomId: activeRoomId });
-    const heartbeat = setInterval(() => {
-      void joinRoomPresence({ roomId: activeRoomId });
-    }, ROOM_PRESENCE_HEARTBEAT_MS);
-    return () => {
-      clearInterval(heartbeat);
-      void leaveRoomPresence({ roomId: activeRoomId });
-    };
-  }, [activeRoomId, joinRoomPresence, leaveRoomPresence]);
 
   const save = useCallback(async (content: string) => {
     if (conflictRef.current) {
@@ -491,6 +425,8 @@ export function CodeArtifactViewer({
     const newCode = e.target.value;
     localCodeRef.current = newCode;
     setLocalCode(newCode);
+    // Typing (or pasting) keeps the editor up, even if focus never fired.
+    setCodeEditing(true);
     if (!conflictRef.current) setShowUpdateBanner(false);
     persistDraft();
     setSaveError(null);
@@ -566,7 +502,11 @@ export function CodeArtifactViewer({
                 color={view === "code" ? "white" : "charcoal.500"}
                 _hover={view === "code" ? { bg: "violet.600" } : { bg: "gray.100" }}
                 fontFamily="heading"
-                onClick={() => setView("code")}
+                onClick={() => {
+                  // Opening Code always lands on the reader, never a stale editor.
+                  setCodeEditing(false);
+                  setView("code");
+                }}
               >
                 <Code size={12} style={{ marginRight: "4px" }} />
                 Code
@@ -652,18 +592,46 @@ export function CodeArtifactViewer({
             )}
           </Box>
         )
+      ) : !codeEditing && !isEmpty && isHtml ? (
+        <Box flex={1} overflow="auto" p={3} bg="white">
+          <AppCodeReader
+            source={localCode}
+            rules={codeRules}
+            startingRules={codeStartingRules}
+            // Without a save path the editor could not keep a hand edit, so
+            // the reader offers no way into it.
+            onEdit={onSave ? () => setCodeEditing(true) : undefined}
+          />
+        </Box>
       ) : (
-        <Box flex={1} overflow="hidden" p={2}>
+        <Box flex={1} overflow="hidden" p={2} display="flex" flexDirection="column">
+          {!isEmpty && isHtml ? (
+            <Button
+              size="sm"
+              variant="plain"
+              colorPalette="violet"
+              alignSelf="flex-start"
+              px={1}
+              onClick={() => setCodeEditing(false)}
+            >
+              ‹ Back to reading
+            </Button>
+          ) : null}
           <Textarea
             value={localCode}
             onChange={handleCodeChange}
+            // Typing into an empty app must not flip to the reader on the
+            // first character: a focused editor stays the editor until
+            // "Back to reading".
+            onFocus={() => setCodeEditing(true)}
             placeholder="No code yet — your tutor can start this with you, or type here"
             _placeholder={{ color: "green.600" }}
             fontFamily="monospace"
             fontSize="xs"
             lineHeight="1.5"
             resize="none"
-            h="100%"
+            flex={1}
+            minH={0}
             bg="gray.900"
             color="green.300"
             border="none"

@@ -4,7 +4,12 @@ import {
   AUTHORED_LAUNCHPADS,
   INSTRUCTION_ANCHOR_STRANDS,
 } from "../../../seed/instructionSeed";
-import { strandInstructionKey } from "../instructionEntries";
+import { nodeInstructionKey, strandInstructionKey } from "../instructionEntries";
+
+/** The key an entry is stored under: node grain when it names a node. */
+function storedKey(lp: (typeof AUTHORED_LAUNCHPADS)[number]): string {
+  return lp.nodeKey ? nodeInstructionKey(lp.nodeKey) : strandInstructionKey(lp.domain, lp.strand);
+}
 
 // Why this file: the authored seed is the content library that actually reaches
 // a child's screen. Every entry must clear the same deterministic gate that
@@ -15,7 +20,7 @@ import { strandInstructionKey } from "../instructionEntries";
 
 describe("authored Launchpad seed — every entry passes the verifier", () => {
   for (const lp of AUTHORED_LAUNCHPADS) {
-    test(`${lp.domain}:${lp.strand} passes`, () => {
+    test(`${storedKey(lp)} passes`, () => {
       const r = verifyInstructionContent({ title: lp.title, subtitle: lp.subtitle, atoms: lp.atoms });
       // Surface the verifier's own report on failure so the fix is obvious.
       expect(r.status, r.report).toBe("passed");
@@ -27,7 +32,7 @@ describe("authored Launchpad seed — coverage + integrity", () => {
   test("every designated anchor strand has a passing Launchpad", () => {
     const passingKeys = new Set(
       AUTHORED_LAUNCHPADS.filter(
-        (lp) => verifyInstructionContent({ title: lp.title, subtitle: lp.subtitle, atoms: lp.atoms }).status === "passed",
+        (lp) => !lp.nodeKey && verifyInstructionContent({ title: lp.title, subtitle: lp.subtitle, atoms: lp.atoms }).status === "passed",
       ).map((lp) => strandInstructionKey(lp.domain, lp.strand)),
     );
     const missing = INSTRUCTION_ANCHOR_STRANDS.filter(
@@ -36,8 +41,8 @@ describe("authored Launchpad seed — coverage + integrity", () => {
     expect(missing, `anchors missing passing content: ${missing.join(", ")}`).toEqual([]);
   });
 
-  test("no duplicate strand keys in the authored set", () => {
-    const keys = AUTHORED_LAUNCHPADS.map((lp) => strandInstructionKey(lp.domain, lp.strand));
+  test("no duplicate stored keys in the authored set", () => {
+    const keys = AUTHORED_LAUNCHPADS.map(storedKey);
     expect(keys.length).toBe(new Set(keys).size);
   });
 

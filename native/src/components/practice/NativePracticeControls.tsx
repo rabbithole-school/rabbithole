@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import * as Haptics from "expo-haptics";
 import {
   ActivityIndicator,
@@ -18,11 +18,10 @@ import Reanimated, {
   withSpring,
   withTiming,
 } from "react-native-reanimated";
-import Svg, { Path, Rect, Text as SvgText } from "react-native-svg";
 
 import { useHardwareKeyboard } from "@/lib/hardwareKeyboard";
-import { KeyCaptureView, isKeyCaptureAvailable } from "@/lib/keyCapture";
-import { useColors } from "@/theme";
+import { isKeyCaptureAvailable } from "@/lib/keyCapture";
+import { fonts, useColors } from "@/theme";
 import {
   createExpressionTemplateState,
   expressionTemplateSeedFromSkeleton,
@@ -41,190 +40,26 @@ import {
   type PadAnswerType,
 } from "@/lib/practicePad";
 import { superscriptExponents } from "../../../vendor/shared/mathNotation";
+// The structure-key faces come from the MIT-licensed keypad package (vendored).
 import {
-  RADICAL_KEYPAD_PATH,
-  RADICAL_KEYPAD_VIEWBOX,
-  radicalMetrics,
-} from "@/lib/radicalGeometry";
+  GlyphFraction,
+  GlyphIndexedRoot,
+  GlyphPower,
+  GlyphSquareRoot,
+} from "../../../vendor/react-native-math-keypad/components/Glyphs";
 import { ExpressionEditor } from "./ExpressionEditor";
+import { AlgebraPadAnswer } from "./AlgebraAnswer";
+import {
+  answerFormHint,
+  usesAlgebraEditor,
+  type AnswerPalette,
+} from "../../../vendor/shared/practiceAnswerForm";
+import { TemplateKeyCaptureHost, TextKeyCapture } from "./PadKeyCapture";
 import { HardwareReturnAdvance } from "./HardwareReturnAdvance";
 import { AppTextInput } from "@/components/AppTextInput";
 
 /** Digits + variable for the template editor's on-screen number pad. */
 const TEMPLATE_GRID = ["7", "8", "9", "4", "5", "6", "1", "2", "3", "x", "0", "⌫"];
-
-/**
- * Off-screen hardware-key capture. It is the fallback for the 2-D editor when
- * the native `KeyCapture` module is absent, and it also catches edit intent
- * during first-miss feedback after iOS has blurred the visible answer field.
- *
- * NOTE: Tab and the arrow keys never reach this field — RN's iOS `onKeyPress`
- * only fires for text-producing keys (plus Backspace); UIKit consumes Tab and
- * the arrows for its own focus/selection handling and RN surfaces no event. Box
- * MOVEMENT here is tap-to-focus. The native `KeyCapture` module (preferred path,
- * see `@/lib/keyCapture`) closes that gap with a `pressesBegan`-based first
- * responder; this field remains only so an un-rebuilt binary still gets digits.
- */
-function TextKeyCapture({
-  enabled,
-  onKey,
-  onSubmit,
-  flatAnswerType,
-  allowUnit = false,
-}: {
-  enabled: boolean;
-  onKey: (key: string) => void;
-  onSubmit: () => void;
-  flatAnswerType?: PadAnswerType;
-  allowUnit?: boolean;
-}) {
-  const ref = useRef<TextInput>(null);
-  useEffect(() => {
-    if (!enabled) return;
-    const t = setTimeout(() => ref.current?.focus(), 0);
-    return () => clearTimeout(t);
-  }, [enabled]);
-  if (!enabled) return null;
-  return (
-    <AppTextInput
-      ref={ref}
-      value=""
-      onKeyPress={(e) => {
-        const k = e.nativeEvent.key;
-        if (k === "Backspace") return onKey("⌫");
-        if (k === "Enter") return;
-        if (flatAnswerType) {
-          if ([...k].length !== 1) return;
-          const normalized = sanitizePadInput(flatAnswerType, k, { allowUnit });
-          if (normalized) onKey(normalized);
-          return;
-        }
-        if (/^[0-9]$/.test(k)) return onKey(k);
-        if (k === "/" || k === "^") return onKey(k);
-        if (k === "x" || k === "X") return onKey("x");
-        // Hardware-keyboard box navigation — parity with the web editor, where
-        // Tab / arrows move between boxes.
-        //
-        // ⚠️ MEASURED ON DEVICE (iPad sim, iOS 26): these branches never fire.
-        // RN's iOS `onKeyPress` is driven by the text field's
-        // shouldChangeCharactersInRange, so only TEXT-producing keys (plus
-        // Backspace, which we do receive) reach it; UIKit consumes Tab and the
-        // arrows for its own focus/selection handling and RN surfaces no event.
-        // Digits, "/", "^" and Backspace all work from a hardware keyboard; box
-        // MOVEMENT on iPad is tap-to-focus (what the hint text tells the scholar).
-        // Kept because they're free and correct if RN ever delivers these keys;
-        // closing the gap for real needs a UIKeyCommand-based native module.
-        // (Shift-Tab can't be distinguished here either — RN onKeyPress exposes
-        // no modifier state.)
-        if (k === "Tab" || k === "\t") return onKey("Tab");
-        if (k === "ArrowRight" || k === "UIKeyInputRightArrow") return onKey("ArrowRight");
-        if (k === "ArrowLeft" || k === "UIKeyInputLeftArrow") return onKey("ArrowLeft");
-        if (k === "ArrowUp" || k === "UIKeyInputUpArrow") return onKey("ArrowUp");
-        if (k === "ArrowDown" || k === "UIKeyInputDownArrow") return onKey("ArrowDown");
-      }}
-      onChangeText={() => {}}
-      onSubmitEditing={onSubmit}
-      showSoftInputOnFocus={false}
-      autoComplete="off"
-      textContentType="none"
-      // No contextMenuHidden here, unlike the visible answer box below: this
-      // field is a 1×1 sink parked off-screen, so there is no way to tap it and
-      // the AutoFill edit menu can never be summoned on it. (Programmatic focus
-      // alone does not raise that menu — measured alongside the box below.)
-      autoCorrect={false}
-      spellCheck={false}
-      autoFocus
-      submitBehavior="submit"
-      returnKeyType="done"
-      caretHidden
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-      style={{ position: "absolute", width: 1, height: 1, left: -1000, top: 0 }}
-    />
-  );
-}
-
-/**
- * The hardware-key capture for the 2-D editor. Prefers the native `KeyCapture`
- * first responder (which delivers Tab / Shift-Tab / arrows — full parity with
- * the web editor's keyboard navigation), and falls back to the text-field-based
- * `TemplateKeyCapture` (digits + Backspace only, tap-to-move) when that native
- * module isn't in the running binary. Only one is ever mounted, since both
- * become first responder while the editor is answering.
- */
-function TemplateKeyCaptureHost({
-  enabled,
-  onKey,
-  onSubmit,
-}: {
-  enabled: boolean;
-  onKey: (key: string) => void;
-  onSubmit: () => void;
-}) {
-  if (isKeyCaptureAvailable) {
-    return <KeyCaptureView active={enabled} onKey={onKey} onSubmit={onSubmit} />;
-  }
-  return <TextKeyCapture enabled={enabled} onKey={onKey} onSubmit={onSubmit} />;
-}
-
-/** A key face that LOOKS like a stacked fraction (two boxes + a bar) — the
- *  redesign's rule that structural keys depict what they insert, not ASCII. */
-function GlyphFraction({ color }: { color: string }) {
-  return (
-    <View style={{ alignItems: "center" }}>
-      <View style={[glyphStyles.miniBox, { borderColor: color }]} />
-      <View style={[glyphStyles.miniBar, { backgroundColor: color }]} />
-      <View style={[glyphStyles.miniBox, { borderColor: color }]} />
-    </View>
-  );
-}
-
-/** A key face that LOOKS like a base box with a raised exponent box. */
-function GlyphPower({ color }: { color: string }) {
-  return (
-    <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
-      <View style={[glyphStyles.miniBox, { borderColor: color }]} />
-      <View style={[glyphStyles.miniBox, { borderColor: color, marginTop: -6, marginLeft: 1 }]} />
-    </View>
-  );
-}
-
-function GlyphSquareRoot({ color }: { color: string }) {
-  const metrics = radicalMetrics(26);
-  return (
-    <Svg accessible={false} height={28} viewBox={RADICAL_KEYPAD_VIEWBOX} width={40}>
-      <Path
-        d={RADICAL_KEYPAD_PATH}
-        fill="none"
-        stroke={color}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={metrics.strokeWidth}
-      />
-      <Rect
-        fill="none"
-        height={18}
-        rx={3}
-        stroke={color}
-        strokeWidth={1.6}
-        width={16}
-        x={21}
-        y={4}
-      />
-    </Svg>
-  );
-}
-
-function GlyphIndexedRoot({ color }: { color: string }) {
-  const metrics = radicalMetrics(26, true);
-  return (
-    <Svg accessible={false} height={28} viewBox={RADICAL_KEYPAD_VIEWBOX} width={40}>
-      <Path d={RADICAL_KEYPAD_PATH} fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth={metrics.strokeWidth} />
-      <SvgText fill={color} fontSize={9} fontWeight="600" x={1} y={9}>n</SvgText>
-      <Rect fill="none" height={18} rx={3} stroke={color} strokeWidth={1.6} width={16} x={19} y={7} />
-    </Svg>
-  );
-}
 
 const glyphStyles = StyleSheet.create({
   grid: {
@@ -234,8 +69,6 @@ const glyphStyles = StyleSheet.create({
     justifyContent: "space-between",
   },
   key: { width: "48%" },
-  miniBox: { width: 13, height: 11, borderWidth: 1.5, borderRadius: 3 },
-  miniBar: { width: 15, height: 2, marginVertical: 2, borderRadius: 1 },
 });
 
 export interface PracticePrimaryActionStyles {
@@ -360,25 +193,7 @@ function PadKey({
   );
 }
 
-export function PracticePadAnswer({
-  answerType,
-  answerShape,
-  answerFormat,
-  answerUnit,
-  value,
-  enabled,
-  focusKey,
-  controlsHidden = false,
-  unitNudge = false,
-  tactile = false,
-  fieldStyle,
-  placeholderColor,
-  styles,
-  onChange,
-  onKey,
-  onSubmit,
-  onRetryIntent,
-}: {
+export type PracticePadAnswerProps = {
   answerType: PadAnswerType;
   /** "twoD" ⇒ a genuine fraction/power/root answer that uses the 2-D box editor.
    *  Absent ⇒ a plain/remainder expression that uses the ordinary keypad. */
@@ -411,7 +226,87 @@ export function PracticePadAnswer({
   onSubmit: () => void;
   /** Present only for first-miss feedback; tapping or editing retries in place. */
   onRetryIntent?: () => void;
-}) {
+  /** Which extra keys the on-screen ALGEBRA pad shows. Present (or a
+   *  `solutionSet` answer) ⇒ the algebra editor + keypad replace the number
+   *  pad. Absent ⇒ every behaviour below is unchanged. */
+  answerPalette?: AnswerPalette;
+  /** The item's requested answer form (contract §3): one hint line under the
+   *  box ("Answer in factored form."). */
+  answerForm?: string;
+  /** The grader said "right value, not yet in the form asked": a calm line
+   *  under the box. The answer stays as typed for the scholar to edit. */
+  formNudge?: string | null;
+};
+
+/**
+ * The typed-answer surface: the ALGEBRA pad for an item with an answer palette
+ * or a solution set, otherwise the number pad / 2-D box editor. Both get the
+ * form hint and the form nudge under the box.
+ */
+export function PracticePadAnswer(props: PracticePadAnswerProps) {
+  const colors = useColors();
+  const hint = answerFormHint(props.answerForm);
+  const nudge = props.formNudge && !props.controlsHidden ? props.formNudge : null;
+  const belowField =
+    hint || nudge ? (
+      <View style={{ width: "100%", gap: 4 }}>
+        {hint ? <Text style={[props.styles.keyboardHint, { paddingVertical: 0 }]}>{hint}</Text> : null}
+        {nudge ? (
+          <Text
+            style={{
+              fontFamily: fonts.semibold,
+              fontSize: 15,
+              lineHeight: 21,
+              color: colors.charcoal,
+              textAlign: "center",
+            }}
+            accessibilityLiveRegion="polite"
+          >
+            {nudge}
+          </Text>
+        ) : null}
+      </View>
+    ) : null;
+  if (usesAlgebraEditor({ answerType: props.answerType, answerPalette: props.answerPalette })) {
+    return (
+      <AlgebraPadAnswer
+        palette={props.answerPalette ?? "algebra"}
+        solutionSet={props.answerType === "solutionSet"}
+        enabled={props.enabled}
+        focusKey={props.focusKey}
+        controlsHidden={props.controlsHidden ?? false}
+        fieldStyle={props.fieldStyle}
+        styles={props.styles}
+        belowField={belowField}
+        onChange={props.onChange}
+        onSubmit={props.onSubmit}
+        onRetryIntent={props.onRetryIntent}
+      />
+    );
+  }
+  return <ClassicPadAnswer {...props} belowField={belowField} />;
+}
+
+function ClassicPadAnswer({
+  answerType,
+  answerShape,
+  answerFormat,
+  answerUnit,
+  value,
+  enabled,
+  focusKey,
+  controlsHidden = false,
+  unitNudge = false,
+  tactile = false,
+  fieldStyle,
+  placeholderColor,
+  styles,
+  onChange,
+  onKey,
+  onSubmit,
+  onRetryIntent,
+  belowField,
+}: PracticePadAnswerProps & { belowField: ReactNode }) {
   const colors = useColors();
   const hardwareKeyboard = useHardwareKeyboard();
   const inputRef = useRef<TextInput>(null);
@@ -558,6 +453,7 @@ export function PracticePadAnswer({
         ) : (
           editorField
         )}
+        {belowField}
 
         <TemplateKeyCaptureHost
           enabled={hardwareKeyboard && enabled && !controlsHidden}
@@ -776,6 +672,7 @@ export function PracticePadAnswer({
       />
 
       {unitNudgeLine}
+      {belowField}
 
       {hardwareKeyboard ? (
         <>

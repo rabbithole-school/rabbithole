@@ -94,6 +94,7 @@ export function useVoiceDictation(
   // actually started (or bailed). Guards the getUserMedia await against a
   // double-click firing two starts on the same token.
   const startingRef = useRef(false);
+  const attemptRef = useRef(0);
 
   const transcribe = useAction(api.audioActions.transcribe);
 
@@ -105,6 +106,7 @@ export function useVoiceDictation(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      attemptRef.current += 1;
       cancelledRef.current = true;
       releaseMic(micToken);
       const recorder = recorderRef.current;
@@ -233,6 +235,9 @@ export function useVoiceDictation(
     // await; cleared on every exit below.
     if (startingRef.current) return;
     startingRef.current = true;
+    const attempt = ++attemptRef.current;
+    const isCurrent = () =>
+      mountedRef.current && attemptRef.current === attempt;
 
     latchedRef.current = !!opts?.latched;
     spokeRef.current = false;
@@ -250,16 +255,16 @@ export function useVoiceDictation(
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
-      setError("Microphone access denied.");
-      startingRef.current = false;
+      if (isCurrent()) {
+        setError("Microphone access denied.");
+        startingRef.current = false;
+      }
       return;
     }
 
-    // Unmounted while the permission prompt was open: the component is gone,
-    // so release the stream and bail without claiming.
-    if (!mountedRef.current) {
+    // Permission may arrive after cancellation or after a newer take starts.
+    if (!isCurrent()) {
       stream.getTracks().forEach((t) => t.stop());
-      startingRef.current = false;
       return;
     }
 
@@ -283,7 +288,7 @@ export function useVoiceDictation(
       recorder = new MediaRecorder(stream, { mimeType });
 
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
+        if (isCurrent() && e.data.size > 0) chunksRef.current.push(e.data);
       };
 
       recorder.onstop = async () => {
@@ -292,15 +297,9 @@ export function useVoiceDictation(
         // already stopped the tracks). Drop the single-owner claim too so
         // another instance can record.
         stream.getTracks().forEach((t) => t.stop());
+        if (!isCurrent()) return;
         stopLevelMonitor();
         releaseMic(micToken);
-
-        // Unmounted mid-recording (surface closed): the mic is already released;
-        // never set state or emit a transcript for a gone component.
-        if (!mountedRef.current) {
-          cancelledRef.current = false;
-          return;
-        }
 
         // If cancelled, discard audio and return to idle
         if (cancelledRef.current) {
@@ -324,17 +323,18 @@ export function useVoiceDictation(
         setState("transcribing");
         try {
           const audioBase64 = await blobToBase64(blob);
+          if (!isCurrent()) return;
           const result = await transcribe({ audioBase64, mimeType, sessionId });
           // The transcribe round-trip is async — the consumer may have unmounted
           // while it was in flight; don't emit into a gone input.
-          if (result.text && mountedRef.current) {
+          if (result.text && isCurrent()) {
             voiceMark("transcript");
             onTranscript(result.text);
           }
         } catch {
-          if (mountedRef.current) setError("Transcription failed. Please try again.");
+          if (isCurrent()) setError("Transcription failed. Please try again.");
         } finally {
-          if (mountedRef.current) setState("idle");
+          if (isCurrent()) setState("idle");
         }
       };
 
@@ -365,13 +365,19 @@ export function useVoiceDictation(
     }
   }, [state]);
 
-  /** Stop recording and discard audio without transcribing. */
+  /** Discard the take, including permission and transcription still in flight. */
   const cancelRecording = useCallback(() => {
-    if (state === "recording" && recorderRef.current) {
-      cancelledRef.current = true;
-      recorderRef.current.stop();
-    }
-  }, [state]);
+    attemptRef.current += 1;
+    startingRef.current = false;
+    cancelledRef.current = true;
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    recorder?.stream.getTracks().forEach((track) => track.stop());
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    stopLevelMonitor();
+    releaseMic(micToken);
+    if (mountedRef.current) setState("idle");
+  }, [micToken, stopLevelMonitor]);
 
   const toggleRecording = useCallback(async () => {
     if (state === "transcribing") return;

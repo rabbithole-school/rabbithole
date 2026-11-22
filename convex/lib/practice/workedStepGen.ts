@@ -96,6 +96,16 @@ function placeWord(n: number): string {
 
 // ── Fraction arithmetic ─────────────────────────────────────────────────────
 
+/**
+ * True when `num/den` is ALREADY the canonical answer — nothing to simplify.
+ * A final step that then asks "Write 3/5 in simplest form: ?" prints its own
+ * answer in the blank (decision board, 2026-11-20). The builders below fold
+ * the last computation into the blank instead, so the scholar still does it.
+ */
+function alreadySimplest(num: number, den: number, answer: TypedAnswer): boolean {
+  return formatAnswer(answer) === `${num}/${den}`;
+}
+
 /** a/d ± b/d (like denominators). */
 export function fractionAddSubtractLikeSteps(
   a: number,
@@ -106,6 +116,18 @@ export function fractionAddSubtractLikeSteps(
 ): WorkedStep[] {
   const num = op === "+" ? a + b : a - b;
   const verb = op === "+" ? "add" : "subtract";
+  if (alreadySimplest(num, d, answer)) {
+    return [
+      {
+        text: `The denominators are the same (${d}), so keep it and ${verb} the numerators: ${a}/${d} ${op} ${b}/${d} = (${a} ${op} ${b})/${d}.`,
+        blankText: `Keep the denominator and ${verb} the numerators: ?`,
+      },
+      {
+        text: `${verb === "add" ? "Add" : "Subtract"} the numerators: (${a} ${op} ${b})/${d} = ${formatAnswer(answer)}, which is already in simplest form.`,
+        blankText: `Work out ${a} ${op} ${b} and keep the denominator ${d}: ?`,
+      },
+    ];
+  }
   return [
     {
       text: `The denominators are the same (${d}), so keep it and ${verb} the numerators: ${a} ${op} ${b} = ${num}.`,
@@ -155,6 +177,18 @@ export function fractionTimesWholeSteps(
   b: number,
   answer: TypedAnswer,
 ): WorkedStep[] {
+  if (alreadySimplest(n * a, b, answer)) {
+    return [
+      {
+        text: `Multiply the whole number by the numerator and keep the denominator: ${n} × ${a}/${b} = (${n} × ${a})/${b}.`,
+        blankText: `Multiply the whole number by the numerator: ?`,
+      },
+      {
+        text: `Multiply: (${n} × ${a})/${b} = ${formatAnswer(answer)}, which is already in simplest form.`,
+        blankText: `Work out ${n} × ${a} and keep the denominator ${b}: ?`,
+      },
+    ];
+  }
   return [
     {
       text: `Multiply the whole number by the numerator and keep the denominator: ${n} × ${a} = ${n * a}, over ${b}.`,
@@ -175,6 +209,18 @@ export function fractionMultiplySteps(
   d: number,
   answer: TypedAnswer,
 ): WorkedStep[] {
+  if (alreadySimplest(a * c, b * d, answer)) {
+    return [
+      {
+        text: `Multiply straight across, top times top and bottom times bottom: ${a}/${b} × ${c}/${d} = (${a} × ${c})/(${b} × ${d}).`,
+        blankText: "Multiply the numerators, then the denominators: ?",
+      },
+      {
+        text: `Multiply: (${a} × ${c})/(${b} × ${d}) = ${formatAnswer(answer)}, which is already in simplest form.`,
+        blankText: `Work out ${a} × ${c} on top and ${b} × ${d} on the bottom: ?`,
+      },
+    ];
+  }
   return [
     {
       text: `Multiply straight across: ${a} × ${c} = ${a * c} on top, ${b} × ${d} = ${b * d} on the bottom.`,
@@ -601,6 +647,20 @@ export function probabilityFractionSteps(
   total: number,
   answer: TypedAnswer,
 ): WorkedStep[] {
+  if (alreadySimplest(favorable, total, answer)) {
+    // Revealing both counts would leave nothing to do but copy them, so the
+    // scaffold reveals only the total and the blank is the count itself.
+    return [
+      {
+        text: `A probability is the favorable outcomes over all the equally likely outcomes. Here there are ${total} equally likely outcomes, so the fraction is over ${total}.`,
+        blankText: "Count all the equally likely outcomes: ?",
+      },
+      {
+        text: `Count the favorable outcomes: there ${favorable === 1 ? "is" : "are"} ${favorable} out of ${total}, and that is already in simplest form, so the probability is ${formatAnswer(answer)}.`,
+        blankText: `Count the favorable outcomes and write them over ${total}: ?`,
+      },
+    ];
+  }
   return [
     {
       text: `Count the favorable outcomes (${favorable}) out of all the equally likely outcomes (${total}).`,
@@ -916,26 +976,28 @@ export function primeCompositeSteps(
   ];
 }
 
-/** Read an exponent off a given prime factorization. When the asked prime has
- *  an EXPLICIT exponent, the rule ("read the small raised number") scaffolds
- *  without answering. When the asked exponent is the implicit 1, the only rule
- *  that helps IS the answer ("no raised number means 1") — there is no honest
- *  scaffold, so return [] and let the coach carry it, matching the
- *  intermediate-equals-answer precedents above. */
-export function primeFactorizationExponentSteps(
+/** A prime's exponent in n's factorization, found by dividing n by the prime
+ *  until it no longer goes in evenly. The chain of quotients is the scaffold;
+ *  the final move counts the divisions, which no earlier step states. */
+export function primeExponentByDivisionSteps(
+  n: number,
   prime: number,
-  factorizationText: string,
   answer: TypedAnswer,
 ): WorkedStep[] {
-  if (answer.type === "integer" && answer.value === 1) return [];
+  const chain = [n];
+  while (chain[chain.length - 1] % prime === 0) chain.push(chain[chain.length - 1] / prime);
+  const divisions = chain.length - 1;
+  if (divisions < 1) return [];
+  const last = chain[chain.length - 1];
+  const shown = chain.join(` ÷ ${prime} → `);
   return [
     {
-      text: `A prime's exponent is the small raised number written just after it in the factorization.`,
-      blankText: `Where do you read a prime's exponent? (the small raised number after it)`,
+      text: `Divide by ${prime} as long as it goes in evenly: ${shown}. ${last} is not divisible by ${prime}, so stop.`,
+      blankText: `Keep dividing ${n} by ${prime} until it no longer goes in evenly: ?`,
     },
     {
-      text: `In ${factorizationText}, the exponent of ${prime} is ${formatAnswer(answer)}.`,
-      blankText: `Read the exponent of ${prime} in ${factorizationText}: ?`,
+      text: `You divided by ${prime} ${divisions === 1 ? "once" : `${divisions} times`}, so ${prime} appears ${formatAnswer(answer)} ${divisions === 1 ? "time" : "times"} in the prime factorization of ${n}.`,
+      blankText: `Count how many times you divided by ${prime}: ?`,
     },
   ];
 }

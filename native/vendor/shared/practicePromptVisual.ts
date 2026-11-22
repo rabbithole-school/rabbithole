@@ -6,6 +6,20 @@
 // direct parser (`./fractions`) FractionText uses, so both the stem and every
 // figure's in-visual numerals read identically.
 import { hasFraction, parseFractions, type FractionNode } from "./fractions";
+import {
+  curvePathD,
+  polynomialCurve,
+  polynomialSketchCurve,
+  rationalCurve,
+  sampleCurve,
+  transformCurve,
+  type CurvePoint,
+  type CurveRational,
+  type CurveWindow,
+  type CurveZero,
+  type FunctionParent,
+  type SampleableCurve,
+} from "./functionCurves";
 
 /**
  * Font size for a practice card's STEM text, shared by the web
@@ -166,6 +180,11 @@ export type CoordinatePlanePromptVisual = {
   points: CoordinatePoint[];
   /** Optional path through the listed points; polygon closes back to the first point. */
   connect?: "segments" | "polygon";
+  /**
+   * Optional axis names drawn at the positive end of each axis. `{ x: "Re",
+   * y: "Im" }` makes this the complex plane (the point (a, b) is a + bi).
+   */
+  axisLabels?: { x: string; y: string };
 };
 
 export type RectangularPrismPromptVisual = {
@@ -287,6 +306,73 @@ export type NumberLinePromptVisual = {
   axisLabel?: string;
 };
 
+/** Options every function-plot curve form shares. */
+export type FunctionPlotCurveOptions = {
+  /** Optional short name drawn near the curve's right end (e.g. "f", "g"). */
+  label?: string;
+  /**
+   * Draw only this x-range (either end optional). Mark a domain endpoint with a
+   * `points` entry (`open: true` for a hollow dot). With 2–3 curves and their
+   * domains this draws a piecewise function.
+   */
+  domain?: { from?: number; to?: number };
+  /**
+   * Arrowheads where the curve leaves the window, so "keeps going" is drawn.
+   * Default true; a domain endpoint never gets one.
+   */
+  arrows?: boolean;
+};
+
+/**
+ * One curve on a function plot, in one of the three forms Algebra 2 graphs
+ * use (the same shapes the `functionGraph` manipulative grades against):
+ *   • transform  — y = a·f(b(x − h)) + k for a parent function f; b is 1
+ *                  (default) or −1, a flip left–right (f(−x), √(−x), 2^(−x))
+ *   • polynomial — leading · Π (x − zᵢ)^mᵢ, real values; `sketch: true` draws
+ *                  the shared normalised sketch instead (same zeros, bounces,
+ *                  crossings and end signs, y-scale meaningless — the y-axis
+ *                  numbers are then not drawn)
+ *   • rational   — horizontal + scale / Π (x − vᵢ), with optional `holes`
+ *                  (hollow dots at removable discontinuities)
+ */
+export type FunctionPlotCurve =
+  | ({ form: "transform"; parent: FunctionParent; a: number; h: number; k: number; b?: number } & FunctionPlotCurveOptions)
+  | ({ form: "polynomial"; zeros: CurveZero[]; leading: number; sketch?: boolean } & FunctionPlotCurveOptions)
+  | ({ form: "rational"; rational: CurveRational } & FunctionPlotCurveOptions);
+
+export type FunctionPlotPoint = {
+  x: number;
+  y: number;
+  /** Optional short name displayed beside the marker. */
+  label?: string;
+  /** Hollow dot: the point is NOT on the graph (an excluded endpoint, a hole). */
+  open?: boolean;
+};
+
+/**
+ * Display-only graph of one to three functions on a whole-unit grid, for typed
+ * items that read a graph. Asymptotes are drawn only when listed — an item that
+ * ASKS for an asymptote must not show it. A piecewise function is 2–3 curves,
+ * each with a `domain`, plus `points` (open or closed) at the joins.
+ */
+export type FunctionPlotPromptVisual = {
+  kind: "functionPlot";
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+  /** One to three curves, drawn teal, warm, then violet. */
+  curves: FunctionPlotCurve[];
+  /** Optional marked points (e.g. intercepts, a vertex, endpoints). */
+  points?: FunctionPlotPoint[];
+  /** Optional dashed asymptote lines. */
+  asymptotes?: { vertical?: number[]; horizontal?: number[] };
+  /** Optional shaded vertical band from x = from to x = to (an interval). */
+  shadeX?: { from: number; to: number };
+  /** Optional dashed mirror line y = x (for a function and its inverse). */
+  referenceLine?: "y=x";
+};
+
 export type PracticePromptVisual =
   | CountablesPromptVisual
   | GroupsPromptVisual
@@ -302,7 +388,8 @@ export type PracticePromptVisual =
   | PictographPromptVisual
   | BarGraphPromptVisual
   | LinePlotPromptVisual
-  | NumberLinePromptVisual;
+  | NumberLinePromptVisual
+  | FunctionPlotPromptVisual;
 
 export type CountablePoint = {
   index: number;
@@ -541,6 +628,48 @@ export type CoordinatePlaneGeometry = {
   points: CoordinatePlotPoint[];
   path?: string;
   closePath: boolean;
+  /** Axis names at the positive end of each axis (x label is right-aligned). */
+  axisLabels?: { x: GeometryLabel; y: GeometryLabel };
+};
+
+export type FunctionPlotCurveGeometry = {
+  index: number;
+  /** SVG path data for the whole curve (several sub-paths when it breaks). */
+  d: string;
+  /** Filled arrowheads (SVG path data) where the curve leaves the window. */
+  arrows: string[];
+  /** Hollow dots (pixel centres) at a rational's removable discontinuities. */
+  holes: Array<{ x: number; y: number }>;
+  label?: GeometryLabel;
+};
+
+export type FunctionPlotPointGeometry = {
+  index: number;
+  x: number;
+  y: number;
+  plotX: number;
+  plotY: number;
+  open: boolean;
+  label?: GeometryLabel;
+};
+
+export type FunctionPlotGeometry = {
+  width: number;
+  height: number;
+  plotX: number;
+  plotY: number;
+  plotWidth: number;
+  plotHeight: number;
+  verticalLines: CoordinateGridLine[];
+  horizontalLines: CoordinateGridLine[];
+  xTicks: CoordinateTick[];
+  yTicks: CoordinateTick[];
+  curves: FunctionPlotCurveGeometry[];
+  asymptotes: GeometryLine[];
+  points: FunctionPlotPointGeometry[];
+  shade?: { x: number; y: number; width: number; height: number };
+  /** The dashed y = x mirror line, clipped to the plot. */
+  referenceLine?: GeometryLine;
 };
 
 export type PrismEdge = GeometryLine & {
@@ -815,6 +944,7 @@ export function makeCoordinatePlanePromptVisual({
   gridStep,
   points,
   connect,
+  axisLabels,
 }: Omit<CoordinatePlanePromptVisual, "kind">): CoordinatePlanePromptVisual {
   const [safeXMin, safeXMax] = sanitizeAxisRange(xMin, xMax);
   const [safeYMin, safeYMax] = sanitizeAxisRange(yMin, yMax);
@@ -833,6 +963,66 @@ export function makeCoordinatePlanePromptVisual({
       label: point.label,
     })),
     connect,
+    ...(axisLabels
+      ? {
+          axisLabels: {
+            x: sanitizeGraphLabel(axisLabels.x, "x", 6),
+            y: sanitizeGraphLabel(axisLabels.y, "y", 6),
+          },
+        }
+      : {}),
+  };
+}
+
+export function makeFunctionPlotPromptVisual({
+  xMin,
+  xMax,
+  yMin,
+  yMax,
+  curves,
+  points,
+  asymptotes,
+  shadeX,
+  referenceLine,
+}: Omit<FunctionPlotPromptVisual, "kind">): FunctionPlotPromptVisual {
+  const [safeXMin, safeXMax] = sanitizeAxisRange(Math.floor(xMin), Math.ceil(xMax));
+  const [safeYMin, safeYMax] = sanitizeAxisRange(Math.floor(yMin), Math.ceil(yMax));
+  const inX = (x: number) => Number.isFinite(x) && x >= safeXMin && x <= safeXMax;
+  const inY = (y: number) => Number.isFinite(y) && y >= safeYMin && y <= safeYMax;
+  return {
+    kind: "functionPlot",
+    xMin: safeXMin,
+    xMax: safeXMax,
+    yMin: safeYMin,
+    yMax: safeYMax,
+    curves: curves.slice(0, FUNCTION_PLOT_MAX_CURVES),
+    ...(points
+      ? {
+          points: points.slice(0, 8).map((point) => ({
+            x: clampNumber(point.x, safeXMin, safeXMax),
+            y: clampNumber(point.y, safeYMin, safeYMax),
+            ...(point.label ? { label: sanitizeGraphLabel(point.label, "", 8) } : {}),
+            ...(point.open ? { open: true } : {}),
+          })),
+        }
+      : {}),
+    ...(asymptotes
+      ? {
+          asymptotes: {
+            vertical: (asymptotes.vertical ?? []).filter(inX).slice(0, 3),
+            horizontal: (asymptotes.horizontal ?? []).filter(inY).slice(0, 3),
+          },
+        }
+      : {}),
+    ...(shadeX && Number.isFinite(shadeX.from) && Number.isFinite(shadeX.to)
+      ? {
+          shadeX: {
+            from: clampNumber(Math.min(shadeX.from, shadeX.to), safeXMin, safeXMax),
+            to: clampNumber(Math.max(shadeX.from, shadeX.to), safeXMin, safeXMax),
+          },
+        }
+      : {}),
+    ...(referenceLine === "y=x" ? { referenceLine } : {}),
   };
 }
 
@@ -1058,6 +1248,9 @@ export function angleFigureAccessibilityLabel(spec: AngleFigurePromptVisual): st
 
 export function coordinatePlaneAccessibilityLabel(spec: CoordinatePlanePromptVisual): string {
   const points = spec.points.map((point) => `${point.label} at ${formatNumber(point.x)}, ${formatNumber(point.y)}`);
+  const axes = spec.axisLabels
+    ? ` The horizontal axis is labeled ${spec.axisLabels.x} and the vertical axis ${spec.axisLabels.y}.`
+    : "";
   const connection = spec.connect === "polygon"
     ? " The points form a closed polygon."
     : spec.connect === "segments"
@@ -1065,7 +1258,35 @@ export function coordinatePlaneAccessibilityLabel(spec: CoordinatePlanePromptVis
       : "";
   return `Coordinate plane from ${formatNumber(spec.xMin)} to ${formatNumber(spec.xMax)} on x and ${formatNumber(spec.yMin)} to ${formatNumber(spec.yMax)} on y${
     points.length > 0 ? `, with ${points.join("; ")}` : ""
-  }.${connection}`;
+  }.${connection}${axes}`;
+}
+
+/**
+ * Describes what is VISIBLE — the window, marked points, drawn asymptotes and
+ * a shaded interval — and never the curve's equation, which is often exactly
+ * what the item asks the scholar to read off the graph.
+ */
+export function functionPlotAccessibilityLabel(spec: FunctionPlotPromptVisual): string {
+  const n = spec.curves.length;
+  const parts = [
+    `Graph of ${n === 1 ? "a function" : `${n} functions`} on a grid from x = ${formatNumber(spec.xMin)} to ${formatNumber(spec.xMax)} and y = ${formatNumber(spec.yMin)} to ${formatNumber(spec.yMax)}`,
+  ];
+  const points = (spec.points ?? []).map(
+    (point) =>
+      `${point.label ? `${point.label} ` : ""}${point.open ? "an open dot " : ""}at (${formatNumber(point.x)}, ${formatNumber(point.y)})`,
+  );
+  if (points.length > 0) parts.push(`marked points ${points.join("; ")}`);
+  const asymptotes = [
+    ...(spec.asymptotes?.vertical ?? []).map((x) => `x = ${formatNumber(x)}`),
+    ...(spec.asymptotes?.horizontal ?? []).map((y) => `y = ${formatNumber(y)}`),
+  ];
+  if (asymptotes.length > 0) parts.push(`dashed asymptotes at ${asymptotes.join(" and ")}`);
+  if (spec.shadeX) {
+    parts.push(`shading from x = ${formatNumber(spec.shadeX.from)} to x = ${formatNumber(spec.shadeX.to)}`);
+  }
+  if (spec.referenceLine === "y=x") parts.push("the dashed line y = x");
+  const sketch = spec.curves.some((curve) => curve.form === "polynomial" && curve.sketch);
+  return `${parts.join(", with ")}.${sketch ? " The curve is a sketch, so its heights are not to scale." : ""}`;
 }
 
 export function rectangularPrismAccessibilityLabel(spec: RectangularPrismPromptVisual): string {
@@ -2075,6 +2296,246 @@ export function coordinatePlaneGeometry(
     points,
     path,
     closePath: spec.connect === "polygon" && points.length >= 3,
+    ...(spec.axisLabels ? { axisLabels: coordinateAxisLabels(spec.axisLabels, xMin, xMax, yMin, yMax, scaleX, scaleY, plotX, plotY, plotWidth, plotHeight) } : {}),
+  };
+}
+
+function coordinateAxisLabels(
+  labels: { x: string; y: string },
+  xMin: number,
+  xMax: number,
+  yMin: number,
+  yMax: number,
+  scaleX: (x: number) => number,
+  scaleY: (y: number) => number,
+  plotX: number,
+  plotY: number,
+  plotWidth: number,
+  plotHeight: number,
+): { x: GeometryLabel; y: GeometryLabel } {
+  const axisY = yMin <= 0 && yMax >= 0 ? scaleY(0) : plotY + plotHeight;
+  const axisX = xMin <= 0 && xMax >= 0 ? scaleX(0) : plotX;
+  return {
+    x: { text: labels.x, x: plotX + plotWidth - 4, y: axisY - 7 },
+    y: { text: labels.y, x: axisX + 7, y: plotY + 14 },
+  };
+}
+
+const FUNCTION_PLOT_MAX_PLOT_WIDTH = 280;
+const FUNCTION_PLOT_MAX_PLOT_HEIGHT = 250;
+/** Three curves is enough for a piecewise function of three pieces. */
+export const FUNCTION_PLOT_MAX_CURVES = 3;
+const ARROW_LENGTH = 10;
+const ARROW_HALF_WIDTH = 5;
+
+function functionPlotSampleable(curve: FunctionPlotCurve, window: CurveWindow): SampleableCurve | null {
+  switch (curve.form) {
+    case "transform":
+      return transformCurve(curve.parent, { a: curve.a, h: curve.h, k: curve.k, b: curve.b });
+    case "polynomial":
+      // A sketch keeps the zeros, multiplicities and leading sign — only the
+      // y-scale changes, by a positive factor — so it can never show a wrong
+      // sign, zero, or bounce/cross.
+      return curve.sketch
+        ? polynomialSketchCurve(curve.zeros, curve.leading, window)
+        : polynomialCurve(curve.zeros, curve.leading);
+    case "rational":
+      return rationalCurve(curve.rational);
+    default:
+      return null;
+  }
+}
+
+/**
+ * Arrowheads at the ends of a curve's polylines that leave the window — through
+ * the top or bottom edge, or through a side where the rule is still defined just
+ * beyond it. An end at a `domain` bound or a natural start (√ at x = h) gets none.
+ */
+function curveArrows(
+  lines: CurvePoint[][],
+  window: CurveWindow,
+  drawn: { from: number; to: number },
+  f: (x: number) => number,
+  toPx: (p: CurvePoint) => { x: number; y: number },
+): string[] {
+  const near = (a: number, b: number) => Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(b));
+  const leaves = (p: CurvePoint): boolean => {
+    if (near(p.y, window.yMin) || near(p.y, window.yMax)) return true;
+    const side = near(p.x, window.xMin) ? -1 : near(p.x, window.xMax) ? 1 : 0;
+    if (side === 0) return false;
+    // A domain bound that sits on the window edge is an endpoint, not an exit.
+    if (side === -1 && !near(drawn.from, window.xMin)) return false;
+    if (side === 1 && !near(drawn.to, window.xMax)) return false;
+    return Number.isFinite(f(p.x + side * 0.01));
+  };
+  const arrows: string[] = [];
+  const round = (n: number) => Math.round(n * 100) / 100;
+  for (const line of lines) {
+    for (const atEnd of [false, true]) {
+      const tip = atEnd ? line[line.length - 1] : line[0];
+      if (!leaves(tip)) continue;
+      const tipPx = toPx(tip);
+      // Direction from a point a few pixels back along the curve.
+      let backPx = tipPx;
+      for (let i = 1; i < line.length; i++) {
+        const candidate = toPx(atEnd ? line[line.length - 1 - i] : line[i]);
+        backPx = candidate;
+        if (Math.hypot(candidate.x - tipPx.x, candidate.y - tipPx.y) >= 6) break;
+      }
+      const dx = tipPx.x - backPx.x;
+      const dy = tipPx.y - backPx.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      const ux = dx / len;
+      const uy = dy / len;
+      const baseX = tipPx.x - ux * ARROW_LENGTH;
+      const baseY = tipPx.y - uy * ARROW_LENGTH;
+      arrows.push(
+        `M${round(tipPx.x)} ${round(tipPx.y)} L${round(baseX - uy * ARROW_HALF_WIDTH)} ${round(baseY + ux * ARROW_HALF_WIDTH)} L${round(baseX + uy * ARROW_HALF_WIDTH)} ${round(baseY - ux * ARROW_HALF_WIDTH)} Z`,
+      );
+    }
+  }
+  return arrows;
+}
+
+export function functionPlotGeometry(spec: FunctionPlotPromptVisual): FunctionPlotGeometry {
+  const [xMin, xMax] = sanitizeAxisRange(spec.xMin, spec.xMax);
+  const [yMin, yMax] = sanitizeAxisRange(spec.yMin, spec.yMax);
+  const spanX = xMax - xMin;
+  const spanY = yMax - yMin;
+  // Square units, so a slope of 1 reads as 45° and a parabola isn't squashed.
+  const unit = Math.min(FUNCTION_PLOT_MAX_PLOT_WIDTH / spanX, FUNCTION_PLOT_MAX_PLOT_HEIGHT / spanY);
+  const plotWidth = unit * spanX;
+  const plotHeight = unit * spanY;
+  const plotX = 40;
+  const plotY = 16;
+  const width = plotX + plotWidth + 26;
+  const height = plotY + plotHeight + 30;
+  const scaleX = (x: number) => plotX + (x - xMin) * unit;
+  const scaleY = (y: number) => plotY + (yMax - y) * unit;
+  const step = Math.max(spanX, spanY) > 14 ? 2 : 1;
+  const verticalLines: CoordinateGridLine[] = axisValues(xMin, xMax, step).map((value) => ({
+    value,
+    x1: scaleX(value),
+    y1: plotY,
+    x2: scaleX(value),
+    y2: plotY + plotHeight,
+    axis: Math.abs(value) < 1e-9,
+  }));
+  const horizontalLines: CoordinateGridLine[] = axisValues(yMin, yMax, step).map((value) => ({
+    value,
+    x1: plotX,
+    y1: scaleY(value),
+    x2: plotX + plotWidth,
+    y2: scaleY(value),
+    axis: Math.abs(value) < 1e-9,
+  }));
+  const window = { xMin, xMax, yMin, yMax };
+  const toPx = (p: { x: number; y: number }) => ({ x: scaleX(p.x), y: scaleY(p.y) });
+  const curves: FunctionPlotCurveGeometry[] = [];
+  spec.curves.slice(0, FUNCTION_PLOT_MAX_CURVES).forEach((curve, index) => {
+    const sampleable = functionPlotSampleable(curve, window);
+    if (!sampleable) return;
+    const from = Math.max(xMin, Number.isFinite(curve.domain?.from) ? (curve.domain!.from as number) : xMin);
+    const to = Math.min(xMax, Number.isFinite(curve.domain?.to) ? (curve.domain!.to as number) : xMax);
+    if (!(to > from)) return;
+    const drawnWindow = { xMin: from, xMax: to, yMin, yMax };
+    const lines = sampleCurve(sampleable, drawnWindow);
+    const lastLine = lines[lines.length - 1];
+    const end = lastLine ? lastLine[lastLine.length - 1] : undefined;
+    const holes =
+      curve.form === "rational"
+        ? (curve.rational.holes ?? [])
+            .filter((c) => Number.isFinite(c) && c >= from && c <= to)
+            .map((c) => ({ c, y: sampleable.f(c) }))
+            .filter(({ y }) => Number.isFinite(y) && y >= yMin && y <= yMax)
+            .map(({ c, y }) => toPx({ x: c, y }))
+        : [];
+    curves.push({
+      index,
+      d: curvePathD(lines, toPx),
+      arrows: curve.arrows === false ? [] : curveArrows(lines, window, { from, to }, sampleable.f, toPx),
+      holes,
+      ...(curve.label && end
+        ? {
+            label: {
+              text: curve.label,
+              x: Math.min(scaleX(end.x) + 4, plotX + plotWidth + 2),
+              y: Math.max(plotY + 12, Math.min(plotY + plotHeight - 4, scaleY(end.y) - 6)),
+            },
+          }
+        : {}),
+    });
+  });
+  const asymptotes: GeometryLine[] = [
+    ...(spec.asymptotes?.vertical ?? [])
+      .filter((x) => Number.isFinite(x) && x >= xMin && x <= xMax)
+      .map((x) => ({ x1: scaleX(x), y1: plotY, x2: scaleX(x), y2: plotY + plotHeight })),
+    ...(spec.asymptotes?.horizontal ?? [])
+      .filter((y) => Number.isFinite(y) && y >= yMin && y <= yMax)
+      .map((y) => ({ x1: plotX, y1: scaleY(y), x2: plotX + plotWidth, y2: scaleY(y) })),
+  ];
+  const points: FunctionPlotPointGeometry[] = (spec.points ?? []).slice(0, 8).map((point, index) => {
+    const x = clampNumber(point.x, xMin, xMax);
+    const y = clampNumber(point.y, yMin, yMax);
+    const px = scaleX(x);
+    const py = scaleY(y);
+    return {
+      index,
+      x,
+      y,
+      plotX: px,
+      plotY: py,
+      open: point.open === true,
+      ...(point.label ? { label: { text: point.label, x: px + 8, y: py - 8 } } : {}),
+    };
+  });
+  let referenceLine: GeometryLine | undefined;
+  if (spec.referenceLine === "y=x") {
+    const lo = Math.max(xMin, yMin);
+    const hi = Math.min(xMax, yMax);
+    if (hi > lo) referenceLine = { x1: scaleX(lo), y1: scaleY(lo), x2: scaleX(hi), y2: scaleY(hi) };
+  }
+  // A sketch's heights mean nothing, so the y-axis carries no numbers.
+  const sketched = spec.curves.some((curve) => curve.form === "polynomial" && curve.sketch);
+  let shade: FunctionPlotGeometry["shade"];
+  if (spec.shadeX) {
+    const from = clampNumber(Math.min(spec.shadeX.from, spec.shadeX.to), xMin, xMax);
+    const to = clampNumber(Math.max(spec.shadeX.from, spec.shadeX.to), xMin, xMax);
+    shade = { x: scaleX(from), y: plotY, width: (to - from) * unit, height: plotHeight };
+  }
+  const xAxisY = yMin <= 0 && yMax >= 0 ? scaleY(0) : plotY + plotHeight;
+  const yAxisX = xMin <= 0 && xMax >= 0 ? scaleX(0) : plotX;
+  return {
+    width,
+    height,
+    plotX,
+    plotY,
+    plotWidth,
+    plotHeight,
+    verticalLines,
+    horizontalLines,
+    xTicks: verticalLines
+      .filter((line) => Math.abs(line.value) >= 1e-9)
+      .map((line) => ({
+        value: line.value,
+        text: formatNumber(line.value),
+        x: line.x1,
+        y: Math.min(xAxisY + 15, plotY + plotHeight + 19),
+      })),
+    yTicks: horizontalLines
+      .filter((line) => !sketched && Math.abs(line.value) >= 1e-9)
+      .map((line) => ({
+        value: line.value,
+        text: formatNumber(line.value),
+        x: Math.max(yAxisX - 5, plotX - 9),
+        y: line.y1 + 4,
+      })),
+    curves,
+    asymptotes,
+    points,
+    ...(shade ? { shade } : {}),
+    ...(referenceLine ? { referenceLine } : {}),
   };
 }
 

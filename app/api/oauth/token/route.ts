@@ -6,9 +6,13 @@
 //
 //   - authorization_code → auth:signIn with the "mcp" credentials
 //     provider (convex/auth.ts), which consumes the one-shot code from
-//     mcpOauth.approve and verifies PKCE.
+//     mcpOauth.approve, verifies PKCE, and opens the session together with
+//     its connection record (mcpOauth.openSession).
 //   - refresh_token → auth:signIn { refreshToken } (the same call the
 //     web client uses to refresh a session; tokens rotate).
+//
+// After either grant, recordSession tells Convex the connection is in use,
+// which pushes the session's end date out (mcpOauth.recordMySession).
 
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "@/convex/_generated/api";
@@ -44,12 +48,14 @@ function tokenSuccess(tokens: { token: string; refreshToken: string }): Response
 }
 
 /**
- * Record the freshly-minted MCP session in the management sidecar so the
- * user can see + revoke it (Account Details → "Connect Claude"). We
- * authenticate a throwaway client AS the new session, so the mutation reads
- * its own sessionId — there's no way to register a session you don't hold.
- * Pass `clientId` on the initial exchange; omit on refresh (just bumps
- * lastSeen). Best-effort: a tracking hiccup must never fail token issuance.
+ * Tell Convex this MCP connection is in use: it bumps lastSeen and pushes the
+ * session's end date out, so a connection that keeps refreshing never hits
+ * the fixed 30-day session lifetime. We authenticate a throwaway client AS
+ * the session, so the mutation reads its own sessionId — there's no way to
+ * renew a session you don't hold. The `clientId` passed on the code exchange
+ * is ignored by current Convex code (openSession records the client) and
+ * only matters while an older backend is still deployed. Best-effort: a
+ * hiccup must never fail token issuance, and the next refresh renews anyway.
  */
 async function recordSession(
   accessToken: string,

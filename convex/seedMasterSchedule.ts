@@ -12,6 +12,7 @@ import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { isTeacherRole } from "./lib/roles";
+import { syncClassesForGroupPeriod, syncClassesForPlacements } from "./lib/classLink";
 
 export const seedSample = internalMutation({
   args: { force: v.optional(v.boolean()) },
@@ -41,14 +42,16 @@ export const seedSample = internalMutation({
       .withIndex("by_period", (q) => q.eq("periodId", periodId))
       .collect();
     if (existingBlocks.length > 0) {
-      if (!force) {
-        return { skipped: true, reason: "term already has a schedule", periodId, term: period.label };
-      }
       const existingPlacements = await ctx.db
         .query("schedulePlacements")
         .withIndex("by_period", (q) => q.eq("periodId", periodId))
         .collect();
+      if (!force) {
+        await syncClassesForPlacements(ctx, existingPlacements);
+        return { skipped: true, reason: "term already has a schedule", periodId, term: period.label };
+      }
       for (const p of existingPlacements) await ctx.db.delete(p._id);
+      await syncClassesForPlacements(ctx, existingPlacements);
       for (const b of existingBlocks) await ctx.db.delete(b._id);
     }
 
@@ -206,35 +209,9 @@ export const seedSample = internalMutation({
       }
     }
 
-    // 7. An out-of-order unit sequence: two activities share a sequenceId, but the
-    //    later step sits EARLIER in the week than the first, so the grid flags
-    //    both chips out-of-order (the "teacher called an audible" case). Both on
-    //    otherwise-free Block C days, so it doesn't also trip conflict/overload.
-    if (g1) {
-      const seqId = "seed-seq-aqua";
-      await ctx.db.insert("schedulePlacements", {
-        periodId,
-        groupId: g1._id,
-        subject: "Aquaponics · step 1",
-        weekday: 4,
-        blockId: blockId["block-c"],
-        teacherId: t0,
-        sequenceId: seqId,
-        sequenceIndex: 0,
-      });
-      await ctx.db.insert("schedulePlacements", {
-        periodId,
-        groupId: g1._id,
-        subject: "Aquaponics · step 2",
-        weekday: 2,
-        blockId: blockId["block-c"],
-        teacherId: t0,
-        sequenceId: seqId,
-        sequenceIndex: 1,
-      });
-      placed += 2;
+    for (const group of groups) {
+      await syncClassesForGroupPeriod(ctx, periodId, group._id);
     }
-
     return { skipped: false, periodId, term: period.label, blocks: blockDefs.length, placements: placed };
   },
 });

@@ -161,6 +161,54 @@ export async function sendParentEmail(opts: {
   return json.id ?? "sent";
 }
 
+/**
+ * A family conversation's message, copied to one of the school's teachers
+ * (parentMessageStaffEmail.ts). The subject is the family email's subject
+ * prefixed with the scholar's first name, so each conversation stays one
+ * thread in the teacher's mail client and they can tell families apart.
+ */
+export function renderStaffFamilyMessage(p: {
+  authorName: string;
+  scholarFirstName: string | null;
+  threadSubjectBody: string;
+  /** The opening message's author, for an opener with no text. */
+  threadOpenerName: string;
+  body: string;
+  attachmentNames: string[];
+  portalUrl: string;
+  canReplyByEmail: boolean;
+}): { subject: string; html: string; text: string } {
+  const family = p.scholarFirstName?.trim()
+    ? `${p.scholarFirstName.trim()}'s family`
+    : "A family";
+  const topic = subjectFromFirstMessage(p.threadSubjectBody, p.threadOpenerName);
+  const subject = `${family}: ${topic}`;
+  const attached =
+    p.attachmentNames.length > 0
+      ? `Attached: ${p.attachmentNames.join(", ")}`
+      : "";
+  const footer = p.canReplyByEmail
+    ? "Reply to this email to answer. Your reply goes to the family in Rabbithole."
+    : "";
+  const html = `
+  <div>
+    <p><strong>${esc(p.authorName)}:</strong> ${renderBodyHtml(p.body)}${
+      attached ? `<br /><em>${esc(attached)}</em>` : ""
+    }</p>
+  </div>
+  <div style="color:#666;margin-top:24px;">
+    ${footer ? `${esc(footer)}<br />` : ""}<a href="${escAttr(p.portalUrl)}" style="color:#666;"><em>Open in Rabbithole</em></a>
+  </div>`;
+  const text = [
+    `${p.authorName}: ${messagePlainText(p.body)}`,
+    ...(attached ? [attached] : []),
+    "",
+    ...(footer ? [footer] : []),
+    `Open in Rabbithole: ${p.portalUrl}`,
+  ].join("\n");
+  return { subject, html, text };
+}
+
 /** wa.me click-to-chat link for the school's WhatsApp number, if configured. */
 export function schoolWhatsAppLink(prefill?: string): string | null {
   const num = (process.env.SCHOOL_WHATSAPP_NUMBER ?? "").replace(/[^\d]/g, "");
@@ -181,11 +229,26 @@ export function neutralFromHeader(): string {
   return `Rabbithole <${parentMessageFromAddress()}>`;
 }
 
-/** The per-thread Reply-To address routed through Resend receiving. */
-export function replyAddressForThread(threadId: string): string | null {
+/** The per-thread Reply-To address routed through Resend receiving. A staff
+ *  copy adds its recipient's token (lib/staffReplyToken.ts). */
+export function replyAddressForThread(
+  threadId: string,
+  staffToken?: string,
+): string | null {
   const domain = process.env.PARENT_INBOUND_DOMAIN?.trim();
   if (!domain) return null;
-  return `reply+${threadId}@${domain}`;
+  return `reply+${threadId}${staffToken ? `.${staffToken}` : ""}@${domain}`;
+}
+
+/** The thread id and optional staff token in a routed reply address. */
+export function parseThreadReplyAddress(
+  address: string,
+): { threadId: string; staffToken?: string } | null {
+  const match = /reply\+([a-z0-9]+)(?:\.([a-z0-9]+))?@/i.exec(address);
+  if (!match) return null;
+  return match[2]
+    ? { threadId: match[1], staffToken: match[2] }
+    : { threadId: match[1] };
 }
 
 /**

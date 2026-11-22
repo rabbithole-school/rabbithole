@@ -205,7 +205,7 @@ export default function SchoolStaffPage() {
           {canManage && <AddStaffButton />}
         </HStack>
 
-        <Box borderWidth="1px" borderColor="gray.200" borderRadius="xl" overflow="hidden" bg="white">
+        <Box borderWidth="1px" borderColor="gray.200" borderRadius="xl" overflowX="auto" bg="white">
           <Table.Root size="sm">
             <Table.Header>
               <Table.Row bg="gray.50">

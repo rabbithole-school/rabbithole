@@ -115,6 +115,13 @@ async function withPdfDocument<T>(
  * `transparent: false` fills the bitmap white first, so scans get a white
  * background rather than a transparent halo.
  *
+ * `renderFormFields: true` draws a fillable PDF's typed values and ticked
+ * boxes. The library default is false, which left every field of an uploaded,
+ * filled-in form blank in its thumbnail (TRA-138). Scanner PDFs have no form
+ * fields, so it changes nothing for them. In @hyzyla/pdfium 2.1.13, turning it
+ * on for a page that already rendered without it crashes the wasm; this module
+ * renders each document exactly once, so that never happens here.
+ *
  * Size: the wrapper computes `floor(floor(width) * scale)`, so we pass the
  * already-rounded pixel size with `scale: 1` and do the DPI arithmetic in one
  * expression — `(points * dpi) / 72` is exact for the common page sizes, where
@@ -134,6 +141,7 @@ async function renderPageRgba(
     render: "bitmap",
     colorSpace: "BGRA",
     transparent: false,
+    renderFormFields: true,
   });
   return { data: render.data, width: render.width, height: render.height };
 }

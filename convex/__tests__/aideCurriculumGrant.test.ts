@@ -401,7 +401,7 @@ describe("unit tenancy regressions to rule out", () => {
       callerUserId: home.teacher.id,
       surface: "private",
     })) as unknown as Tool[];
-    const assign = tools.find((x) => x.name === "assign_unit")!;
+    const assign = tools.find((x) => x.name === "give")!;
     const res = await assign
       .run({ unitId: otherUnit, scholarNames: [home.scholars[0].name] })
       .catch((e: unknown) => String(e));

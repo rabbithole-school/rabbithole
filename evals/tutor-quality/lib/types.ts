@@ -21,6 +21,11 @@ export interface Turn {
   content: string;
 }
 
+/** The scholar-started chat a regenerate run rebuilds (TutorCase.sessionShape). */
+export type SessionShape =
+  | { kind: "ownQuestChat"; unitTitle: string }
+  | { kind: "seedChat"; topic: string; domain: string | null };
+
 export interface FixtureSecondBeat {
   scholarReply: string;
   followThroughMust: string[];
@@ -54,6 +59,11 @@ export interface TutorCase {
   /** Regenerate mode: render the open-exploration "Wrap up" note, as the live
    *  tutor does for a session with no activity (set by --offers-wrap-up). */
   offersWrapUp?: boolean;
+  /** Regenerate mode: rebuild the context of a chat the scholar started
+   *  themselves, as getSessionContext assembles it: their own Quest's
+   *  activity-less chat, or a seed chat with no activity. Both get the Wrap up
+   *  note and no create_code. Absent = the bare prompt (no unit, no seed). */
+  sessionShape?: SessionShape;
   scoringTarget?: string;
   preferredOutcome?: string;
   secondBeat?: FixtureSecondBeat;

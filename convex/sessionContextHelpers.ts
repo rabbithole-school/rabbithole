@@ -163,11 +163,16 @@ export type SeedRow = {
   domain?: string;
   approachHint?: string;
   suggestionType: string;
+  origin: string;
 };
 
 /**
- * Merge active (teacher-approved) and pending (unreviewed) seeds into one list,
- * approved first, each stamped with an `approved` flag for the prompt builder.
+ * Merge active and pending seeds into one list, each stamped with the
+ * `approved` flag the prompt builder labels "Teacher-approved".
+ *
+ * `approved` means a teacher planted it: status active AND origin `teacher`.
+ * Active alone is not enough. Stories, badge follows, parked ideas and the sky
+ * generator's stars are all written `active` with no teacher involved.
  */
 export function mergeSeeds(
   activeSeeds: SeedRow[],
@@ -181,7 +186,7 @@ export function mergeSeeds(
     approved,
   });
   return [
-    ...activeSeeds.map((s) => shape(s, true)),
+    ...activeSeeds.map((s) => shape(s, s.origin === "teacher")),
     ...pendingSeeds.map((s) => shape(s, false)),
   ];
 }
@@ -202,18 +207,18 @@ export type ScheduleEntryLite = {
  * neither applies. `now` is injected for determinism.
  */
 export function resolveTimingContext(args: {
-  activitySchedule: ScheduleEntryLite[] | undefined;
+  schedule: ScheduleEntryLite[] | undefined;
   sessionActivityId: Id<"activities"> | undefined;
   sessionStartedAt: number;
   unitDurationMinutes: number | null | undefined;
   now: number;
 }): TimingContext | null {
-  const { activitySchedule, sessionActivityId, sessionStartedAt, now } = args;
+  const { schedule, sessionActivityId, sessionStartedAt, now } = args;
   const unitDurationMinutes = args.unitDurationMinutes ?? null;
 
   let classFocusEndsAt: number | null = null;
-  if (activitySchedule) {
-    for (const entry of activitySchedule) {
+  if (schedule) {
+    for (const entry of schedule) {
       if (entry.mode !== "classFocus") continue;
       if (!entry.endsAt || entry.endsAt <= now) continue;
       if (sessionActivityId && entry.activityId !== sessionActivityId) continue;

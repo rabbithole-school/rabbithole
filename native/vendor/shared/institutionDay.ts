@@ -157,6 +157,14 @@ export function dayStartForDayKey(
   return withinOrAfter;
 }
 
+/** Last millisecond of a named local day (handles 23- and 25-hour days). */
+export function dayEndForDayKey(
+  dayKey: string,
+  timeZone = DEFAULT_TIMEZONE,
+): number {
+  return dayStartForDayKey(shiftDayKey(dayKey, 1), timeZone) - 1;
+}
+
 /**
  * First millisecond of the local day containing an instant.
  */
@@ -262,6 +270,97 @@ export function institutionDayAt(
 }
 
 /**
+ * The one due-date format: weekday + month + day, "Thu, Nov 5", with the year
+ * appended only when it differs from the current institution year
+ * ("Tue, Jan 5, 2027"). Every scholar-facing due date goes through this, so a
+ * late item can never read as a bare weekday that looks like this week.
+ */
+export function formatDueDate(
+  dueAt: number,
+  nowMs: number,
+  timeZone: string,
+): string {
+  const sameYear =
+    dayKeyForTimezone(dueAt, timeZone).slice(0, 4) ===
+    dayKeyForTimezone(nowMs, timeZone).slice(0, 4);
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  }).format(new Date(dueAt));
+}
+
+/** Whole calendar days from `fromDayKey` to `toDayKey` (negative = earlier). */
+export function daysBetweenDayKeys(fromDayKey: string, toDayKey: string): number {
+  const from = parseDayKey(fromDayKey);
+  const to = parseDayKey(toDayKey);
+  return Math.round(
+    (Date.UTC(to.year, to.month - 1, to.day) -
+      Date.UTC(from.year, from.month - 1, from.day)) /
+      86_400_000,
+  );
+}
+
+/**
+ * The relative day heading a scholar reads over a group of work, shared by
+ * the Homework section (verb "due") and "Coming up" (verb "starts"). Calendar days in
+ * the institution's time zone, counted between day keys:
+ *
+ *   today            "Due today"
+ *   tomorrow         "Due tomorrow"
+ *   2 to 6 days out  "Due Wednesday · in 3 days"
+ *   7+ days out      "Due Mon, Nov 23 · in 15 days" (year added when it differs)
+ *   an earlier day   "Was due Sat, Nov 7" / "Started Sat, Nov 7"
+ *
+ * The weekday stands alone only inside the next six days, where it can name
+ * one day; the count after it says which. Further out the date uses the same
+ * form as the "was due Sat, Nov 7" chip (`formatDueDate`).
+ */
+export function formatRelativeDayHeading(
+  dayKey: string,
+  todayKey: string,
+  /** null: no verb ("Saturday · in 3 days"), for a day whose rows each say
+   *  what they are. */
+  verb: "due" | "starts" | null,
+): string {
+  const { year } = parseDayKey(dayKey);
+  // The key already IS the institution-local date, so read it in UTC.
+  const date = new Date(`${dayKey}T12:00:00Z`);
+  const days = daysBetweenDayKeys(todayKey, dayKey);
+  if (verb === null) {
+    const label = formatRelativeDayHeading(dayKey, todayKey, "due").replace(
+      /^(Was due|Due) /,
+      "",
+    );
+    return label.charAt(0).toUpperCase() + label.slice(1);
+  }
+  const lead = verb === "due" ? "Due" : "Starts";
+  const shortDate = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(String(year) === todayKey.slice(0, 4) ? {} : { year: "numeric" }),
+  }).format(date);
+
+  if (days < 0) {
+    return `${verb === "due" ? "Was due" : "Started"} ${shortDate}`;
+  }
+  if (days === 0) return `${lead} today`;
+  if (days === 1) return `${lead} tomorrow`;
+  if (days <= 6) {
+    const weekday = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      weekday: "long",
+    }).format(date);
+    return `${lead} ${weekday} · in ${days} days`;
+  }
+  return `${lead} ${shortDate} · in ${days} days`;
+}
+
+/**
  * The one homework-deadline primitive: institution-day status + human phrase,
  * derived together so they can never disagree.
  *
@@ -271,21 +370,19 @@ export function institutionDayAt(
  *     institution timezone. Day-key granularity (not `dueAt <= now`) so
  *     "due today" owns the entire due day and overdue starts at 00:00 the next
  *     institution day — no overlap, no gap.
- *   - phrase in the institution's calendar:
- *       upcoming: "due tomorrow" (1d) · "due Thursday" (2–6d) · "due Mar 14"
- *                 (same year) · "due Mar 14, 2027" (other year)
+ *   - phrase, always through `formatDueDate`:
  *       dueToday: "due today"
- *       overdue:  "was due yesterday" (1d) · "was due Monday" (2–6d) · "was due
- *                 Mar 14" (same year) · "was due Mar 14, 2025" (other year)
+ *       upcoming: "due tomorrow" (next day) · "due Thu, Nov 5" (anything later)
+ *       overdue:  "was due Fri, Oct 16" (always the full date)
  *
- * `was due X` deliberately shares the scholar's "Catch up" lexicon — one
- * vocabulary across scholar pills and teacher badges. The phrase includes its
- * own "due"/"was due", so callers add only their separator (e.g. " · ").
+ * Only "today" and "tomorrow" may be relative. A weekday never stands alone:
+ * "was due Thursday" and "due Thursday" used to read the same at a glance.
+ * (Group headings add a day count instead: `formatRelativeDayHeading`.)
+ * The phrase includes its own "due"/"was due", so callers add only their
+ * separator (e.g. " · ").
  *
- * Day distance is computed from `dayStartForTimezone` values (DST-safe:
- * rounding whole days absorbs the 23-/25-hour DST day). Callers must derive
- * this from the ticking `nowMs`, never a stored field (see the design memo,
- * T11), so a row crossing institution midnight re-derives on the next tick.
+ * Callers must derive this from the ticking `nowMs`, never a stored field
+ * (T11), so a row crossing institution midnight re-derives on the next tick.
  */
 export function dueStatus(
   dueAt: number | null | undefined,
@@ -294,41 +391,21 @@ export function dueStatus(
 ): { status: "upcoming" | "dueToday" | "overdue"; phrase: string } | null {
   if (dueAt == null) return null;
 
-  const nowDayStart = dayStartForTimezone(nowMs, timeZone);
-  const dueDayStart = dayStartForTimezone(dueAt, timeZone);
-  const dayDistance = Math.round(
-    (dueDayStart - nowDayStart) / (24 * 60 * 60 * 1000),
-  );
+  const nowKey = dayKeyForTimezone(nowMs, timeZone);
+  const dueKey = dayKeyForTimezone(dueAt, timeZone);
 
-  if (dayDistance === 0) return { status: "dueToday", phrase: "due today" };
-
-  const dueDate = new Date(dueAt);
-  const weekday = () =>
-    new Intl.DateTimeFormat("en-US", { timeZone, weekday: "long" }).format(
-      dueDate,
-    );
-  const sameYear =
-    dayKeyForTimezone(dueAt, timeZone).slice(0, 4) ===
-    dayKeyForTimezone(nowMs, timeZone).slice(0, 4);
-  const calendarDate = () =>
-    new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      month: "short",
-      day: "numeric",
-      ...(sameYear ? {} : { year: "numeric" }),
-    }).format(dueDate);
-
-  const abs = Math.abs(dayDistance);
-  const when =
-    abs === 1
-      ? dayDistance > 0
-        ? "tomorrow"
-        : "yesterday"
-      : abs >= 2 && abs <= 6
-        ? weekday()
-        : calendarDate();
-
-  return dayDistance > 0
-    ? { status: "upcoming", phrase: `due ${when}` }
-    : { status: "overdue", phrase: `was due ${when}` };
+  if (dueKey === nowKey) return { status: "dueToday", phrase: "due today" };
+  if (dueKey < nowKey) {
+    return {
+      status: "overdue",
+      phrase: `was due ${formatDueDate(dueAt, nowMs, timeZone)}`,
+    };
+  }
+  if (dueKey === shiftDayKey(nowKey, 1)) {
+    return { status: "upcoming", phrase: "due tomorrow" };
+  }
+  return {
+    status: "upcoming",
+    phrase: `due ${formatDueDate(dueAt, nowMs, timeZone)}`,
+  };
 }

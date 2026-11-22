@@ -5,7 +5,7 @@
  * calls a "message" or "transition" room cue (see convex/roomCues.ts). One
  * banner per live cue; the caller renders up to one per kind (message,
  * transition never replace each other). Quiet styling deliberately distinct
- * from the orange focus-lock banner (a restriction) and the violet angle
+ * from the class-focus banner and the violet angle
  * banner (personal context) — this is a passed-through, teacher-spoken note,
  * so it reads as an announcement, not a warning.
  *

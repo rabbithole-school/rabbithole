@@ -21,6 +21,7 @@ import {
   mayReadTeacherArchived,
 } from "./lib/teacherArchive";
 import { isTeacherArchived } from "../shared/teacherArchive";
+import { rehearsalBuildRequest } from "./lib/appActivity";
 
 type MutationCtx = GenericMutationCtx<DataModel>;
 
@@ -204,7 +205,7 @@ export const recordTurnRevision = internalMutation({
     // A free-play copy (TRA-489) never writes back into the activity's starter.
     if (session?.isTestDrive && session.activityId && session.freePlay !== true) {
       const activity = await ctx.db.get(session.activityId);
-      if (activity?.appRequest != null) {
+      if ((await rehearsalBuildRequest(ctx, activity, session)) != null) {
         autosaveActivityId = session.activityId;
       }
     }

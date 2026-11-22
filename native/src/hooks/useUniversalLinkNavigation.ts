@@ -65,7 +65,11 @@ export function useUniversalLinkNavigation(): void {
       return;
     }
     if (decision.action === "navigate") {
-      router.push(decision.route as never);
+      // A link to Home returns to the Home already on the stack; pushing "/"
+      // would mount a second one (see usePrewarmSessions).
+      const route = decision.route as string;
+      if (route.split(/[?#]/)[0] === "/") router.dismissTo(route as never);
+      else router.push(decision.route as never);
     }
     // "skip": already on the resolved route — nothing to do.
   }, [pending.url, isAuthenticated, sitemap, currentHref, router]);

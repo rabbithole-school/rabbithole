@@ -134,6 +134,7 @@ describe("custom app sandbox", () => {
       "three.iife.min.js",
       "rh-expression-editor.js",
       "rh-expression-editor.css",
+      "highlight-python.min.js",
     ]);
   });
 

@@ -17,6 +17,7 @@
 import type { SessionAppContext } from "../shared/appSurface";
 import { CODE_EDITOR_TOOL_NAME } from "./lib/tutorCodeEditor";
 import type { SessionMission } from "./lib/mission";
+import type { PythonBenchContext } from "./lib/pythonBench";
 import {
   buildSystemPromptParts,
   joinTutorPromptParts,
@@ -129,6 +130,20 @@ export function parseSessionStreamBody(body: unknown): {
   assistantMsgId: string;
   platform: "web" | "native";
   supportsRenderCheck?: true;
+  /**
+   * The client's app host inlines `<script src="/app-assets/…">` assets
+   * (shared/appAssets.ts → inlineAppAssetScripts). Older iPad builds don't, so
+   * a charm_model script would be blocked by their CSP; without this flag the
+   * turn never offers charm_model.
+   */
+  supportsAppScripts?: true;
+  /**
+   * The client draws the tutor's proposal card (TRA-690, a `questProposalCard`
+   * tool row and stream event) and its Propose button. Without it the turn
+   * never offers offer_quest_proposal, so the tutor never points at a card the
+   * screen cannot show.
+   */
+  supportsQuestProposalCard?: true;
   appRequest?: Pick<AppTutorRequest, "context">;
   /**
    * Present when the turn was triggered by the "Check my work" button rather
@@ -160,6 +175,8 @@ export function parseSessionStreamBody(body: unknown): {
     assistantMsgId,
     platform,
     supportsRenderCheck,
+    supportsAppScripts,
+    supportsQuestProposalCard,
     appRequest,
     rubricCheck,
     kickoff,
@@ -170,6 +187,8 @@ export function parseSessionStreamBody(body: unknown): {
     assistantMsgId: string;
     platform?: unknown;
     supportsRenderCheck?: unknown;
+    supportsAppScripts?: unknown;
+    supportsQuestProposalCard?: unknown;
     appRequest?: { context?: unknown };
     rubricCheck?: { artifactTitle?: string };
     kickoff?: boolean;
@@ -186,6 +205,9 @@ export function parseSessionStreamBody(body: unknown): {
     platform: platform === "native" ? "native" : "web",
     supportsRenderCheck:
       supportsRenderCheck === true ? true : undefined,
+    supportsAppScripts: supportsAppScripts === true ? true : undefined,
+    supportsQuestProposalCard:
+      supportsQuestProposalCard === true ? true : undefined,
     appRequest: validAppRequest
       ? {
           ...(normalizedAppContext ? { context: normalizedAppContext } : {}),
@@ -494,7 +516,6 @@ export function scholarBuildKickoffInstruction(): string {
  * the query's output and the prompt builder is a type error at the call site.
  */
 export type TutorPromptContext = {
-  teacherWhisper: string | null;
   /** The TALK level (lib/readingLevels.ts). */
   readingLevel: string | null;
   /** READ level and WRITE mode (TRA-503). Optional for offline callers. */
@@ -512,6 +533,16 @@ export type TutorPromptContext = {
   /** Role "side" with an app: the work the tutor steers back to (the
    *  activity's deliverable kind; null for a discussion). */
   sideAppWork?: { deliverableKind: string | null } | null;
+  /** create_code is offered (getSessionContext → lib/mission.ts
+   *  mayCreateAppInSession). Absent = offered, for offline callers. */
+  appCreationAllowed?: boolean;
+  /** The Python bench (getSessionContext → lib/pythonBench.ts): offered,
+   *  already open, which kind of chat. Absent = not offered (offline). */
+  pythonBench?: PythonBenchContext | null;
+  /** offer_quest_proposal is offered this turn (TRA-690): the session allows
+   *  it (getSessionContext questProposalOffered), the client draws the card,
+   *  and the scholar is the caller. Set by the stream; absent = not offered. */
+  offersQuestProposal?: boolean;
   vibecodeStarterUsedAt?: number | null;
   /** True on a teacher test-drive session. In a vibecode session it flips the
    *  tutor into the build-partner stance (Move B). Optional so positional/
@@ -520,7 +551,7 @@ export type TutorPromptContext = {
   /** The scholar's screen shows the open-exploration "Wrap up" button (see
    *  getSessionContext). Optional so guest/offline callers default to off. */
   offersWrapUp?: boolean;
-  /** Rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section (sessions with an app). */
+  /** Rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section (unit activities). */
   priorUnitWork?: string | null;
   /** The scholar's parked ideas (sessions.parkingLot), rendered where the
    *  mission tools are offered. */
@@ -531,10 +562,14 @@ export type TutorPromptContext = {
   /** A free-play session (sessions.freePlay, TRA-489). Optional; offline
    *  callers default to the assignment designer. */
   freePlay?: boolean;
-  /** The streaming caller owns the session (set by the stream route). Gates
-   *  the contract steering's stay_silent branch. Offline callers default to
-   *  true. */
-  callerIsSessionOwner?: boolean;
+  /** The scholar has finished this activity (sessions.activityCompletedAt).
+   *  Optional; offline callers default to an unfinished activity. */
+  activityComplete?: boolean;
+  /** The builder's open question (sessions.provocation). Optional; offline
+   *  callers get none. */
+  provocation?: string | null;
+  /** set_provocation is offered this turn: a native builder turn. Offline callers default to true. */
+  offersProvocation?: boolean;
   unitContext: UnitContext | null;
   personaContext: PersonaContext | null;
   perspectiveContext: PerspectiveContext | null;
@@ -587,6 +622,10 @@ export type TutorPromptContext = {
    *  ARTIFACTS tool section is dropped (G5). Optional; defaults to Edit. Only
    *  the live tutor stream threads it. */
   playMode?: boolean;
+  /** Play turns: the caller's Edit verdict (`allowed` | `locked` | `hidden`),
+   *  so the Play lead-in only says "switch to Edit" when they can. Optional;
+   *  defaults to allowed. Only the live tutor stream threads it. */
+  playEditAccess?: "allowed" | "locked" | "hidden";
 };
 
 type TeacherBuildContext = {
@@ -649,7 +688,6 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
   const activity = ctx.lessonActivityContext;
   const teacherBuild = isTeacherBuildContext(ctx);
   return buildSystemPromptParts(
-    ctx.teacherWhisper,
     ctx.readingLevel,
     ctx.scholarName,
     ctx.unitContext,
@@ -703,7 +741,6 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
     ctx.offersWrapUp ?? false,
     ctx.priorUnitWork ?? null,
     ctx.parkingLot ?? null,
-    ctx.callerIsSessionOwner ?? true,
     ctx.freePlay ?? false,
     ctx.readLevel
       ? {
@@ -718,9 +755,16 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
           builderFeatures: ctx.appContext.builderFeatures,
           builderPrimary: ctx.appContext.builderPrimary,
           sideAppWork: ctx.sideAppWork ?? null,
+          canCreateApp: ctx.appCreationAllowed !== false,
+          pythonBench: ctx.pythonBench ?? null,
+          questProposal: ctx.offersQuestProposal === true,
         }
       : null,
     ctx.mission ?? null,
+    ctx.playEditAccess ?? "allowed",
+    ctx.activityComplete ?? false,
+    ctx.offersProvocation === false ? null : (ctx.provocation ?? null),
+    ctx.offersProvocation !== false,
   );
 }
 

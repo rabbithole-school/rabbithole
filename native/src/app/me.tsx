@@ -37,7 +37,6 @@ export default function MyLearning() {
     api.masteryObservations.growthForScholar,
     scholarId ? { scholarId } : "skip",
   );
-  const sky = useQuery(api.seeds.skyForSelf, {});
   // Milestone reveals (f6): the map card is hidden until at least one of the
   // scholar's two maps first has real data. No padlock/teaser — it simply
   // isn't here until then.
@@ -108,25 +107,21 @@ export default function MyLearning() {
           </View>
           <SymbolView name="chevron.right" size={14} tintColor={colors.charcoalSubtle} />
         </Pressable>
-        {/* Curiosities → star map (hidden until a map has real data — f6) */}
+        {/* The kid's own sky (hidden until a map has real data — f6). Same
+            words as web's "Your sky" band (components/sky/YourSkyBand.tsx),
+            and like the sky itself it never shows a number. */}
         {mapUnlocked && (
         <Pressable
           onPress={() => router.push("/sky")}
           style={({ pressed }) => [styles.skyCard, pressed && { opacity: 0.92 }]}
+          accessibilityRole="button"
+          accessibilityLabel="Your sky"
         >
           <View style={[styles.skyDot, { top: 16, left: 26, opacity: 0.9 }]} />
           <View style={[styles.skyDot, { top: 38, right: 70, width: 4, height: 4, opacity: 0.6 }]} />
           <View style={[styles.skyDot, { bottom: 22, right: 120, width: 5, height: 5 }]} />
           <View style={styles.skyBody}>
-            <Text style={styles.skyEyebrow}>YOUR MAP</Text>
-            <Text style={styles.skyTitle}>
-              {sky ? `${sky.seeds.length} curiosities to explore` : "Your curiosities"}
-            </Text>
-            {sky && sky.mastery.length > 0 ? (
-              <Text style={styles.skyMasterySubtitle}>
-                {sky.mastery.length} skill{sky.mastery.length === 1 ? "" : "s"} glowing bright
-              </Text>
-            ) : null}
+            <Text style={styles.skyTitle}>Your sky</Text>
             <Text style={styles.skyCta}>Open ›</Text>
           </View>
         </Pressable>
@@ -335,19 +330,7 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     opacity: 0.8,
   },
   skyBody: { padding: 22, gap: 4 },
-  skyEyebrow: {
-    color: palette.violet[200],
-    fontSize: 12.5,
-    letterSpacing: 1.2,
-    fontFamily: fonts.bold,
-  },
   skyTitle: { color: c.white, fontSize: 22, fontFamily: fonts.bold },
-  skyMasterySubtitle: {
-    color: palette.violet[200],
-    fontSize: 13,
-    fontFamily: fonts.semibold,
-    marginTop: 2,
-  },
   skyCta: {
     color: palette.violet[200],
     fontSize: 15,

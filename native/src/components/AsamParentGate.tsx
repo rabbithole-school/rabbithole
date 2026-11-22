@@ -9,6 +9,7 @@ import { SvgUri } from "react-native-svg";
 import type { DeviceLockState } from "@/hooks/useAsamController";
 import { selectAsamLockStatus } from "@/lib/asam/asamDecision";
 import { readManagedSerial } from "@/lib/managedClaim";
+import { useModalPresentationRetry } from "@/hooks/useModalPresentationRetry";
 import { fonts, type Colors, useColors } from "@/theme";
 
 const REQUIRED_POINTERS = 4;
@@ -59,6 +60,7 @@ export function AsamParentGate({
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const serialNumber = readManagedSerial();
+  const presentation = useModalPresentationRetry(visible);
 
   const openSettings = useCallback(() => {
     void Haptics.notificationAsync(
@@ -102,7 +104,8 @@ export function AsamParentGate({
           style={styles.axTarget}
         />
         <Modal
-          visible={visible}
+          visible={presentation.visible}
+          onShow={presentation.markShown}
           transparent
           animationType="fade"
           supportedOrientations={["landscape"]}

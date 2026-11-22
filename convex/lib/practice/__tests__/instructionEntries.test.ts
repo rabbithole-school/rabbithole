@@ -90,7 +90,6 @@ describe("selectRunLaunchpad", () => {
     hasAttemptOnNode: never,
     hasNodeContent: never,
     eventByKey: new Map<string, InstructionEventLike>(),
-    dayBucket: "2026-07-24",
   };
 
   test("REGRESSION (§3): the framed item is always one the run serves", () => {
@@ -134,15 +133,6 @@ describe("selectRunLaunchpad", () => {
     expect(got).toMatchObject({ at: 1, nodeKey: "f1" });
   });
 
-  test("the cross-key daily governor can be turned off for the question framing", () => {
-    const eventByKey = new Map<string, InstructionEventLike>([
-      ["node:other", { key: "node:other", shownAt: 1, lastShownDayBucket: "2026-07-24" }],
-    ]);
-    const items = [item({ skillKey: "a" })];
-    expect(selectRunLaunchpad({ ...base, eventByKey, items })).toBeNull();
-    expect(selectRunLaunchpad({ ...base, eventByKey, items, dailyCap: false })).toMatchObject({ nodeKey: "a" });
-  });
-
   test("never frames a mapping probe or an optional challenge/stretch tail", () => {
     for (const lane of ["mapping", "challenge", "stretch"]) {
       expect(selectRunLaunchpad({ ...base, items: [item({ skillKey: "x", lane })] })).toBeNull();
@@ -174,7 +164,6 @@ describe("selectRunLaunchpad — the move must be about the framed item", () => 
   const base = {
     hasAttemptOnNode: never,
     eventByKey: new Map<string, InstructionEventLike>(),
-    dayBucket: "2026-10-10",
   };
 
   test("precedence: the item's own teaching step beats node content", () => {
@@ -268,7 +257,7 @@ describe("compactMoveAtoms — the inline move is text + worked example only", (
   });
 });
 
-describe("selectRunLaunchpad — the <=1/day governor is scoped to OTHER keys", () => {
+describe("selectRunLaunchpad — the fire-once ledger", () => {
   const items = [item({ skillKey: "s1", domain: "math", strand: "fractions" })];
   const key = nodeInstructionKey("s1");
   const otherKey = nodeInstructionKey("r1");
@@ -276,7 +265,6 @@ describe("selectRunLaunchpad — the <=1/day governor is scoped to OTHER keys", 
     items,
     hasAttemptOnNode: never,
     hasNodeContent: never,
-    dayBucket: "2026-07-24",
   };
 
   it("keeps offering THIS key after its own impression claim (no self-retraction)", () => {
@@ -287,27 +275,10 @@ describe("selectRunLaunchpad — the <=1/day governor is scoped to OTHER keys", 
     expect(out?.key).toBe(key);
   });
 
-  it("still suppresses when a DIFFERENT key was shown today", () => {
+  it("a DIFFERENT key shown today does not hold it (no cross-key day cap)", () => {
     const out = selectRunLaunchpad({
       ...base,
       eventByKey: new Map([[otherKey, { key: otherKey, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1 }]]),
-    });
-    expect(out).toBeNull();
-  });
-
-  it("a legacy STRAND key shown today still counts for the governor", () => {
-    const strandKey = strandInstructionKey("math", "ratio");
-    const out = selectRunLaunchpad({
-      ...base,
-      eventByKey: new Map([[strandKey, { key: strandKey, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1 }]]),
-    });
-    expect(out).toBeNull();
-  });
-
-  it("re-offers tomorrow after a different key was shown yesterday", () => {
-    const out = selectRunLaunchpad({
-      ...base,
-      eventByKey: new Map([[otherKey, { key: otherKey, shownAt: 1, lastShownDayBucket: "2026-07-23", offerCount: 1 }]]),
     });
     expect(out?.key).toBe(key);
   });

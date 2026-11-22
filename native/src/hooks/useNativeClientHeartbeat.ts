@@ -6,6 +6,7 @@ import { AppState, type AppStateStatus } from "react-native";
 import { api } from "@/lib/convex";
 import { nativeClientBuildInfo } from "@/lib/nativeClientBuildInfo";
 import { getStableDeviceId } from "@/lib/deviceIdentity";
+import { readBattery, subscribeBatteryStateChange } from "@/lib/batteryReading";
 
 export const NATIVE_CLIENT_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -20,6 +21,8 @@ type NativeClientHeartbeatApi = {
         appVersion: string;
         buildNumber: string;
         gitSha: string;
+        batteryLevel?: number;
+        batteryState?: "unplugged" | "charging" | "full" | "unknown";
       }
     >;
   };
@@ -51,11 +54,18 @@ export function useNativeClientHeartbeat() {
         return;
       }
       inFlight = true;
-      void recordHeartbeat({
-        deviceId,
-        ...nativeClientBuildInfo,
-        channel,
-      })
+      const id = deviceId;
+      // The battery rides along so the school-night charge reminder can skip
+      // a BunnyPad that's already plugged in. No reading → no fields.
+      void readBattery()
+        .then((battery) =>
+          recordHeartbeat({
+            deviceId: id,
+            ...nativeClientBuildInfo,
+            channel,
+            ...(battery ?? {}),
+          }),
+        )
         .catch((error: unknown) => {
           console.warn("[native-client-heartbeat] report failed", error);
         })
@@ -87,10 +97,13 @@ export function useNativeClientHeartbeat() {
       },
     );
 
+    const unsubscribeBattery = subscribeBatteryStateChange(report);
+
     return () => {
       mounted = false;
       clearInterval(timer);
       subscription.remove();
+      unsubscribeBattery();
     };
   }, [isAuthenticated, isLoading, recordHeartbeat]);
 }

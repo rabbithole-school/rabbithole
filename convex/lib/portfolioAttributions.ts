@@ -1,5 +1,6 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx, MutationCtx } from "../_generated/server";
+import { detachMeterTakeRow } from "./decibelMeterTakes";
 
 type AttributionCtx = Pick<QueryCtx, "db"> | Pick<MutationCtx, "db">;
 
@@ -42,6 +43,8 @@ export async function detachScholarFromPortfolio(
   orphanedItems: Doc<"portfolioItems">[];
   deletedAttributions: number;
   deletedCaptures: number;
+  /** Decibel meter sound files the orphaned items' take rows held, for the caller to delete. */
+  orphanedBlobIds: Id<"_storage">[];
 }> {
   const primaryItems = await ctx.db
     .query("portfolioItems")
@@ -57,6 +60,7 @@ export async function detachScholarFromPortfolio(
   }
 
   const orphanedItems: Doc<"portfolioItems">[] = [];
+  const orphanedBlobIds: Id<"_storage">[] = [];
   let deletedAttributions = 0;
   let deletedCaptures = 0;
   for (const itemId of itemIds) {
@@ -94,6 +98,8 @@ export async function detachScholarFromPortfolio(
         await ctx.db.delete(capture._id);
         deletedCaptures += 1;
       }
+      const audioStorageId = await detachMeterTakeRow(ctx, itemId);
+      if (audioStorageId) orphanedBlobIds.push(audioStorageId);
       continue;
     }
 
@@ -104,5 +110,5 @@ export async function detachScholarFromPortfolio(
       await ctx.db.patch(capture._id, { scholarIds: survivingIds });
     }
   }
-  return { orphanedItems, deletedAttributions, deletedCaptures };
+  return { orphanedItems, deletedAttributions, deletedCaptures, orphanedBlobIds };
 }

@@ -14,18 +14,26 @@
 // A still-building coded app shows a placeholder; a bad/archived token 404s.
 
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { injectAppStateSdk } from "@/lib/appStateBridge.mjs";
 import { prepareCustomAppSandbox } from "@/shared/customAppSandbox";
 import { CustomAppHost } from "./CustomAppHost";
 import { resolveCustomAppByToken } from "./customAppData";
 import { buildCustomAppMetadata } from "./customAppMetadata";
+import {
+  CUSTOM_APP_FROM_ASSIGNMENT,
+  CUSTOM_APP_FROM_PARAM,
+} from "@/shared/appKind";
 
 // The token → app lookup must run per-request, never be statically cached.
 export const dynamic = "force-dynamic";
 
 type CustomAppPageProps = {
-  searchParams: Promise<{ token?: string | string[] }>;
+  searchParams: Promise<{
+    token?: string | string[];
+    [CUSTOM_APP_FROM_PARAM]?: string | string[];
+  }>;
 };
 
 function tokenFrom(
@@ -70,8 +78,12 @@ function CenteredNote({ title, body }: { title: string; body: string }) {
 export default async function CustomAppPage({
   searchParams,
 }: CustomAppPageProps) {
-  const token = tokenFrom(await searchParams);
+  const params = await searchParams;
+  const token = tokenFrom(params);
   if (!token) notFound();
+  const fromAssignment = [params[CUSTOM_APP_FROM_PARAM]]
+    .flat()
+    .includes(CUSTOM_APP_FROM_ASSIGNMENT);
 
   const app = await resolveCustomAppByToken(token);
   if (!app) notFound();
@@ -96,6 +108,8 @@ export default async function CustomAppPage({
     app.html,
     injectAppStateSdk,
     (assetId) => assetUrls.get(assetId),
+    // This deployment serves /app-kit/pyodide/ for apps that opt in.
+    requestHeadersOrigin(await headers()),
   );
 
   return (
@@ -104,6 +118,19 @@ export default async function CustomAppPage({
       name={app.name}
       srcDoc={sandbox.srcDoc}
       csp={sandbox.csp}
+      credit={app.credit}
+      trackLaunch={!fromAssignment}
     />
   );
+}
+
+/** This deployment's externally visible origin (Vercel sets x-forwarded-*). */
+function requestHeadersOrigin(requestHeaders: {
+  get(name: string): string | null;
+}): string | undefined {
+  const host =
+    requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host");
+  if (!host) return undefined;
+  const proto = requestHeaders.get("x-forwarded-proto") ?? "https";
+  return `${proto}://${host}`;
 }

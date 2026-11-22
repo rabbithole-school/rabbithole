@@ -102,7 +102,6 @@ vi.mock("@/lib/convex", () => ({
       startFreePlay: "sessions.startFreePlay",
       questFromParkedIdea: "sessions.questFromParkedIdea",
     },
-    quests: { appendBuildStep: "quests.appendBuildStep" },
     units: { get: "units.get" },
     users: { currentUser: "users.currentUser" },
   },
@@ -143,9 +142,9 @@ describe("UnitProgressScreen", () => {
     fixture.unit = null;
   });
 
-  // TRA-519 B6: a Quest build step waiting on its learning step reads as
-  // locked with why, and is never the Continue target (no tap action).
-  it("shows a locked Quest build step with its unlock line and no Continue", () => {
+  // A kid's own Quest no longer locks its build step: an old unit that still
+  // carries a lock shows no unlock line and keeps its Continue.
+  it("shows no unlock line for an old Quest's build step", () => {
     fixture.activityKind = "vibecode";
     fixture.unit = {
       title: "My Quest",
@@ -159,7 +158,7 @@ describe("UnitProgressScreen", () => {
       renderer = create(createElement(UnitProgressScreen));
     });
     const text = renderedText(renderer.toJSON());
-    expect(text).toContain("Unlocks when you finish Name the rule");
+    expect(text).not.toContain("Unlocks when you finish");
     // B5: the scholar's own Quest shows its mission line.
     expect(text).toContain("Mission:");
     expect(text).toContain("Find out why bridges sag");
@@ -168,7 +167,7 @@ describe("UnitProgressScreen", () => {
         (node) =>
           node.props.accessibilityLabel === "Continue to A focused activity",
       ),
-    ).toHaveLength(0);
+    ).not.toHaveLength(0);
   });
 
   it("hides the mission line on a Quest the viewer did not author", () => {

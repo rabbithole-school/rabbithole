@@ -1,21 +1,33 @@
 // Every tab the portal knows how to render. Their components + content blocks
 // are kept wired up; which ones are actually reachable is a separate list.
 export const PARENT_KNOWN_TABS = [
+  "home",
   "progress",
   "portfolio",
+  "reports",
   "messages",
   "records",
   "math",
+  "homework",
   "calendar",
+  "bunnypad",
 ] as const;
 
-// The always-visible tabs. Progress remains hidden until it is ready.
+// The always-visible tabs, in nav order. Home is first, so the portal opens
+// on it; Records is last, since families visit it a few times a year
+// (Andy's call on the parent portal decision board, 2026-11-18). Progress
+// remains hidden until it is ready.
 export const PARENT_VISIBLE_TABS = [
-  "records",
+  "home",
   "portfolio",
+  // End-of-term reports a teacher published (TRA-728).
+  "reports",
   "math",
+  "homework",
   "calendar",
   "messages",
+  "bunnypad",
+  "records",
 ] as const;
 
 export type ParentKnownTab = (typeof PARENT_KNOWN_TABS)[number];
@@ -44,22 +56,30 @@ export function parentPortalMode({
 // subtab). The URL slug stays "math".
 export const PARENT_TAB_LABELS: Partial<Record<ParentTab, string>> = {
   math: "Math Skills",
+  bunnypad: "BunnyPad",
   admissions: "Admissions",
 };
+
+/** A tab's display name: its override, else the capitalized slug. Shared by
+ *  the nav and the browser-tab title (app/parent/[[...tab]]/layout.tsx). */
+export function parentTabLabel(tab: ParentTab): string {
+  return PARENT_TAB_LABELS[tab] ?? `${tab[0].toUpperCase()}${tab.slice(1)}`;
+}
 
 // A program guest (Extended Education visiting student) has no school record,
 // so most tabs stay hidden — but their family does see the work and the
 // teacher's resources from the programs the child is actually part of, so
 // Portfolio is reachable for them too. An applicant family sees only
 // Admissions: nothing else in the portal belongs to them yet. An enrolled
-// family sees Admissions last, to apply for a sibling and follow that
-// application.
+// family reaches Admissions (to apply for a sibling and follow that
+// application) from the account menu instead of the tab row, so the row fits
+// a laptop with two children (parent portal decision board, 2026-11-18).
 export function parentVisibleTabs(
   mode: ParentPortalMode = "family",
 ): ParentTab[] {
   if (mode === "applicant") return ["admissions"];
   if (mode === "program_guest") return ["records", "portfolio", "messages"];
-  return [...PARENT_VISIBLE_TABS, "admissions"];
+  return [...PARENT_VISIBLE_TABS];
 }
 
 export function parentTabFromPath(
@@ -68,6 +88,11 @@ export function parentTabFromPath(
 ): ParentTab {
   const segment = pathname.split("/")[2];
   const visible = parentVisibleTabs(mode);
+  // Settings and Admissions are out of an enrolled family's tab row; the
+  // account menu links to both.
+  if ((segment === "settings" || segment === "admissions") && mode === "family") {
+    return segment;
+  }
   return visible.includes(segment as ParentTab)
     ? (segment as ParentTab)
     : visible[0];

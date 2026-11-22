@@ -11,7 +11,8 @@
  *
  * Purely instructional: it records nothing. The one blank is graded CLIENT-SIDE
  * with the SAME pure `parseAnswer`/`answersEqual` the server grader uses (so
- * representation like 6/8 ≡ 0.75 still matches), and no mutation is called — the
+ * representation like 6/8 ≡ 0.75 still matches), plus the item's `answerForm`
+ * when it requires one (`teachingBlankCorrect`), and no mutation is called — the
  * step can never move mastery or placement scoring. Steps + reveal value come
  * from the read-only `api.practiceSkills.teachingStep` query.
  *
@@ -46,7 +47,7 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { FadeResult } from "@/convex/lib/practice/fadedSteps";
-import { rawAnswersEqual, type AnswerType } from "@/convex/lib/practice/answers";
+import { teachingBlankCorrect, type AnswerType } from "@/convex/lib/practice/answers";
 import { WorkedSteps } from "@/components/practice/WorkedSteps";
 import { SpeakableLabel } from "@/components/SpeakableLabel";
 import { applyKeyToInputBuffer } from "@/shared/practiceLoop";
@@ -120,7 +121,7 @@ export function TeachingStep({
   const onCheck = () => {
     if (attempt) return;
     const submittedInput = inputBuffer.current.trim();
-    const correct = rawAnswersEqual(submittedInput, answer, answerType);
+    const correct = teachingBlankCorrect(submittedInput, answer, answerType, step?.answerForm);
     // Either way the scholar has now ATTEMPTED, so Next unlocks — a wrong guess
     // must never trap them, whatever the ladder does next.
     notifyReady();

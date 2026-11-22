@@ -47,6 +47,8 @@ describe("AsamControllerContext", () => {
             value: {
               releaseForSystemUI: vi.fn(),
               restoreAfterSystemUI: vi.fn(),
+              rearmLock: vi.fn(),
+              isLockSettled: () => true,
               openTeacherUnlock,
               isTeacherUnlockAvailable: true,
             },

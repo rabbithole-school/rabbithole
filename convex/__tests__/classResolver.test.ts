@@ -1,10 +1,11 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
-  linkedAssignmentIdsForClass,
+  linkedAssignmentIdsForClass, subjectDisciplines, unitSubjectFitsClass,
 } from "../lib/classResolver";
 
 /**
@@ -91,7 +92,7 @@ async function seedAssignment(
     ctx.db.insert("units", { teacherId, title: "U", isActive: true }),
   );
   return await t.run(async (ctx) =>
-    ctx.db.insert("assignments", {
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds,
@@ -470,5 +471,73 @@ describe("listGroupClasses institution boundary", () => {
       periodId,
     });
     expect(list.classes.some((c) => c.subjectKey === "humanities")).toBe(true);
+  });
+});
+
+describe("unitSubjectFitsClass", () => {
+  test.each([
+    ["Social Studies", "Humanities"],
+    ["Mathematics", "Math Workshop"],
+    ["Math", "Math Workshop"],
+    ["Language Arts", "LA Workshop"],
+    ["Geography", "Humanities"],
+    [" science ", "Science"],
+    ["Robotics / Science", "Science"],
+    ["Social Studies / Art", "Art"],
+    ["Art / Art History", "Art"],
+  ])("a %s unit fits %s", (unit, cls) => {
+    expect(unitSubjectFitsClass(unit, cls)).toBe(true);
+  });
+
+  test.each([
+    ["Social Studies", "Japanese Cooking Enrichment Cluster"],
+    ["Science", "Math Workshop"],
+    ["Mathematics", "Science"],
+    ["Interdisciplinary (Math, Business, Design)", "Math Workshop"],
+    ["Welcome", "Morning Circle"],
+  ])("a %s unit does not fit %s", (unit, cls) => {
+    expect(unitSubjectFitsClass(unit, cls)).toBe(false);
+  });
+
+  test("a compound subject names each of its parts", () => {
+    expect(subjectDisciplines("Science & Art")).toEqual(["science", "art"]);
+  });
+
+  // Boundaries (TRA-723): pinned so a later change can't loosen the matcher
+  // without a test saying so.
+  test("Language Arts is not Art", () => {
+    expect(unitSubjectFitsClass("Language Arts", "Art")).toBe(false);
+    expect(unitSubjectFitsClass("Art", "Language Arts")).toBe(false);
+  });
+
+  test("Reading and Writing both fit Language Arts", () => {
+    expect(unitSubjectFitsClass("Reading", "Language Arts")).toBe(true);
+    expect(unitSubjectFitsClass("Writing", "Language Arts")).toBe(true);
+  });
+
+  test("Science & Art fits both Science and Art", () => {
+    expect(unitSubjectFitsClass("Science & Art", "Science")).toBe(true);
+    expect(unitSubjectFitsClass("Science & Art", "Art")).toBe(true);
+  });
+
+  test("Arts and Sciences fits Art but not Science today (no alias for 'sciences')", () => {
+    expect(subjectDisciplines("Arts and Sciences")).toEqual(["art", "sciences"]);
+    expect(unitSubjectFitsClass("Arts and Sciences", "Art")).toBe(true);
+    expect(unitSubjectFitsClass("Arts and Sciences", "Science")).toBe(false);
+  });
+
+  test.each(["Welcome", "Interdisciplinary (Math, Business, Design)"])(
+    "%s fits only itself",
+    (subject) => {
+      expect(unitSubjectFitsClass(subject, subject)).toBe(true);
+      for (const other of ["Math", "Science", "Art", "Humanities", "Language Arts"]) {
+        expect(unitSubjectFitsClass(subject, other)).toBe(false);
+      }
+    },
+  );
+
+  test("a blank subject fits nothing", () => {
+    expect(unitSubjectFitsClass("", "Science")).toBe(false);
+    expect(unitSubjectFitsClass("  ", "")).toBe(false);
   });
 });

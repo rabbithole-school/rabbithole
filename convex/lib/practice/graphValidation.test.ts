@@ -45,6 +45,11 @@ import {
   ALGEBRA_1_SKILLS,
   ALGEBRA_1_EDGES,
 } from "../../seed/algebra1Graph";
+import {
+  ALGEBRA_2_DOMAIN,
+  ALGEBRA_2_SKILLS,
+  ALGEBRA_2_EDGES,
+} from "../../seed/algebra2Graph";
 
 const n = (nodeKey: string, domain = "d"): ValidatableNode => ({ nodeKey, domain });
 
@@ -178,6 +183,7 @@ describe("validateCombinedGraph — global nodeKey uniqueness (cross-domain guar
       { domain: INTEGERS_COORDINATES_DOMAIN, skills: INTEGERS_COORDINATES_SKILLS, edges: INTEGERS_COORDINATES_EDGES },
       { domain: EARLY_ALGEBRA_DOMAIN, skills: EARLY_ALGEBRA_SKILLS, edges: EARLY_ALGEBRA_EDGES },
       { domain: ALGEBRA_1_DOMAIN, skills: ALGEBRA_1_SKILLS, edges: ALGEBRA_1_EDGES },
+      { domain: ALGEBRA_2_DOMAIN, skills: ALGEBRA_2_SKILLS, edges: ALGEBRA_2_EDGES },
     ];
     const nodes = graphs.flatMap((g) => g.skills.map((s) => ({ nodeKey: s.skillKey, domain: g.domain })));
     const edges = graphs.flatMap((g) => g.edges.map((e) => ({ fromKey: e.fromKey, toKey: e.toKey })));

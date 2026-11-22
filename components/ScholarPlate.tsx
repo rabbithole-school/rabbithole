@@ -3,7 +3,9 @@
 /**
  * Scholar plate — the redesigned /scholar home view + teacher remote view.
  *
- * Three page-level sections: Class focus → Homework → Independent study.
+ * Three page-level sections: Class focus → Homework → Independent study. On
+ * the scholar's own tabs the Homework section is empty by design: homework
+ * lives in the Homework section on Now. The teacher's remote view still shows it.
  * Seeds + IS start-actions fold INTO the IS section footer, not a
  * separate peer heading.
  *
@@ -23,14 +25,13 @@ import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "convex/react";
 import {
   Box,
-  Button,
   Flex,
   HStack,
   Spinner,
   Stack,
   Text,
 } from "@chakra-ui/react";
-import { Cards, Clock, Lock, Plus } from "@phosphor-icons/react";
+import { Cards, Clock } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import { toaster } from "@/lib/toaster";
 import { ActivityModeIcon } from "@/lib/activityMode";
@@ -39,13 +40,18 @@ import {
   dueStatus,
 } from "@/shared/institutionDay";
 import type { Id } from "@/convex/_generated/dataModel";
-import type { ExploreSeedOptions } from "@/lib/bakePaths";
 import { useContainedQuery } from "@/hooks/useContainedQuery";
 import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { useRemote } from "@/hooks/useRemote";
 import { PeerTrails } from "@/components/PeerTrails";
-import { QuestionQueueList } from "@/components/QuestionQueue";
-import { CreateQuestDialog } from "@/components/CreateQuestDialog";
+import { WonderStarters } from "@/components/WonderLists";
+import { YourSkyBand } from "@/components/sky/YourSkyBand";
+import {
+  ProposeQuestButton,
+  QuestProposalRows,
+  useQuestProposals,
+  type QuestProposalsRead,
+} from "@/components/QuestProposals";
 import { HomeArchiveButton } from "@/components/HomeArchiveButton";
 import { ActivityCard, ActivityCardCta, ActivityCardMeta, ActivityCardTitle } from "@/components/ui/ActivityCard";
 import { DueChip } from "@/components/ui/DueChip";
@@ -55,14 +61,20 @@ import { UnitGroupBand, UnitGroupCard, UnitGroupRow } from "@/components/ui/Unit
 import {
   isWelcomeGated,
   prioritizeFocusedUnit,
-  type PlateFocusLock,
-} from "@/lib/focusLock";
+  type PlateClassFocus,
+} from "@/lib/classFocus";
 import {
   liveFocusLine,
 } from "@/shared/roomTurn";
 import { useRoomTurnPhase } from "@/hooks/useRoomTurnPhase";
-import { filterRowsForTab } from "@/shared/scholarHomeNow";
+import {
+  filterRowsForTab,
+  focusSectionLabel,
+  onYourList,
+} from "@/shared/scholarHomeNow";
 import { HOME_ARCHIVE_COPY } from "@/shared/homeArchive";
+import { opensOfflinePage } from "@/shared/homeworkList";
+import { proposalCoverage, proposalRowCount } from "@/shared/questRows";
 
 type PlateResult = NonNullable<
   ReturnType<typeof useQuery<typeof api.scholarPlate.activeForMe>>
@@ -94,7 +106,9 @@ const PlateNowContext = createContext<number>(0);
 const SECTIONS: Section[] = [
   {
     origin: "classFocus",
-    heading: "Class focus",
+    // Replaced at render by focusSectionLabel ("In class now" / "From class
+    // today"), the one name the Now tab uses for the same work.
+    heading: "In class now",
     icon: <ActivityModeIcon mode="classFocus" size={20} />,
   },
   {
@@ -108,12 +122,12 @@ const SECTIONS: Section[] = [
   },
 ];
 
-/** The live class-focus lock, passed down from the scholar Home. `unitId` is
+/** The live class focus, passed down from the scholar Home. `unitId` is
  *  the focused unit; `label` names what the class is on right now. Null when no
  *  focus is live (or in the teacher's remote view). Since the hard focus gate
- *  was removed (lib/focusLock.ts) this is a SOFT signal: it sorts the focused
+ *  was removed (lib/classFocus.ts) this is a SOFT signal: it sorts the focused
  *  unit first and names what the class is on. It never disables a card. */
-export type { PlateFocusLock };
+export type { PlateClassFocus };
 
 export function ScholarPlate({
   userId,
@@ -121,10 +135,10 @@ export function ScholarPlate({
   onOpenUnitProgress,
   onExploreSeed,
   exploringSeedId,
-  focusLock = null,
+  liveFocus = null,
   hideOnboarding = false,
-  hideHomework = false,
   tabKey,
+  isWithinSchoolHours = false,
 }: {
   userId?: Id<"users">;
   onOpenUnit: (unitId: Id<"units">) => void;
@@ -132,9 +146,9 @@ export function ScholarPlate({
     unitId: Id<"units">,
     assignmentId?: Id<"assignments">,
   ) => void;
-  onExploreSeed: (id: Id<"seeds">, opts?: ExploreSeedOptions) => void;
+  onExploreSeed: (id: Id<"seeds">) => void;
   exploringSeedId: string | null;
-  focusLock?: PlateFocusLock;
+  liveFocus?: PlateClassFocus;
   /** True when the page itself already rendered the Welcome pin ABOVE
    *  "Today" (H1 fix: a brand-new scholar's Welcome beat should lead Home,
    *  not sink below the louder Math Check-In card) — suppresses this
@@ -143,12 +157,13 @@ export function ScholarPlate({
    *  zero-history quest gating applies whether the pin renders here or was
    *  hoisted to the page. */
   hideOnboarding?: boolean;
-  /** Suppresses homework rows in the Now quiet fallback during the school day. */
-  hideHomework?: boolean;
-  /** Self-view tab filter. `"all"`/`"now"` show assigned work,
+  /** Self-view tab filter. `"now"` shows assigned work,
    *  `"quests"` shows independent work, and subject/other keys narrow the
    *  assigned lanes. Undefined is the teacher remote view's full plate. */
   tabKey?: string;
+  /** Names the class-work section through focusSectionLabel: "In class now"
+   *  during school hours, "From class today" after. */
+  isWithinSchoolHours?: boolean;
 }) {
   const isRemoteMode = !!userId;
   const isQuestTab = tabKey === "quests";
@@ -168,7 +183,7 @@ export function ScholarPlate({
 
   // Smoothed, not plain: the minute bucket re-arms this subscription every
   // 60s, and the initial-load gate below must not fire on each re-arm (it sits
-  // above CreateQuestDialog, whose typed text would be lost).
+  // above the plate's controls, whose typed text would be lost).
   const result = useSmoothedQuery(api.scholarPlate.activeForMe, {
     userId,
     now: minuteNow,
@@ -191,6 +206,16 @@ export function ScholarPlate({
     api.units.myIndependentStudyUnits,
     userId ? { userId } : {},
   );
+  // The kid's own proposals and the Quests approved from them (TRA-694),
+  // drawn first in the Quests section with the one row. The older lists below
+  // leave out those units and the chats they were proposed from, so neither
+  // an approved Quest nor its proposal chat shows twice.
+  const showExplore = !isRemoteMode && isQuestTab;
+  const proposals = useQuestProposals(showExplore);
+  const covered = useMemo(
+    () => (proposals ? proposalCoverage(proposals) : null),
+    [proposals],
+  );
   // Standalone IS unit cards: units with NO in-progress (plate-visible)
   // project — either never opened, or opened but the started project's
   // current activity is complete while the unit still has work left
@@ -202,36 +227,52 @@ export function ScholarPlate({
     () =>
       (myISUnits ?? []).filter((u) => {
         if (u.hasStartedSession) return false;
+        if (covered?.unitIds.has(String(u.unitId))) return false;
         const done =
           u.onlineActivityCount > 0 &&
           u.completedCount >= u.onlineActivityCount;
         return !done;
       }),
-    [myISUnits],
+    [myISUnits, covered],
   );
 
-  const bySection = useMemo(() => {
+  const { map: bySection, hiddenIs: hiddenIsCount } = useMemo(() => {
     const map: Record<Section["origin"], PlateRow[]> = {
       classFocus: [], homework: [], is: [],
     };
-    if (!result) return map;
+    let hiddenIs = 0;
+    if (!result) return { map, hiddenIs };
     const tabRows = tabKey
       ? filterRowsForTab(result.rows, tabKey)
       : result.rows;
-    const rowsToUse = hideHomework
-      ? tabRows.filter((row) => row.origin !== "homework")
+    // The scholar's own tabs leave homework to the Homework section on Now
+    // (shared/homeworkList.ts), its one home. The teacher's remote view (no
+    // tabKey) still lists it here, since it has no Now tab.
+    // Open-until work counts as Homework while its window is open.
+    const rowsToUse = isAssignedTab
+      ? tabRows.filter((row) => !onYourList(row, plateNowMs))
       : tabRows;
-    for (const r of rowsToUse) map[r.origin].push(r);
-    return map;
-  }, [hideHomework, result, tabKey]);
+    for (const r of rowsToUse) {
+      if (
+        r.origin === "is" &&
+        covered &&
+        ((r.unitId && covered.unitIds.has(String(r.unitId))) ||
+          (r.sessionId && covered.sessionIds.has(String(r.sessionId))))
+      ) {
+        hiddenIs += 1;
+        continue;
+      }
+      map[r.origin].push(r);
+    }
+    return { map, hiddenIs };
+  }, [isAssignedTab, plateNowMs, covered, result, tabKey]);
 
-  const showExplore = !isRemoteMode && isQuestTab;
-  // H1 fix: gate zero-history authoring/exploration actions (Custom Quest +
-  // the suggested-quests/peer-trails extras) until the scholar has completed
+  // H1 fix: gate zero-history authoring/exploration actions (the
+  // suggested-quests/peer-trails extras) until the scholar has completed
   // at least the FIRST Welcome beat. Lifts the moment `completedCount` reaches
   // 1; fully gone once onboarding itself completes (`result.onboarding` →
   // null). This is the ONLY gate on these actions now — a live class focus no
-  // longer locks them (lib/focusLock.ts).
+  // longer gates them (lib/classFocus.ts).
   const welcomeGate = isWelcomeGated(result?.onboarding);
   // Initial load only: show spinner before we have any data. Later minute
   // re-arms keep the previous result (useSmoothedQuery), so this never
@@ -256,20 +297,27 @@ export function ScholarPlate({
             rows={filterRowsForTab(result.rows, "apps")}
             onOpenUnitProgress={onOpenUnitProgress}
             activeSessions={activeSessions}
-            focusLock={focusLock}
+            liveFocus={liveFocus}
           />
         )}
         {!isAppsTab && SECTIONS.map((section) => {
           if (isQuestTab && section.origin !== "is") return null;
           if (isAssignedTab && section.origin === "is") return null;
           const sectionRows = bySection[section.origin];
-          const totalForSection = section.origin === "is" ? result.isTotalCount : sectionRows.length;
+          const totalForSection =
+            section.origin === "is"
+              ? Math.max(0, result.isTotalCount - hiddenIsCount)
+              : sectionRows.length;
           const isUnitCards = section.origin === "is" ? newISUnits : [];
           if (sectionRows.length === 0 && isUnitCards.length === 0 && section.origin !== "is") return null;
           return (
             <PlateSection
               key={section.origin}
-              section={section}
+              section={
+                section.origin === "classFocus"
+                  ? { ...section, heading: focusSectionLabel(isWithinSchoolHours) }
+                  : section
+              }
               rows={sectionRows}
               totalForSection={totalForSection}
               isUnitCards={isUnitCards}
@@ -279,8 +327,9 @@ export function ScholarPlate({
               showExplore={showExplore}
               onExploreSeed={onExploreSeed}
               exploringSeedId={exploringSeedId}
-              focusLock={focusLock}
+              liveFocus={liveFocus}
               welcomeGate={welcomeGate}
+              proposals={section.origin === "is" ? proposals : null}
             />
           );
         })}
@@ -426,7 +475,7 @@ function AppsYouBuiltSection({
   rows,
   onOpenUnitProgress,
   activeSessions,
-  focusLock,
+  liveFocus,
 }: {
   rows: PlateRow[];
   onOpenUnitProgress?: (
@@ -434,7 +483,7 @@ function AppsYouBuiltSection({
     assignmentId?: Id<"assignments">,
   ) => void;
   activeSessions: ActiveSession[] | undefined;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
 }) {
   if (rows.length === 0) return null;
   return (
@@ -449,7 +498,7 @@ function AppsYouBuiltSection({
             rows={b.rows}
             onOpenUnitProgress={onOpenUnitProgress}
             activeSessions={activeSessions}
-            focusLock={focusLock}
+            liveFocus={liveFocus}
           />
         ))}
       </Stack>
@@ -469,8 +518,9 @@ function PlateSection({
   showExplore,
   onExploreSeed,
   exploringSeedId,
-  focusLock,
+  liveFocus,
   welcomeGate = false,
+  proposals,
 }: {
   section: Section;
   rows: PlateRow[];
@@ -483,98 +533,54 @@ function PlateSection({
   ) => void;
   activeSessions: ActiveSession[] | undefined;
   showExplore: boolean;
-  onExploreSeed: (id: Id<"seeds">, opts?: ExploreSeedOptions) => void;
+  onExploreSeed: (id: Id<"seeds">) => void;
   exploringSeedId: string | null;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   /** H1 fix: true while the scholar hasn't completed the first Welcome beat
-   *  yet — gates the "Custom Quest" entry + the suggested-quests/peer-trails
-   *  extras. The only gate left on them since the class-focus lock was removed
-   *  (lib/focusLock.ts). */
+   *  yet — gates the suggested-quests/peer-trails extras. The only gate left on them since the class-focus gate was removed
+   *  (lib/classFocus.ts). */
   welcomeGate?: boolean;
+  /** The kid's proposals and approved Quests (`questProposals.forSelf`),
+   *  on their own Quests tab only. */
+  proposals: QuestProposalsRead | null;
 }) {
-  const [customQuestOpen, setCustomQuestOpen] = useState(false);
-  // A not-yet-completed first Welcome beat gates NEW independent work — a
-  // zero-history scholar shouldn't author/explore before finishing even one
-  // beat of Welcome (H1). A live class focus USED to gate the same entries;
-  // that hard gate is gone (lib/focusLock.ts), so Welcome is the only reason
-  // left.
-  const gateHint = "Finish Welcome first";
-  // The gate only ever disables the "Custom Quest" authoring entry (and hides
-  // the explore extras) — it NEVER hides an already-started or offered quest,
-  // which stay playable right below. So the note must speak only to what's
-  // actually gated (creating a Custom Quest); "New quests open up after…" over
-  // a playable quest read as a contradiction (pilot9 J8b).
-  const gateNote = "Custom Quests unlock after you finish Welcome";
-  const hasQuestContent = rows.length > 0 || isUnitCards.length > 0;
+  const proposalCount = proposals ? proposalRowCount(proposals) : 0;
+  const hasQuestContent =
+    rows.length > 0 || isUnitCards.length > 0 || proposalCount > 0;
   const sortedBuckets = bucketPlateRows(rows);
   const buckets =
     section.origin === "classFocus"
-      ? prioritizeFocusedUnit(sortedBuckets, focusLock)
+      ? prioritizeFocusedUnit(sortedBuckets, liveFocus)
       : sortedBuckets;
 
-  // Section count — honest about started ("in progress") vs not-yet-started
-  // ("to start") work, so a header never reads "in progress" above a "not
-  // started" item. Homework reads "N due" (applies whether opened or not).
+  // Section count. Homework reads "N due" (applies whether opened or not);
+  // started quests read "N in progress". Class work carries no count, like
+  // the Homework section on the Now tab.
   //
   // Reopened-completed rows are excluded from every owed-work count: a scholar
   // who peeked back into finished work via "Keep working on this" still sees a
   // resumable card, but it must NOT resurrect as due/in-progress owed work.
   const owedRows = rows.filter((r) => !r.isReopenedComplete);
-  const startedCount = owedRows.filter((r) => !r.notStarted).length;
-  const notStartedCount = owedRows.filter((r) => r.notStarted).length;
   let countText: string | null = null;
   if (section.origin === "homework") {
     if (owedRows.length > 0) countText = `${owedRows.length} due`;
   } else if (section.origin === "is") {
     // Started quests have a session. The not-yet-started IS-unit cards are
     // visible right below as their own cards, so we DON'T also count them
-    // here — a bare "1 to start" next to the Custom Quest button read as
-    // awkward/unclear.
+    // here — a bare "1 to start" read as awkward/unclear.
     countText = totalForSection > 0 ? `${totalForSection} in progress` : null;
-  } else {
-    const parts: string[] = [];
-    if (startedCount > 0) parts.push(`${startedCount} in progress`);
-    if (notStartedCount > 0) parts.push(`${notStartedCount} to start`);
-    countText = parts.length ? parts.join(" · ") : null;
   }
 
   return (
     <Stack gap={4} id={`plate-${section.origin}`} scrollMarginTop="64px">
-      {section.origin === "is" && showExplore && (
-        <CreateQuestDialog
-          open={customQuestOpen}
-          onClose={() => setCustomQuestOpen(false)}
-        />
-      )}
       <ScholarHomeSectionHeader
         icon={section.icon}
         actions={
           <HStack gap={3}>
-            {section.origin === "is" && showExplore && (
-              welcomeGate ? (
-                <Button
-                  size="2xs"
-                  variant="outline"
-                  colorPalette="gray"
-                  fontFamily="heading"
-                  fontWeight="600"
-                  disabled
-                  title={gateHint}
-                >
-                  <Lock size={12} style={{ marginRight: 3 }} /> Custom Quest
-                </Button>
-              ) : (
-                <Button
-                  size="2xs"
-                  variant="outline"
-                  colorPalette="violet"
-                  fontFamily="heading"
-                  fontWeight="600"
-                  onClick={() => setCustomQuestOpen(true)}
-                >
-                  <Plus size={12} style={{ marginRight: 3 }} /> Custom Quest
-                </Button>
-              )
+            {/* "Propose a Quest" (TRA-694), where "+ Custom Quest" was. Waits
+                for the first Welcome beat, like the explore extras (H1). */}
+            {section.origin === "is" && showExplore && !welcomeGate && (
+              <ProposeQuestButton />
             )}
             {countText && (
               <Text fontSize="xs" color="charcoal.400" fontFamily="heading">
@@ -587,19 +593,11 @@ function PlateSection({
         {section.heading}
       </ScholarHomeSectionHeader>
 
-      {/* Welcome-gate hint for the disabled Custom Quest entry (a tooltip
-          alone isn't discoverable). Quiet: a small lock, muted text, no new
-          colour. */}
-      {section.origin === "is" && showExplore && welcomeGate && (
-        <HStack gap={1.5} fontSize="xs" color="charcoal.400" fontFamily="heading">
-          <Lock size={12} />
-          <Text lineClamp={1}>{gateNote}</Text>
-        </HStack>
-      )}
-
       {section.origin === "is" && showExplore && !hasQuestContent && (
         <QuestsEmptyState queueShown={!welcomeGate} />
       )}
+
+      {proposals && proposalCount > 0 && <QuestProposalRows read={proposals} />}
 
       {rows.length > 0 && (
         <Stack gap={5}>
@@ -609,7 +607,7 @@ function PlateSection({
               rows={b.rows}
               onOpenUnitProgress={onOpenUnitProgress}
               activeSessions={activeSessions}
-              focusLock={focusLock}
+              liveFocus={liveFocus}
             />
           ))}
         </Stack>
@@ -630,29 +628,31 @@ function PlateSection({
         </Stack>
       )}
 
-      {/* The ONE list of open items (questionQueue.forSelf): open questions
-          (story threads + cross-domain seeds, answerable right here) and
-          "From your teacher" quests. It replaced the separate "New quests",
-          "Suggested by your teacher" sections (T1). Peer trails don't map onto
-          a question row, so they stay below, unchanged. Self view only; hidden
-          before the first Welcome beat is done (H1). */}
+      {/* Peer trails, then "Things to wonder about": the ONE question queue, its
+          question cards answered in place as before and its other starters
+          (questionQueue.startersForSelf) as rows with Ask, closing the tab
+          (review/quests-rebuilt-proposal.html, figure 1 and "Starters").
+          Prep's "Keep going" draws the same queue's top rows. Self view
+          only. Both wait for the first Welcome beat (H1). A kid's wonders
+          live on Scholar's Prep, with the box. */}
+      {section.origin === "is" && showExplore && !welcomeGate && <PeerTrails />}
       {section.origin === "is" && showExplore && !welcomeGate && (
-        <>
-          <QuestionQueueList
-            onStartTeacherQuest={onExploreSeed}
-            startingSeedId={exploringSeedId}
-          />
-          <PeerTrails />
-        </>
+        <WonderStarters
+          onAsk={onExploreSeed}
+          askingSeedId={exploringSeedId}
+        />
       )}
+      {/* The quiet "Your sky" band closes the tab and opens the kid's own
+          sky on its own page (figure 9, TRA-699). */}
+      {section.origin === "is" && showExplore && !welcomeGate && <YourSkyBand />}
 
     </Stack>
   );
 }
 
-/** "No Quests yet" — but never above a list of open questions, which the
- *  question queue renders right below this section (it would contradict it).
- *  Same subscription the queue already holds, so no extra read. */
+/** "No Quests yet" — but never above open questions, which "Things to wonder
+ *  about" draws at the end of this section from the same queue (it would
+ *  contradict it). */
 function QuestsEmptyState({ queueShown }: { queueShown: boolean }) {
   // Contained: an older backend (deploy skew) lacks this query; an error
   // just shows the empty state.
@@ -730,13 +730,13 @@ function rowKey(row: PlateRow): string {
 export function ScholarPlateActivityCard({
   row,
   activeSessions,
-  focusLock,
+  liveFocus,
   onOpenUnitProgress,
   unitPinAction,
 }: {
   row: PlateRow;
   activeSessions: ActiveSession[] | undefined;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   onOpenUnitProgress?: (
     unitId: Id<"units">,
     assignmentId?: Id<"assignments">,
@@ -751,7 +751,7 @@ export function ScholarPlateActivityCard({
       <PlateRowCard
         row={row}
         activeSessions={activeSessions}
-        focusLock={focusLock}
+        liveFocus={liveFocus}
       />
     );
   }
@@ -775,7 +775,7 @@ export function ScholarPlateActivityCard({
       <ScholarPlateActivityRow
         row={row}
         activeSessions={activeSessions}
-        focusLock={focusLock}
+        liveFocus={liveFocus}
         showDivider={false}
         secondaryAction={unitPinAction?.(unitId, row.unitTitle ?? "Quest")}
       />
@@ -787,13 +787,13 @@ export function ScholarPlateActivityCard({
 export function ScholarPlateActivityRow({
   row,
   activeSessions,
-  focusLock,
+  liveFocus,
   showDivider,
   secondaryAction,
 }: {
   row: PlateRow;
   activeSessions: ActiveSession[] | undefined;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   showDivider: boolean;
   secondaryAction?: React.ReactNode;
 }) {
@@ -801,7 +801,7 @@ export function ScholarPlateActivityRow({
     <PlateRowCard
       row={row}
       activeSessions={activeSessions}
-      focusLock={focusLock}
+      liveFocus={liveFocus}
       variant="row"
       showDivider={showDivider}
       secondaryAction={secondaryAction}
@@ -813,13 +813,13 @@ export function ScholarPlateActivityRow({
 export function ScholarPlateActivityGroup({
   rows,
   activeSessions,
-  focusLock,
+  liveFocus,
   onOpenUnitProgress,
   unitPinAction,
 }: {
   rows: PlateRow[];
   activeSessions: ActiveSession[] | undefined;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   onOpenUnitProgress?: (
     unitId: Id<"units">,
     assignmentId?: Id<"assignments">,
@@ -847,13 +847,13 @@ export function ScholarPlateActivityGroup({
       }}
       onOpenUnitProgress={onOpenUnitProgress}
       activeSessions={activeSessions}
-      focusLock={focusLock}
+      liveFocus={liveFocus}
       unitPinAction={unitPinAction}
     />
   );
 }
 
-function UnitBucket({ bucket, onOpenUnitProgress, activeSessions, focusLock, unitPinAction }: {
+function UnitBucket({ bucket, onOpenUnitProgress, activeSessions, liveFocus, unitPinAction }: {
   bucket: {
     unitId: Id<"units"> | null;
     unitTitle: string | null;
@@ -870,7 +870,7 @@ function UnitBucket({ bucket, onOpenUnitProgress, activeSessions, focusLock, uni
     assignmentId?: Id<"assignments">,
   ) => void;
   activeSessions: ActiveSession[] | undefined;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   unitPinAction?: (
     unitId: Id<"units">,
     title: string,
@@ -904,7 +904,7 @@ function UnitBucket({ bucket, onOpenUnitProgress, activeSessions, focusLock, uni
               key={rowKey(row)}
               row={row}
               activeSessions={activeSessions}
-              focusLock={focusLock}
+              liveFocus={liveFocus}
             />
           ))}
         </Stack>
@@ -924,7 +924,7 @@ function UnitBucket({ bucket, onOpenUnitProgress, activeSessions, focusLock, uni
               key={rowKey(row)}
               row={row}
               activeSessions={activeSessions}
-              focusLock={focusLock}
+              liveFocus={liveFocus}
               onOpenUnitProgress={onOpenUnitProgress}
               unitPinAction={unitPinAction}
             />
@@ -954,7 +954,7 @@ function UnitBucket({ bucket, onOpenUnitProgress, activeSessions, focusLock, uni
             key={rowKey(row)}
             row={row}
             activeSessions={activeSessions}
-            focusLock={focusLock}
+            liveFocus={liveFocus}
             variant="row"
             showDivider={i > 0}
             secondaryAction={
@@ -981,7 +981,7 @@ function UnitBucket({ bucket, onOpenUnitProgress, activeSessions, focusLock, uni
           teacherImage={bucket.teacherImage}
           options={options}
           activeSessions={activeSessions}
-          focusLock={focusLock}
+          liveFocus={liveFocus}
           pinAction={
             bucket.unitId
               ? unitPinAction?.(
@@ -1007,7 +1007,7 @@ function ChoiceMenuCard({
   teacherImage,
   options,
   activeSessions,
-  focusLock,
+  liveFocus,
   pinAction,
 }: {
   unitEmoji: string | null;
@@ -1016,7 +1016,7 @@ function ChoiceMenuCard({
   teacherImage?: string;
   options: PlateRow[];
   activeSessions: ActiveSession[] | undefined;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   pinAction?: React.ReactNode;
 }) {
   const pickCount = options[0]?.choicePickCount ?? 1;
@@ -1061,7 +1061,7 @@ function ChoiceMenuCard({
           key={rowKey(row)}
           row={row}
           activeSessions={activeSessions}
-          focusLock={focusLock}
+          liveFocus={liveFocus}
           variant="row"
           showDivider={i > 0}
           secondaryAction={i === 0 ? pinAction : undefined}
@@ -1078,14 +1078,14 @@ function PlateRowCard({
   variant = "card",
   showDivider = false,
   activeSessions,
-  focusLock,
+  liveFocus,
   secondaryAction,
 }: {
   row: PlateRow;
   variant?: "card" | "row";
   showDivider?: boolean;
   activeSessions: ActiveSession[] | undefined;
-  focusLock: PlateFocusLock;
+  liveFocus: PlateClassFocus;
   secondaryAction?: React.ReactNode;
 }) {
   const { stamp, remote } = useRemote();
@@ -1094,18 +1094,19 @@ function PlateRowCard({
   const openOfflineHomework = useMutation(api.sessions.openOfflineHomework);
   const [starting, setStarting] = useState(false);
 
-  const isOfflineHomework =
-    row.activityKind === "offline" && row.origin === "homework";
+  // Offline homework and offline open-until work open their read-only page,
+  // never a tutor session (the teacher's remote view lists them here).
+  const isOfflineHomework = opensOfflinePage(row);
 
   // "The turn, not the bell": this row IS the class-focus activity the room
   // is on right now (never a countdown — a soft phase + a wall-clock label).
   const matchesLiveFocus =
     row.origin === "classFocus" &&
-    !!focusLock?.unitId &&
-    String(row.unitId ?? "") === focusLock.unitId;
-  const roomPhase = useRoomTurnPhase(matchesLiveFocus ? focusLock?.endsAt ?? null : null);
+    !!liveFocus?.unitId &&
+    String(row.unitId ?? "") === liveFocus.unitId;
+  const roomPhase = useRoomTurnPhase(matchesLiveFocus ? liveFocus?.endsAt ?? null : null);
   const roomTurnLine =
-    matchesLiveFocus && focusLock ? liveFocusLine(roomPhase, focusLock) : null;
+    matchesLiveFocus && liveFocus ? liveFocusLine(roomPhase, liveFocus) : null;
 
   // Secondary overdue read on All / subject cards: a tiny "was due X" subline
   // on past-due homework (the same orange/vocabulary as the Now pill). The
@@ -1125,7 +1126,8 @@ function PlateRowCard({
   // row here would be deadline noise on a screen about choosing work. That
   // selection is the plate's; the RENDERING is not, and now goes through the
   // one shared DueChip (review/scholar-activity-row-rationalization.html §4).
-  const isOverdue = dueInfo?.status === "overdue";
+  // Reopened work is never late (shared/homeworkList.ts): no late chip.
+  const isOverdue = dueInfo?.status === "overdue" && !row.isReopenedComplete;
 
   // Card context: every card leans on the unit/activity's authored blurb
   // (`row.description` — now the scholar-facing one) so the cards are
@@ -1226,10 +1228,27 @@ function PlateRowCard({
       : 1;
 
   // Any session-backed row can be archived (it then lists under the tab's
-  // Archived section). A not-started row has no session to archive.
-  const archiveButton = row.sessionId ? (
-    <HomeArchiveButton sessionId={row.sessionId} archived={row.isArchived} />
+  // Archived section). A not-started row has no session to archive. Archiving
+  // is the wonder rows' quiet ×, after the verb (iPad twin: the × on Home's
+  // plate rows). An archived row's Unarchive is a restore and stays where it
+  // was, before the verb.
+  const archiveControl = row.sessionId ? (
+    <HomeArchiveButton
+      sessionId={row.sessionId}
+      archived={row.isArchived}
+      title={row.title}
+    />
   ) : undefined;
+  const archiveButton = row.isArchived ? archiveControl : undefined;
+  const afterCta =
+    archiveControl && !row.isArchived ? (
+      <HStack gap={1.5}>
+        {secondaryAction}
+        {archiveControl}
+      </HStack>
+    ) : (
+      secondaryAction
+    );
 
   const cta = (
     <ActivityCardCta
@@ -1289,7 +1308,7 @@ function PlateRowCard({
   if (variant === "row") {
     return (
       <UnitGroupRow
-        status={row.notStarted ? "todo" : "here"}
+        emoji={row.unitEmoji}
         showDivider={showDivider}
         href={href}
         onClick={onClick}
@@ -1299,7 +1318,7 @@ function PlateRowCard({
         opacity={opacity}
         trailing={archiveButton}
         cta={cta}
-        secondaryAction={secondaryAction}
+        secondaryAction={afterCta}
       >
         {body}
       </UnitGroupRow>
@@ -1322,7 +1341,7 @@ function PlateRowCard({
       opacity={opacity}
       trailing={archiveButton}
       cta={cta}
-      secondaryAction={secondaryAction}
+      secondaryAction={afterCta}
     >
       {body}
     </ActivityCard>

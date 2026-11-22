@@ -608,6 +608,74 @@ describe("parseObserverResponse", () => {
     expect(result?.observations.map((o) => o.conceptLabel)).toEqual(["tension"]);
   });
 
+  describe("confidence alias from non-strict tool calls", () => {
+    const raw = {
+      conceptLabel: "Sound propagation through materials",
+      domain: "Physics",
+      masteryLevel: 3.3,
+      confidence: 0.7,
+      evidenceSummary: "Generalized sound transmission across metal, rubber, and water.",
+      evidenceType: "direct_demonstration",
+      attemptContext: "conversation",
+      studentInitiated: false,
+      transcriptExcerpt: "sound travels through all of them but different",
+      sourceMessageId: "eval-message-9",
+      pcmDimension: "core",
+    };
+
+    test("keeps all scored rows when confidenceScore was emitted as confidence", () => {
+      const second = {
+        ...raw,
+        conceptLabel: "Engineering trade-offs and constraint optimization",
+        domain: "Engineering",
+        masteryLevel: 2.8,
+        confidence: 0.55,
+      };
+      const observations = [raw, second];
+      const result = parseObserverResponse([
+        { type: "tool_use", input: { pulse: fullPulse, observations } },
+      ]);
+
+      expect(result?.observations).toEqual(observations.map(({ confidence, ...o }) => ({
+        ...o,
+        confidenceScore: confidence,
+      })));
+      // Raw eval evidence must remain raw after parsing.
+      expect(raw).not.toHaveProperty("confidenceScore");
+      expect(second).not.toHaveProperty("confidenceScore");
+    });
+
+    test("keeps the canonical score, including zero, when both keys exist", () => {
+      const canonical = { ...raw, confidenceScore: 0 };
+      const result = parseObserverResponse([
+        { type: "tool_use", input: { observations: [canonical] } },
+      ]);
+      expect(result?.observations).toEqual([canonical]);
+    });
+
+    test("does not invent, coerce, or replace invalid scores using the alias", () => {
+      const result = parseObserverResponse([
+        {
+          type: "tool_use",
+          input: {
+            observations: [
+              ...[undefined, null, "0.7", -0.1, 1.1, NaN, Infinity].map(
+                (confidence) => ({ ...raw, confidence }),
+              ),
+              ...[null, "0.7", NaN].map(
+                (confidenceScore) => ({ ...raw, confidenceScore }),
+              ),
+              { ...raw, masteryLevel: undefined },
+              { ...raw, masteryLevel: "3.3" },
+              null,
+            ],
+          },
+        },
+      ]);
+      expect(result?.observations).toEqual([]);
+    });
+  });
+
   test("picks the tool_use block even when text precedes it", () => {
     const result = parseObserverResponse([
       { type: "text" },

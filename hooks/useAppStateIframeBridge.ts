@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { pressComposeKey } from "@/hooks/useComposeKey";
 import * as appStateBridgeRuntime from "@/lib/appStateBridge.mjs";
 import {
+  APP_ACTIVITY_TYPE,
   APP_STATE_MAX_LOG_ENTRIES,
   appActionRegistryWriteDecision,
   appStateFlushDelay,
@@ -111,10 +113,16 @@ export async function createAppStateIframeSandbox(
   html: string,
   snapshot: AppStateSnapshot | null | undefined,
   resolveAssetUrl: AppAssetUrlResolver = NO_APP_ASSET_URL,
+  kitOrigin?: string,
 ): Promise<AppStateIframeSandbox | null> {
   return snapshot === undefined
     ? null
-    : await prepareCustomAppSandbox(html, injectAppStateSdk, resolveAssetUrl);
+    : await prepareCustomAppSandbox(
+        html,
+        injectAppStateSdk,
+        resolveAssetUrl,
+        kitOrigin,
+      );
 }
 
 export async function createAppStateIframeSrcDoc(
@@ -148,6 +156,8 @@ export function useAppStateIframeSrcDoc(
       requestedHtml,
       null,
       (assetId) => assetUrls?.get(assetId),
+      // The page's own origin serves /app-kit/pyodide/ for opted-in apps.
+      window.location.origin,
     ).then(
       (sandbox) => {
         if (!cancelled) {
@@ -379,18 +389,6 @@ export async function uploadChangedAppSnapshot({
   };
 }
 
-type SharedAppStateBridge<RoomId extends string> = {
-  roomId: RoomId | null | undefined;
-  selectionVersion?: number;
-  snapshot: AppStateSnapshot | null | undefined;
-  presence: unknown[] | undefined;
-  persist: (
-    roomId: RoomId,
-    patch: Record<string, unknown>,
-  ) => Promise<unknown>;
-  onSelect: (roomId: string) => void;
-};
-
 /** Answers a frame `request` (character.say / judge). Hosts without one —
  *  e.g. custom-app tiles, which have no session — answer `unavailable`. */
 export type AppBridgeRequestHandler = (
@@ -405,23 +403,25 @@ function snapshotVersionKey(current: AppStateSnapshot | null | undefined) {
     : "empty";
 }
 
-export function useAppStateIframeBridge<RoomId extends string = string>({
+export function useAppStateIframeBridge({
   identity,
   snapshot,
   persist,
-  shared,
   onAskTutor,
   onRequest,
   onAppAiTurn,
+  onActivity,
 }: {
   identity: string;
   snapshot: AppStateSnapshot | null | undefined;
   persist: (update: AppStateHostUpdate) => Promise<unknown>;
-  shared?: SharedAppStateBridge<RoomId>;
   onAskTutor?: (request: AppTutorRequest) => void | Promise<void>;
   onRequest?: AppBridgeRequestHandler;
   /** A character/judge success reached the app (see deliverAppBridgeReply). */
   onAppAiTurn?: () => void;
+  /** Someone touched, pressed a key in, or scrolled the app (throttled in the
+   *  frame). Feeds the play tracker's active time. */
+  onActivity?: () => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const readyWindowRef = useRef<Window | null>(null);
@@ -474,29 +474,19 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
   const pendingSinceRef = useRef<number | undefined>(undefined);
   const identityRef = useRef(identity);
   const activeIdentityRef = useRef(identity);
-  const sharedRef = useRef(shared);
-  const activeSharedRoomRef = useRef(shared?.roomId);
-  const pendingSharedPatchRef = useRef<Record<string, unknown>>({});
-  const sharedInFlightRef = useRef<
-    Array<{ id: number; roomId: RoomId; patch: Record<string, unknown> }>
-  >([]);
-  const sharedWriteIdRef = useRef(0);
-  const sharedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
-  const sharedPendingSinceRef = useRef<number | undefined>(undefined);
   const onAskTutorRef = useRef(onAskTutor);
   const onRequestRef = useRef(onRequest);
   const onAppAiTurnRef = useRef(onAppAiTurn);
+  const onActivityRef = useRef(onActivity);
 
   /* eslint-disable react-hooks/refs -- Stable iframe/window listeners and write queues must read current committed host inputs. */
   snapshotRef.current = snapshot;
   persistRef.current = persist;
   activeIdentityRef.current = identity;
-  sharedRef.current = shared;
   onAskTutorRef.current = onAskTutor;
   onRequestRef.current = onRequest;
   onAppAiTurnRef.current = onAppAiTurn;
+  onActivityRef.current = onActivity;
   /* eslint-enable react-hooks/refs */
 
   const clearPendingSnapshotRequests = useCallback(() => {
@@ -637,30 +627,11 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
         .map((entry) => entry.patch),
       pendingPatchRef.current,
     ];
-    const sharedValue = sharedRef.current;
-    const sharedMessage =
-      sharedValue?.roomId === null
-        ? null
-        : typeof sharedValue?.roomId === "string" &&
-            sharedValue.snapshot !== undefined &&
-            sharedValue.presence !== undefined
-          ? {
-              roomId: sharedValue.roomId,
-              doc: mergeAppStateDoc(sharedValue.snapshot?.doc, [
-                ...sharedInFlightRef.current
-                  .filter((entry) => entry.roomId === sharedValue.roomId)
-                  .map((entry) => entry.patch),
-                pendingSharedPatchRef.current,
-              ]),
-              presence: sharedValue.presence,
-            }
-          : undefined;
     frameWindow.postMessage(
       createAppStateHostMessage(
         type,
         mergeAppStateDoc(current?.doc, pendingPatches),
         nonce,
-        sharedMessage,
         current?.actionRequest,
         current?.characterLine,
       ),
@@ -669,32 +640,6 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
     initializedRef.current = true;
     lastSentVersionRef.current = snapshotVersionKey(current);
   }, []);
-
-  const flushShared = useCallback(() => {
-    clearTimeout(sharedTimerRef.current);
-    sharedTimerRef.current = undefined;
-    sharedPendingSinceRef.current = undefined;
-    const roomId = activeSharedRoomRef.current;
-    const writer = sharedRef.current?.persist;
-    const patch = pendingSharedPatchRef.current;
-    pendingSharedPatchRef.current = {};
-    if (!roomId || !writer || Object.keys(patch).length === 0) return;
-    const writeId = sharedWriteIdRef.current++;
-    sharedInFlightRef.current.push({ id: writeId, roomId, patch });
-    void writer(roomId, patch)
-      .then(() => {
-        sharedInFlightRef.current = sharedInFlightRef.current.filter(
-          (entry) => entry.id !== writeId,
-        );
-      })
-      .catch((error) => {
-        sharedInFlightRef.current = sharedInFlightRef.current.filter(
-          (entry) => entry.id !== writeId,
-        );
-        postSnapshot();
-        console.error("[rabbithole] failed to persist shared app state", error);
-      });
-  }, [postSnapshot]);
 
   const flush = useCallback(
     (identityOverride?: string): Promise<boolean> => {
@@ -832,6 +777,12 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
       if (!frameWindow || event.source !== frameWindow) return;
       const message = parseBridgeMessage(event.data);
       if (!message) return;
+      // The activity script has its own nonce; the WindowProxy check above
+      // is what authenticates it.
+      if (message.type === APP_ACTIVITY_TYPE) {
+        onActivityRef.current?.();
+        return;
+      }
       if (message.type === APP_SNAPSHOT_READY_TYPE) {
         if (
           snapshotNonceRef.current !== message.nonce
@@ -883,22 +834,8 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
         return;
       }
       if (!matchesAppStateBridgeNonce(message, nonceRef.current)) return;
-      if (message.type === "sharedSelect") {
-        sharedRef.current?.onSelect(message.roomId);
-        return;
-      }
-      if (message.type === "sharedChange") {
-        if (message.roomId !== activeSharedRoomRef.current) return;
-        pendingSharedPatchRef.current = {
-          ...pendingSharedPatchRef.current,
-          ...message.patch,
-        };
-        sharedPendingSinceRef.current ??= Date.now();
-        clearTimeout(sharedTimerRef.current);
-        sharedTimerRef.current = setTimeout(
-          flushShared,
-          appStateFlushDelay(sharedPendingSinceRef.current),
-        );
+      if (message.type === "composeKey") {
+        pressComposeKey();
         return;
       }
       if (message.type === "actionResult") {
@@ -993,12 +930,10 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
       window.removeEventListener("message", handleMessage);
       clearPendingSnapshotRequests();
       flush();
-      flushShared();
     };
   }, [
     clearPendingSnapshotRequests,
     flush,
-    flushShared,
     postSnapshot,
     queueActions,
   ]);
@@ -1012,16 +947,6 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
       postSnapshot();
     }
   }, [postSnapshot, queueActions, snapshot]);
-
-  useEffect(() => {
-    postSnapshot();
-  }, [
-    postSnapshot,
-    shared?.presence,
-    shared?.roomId,
-    shared?.selectionVersion,
-    shared?.snapshot,
-  ]);
 
   useEffect(() => {
     if (identityRef.current === identity) return;
@@ -1042,17 +967,6 @@ export function useAppStateIframeBridge<RoomId extends string = string>({
     inFlightLogsRef.current = [];
     identityRef.current = identity;
   }, [clearPendingSnapshotRequests, flush, identity]);
-
-  useEffect(() => {
-    const previous = activeSharedRoomRef.current;
-    const next = shared?.roomId;
-    if (previous === next) return;
-    if (typeof previous === "string") flushShared();
-    pendingSharedPatchRef.current = {};
-    sharedInFlightRef.current = [];
-    activeSharedRoomRef.current = next;
-    postSnapshot();
-  }, [flushShared, postSnapshot, shared?.roomId]);
 
   const onLoad = useCallback(() => {
     readyWindowRef.current = iframeRef.current?.contentWindow ?? null;

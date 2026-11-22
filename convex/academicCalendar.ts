@@ -20,6 +20,8 @@ import type { Id } from "./_generated/dataModel";
 import type { AcademicCalendarIcsEvent } from "../shared/academicCalendarIcs";
 import { effectiveInstitutionTimeZone } from "./lib/institutionTime";
 import { dayKeyForTimezone } from "../shared/institutionDay";
+import { tripsForScholar } from "./fieldTrips";
+import type { FieldTripSummary } from "../shared/fieldTrips";
 
 export type PublicAcademicCalendar = {
   calendarName: string;
@@ -46,7 +48,7 @@ function isRealDayKey(dayKey: string): boolean {
  *  `endDayKey` are plain `v.string()` in the schema, and a strict calendar
  *  client rejects the ENTIRE subscription on a single bad DTSTART — so a row
  *  that can't produce a valid date is skipped rather than serialized. */
-function hasUsableDays(closure: {
+export function hasUsableDays(closure: {
   startDayKey: string;
   endDayKey: string;
 }): boolean {
@@ -75,7 +77,7 @@ export function noSchoolSummary(label: string): string {
 }
 
 /** Closures scoped to one institution, plus the institution-agnostic ones. */
-async function closuresForInstitution(
+export async function closuresForInstitution(
   ctx: QueryCtx,
   institutionId: Id<"institutions">,
 ) {
@@ -220,7 +222,10 @@ async function upcomingForInstitutionInner(
  */
 export const upcomingForScholar = authedQuery({
   args: { scholarId: v.id("users") },
-  handler: async (ctx, args): Promise<ScholarSchoolCalendar | null> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<(ScholarSchoolCalendar & { trips: FieldTripSummary[] }) | null> => {
     // Guardian, or staff previewing the family view ("View as parent").
     await requireGuardianOrStaffPreview(ctx, args.scholarId);
     const scholar = await ctx.db.get(args.scholarId);
@@ -229,7 +234,18 @@ export const upcomingForScholar = authedQuery({
         `The school calendar isn't available for ${EXTENDED_EDUCATION_LABEL} scholars.`,
       );
     }
-    return await upcomingForScholarInner(ctx, args.scholarId);
+    const calendar = await upcomingForScholarInner(ctx, args.scholarId);
+    if (!calendar) return null;
+    // This child's field trips from today on (TRA-601): only trips one of the
+    // child's groups goes on, never notes. Family-only, so they stay out of
+    // the unauthenticated .ics feed above, which is school-wide.
+    const { trips } = await tripsForScholar(ctx, args.scholarId, calendar.today, "9999-12-31");
+    return {
+      ...calendar,
+      trips: [...trips].sort(
+        (a, b) => a.dayKey.localeCompare(b.dayKey) || a.startLocal.localeCompare(b.startLocal),
+      ),
+    };
   },
 });
 

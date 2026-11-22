@@ -48,30 +48,3 @@ export async function exitSingleAppMode(): Promise<boolean> {
     return false;
   }
 }
-
-/**
- * Keep a managed install at maximum brightness while enabled. A native rebuild
- * is required when the current client predates this API.
- */
-export async function setManagedMaximumBrightness(
-  enabled: boolean,
-): Promise<boolean> {
-  try {
-    if (nativeModule?.setManagedMaximumBrightness) {
-      await nativeModule.setManagedMaximumBrightness(enabled);
-      return true;
-    }
-    // Best effort for a cold old client. A block observer retained by an older
-    // Metro runtime survives JS reloads, so only a full process restart removes it.
-    await nativeModule?.setBrightnessPinned?.(false);
-    if (enabled) {
-      console.warn(
-        "[managed-brightness] Current native client cannot enforce maximum brightness. Fully quit the app and install a rebuilt client.",
-      );
-    }
-    return false;
-  } catch (error) {
-    console.warn("[managed-brightness] Could not update brightness policy.", error);
-    return false;
-  }
-}

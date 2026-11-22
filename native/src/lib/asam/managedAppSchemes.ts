@@ -27,6 +27,8 @@ export const MANAGED_APP_URL_SCHEMES = [
   "spike://",
   "stopmotionstudio://",
   "com.google.stella://",
+  "adobelightroom://",
+  "brilliant://",
 ] as const;
 
 /**
@@ -34,7 +36,12 @@ export const MANAGED_APP_URL_SCHEMES = [
  * from the scheme list: only schemes belong in LSApplicationQueriesSchemes,
  * and putting a bundle id there would be silently meaningless.
  */
-export const MANAGED_APP_BUNDLE_IDS = ["com.mentava.learn2read"] as const;
+export const MANAGED_APP_BUNDLE_IDS = [
+  "com.mentava.learn2read",
+  "AsheKube.Carnets",
+  "ai.sageteacher.app",
+  "school.rabbithole.checkin",
+] as const;
 
 /** The bare scheme names, as iOS wants them in LSApplicationQueriesSchemes. */
 export const MANAGED_APP_QUERY_SCHEMES = MANAGED_APP_URL_SCHEMES.map((scheme) =>

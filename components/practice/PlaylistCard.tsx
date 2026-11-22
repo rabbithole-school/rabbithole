@@ -75,10 +75,10 @@ import {
   deriveStartCta,
   effectiveDomainSet,
   expandMoreLabel,
-  isDomainOutsideEffectiveSet,
   nextTileSelection,
   playlistTileIconName,
   practiceCtaAccessibleLabel,
+  strandPickStartParams,
 } from "@/shared/practiceChoiceSelection";
 import {
   STRETCH_TILE_HEADLINE,
@@ -699,9 +699,11 @@ export function PlaylistCard({
   // A MIXED standing assignment (≥2 domains) links to plain /scholar/practice so
   // the page resolves the whole blended set via myActiveStanding — pinning just
   // ?domain= would collapse it to the primary domain. Single/none keep ?domain=.
-  // A strand selection overrides all of this — it goes straight to the SAME
-  // ?choiceDomain=/?choiceStrand= route the old tap-to-launch tiles used
-  // (app/scholar/practice/page.tsx). The check-in re-entry tile routes to
+  // A strand selection overrides all of this — it launches the PICKED domain
+  // alone via `strandPickStartParams` (shared with native), so Start serves the
+  // single-domain run the preview just showed instead of re-resolving the
+  // mixed blend (where the pick was only a ×2 weight and whole-number reviews
+  // led). The check-in re-entry tile routes to
   // `/scholar/practice?checkin=all` — an EXPLICIT intent flag (pilot7 f19
   // finding: an incomplete/paused check-in must never preempt an ordinary
   // blend/strand entry, so those two keep NO checkin param at all — only this
@@ -723,26 +725,10 @@ export function PlaylistCard({
   // row alone made every visible pick launch the bare `/scholar/practice`, which
   // the practice page re-resolves into the mixed blend across all domains —
   // preview and Start disagreeing on exactly the choice the scholar just made.
-  // A pick collapses the set to that one domain, so the link pins `?domain=`
-  // (top precedence on the practice page). Mirrors native's
+  // A switcher pick collapses the set to that one domain. Mirrors native's
   // `selectedDomainSet` / `isMixed` (PracticePlaylistCard.tsx).
   const selectedDomainSet = selectedDomain ? [selectedDomain] : domainSet;
   const isMixed = selectedDomainSet.length > 1;
-  // A tile pick OUTSIDE that set (a "new territory" domain, ANY tile whose
-  // domain a standing pin doesn't cover, or — once the switcher has narrowed
-  // the set — any tile at all) must carry an EXPLICIT `?domain=` — otherwise
-  // the practice page falls through to `standing`/auto-blend resolution (which
-  // wins over an unmatched `choiceHint`, per its own `choiceHint.domain ===
-  // domain` gate), silently serving a DIFFERENT territory than the one just
-  // previewed. `?domain=` has top precedence there (checked before `standing`),
-  // so this reliably targets the picked domain — mirrors native's `inSet`
-  // ternary (PracticePlaylistCard.tsx's `openPractice`). An IN-SET pick with no
-  // switcher narrowing is left exactly as before (no override — the page's own
-  // standing/auto-blend resolution already serves it correctly, blend included).
-  const pinPickDomain =
-    !!selectedChoice &&
-    (!!selectedDomain ||
-      isDomainOutsideEffectiveSet(selectedChoice.domain, selectedDomainSet));
   // The launch domain for a plain blend/switcher entry, and whether that entry
   // folds the `· mapping` band. `?blend=1` marks "this `?domain=` was DERIVED
   // from the scholar's own blend / switcher pick", the same distinction the
@@ -765,9 +751,7 @@ export function PlaylistCard({
   const practiceHref = stretchSelected
     ? `/scholar/practice?domain=${encodeURIComponent(playlist.domain)}&stretch=1`
     : selectedChoice
-      ? `/scholar/practice?choiceDomain=${encodeURIComponent(selectedChoice.domain)}&choiceStrand=${encodeURIComponent(selectedChoice.strand)}${
-          pinPickDomain ? `&domain=${encodeURIComponent(selectedChoice.domain)}` : ""
-        }`
+      ? `/scholar/practice?${new URLSearchParams(strandPickStartParams(selectedChoice)).toString()}`
       : isMixed || !blendDomain
         ? "/scholar/practice"
         : `/scholar/practice?domain=${encodeURIComponent(blendDomain)}${blendMarker}`;
@@ -950,23 +934,16 @@ export function PlaylistCard({
     label: string;
     kind: "next" | "queued" | "done";
     tag: string;
-    /** What this row reads once it is NO LONGER next — see `withLaunchpadRow`.
-     *  A doorway that leads the list demotes the skill behind it, and the tag
-     *  has to move with the dot or the receipt names two next things. */
-    queuedTag: string;
     muted: boolean;
     /** Out-of-current-domain sweep review — drives the per-row domain chip. */
     domain?: string;
   }[] = [];
   if (nextUp && !nextInSet) {
-    // Unreachable as a demotion target: the doorway is spliced at `at + 1` or
-    // later whenever this row exists, so it is never the row behind it.
     rows.push({
       key: nextUp.key,
       label: nextUp.label,
       kind: "next",
       tag: nextUpTag(nextUp.reason),
-      queuedTag: nextUpTag(nextUp.reason),
       muted: false,
       domain: nextUp.domain,
     });
@@ -986,7 +963,6 @@ export function PlaylistCard({
       label: row.label,
       kind,
       tag,
-      queuedTag: row.doneToday ? "Done this block" : reasonTag(row.reason),
       muted: row.doneToday,
       domain: row.domain,
     });

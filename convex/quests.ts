@@ -24,7 +24,7 @@
 // assignments.coreAideArchive / coreAideDispatchActivity).
 
 import { unarchivePatch } from "./lib/teacherArchive";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   authedMutation,
   teacherMutation,
@@ -41,6 +41,7 @@ import type { QuestState } from "./lib/questLifecycle";
 import { chosenPathValidator } from "./bakeUnitFromSeed";
 import { createSessionFromSeedCore } from "./sessions";
 import { isAppActivity } from "../shared/appSurface";
+import { SCHOLAR_LED_APP_BUILDING } from "../shared/missionCopy";
 import { normalizeDeliverable } from "./lib/deliverable";
 import {
   canUnlockQuestBuild,
@@ -113,6 +114,73 @@ export interface RetractResult {
 }
 
 /**
+ * The retract cascade itself, with no access check: the caller has already
+ * decided who may retract this scholar-owned unit (a teacher through
+ * {@link retractScholarQuestCore}, or the Quest's own scholar taking it off
+ * their list, questProposals.dismissQuest). Steps 1 to 3 of the retract
+ * transition below; {@link reopenScholarQuestCore} undoes it either way.
+ */
+export async function retractQuestUnit(
+  ctx: MutationCtx,
+  unit: Doc<"units">,
+  by: { reason: string; teacherId?: Id<"users"> },
+): Promise<Omit<RetractResult, "state">> {
+  const unitId = unit._id;
+  const authorScholarId = unit.authorScholarId;
+  if (!authorScholarId) throw new Error("Not a scholar-authored quest");
+
+  // 1. Deactivate the unit.
+  const unitDeactivated = unit.isActive === true;
+  if (unitDeactivated) {
+    await ctx.db.patch(unitId, { isActive: false });
+  }
+
+  // 2. Dismiss non-terminal seed offers pointing at this unit. A seed belongs
+  //    to the owning scholar, so scan just their pending + active seeds.
+  let seedsDismissed = 0;
+  for (const status of ["pending", "active"] as const) {
+    const seeds = await ctx.db
+      .query("seeds")
+      .withIndex("by_scholar_status", (q) =>
+        q.eq("scholarId", authorScholarId).eq("status", status),
+      )
+      .collect();
+    for (const seed of seeds) {
+      if (String(seed.unitId ?? "") !== String(unitId)) continue;
+      await ctx.db.patch(seed._id, {
+        status: "dismissed",
+        dismissedReason: by.reason,
+        ...(by.teacherId ? { teacherId: by.teacherId } : {}),
+      });
+      seedsDismissed++;
+    }
+  }
+
+  // 3. Archive its non-archived, non-test-drive sessions.
+  let sessionsArchived = 0;
+  const sessions = await ctx.db
+    .query("sessions")
+    .withIndex("by_unit", (q) => q.eq("unitId", unitId))
+    .collect();
+  for (const s of sessions) {
+    if (s.isTestDrive) continue;
+    // A teacher-archived app keeps its stamp, but a later restoreApp must
+    // come back to "retracted", not to its pre-archive state.
+    if (s.teacherArchivedAt != null) {
+      if (s.teacherArchivePriorArchived !== true) {
+        await ctx.db.patch(s._id, { teacherArchivePriorArchived: true });
+      }
+      continue;
+    }
+    if (s.isArchived) continue;
+    await ctx.db.patch(s._id, { isArchived: true });
+    sessionsArchived++;
+  }
+
+  return { unitDeactivated, seedsDismissed, sessionsArchived };
+}
+
+/**
  * The `retract` transition (MOVED verbatim from units.retractScholarQuest).
  *
  * A scholar quest can reach Home through THREE independent paths (an active
@@ -141,53 +209,11 @@ export async function retractScholarQuestCore(
   // Teacher must have access to the owning scholar (institution boundary).
   await requireActiveScholarAccess(ctx, caller, authorScholarId);
 
-  // 1. Deactivate the unit.
-  const unitDeactivated = unit.isActive === true;
-  if (unitDeactivated) {
-    await ctx.db.patch(unitId, { isActive: false });
-  }
-
-  // 2. Dismiss non-terminal seed offers pointing at this unit. A seed belongs
-  //    to the owning scholar, so scan just their pending + active seeds.
-  let seedsDismissed = 0;
-  for (const status of ["pending", "active"] as const) {
-    const seeds = await ctx.db
-      .query("seeds")
-      .withIndex("by_scholar_status", (q) =>
-        q.eq("scholarId", authorScholarId).eq("status", status),
-      )
-      .collect();
-    for (const seed of seeds) {
-      if (String(seed.unitId ?? "") !== String(unitId)) continue;
-      await ctx.db.patch(seed._id, {
-        status: "dismissed",
-        dismissedReason: "Quest retracted",
-        teacherId: caller._id,
-      });
-      seedsDismissed++;
-    }
-  }
-
-  // 3. Archive its non-archived, non-test-drive sessions.
-  let sessionsArchived = 0;
-  const sessions = await ctx.db
-    .query("sessions")
-    .withIndex("by_unit", (q) => q.eq("unitId", unitId))
-    .collect();
-  for (const s of sessions) {
-    if (s.isTestDrive) continue;
-    // A teacher-archived app keeps its stamp, but a later restoreApp must
-    // come back to "retracted", not to its pre-archive state.
-    if (s.teacherArchivedAt != null) {
-      if (s.teacherArchivePriorArchived !== true) {
-        await ctx.db.patch(s._id, { teacherArchivePriorArchived: true });
-      }
-      continue;
-    }
-    if (s.isArchived) continue;
-    await ctx.db.patch(s._id, { isArchived: true });
-    sessionsArchived++;
-  }
+  const { unitDeactivated, seedsDismissed, sessionsArchived } =
+    await retractQuestUnit(ctx, unit, {
+      reason: "Quest retracted",
+      teacherId: caller._id,
+    });
 
   const state = await questStateForPair(ctx, authorScholarId, unitId);
   return { unitDeactivated, seedsDismissed, sessionsArchived, state };
@@ -286,8 +312,7 @@ export const offer = teacherMutation({
 export const start = authedMutation({
   args: {
     unitId: v.id("units"),
-    // Passed through to the bake for a topic-only seed (rare here — offers are
-    // unit-backed); harmless for structured offers.
+    // Accepted from older clients and ignored: no seed start bakes (TRA-660).
     bakePath: v.optional(chosenPathValidator),
   },
   handler: async (ctx, args) => {
@@ -305,12 +330,7 @@ export const start = authedMutation({
       throw new Error("No open offer to start for this unit");
     }
 
-    const { id } = await createSessionFromSeedCore(
-      ctx,
-      scholarId,
-      openOffer._id,
-      args.bakePath,
-    );
+    const { id } = await createSessionFromSeedCore(ctx, scholarId, openOffer._id);
 
     const state = await questStateForPair(ctx, scholarId, args.unitId);
     return { sessionId: id, state };
@@ -370,6 +390,11 @@ export const appendBuildStep = authedMutation({
     );
     if (existing) return { activityId: existing._id };
 
+    if (!SCHOLAR_LED_APP_BUILDING) {
+      throw new ConvexError(
+        "Quests don't add build steps right now: apps are built in activities your teacher assigns.",
+      );
+    }
     if (!(await canUnlockQuestBuild(ctx, { unit, scholarId }))) {
       throw new Error("Finish the Quest before unlocking the build.");
     }

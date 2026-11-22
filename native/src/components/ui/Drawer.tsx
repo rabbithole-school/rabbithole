@@ -22,7 +22,7 @@
  *     NEVER slides, so its edge never sweeps the screen (the seam a sliding
  *     scrim reintroduces). During a dismiss drag it dims proportionally to how
  *     far the panel has been pulled toward the edge.
- *   • Tap the backdrop to dismiss; an inner Pressable swallows taps inside.
+ *   • Tap the backdrop to dismiss; the panel intercepts hits above it.
  *   • Children stay MOUNTED through the close animation (a `rendered` latch) so
  *     the panel never blanks mid-slide.
  *   • Safe-area insets; a grabber; reduce-motion snaps instead of animating.
@@ -73,6 +73,11 @@ type Props = {
   onClose: () => void;
   title: string;
   eyebrow?: string;
+  /** Drop the close button: the drawer still closes by swipe or backdrop tap.
+   *  Only for a host with its own visible close control (VoiceOver needs one). */
+  hideClose?: boolean;
+  /** Rendered at the end of the header row, with a rule under the row (e.g. tabs). */
+  headerTrailing?: ReactNode;
   children: ReactNode;
   /** Which edge the drawer is anchored to. Default "bottom". */
   side?: "bottom" | "right";
@@ -90,6 +95,8 @@ export function Drawer({
   onClose,
   title,
   eyebrow,
+  hideClose = false,
+  headerTrailing,
   children,
   side = "bottom",
   heightFraction = 0.7,
@@ -199,21 +206,31 @@ export function Drawer({
   if (!rendered) return null;
 
   const header = (
-    <View style={styles.header}>
+    <View
+      style={[
+        styles.header,
+        headerTrailing
+          ? [styles.headerRuled, { borderBottomColor: colors.border }]
+          : null,
+      ]}
+    >
       <View style={styles.headerText}>
         {eyebrow ? (
           <Text style={[styles.eyebrow, { color: colors.fgMuted }]}>{eyebrow}</Text>
         ) : null}
         <Text style={[styles.title, { color: colors.fg }]}>{title}</Text>
       </View>
-      <Pressable
-        onPress={onClose}
-        hitSlop={12}
-        accessibilityRole="button"
-        accessibilityLabel="Close"
-      >
-        <SymbolView name="xmark.circle.fill" tintColor={colors.gray300} size={26} />
-      </Pressable>
+      {headerTrailing}
+      {hideClose ? null : (
+        <Pressable
+          onPress={onClose}
+          hitSlop={12}
+          accessibilityRole="button"
+          accessibilityLabel="Close"
+        >
+          <SymbolView name="xmark.circle.fill" tintColor={colors.gray300} size={26} />
+        </Pressable>
+      )}
     </View>
   );
 
@@ -223,16 +240,23 @@ export function Drawer({
   // fight a vertical scroll), so the detector wraps everything. On the BOTTOM
   // sheet only the header is a drag handle, so a scrolling body keeps its
   // vertical scroll — the detector wraps just the grabber + header.
+  // The panel is a plain View, never a Pressable. A touch that no child claims
+  // (the blank space beside a right-aligned chat bubble) would make a panel
+  // Pressable the JS responder, and Fabric's ScrollView refuses to start a
+  // scroll while any ANCESTOR holds the responder
+  // (RCTScrollViewComponentView touchesShouldCancelInContentView), so the
+  // chat would not scroll from there. The backdrop is a sibling underneath,
+  // so taps inside the panel still never reach it.
   const panel = isRight ? (
     <GestureDetector gesture={dismiss}>
-      <Pressable style={styles.inner} onPress={() => {}} accessible={false}>
+      <View style={styles.inner} accessible={false}>
         <View style={[styles.grabberRight, { backgroundColor: colors.gray300 }]} />
         {header}
         {body}
-      </Pressable>
+      </View>
     </GestureDetector>
   ) : (
-    <Pressable style={styles.inner} onPress={() => {}} accessible={false}>
+    <View style={styles.inner} accessible={false}>
       <GestureDetector gesture={dismiss}>
         <View>
           <View style={[styles.grabber, { backgroundColor: colors.gray300 }]} />
@@ -240,7 +264,7 @@ export function Drawer({
         </View>
       </GestureDetector>
       {body}
-    </Pressable>
+    </View>
   );
 
   return (
@@ -324,6 +348,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingBottom: 10,
   },
+  headerRuled: { borderBottomWidth: StyleSheet.hairlineWidth, marginBottom: 8 },
   headerText: { flex: 1 },
   eyebrow: {
     fontFamily: fonts.semibold,

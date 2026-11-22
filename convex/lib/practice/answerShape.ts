@@ -22,6 +22,13 @@
  *     client seed grammar is fractions-only).
  *
  * Pure + deterministic; no answer text ever crosses to the client.
+ *
+ * Algebra-pad items (a template that declares `answerPalette`) are never
+ * classified here: the serve paths (`templateInputHints` in session.ts,
+ * `servedItemFromServable` in serve.ts) skip these signals for them, so a typed
+ * algebra answer like "x^2" can't be routed to the box editor's locked
+ * skeletons. A `solutionSet` answer is neither "expression" nor "fraction", so
+ * it falls through to `{}` on its own.
  */
 
 import type { AnswerType, TypedAnswer } from "./answers";

@@ -1,4 +1,5 @@
 import { convexTest, type TestConvex } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
@@ -93,14 +94,24 @@ describe("practiceSkills — graph seed", () => {
     // 380 → 428 when the elective discrete-math domain landed (48 nodes).
     // 428 → 427 when the duplicate `prime_composite` node was folded into
     // `prime_or_composite` (2026-09-07).
-    expect(res.skills).toBe(427);
+    // 427 → 488 when the algebra-2 domain landed (61 nodes, 2026-11-20).
+    // 488 → 501 with discrete-math's algorithms strand (13 nodes, 2026-11-21).
+    expect(res.skills).toBe(501);
     // 592 buildsOn edges + 10 INFERENCE-ONLY `implies` edges (probability 3 +
     // geometry 1 + early-algebra 2 + algebra-1 4) — the rebuild absorbs both kinds.
     // 601 → 657 with discrete-math: 56 buildsOn edges (48 in-domain + 8
     // cross-domain from the WNA number-theory strand), 0 implies.
     // 657 → 655 with the prime fold: its three edges left, one
     // (`prime_or_composite → prime_factorization`) arrived.
-    expect(res.edges).toBe(655);
+    // 655 → 747 with algebra-2 (2026-11-20): 88 buildsOn edges (49 in-domain
+    // + 39 cross-domain from algebra-1/early-algebra/geometry) + 4 implies.
+    // 747 → 751 when Algebra 2's prerequisites were matched to what its items
+    // ask: 2 in-domain (cx_imaginary_unit, poly_factor_grouping_cubes →
+    // poly_solve_higher_degree) + 2 cross-domain (factor_special_forms →
+    // poly_factor_quadratic_form, factor_trinomial_general → poly_factor_theorem).
+    // 751 → 770 with the algorithms strand: 18 in-domain + 1 cross-domain
+    // (exponents_repeated_mult → algo_halving_loop).
+    expect(res.edges).toBe(770);
 
     const { skills, edges } = await t.query(api.practiceSkills.getDomain, {});
     expect(skills).toHaveLength(86);
@@ -3916,10 +3927,10 @@ describe("practiceSkills — spiral circuit breaker", () => {
     expect(stuck[0].body).toContain("This sitting: 1 of 4 correct");
     expect(stuck[0].body.match(/^• /gm)).toHaveLength(3);
     expect(stuck[0].body).toContain(
-      "• **prior\\_2** (7s on this one)\n",
+      "• **prior_2** (7s on this one)\n",
     );
     expect(stuck[0].body).toContain(
-      "• **prior\\_1** (8s on this one)\n",
+      "• **prior_1** (8s on this one)\n",
     );
     expect(stuck[0].body).toContain(
       "• **Count to 10 by ones** (17s on this one)\n",
@@ -4707,7 +4718,7 @@ describe("practiceSkills — problem_set activity (scoped practice)", () => {
           targetSkillKeys,
         },
       });
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId: scholar,
         unitId,
         scholarIds: [scholar],
@@ -6437,6 +6448,59 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
     expect(floorRow?.source).toBe("accelerated");
   });
 
+  test("submitReprobe leaves earned rows alone when a dropped credit opened a hole below them", async () => {
+    const t = await freshSeeded();
+    const scholar = await seedScholar(t);
+    const asScholar = await asUser(t, scholar);
+    const order = await countingOrder(t);
+    let targetIdx = -1;
+    for (let i = order.length - 1; i >= 3; i--) {
+      if (hasTemplate(order[i])) { targetIdx = i; break; }
+    }
+    expect(targetIdx).toBeGreaterThanOrEqual(3);
+    // Index 0 is a dropped credit (zero reps); 1 and 2 are earned by practice.
+    await t.run(async (ctx) => {
+      for (const [i, skillKey] of order.slice(0, 3).entries()) {
+        await ctx.db.insert("practiceMastery", {
+          scholarId: scholar,
+          skillKey,
+          domain: "whole-number-arithmetic",
+          strand: "counting",
+          repetition: i === 0 ? 0 : FLUENT_REPS + 2,
+          halfLifeDays: i === 0 ? 0 : 30,
+          lastPracticedAt: i === 0 ? undefined : Date.now(),
+          frontier: false,
+          source: i === 0 ? "placement" : "practice",
+          missStreak: i === 2 ? 2 : 0,
+          updatedAt: Date.now(),
+        });
+      }
+    });
+    const itemId = makeItemId(order[targetIdx], 4242);
+    const correct = gradeTemplateItem(itemId, "0")!.correctAnswer;
+    await asScholar.mutation(api.practiceSkills.submitReprobe, {
+      scholarId: scholar,
+      strand: "counting",
+      answers: [{ itemId, answer: correct }],
+    });
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("practiceMastery")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", scholar))
+        .collect(),
+    );
+    const byKey = new Map(rows.map((r) => [r.skillKey, r]));
+    expect(byKey.get(order[0])).toMatchObject({ source: "reprobe", repetition: FLUENT_REPS });
+    for (const key of [order[1], order[2]]) {
+      expect(byKey.get(key)).toMatchObject({
+        source: "practice",
+        repetition: FLUENT_REPS + 2,
+        halfLifeDays: 30,
+        missStreak: 0,
+      });
+    }
+  });
+
   // Reprobe is the ONE trust-upward path that PATCHES an existing mastery row
   // (placement and the accel seed only insert fresh ones), so it is the only
   // place a stale missStreak could survive a credit. Clearing a HIGHER node is a
@@ -7152,8 +7216,8 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
 
     // Every seeded registered domain is present, labeled + discipline-tagged
     // (including the elective discrete-math — this read is a catalog, not the
-    // check-in's eligible set).
-    expect(domains.length).toBe(9);
+    // check-in's eligible set). 9 → 10 with algebra-2 (2026-11-20).
+    expect(domains.length).toBe(10);
     expect(byId["discrete-math"].label).toBe("Discrete math");
     expect(byId["fraction-arithmetic"].label).toBe("Fractions");
     expect(byId["fraction-arithmetic"].discipline).toBe("Mathematics");
@@ -7907,7 +7971,7 @@ describe("practiceSkills — unified all-domains tree", () => {
 
     // Every seeded domain is present (whole-number 87 + fractions 25 + probability 26
     // + geometry-measurement 46 + ratio-proportion-percent 39 + integers-coordinates 31
-    // + early-algebra 45 + algebra-1 55).
+    // + early-algebra 45 + algebra-1 55 + discrete-math 48 + algebra-2 61).
     expect(unified.domain).toBeNull();
     expect(new Set(unified.domains)).toEqual(
       new Set([
@@ -7919,13 +7983,15 @@ describe("practiceSkills — unified all-domains tree", () => {
         "integers-coordinates",
         "early-algebra",
         "algebra-1",
+        "algebra-2",
         "discrete-math",
       ]),
     );
     // Probability is 32 after the six-node sampling-inference strand; geometry-
     // measurement is 60 since the 14-node measurement-data strand landed.
     // Whole-number is 86 since the duplicate prime node was folded (2026-09-07).
-    expect(unified.nodes).toHaveLength(86 + 31 + 32 + 60 + 39 + 31 + 45 + 55 + 48);
+    // Discrete-math is 61 since its 13-node algorithms strand landed (2026-11-21).
+    expect(unified.nodes).toHaveLength(86 + 31 + 32 + 60 + 39 + 31 + 45 + 55 + 61 + 61);
 
     // Every node carries its domain, and a known key from each domain is present.
     for (const n of unified.nodes) expect(typeof n.domain).toBe("string");
@@ -8024,6 +8090,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
     "integers-coordinates",
     "early-algebra",
     "algebra-1",
+    "algebra-2",
   ];
   const ALL_SEEDED = [...REGISTERED, "discrete-math"];
 
@@ -8360,7 +8427,10 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
     // probeable nodes). 171 → 184 when the per-strand cap rose 5 → 6 (TRA-92):
     // exactly the 13 seeded strands with ≥6 probeable nodes each gain one probe
     // of headroom. Worth re-reading this number if it ever moves further.
-    expect(current.maxQuestions).toBe(184);
+    // 184 → 209 with algebra-2 (2026-11-20): its seven strands would sum to
+    // 7 × 6 = 42, but each domain's cap is clamped to PLACEMENT_GLOBAL_CAP (25),
+    // so the new domain adds exactly 25.
+    expect(current.maxQuestions).toBe(209);
 
     // Finish; the current read now reports done + a per-domain summary row each.
     await runMixedPlacement(asScholar, scholar, () => "correct");
@@ -8563,6 +8633,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
     const idxIntegers = served.map((s, i) => (s.domain === "integers-coordinates" ? i : -1)).filter((i) => i >= 0);
     const idxAlgebra = served.map((s, i) => (s.domain === "early-algebra" ? i : -1)).filter((i) => i >= 0);
     const idxAlgebra1 = served.map((s, i) => (s.domain === "algebra-1" ? i : -1)).filter((i) => i >= 0);
+    const idxAlgebra2 = served.map((s, i) => (s.domain === "algebra-2" ? i : -1)).filter((i) => i >= 0);
 
     // Every whole-number probe precedes every fraction probe (the gate deferred
     // fractions until whole-number/division was placed).
@@ -8616,6 +8687,13 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
     for (const source of [idxWna, idxAlgebra, idxGeometry, idxRatio, idxIntegers]) {
       if (source.length && idxAlgebra1.length) {
         expect(Math.max(...source)).toBeLessThan(Math.min(...idxAlgebra1));
+      }
+    }
+    // Algebra 2 builds on Algebra 1, plus one early-algebra pattern and the
+    // geometry coordinate plane, so all three finish before it begins.
+    for (const source of [idxAlgebra1, idxAlgebra, idxGeometry]) {
+      if (source.length && idxAlgebra2.length) {
+        expect(Math.max(...source)).toBeLessThan(Math.min(...idxAlgebra2));
       }
     }
     // The gate never blocks completion: all seeded domains still get placed.
@@ -9235,7 +9313,7 @@ describe("practiceSkills — implicit and standing serving", () => {
     const t = await freshSeeded();
     const scholar = await seedScholar(t, "standing_assignment_wins");
     await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: scholar,
         scholarIds: [scholar],
         title: "Probability practice",

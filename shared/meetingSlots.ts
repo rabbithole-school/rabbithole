@@ -45,6 +45,25 @@ export type RecurringPlacementInput = {
   mode?: string | null;
 };
 
+/**
+ * Whether a schedule row is one of its class's weekly meetings: placed (a
+ * weekday and a block), recurring (no own week) and not homework. The one
+ * definition of a recurring meeting, shared by `deriveClassMeetingPattern` and
+ * School › Classes & times. A meeting may also carry a linked activity or app
+ * (filling a recurring slot patches the row in place; a standing app slot is a
+ * recurring row with an app); it is still the class's meeting.
+ */
+export function isRecurringClassMeeting(
+  p: Pick<RecurringPlacementInput, "weekStartMs" | "weekday" | "blockId" | "mode">,
+): p is typeof p & { weekday: number; blockId: string } {
+  return (
+    p.weekStartMs == null && // concrete instance, not the shell
+    p.weekday != null &&
+    p.blockId != null && // shelf
+    p.mode !== "homework" // due rail, not a class meeting
+  );
+}
+
 /** Chronological order key within a week: (weekday, block order). */
 function chronoKey(
   weekday: number,
@@ -71,9 +90,7 @@ export function deriveClassMeetingPattern(args: {
   const seen = new Set<string>();
   const pattern: MeetingPatternSlot[] = [];
   for (const p of args.placements) {
-    if (p.weekStartMs != null) continue; // concrete instance, not the shell
-    if (p.weekday == null || p.blockId == null) continue; // shelf
-    if (p.mode === "homework") continue; // due rail, not a class meeting
+    if (!isRecurringClassMeeting(p)) continue;
     if (String(p.groupId) !== String(args.groupId)) continue;
     if (p.subject.trim().toLowerCase() !== wantSubject) continue;
     const key = `${p.weekday}|${p.blockId}`;

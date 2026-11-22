@@ -22,6 +22,8 @@ export async function prepareCustomAppSandbox(
   injectAppStateSdk: AppStateSdkInjector,
   resolveAppKitSource: AsyncAppKitSourceResolver,
   resolveAssetUrl: AppAssetUrlResolver = NO_APP_ASSET_URL,
+  /** Web origin that serves /app-kit/pyodide/; see PYODIDE_KIT_PATH. */
+  kitOrigin?: string,
 ): Promise<{ csp: string; srcDoc: string }> {
   const requestedFiles = requestedAppKitFiles(html);
   const sources = new Map<AppKitFile, string>();
@@ -43,5 +45,6 @@ export async function prepareCustomAppSandbox(
     injectAppStateSdk,
     resolveSource,
     resolveAssetUrl,
+    kitOrigin,
   );
 }

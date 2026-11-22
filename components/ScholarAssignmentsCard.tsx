@@ -109,7 +109,7 @@ export function ScholarAssignmentsCard({
                 mb={1}
                 mt={assignments.length > 0 ? 1 : 0}
               >
-                Class focus
+                In class
               </Text>
               <Row
                 icon={
@@ -118,11 +118,11 @@ export function ScholarAssignmentsCard({
                   </span>
                 }
                 borderColor="violet.300"
-                label="Class focus right now"
+                label="In class right now"
                 detail={
                   focus.activityTitle
                     ? `${focus.unitTitle ?? "Activity"} — ${focus.activityTitle}`
-                    : focus.unitTitle ?? "(active focus)"
+                    : focus.unitTitle ?? "(in-class work)"
                 }
                 href="/teacher/schedule"
               />

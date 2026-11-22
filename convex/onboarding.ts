@@ -25,7 +25,7 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { ROLES } from "./lib/roles";
 import { isProgramGuest } from "./lib/enrollmentStanding";
-import { syncScheduleMirrorAll } from "./lib/scheduleMirror";
+import { writeSchedule } from "./lib/scheduleStore";
 import {
   ONBOARDING_UNIT,
   ONBOARDING_UNIT_SLUG,
@@ -103,7 +103,6 @@ export async function reconcileOnboardingActivities(
       systemPrompt: a.systemPrompt,
       deliverable: a.deliverable,
       advanceRubric: a.advanceRubric,
-      defaultMode: "classFocus" as const,
     };
     const foundByTitle = existing.find(
       (row) => !claimedIds.has(row._id) && row.title === a.title,
@@ -215,7 +214,6 @@ export const seedOnboarding = internalMutation({
         systemPrompt: a.systemPrompt,
         deliverable: a.deliverable,
         advanceRubric: a.advanceRubric,
-        defaultMode: "classFocus",
       });
     }
 
@@ -302,16 +300,9 @@ export const enrollScholar = internalMutation({
       title: ONBOARDING_UNIT.title,
       startedAt: Date.now(),
       selfPaced: true,
-      activitySchedule: schedule,
     });
-    // This writes `activitySchedule` directly instead of going through
-    // `pushActivity`, so it has to mirror by hand. Without this, every scholar
-    // onboarded after the backfill ran would carry a permanently mirror-less
-    // live focus — a hole the drift counter would report but nothing would fix.
-    if (schedule.length > 0) {
-      const created = await ctx.db.get(assignmentId);
-      if (created) await syncScheduleMirrorAll(ctx, created, schedule);
-    }
+    if (schedule.length > 0) await writeSchedule(ctx, assignmentId, schedule);
+
     return null;
   },
 });

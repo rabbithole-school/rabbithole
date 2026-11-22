@@ -14,8 +14,9 @@ export interface Scholar {
   enrollmentStanding: "enrolled" | "program_guest";
   readingLevel: string | null;
   dateOfBirth: string | null;
+  /** Enrolled grade tag (`users.gradeLevel`), e.g. "K" or "3". */
+  gradeLevel: string | null;
   sessionCount: number;
-  messageCount: number;
   lastActive: number;
   statusSummary: string | null;
   pulseScore: number | null;

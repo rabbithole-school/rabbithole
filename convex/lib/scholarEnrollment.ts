@@ -269,7 +269,7 @@ export async function reconcileScholarEnrollment(
     inviteId?: Id<"institutionInvites">;
     scrubGroups?: boolean;
   },
-): Promise<void> {
+): Promise<{ scrubbedGroupIds: Id<"scholarGroups">[] }> {
   const scholar = await ctx.db.get(args.scholarId);
   if (!scholar) throw new Error("User not found");
   if (!(await ctx.db.get(args.institutionId))) {
@@ -351,9 +351,9 @@ export async function reconcileScholarEnrollment(
     .unique();
   if (migrationIssue) await ctx.db.delete(migrationIssue._id);
 
+  const scrubbedGroupIds = new Set<Id<"scholarGroups">>();
   if (enrollmentChanged || args.scrubGroups) {
     const groups = await ctx.db.query("scholarGroups").collect();
-    const scrubbedGroupIds = new Set<Id<"scholarGroups">>();
     for (const group of groups) {
       if (
         group.scholarIds.includes(args.scholarId) &&
@@ -380,4 +380,5 @@ export async function reconcileScholarEnrollment(
     }
     await invalidatePendingGroupWork(ctx, scrubbedGroupIds);
   }
+  return { scrubbedGroupIds: [...scrubbedGroupIds] };
 }

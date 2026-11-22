@@ -53,6 +53,8 @@
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
+
+import { useIsBedtime } from "@/contexts/BedtimeContext";
 import { useFocusEffect } from "expo-router";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
@@ -130,8 +132,13 @@ export function usePreReaderVoice(opts: {
   const startRef = useRef(opts.startListening);
   const cancelRef = useRef(opts.cancelListening);
   const lastTutorTextRef = useRef(opts.lastTutorText);
+  // Bedtime (BedtimeGate): the session stays mounted under the night sky, so
+  // the voice loop itself must stop — no listening, no voice, no keep-awake.
+  const isBedtime = useIsBedtime();
+  const bedtimeRef = useRef(isBedtime);
   // Latest values for the engine/AppState/timer callbacks, synced after commit.
   useEffect(() => {
+    bedtimeRef.current = isBedtime;
     sttEnabledRef.current = sttEnabled;
     autoListenRef.current = opts.autoListen;
     alphabetRef.current = opts.yourTurnAlphabet;
@@ -160,6 +167,7 @@ export function usePreReaderVoice(opts: {
 
   const canListenNow = useCallback(
     (drainedSource: SpeechSource | null) =>
+      !bedtimeRef.current &&
       shouldAutoListen({
         voiceMode: voiceModeRef.current,
         sttEnabled: sttEnabledRef.current,
@@ -255,14 +263,22 @@ export function usePreReaderVoice(opts: {
     }, [maybeAutoListen, silenceVoice]),
   );
 
-  // A child listening to a long reply isn't touching the screen.
+  // A child listening to a long reply isn't touching the screen — except at
+  // bedtime, when the iPad should be free to sleep.
   useEffect(() => {
-    if (!voiceMode) return;
+    if (!voiceMode || isBedtime) return;
     void activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => {});
     return () => {
       void deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {});
     };
-  }, [voiceMode]);
+  }, [voiceMode, isBedtime]);
+
+  // Bedtime falls mid-conversation: stop the voice and the mic now.
+  useEffect(() => {
+    if (!isBedtime) return;
+    silenceVoice();
+    cancelRef.current();
+  }, [isBedtime, silenceVoice]);
 
   // Leaving the app stops the mic and the voice — no recording or playback
   // running while backgrounded, no odd resume state (web parity).
@@ -278,6 +294,7 @@ export function usePreReaderVoice(opts: {
   /** Queue whole text through the sentence splitter as the voice loop's own
    *  audio (so it hands the turn to the child when it finishes). */
   const speakAsVoice = useCallback((text: string) => {
+    if (bedtimeRef.current) return;
     const tts = getNativeTTS();
     const acc = new SentenceAccumulator();
     const parts = acc.push(stripMarkdownForSpeech(text) + " ");
@@ -299,11 +316,15 @@ export function usePreReaderVoice(opts: {
 
   /** A streamed text delta: speak each sentence it completes. */
   const onReplyText = useCallback((delta: string) => {
-    if (!voiceModeRef.current || !focusedRef.current) return;
+    if (!voiceModeRef.current || !focusedRef.current || bedtimeRef.current) return;
     const tts = getNativeTTS();
     // The child's own "your turn" line never goes to the voice.
     const speakable = turnFilterRef.current.push(delta);
-    for (const s of accRef.current.push(speakable)) {
+    const sentences = accRef.current.push(speakable);
+    // The child tapped the mic mid-reply: that interrupts the tutor, so the
+    // rest of the reply isn't read over their answer (TRA-706).
+    if (appStatusBus.isMicOwned()) return;
+    for (const s of sentences) {
       tts.enqueue(stripMarkdownForSpeech(s), "voice");
     }
   }, []);
@@ -312,8 +333,10 @@ export function usePreReaderVoice(opts: {
    *  the engine won't fire another onIdle, so ask whose audio drained. */
   const onReplyDone = useCallback(() => {
     replyOpenRef.current = false;
-    if (!voiceModeRef.current || !focusedRef.current) return;
+    if (!voiceModeRef.current || !focusedRef.current || bedtimeRef.current) return;
     const tts = getNativeTTS();
+    // The child is talking (they tapped the mic mid-reply): stay quiet.
+    if (appStatusBus.isMicOwned()) return;
     const filter = turnFilterRef.current;
     const tail = accRef.current.push(filter.flush());
     for (const s of tail) tts.enqueue(stripMarkdownForSpeech(s), "voice");

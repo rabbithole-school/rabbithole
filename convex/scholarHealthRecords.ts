@@ -31,7 +31,7 @@ import {
 } from "./lib/formInstitutionGate";
 import { resolveInstitutionLens } from "./lib/institutionLens";
 import { isPlatformAdminRole } from "./lib/roles";
-import { ENROLLMENT_STANDINGS } from "./lib/enrollmentStanding";
+import { ENROLLMENT_STANDINGS, isWithdrawn } from "./lib/enrollmentStanding";
 import {
   hasHealthAccessAtInstitution,
   healthInstitutionIds,
@@ -962,8 +962,10 @@ export const listHealthScholarsForStaff = authedQuery({
         q.eq("institutionId", lens.institution!._id),
       )
       .collect();
+    // The picker lists current scholars; a withdrawn scholar's record stays
+    // reachable through requireStaffScholarAccess (staffScholarCandidates).
     return users
-      .filter((user) => user.role === "scholar")
+      .filter((user) => user.role === "scholar" && !isWithdrawn(user))
       .map((user) => ({
         id: user._id,
         name: user.name ?? user.username ?? "Scholar",
@@ -1957,12 +1959,25 @@ export const getHealthRecord = authedQuery({
  */
 export const scholarFormsAvailable = authedQuery({
   args: { scholarId: v.id("users") },
-  handler: async (ctx, { scholarId }): Promise<boolean> => {
-    await requireGuardianOf(ctx, scholarId);
-    if (isPlatformAdminRole(ctx.user.role)) return true;
-    return scholarFormsAllowed(ctx, scholarId);
-  },
+  handler: async (ctx, { scholarId }): Promise<boolean> =>
+    guardianFormsAvailableFor(ctx, scholarId),
 });
+
+/** The caller the guardian-facing reads below authorize against. */
+type GuardianReadCtx = QueryCtx & { user: Pick<Doc<"users">, "_id" | "role"> };
+
+/**
+ * `scholarFormsAvailable`'s body, shared with `parents.recordsTab` so the
+ * Records tab composes the same gate rather than restating it.
+ */
+export async function guardianFormsAvailableFor(
+  ctx: GuardianReadCtx,
+  scholarId: Id<"users">,
+): Promise<boolean> {
+  await requireGuardianOf(ctx, scholarId);
+  if (isPlatformAdminRole(ctx.user.role)) return true;
+  return scholarFormsAllowed(ctx, scholarId);
+}
 
 /**
  * Staff-side form availability for a specific scholar and institution lens.
@@ -2299,69 +2314,79 @@ export const saveHealthRecord = authedMutation({
 
 export const hasCompletedHealthRecord = authedQuery({
   args: { scholarId: v.id("users") },
-  handler: async (ctx, { scholarId }) => {
-    await requireGuardianOf(ctx, scholarId);
-    await assertScholarFormsAllowed(ctx, ctx.user, scholarId);
-    const signed = await canonicalRecord(ctx, scholarId);
-    const draft = await guardianDraft(ctx, scholarId, ctx.user._id);
-    const outstandingForms: string[] = [];
-    if (signed) {
-      const fields = healthFieldsFrom(signed);
-      // A slot is outstanding when its document is missing OR staff sent the
-      // uploaded document back for replacement. Without the second check a
-      // "needs replacement" verdict is invisible to the family: the pointer
-      // survives, so a missing-only test never re-flags it.
-      const needsReplacement = async (
-        fileId: Id<"healthRecordFiles"> | null | undefined,
-      ): Promise<boolean> => {
-        if (!fileId) return false;
-        const file = await ctx.db.get(fileId);
-        return file?.reviewStatus === "needs_replacement";
-      };
-      if (
-        fields.schoolMedicationMode !== "" &&
-        fields.schoolMedicationMode !== "none" &&
-        fields.medicationDocumentDelivery !== "provide_separately" &&
-        (!fields.medicationDocumentId ||
-          (await needsReplacement(fields.medicationDocumentId)))
-      ) {
-        outstandingForms.push("Medication authorization");
-      }
-      if (!fields.hap.none && fields.hap.allergy) {
-        const allergyId = fields.actionPlanDocumentIds?.allergy;
-        if (!allergyId || (await needsReplacement(allergyId))) {
-          outstandingForms.push("Food allergy action plan");
-        }
-      }
-      if (!fields.hap.none && fields.hap.asthma) {
-        const asthmaId = fields.actionPlanDocumentIds?.asthma;
-        if (!asthmaId || (await needsReplacement(asthmaId))) {
-          outstandingForms.push("Asthma action plan");
-        }
+  handler: async (ctx, { scholarId }) =>
+    guardianHealthRecordStatusFor(ctx, scholarId),
+});
+
+/**
+ * `hasCompletedHealthRecord`'s body, shared with `parents.recordsTab`: the
+ * guardian's view of the signed record (done, drafting, outstanding forms).
+ */
+export async function guardianHealthRecordStatusFor(
+  ctx: GuardianReadCtx,
+  scholarId: Id<"users">,
+) {
+  await requireGuardianOf(ctx, scholarId);
+  await assertScholarFormsAllowed(ctx, ctx.user, scholarId);
+  const signed = await canonicalRecord(ctx, scholarId);
+  const draft = await guardianDraft(ctx, scholarId, ctx.user._id);
+  const outstandingForms: string[] = [];
+  if (signed) {
+    const fields = healthFieldsFrom(signed);
+    // A slot is outstanding when its document is missing OR staff sent the
+    // uploaded document back for replacement. Without the second check a
+    // "needs replacement" verdict is invisible to the family: the pointer
+    // survives, so a missing-only test never re-flags it.
+    const needsReplacement = async (
+      fileId: Id<"healthRecordFiles"> | null | undefined,
+    ): Promise<boolean> => {
+      if (!fileId) return false;
+      const file = await ctx.db.get(fileId);
+      return file?.reviewStatus === "needs_replacement";
+    };
+    if (
+      fields.schoolMedicationMode !== "" &&
+      fields.schoolMedicationMode !== "none" &&
+      fields.medicationDocumentDelivery !== "provide_separately" &&
+      (!fields.medicationDocumentId ||
+        (await needsReplacement(fields.medicationDocumentId)))
+    ) {
+      outstandingForms.push("Medication authorization");
+    }
+    if (!fields.hap.none && fields.hap.allergy) {
+      const allergyId = fields.actionPlanDocumentIds?.allergy;
+      if (!allergyId || (await needsReplacement(allergyId))) {
+        outstandingForms.push("Food allergy action plan");
       }
     }
-    const currentDraft =
-      draft && draft.baseRevision === (signed?.revision ?? 0) ? draft : null;
-    return {
-      completed: signed !== null,
-      submittedAt: signed?.submittedAt ?? null,
-      hasDraft: currentDraft !== null,
-      // Saved answers this guardian has not signed for yet, so the school is
-      // still reading the older signed record. Documents are excluded by
-      // construction — they are committed in place on save, so an upload never
-      // leaves the family owing a signature (see `commitGuardianDocumentSlots`).
-      unsentChanges:
-        !!signed &&
-        !!currentDraft &&
-        healthRecordAnswersDiffer(
-          healthFieldsFrom(currentDraft),
-          healthFieldsFrom(signed),
-        ),
-      currentStep: currentDraft ? currentDraft.currentStep : signed ? 11 : 0,
-      outstandingForms,
-    };
-  },
-});
+    if (!fields.hap.none && fields.hap.asthma) {
+      const asthmaId = fields.actionPlanDocumentIds?.asthma;
+      if (!asthmaId || (await needsReplacement(asthmaId))) {
+        outstandingForms.push("Asthma action plan");
+      }
+    }
+  }
+  const currentDraft =
+    draft && draft.baseRevision === (signed?.revision ?? 0) ? draft : null;
+  return {
+    completed: signed !== null,
+    submittedAt: signed?.submittedAt ?? null,
+    hasDraft: currentDraft !== null,
+    // Saved answers this guardian has not signed for yet, so the school is
+    // still reading the older signed record. Documents are excluded by
+    // construction — they are committed in place on save, so an upload never
+    // leaves the family owing a signature (see `commitGuardianDocumentSlots`).
+    unsentChanges:
+      !!signed &&
+      !!currentDraft &&
+      healthRecordAnswersDiffer(
+        healthFieldsFrom(currentDraft),
+        healthFieldsFrom(signed),
+      ),
+    currentStep: currentDraft ? currentDraft.currentStep : signed ? 11 : 0,
+    outstandingForms,
+  };
+}
 
 export const getHealthRecordForStaff = authedQuery({
   args: {
@@ -2945,19 +2970,26 @@ export const listMedicalClearanceRequestsForStaff = authedQuery({
  */
 export const listMedicalClearanceRequestsForGuardian = authedQuery({
   args: { scholarId: v.id("users") },
-  handler: async (ctx, { scholarId }) => {
-    await requireGuardianOf(ctx, scholarId);
-    await assertScholarFormsAllowed(ctx, ctx.user, scholarId);
-    const requests = await ctx.db
-      .query("medicalClearanceRequests")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-      .collect();
-    const active = requests
-      .filter((request) => isActiveClearanceStatus(request.status))
-      .sort((a, b) => b.requestedAt - a.requestedAt);
-    return Promise.all(active.map((request) => clearanceRequestView(ctx, request)));
-  },
+  handler: async (ctx, { scholarId }) =>
+    guardianClearanceRequestsFor(ctx, scholarId),
 });
+
+/** `listMedicalClearanceRequestsForGuardian`'s body, shared with `parents.recordsTab`. */
+export async function guardianClearanceRequestsFor(
+  ctx: GuardianReadCtx,
+  scholarId: Id<"users">,
+) {
+  await requireGuardianOf(ctx, scholarId);
+  await assertScholarFormsAllowed(ctx, ctx.user, scholarId);
+  const requests = await ctx.db
+    .query("medicalClearanceRequests")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .collect();
+  const active = requests
+    .filter((request) => isActiveClearanceStatus(request.status))
+    .sort((a, b) => b.requestedAt - a.requestedAt);
+  return Promise.all(active.map((request) => clearanceRequestView(ctx, request)));
+}
 
 /**
  * Guardian starts an upload for a clearance request. Mirrors
@@ -3273,17 +3305,24 @@ export const generatePhysicalExamUploadUrl = authedMutation({
  */
 export const getPhysicalExamForGuardian = authedQuery({
   args: { scholarId: v.id("users") },
-  handler: async (ctx, { scholarId }) => {
-    await requireGuardianOf(ctx, scholarId);
-    await assertScholarFormsAllowed(ctx, ctx.user, scholarId);
-    const [current] = await physicalExamFiles(ctx, scholarId);
-    if (!current) return null;
-    const url = current.storageId
-      ? await ctx.storage.getUrl(current.storageId)
-      : null;
-    return physicalExamView(current, url);
-  },
+  handler: async (ctx, { scholarId }) =>
+    guardianPhysicalExamFor(ctx, scholarId),
 });
+
+/** `getPhysicalExamForGuardian`'s body, shared with `parents.recordsTab`. */
+export async function guardianPhysicalExamFor(
+  ctx: GuardianReadCtx,
+  scholarId: Id<"users">,
+) {
+  await requireGuardianOf(ctx, scholarId);
+  await assertScholarFormsAllowed(ctx, ctx.user, scholarId);
+  const [current] = await physicalExamFiles(ctx, scholarId);
+  if (!current) return null;
+  const url = current.storageId
+    ? await ctx.storage.getUrl(current.storageId)
+    : null;
+  return physicalExamView(current, url);
+}
 
 /**
  * The staff-facing list: every physical on file for a scholar, newest first,

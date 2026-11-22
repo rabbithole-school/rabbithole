@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   diceCount,
+  diceSubmittableState,
   diceDefaultCount,
   diceEventMatches,
   diceExpectedAnswer,
@@ -228,5 +229,30 @@ describe("parseDicePrediction (keypad-typed prediction)", () => {
     const parsed = parseDicePrediction("2/4");
     expect(parsed).not.toBeNull();
     expect(diceSolved(probHeads, { rollCount: 3, predicted: parsed! })).toBe(true);
+  });
+});
+
+describe("diceSubmittableState (what a dice widget reports for Done)", () => {
+  const challenge = spec({
+    prediction: { type: "probability", event: { type: "atLeast", value: 2 } },
+  });
+
+  test("a challenge reports nothing until a prediction is committed", () => {
+    expect(diceSubmittableState(challenge, { rollCount: 0, predicted: null })).toBeNull();
+    expect(diceSubmittableState(challenge, { rollCount: 7, predicted: null })).toBeNull();
+  });
+
+  test("a committed prediction is reported, right or wrong, and grades through", () => {
+    const right = { rollCount: 3, predicted: { num: 5, den: 6 } };
+    const wrong = { rollCount: 3, predicted: { num: 1, den: 2 } };
+    expect(diceSubmittableState(challenge, right)).toBe(right);
+    expect(diceSubmittableState(challenge, wrong)).toBe(wrong);
+    expect(gradeManipulativeSubmission(JSON.stringify(challenge), JSON.stringify(right))).toEqual({ correct: true });
+    expect(gradeManipulativeSubmission(JSON.stringify(challenge), JSON.stringify(wrong))).toEqual({ correct: false });
+  });
+
+  test("a sandbox (no prediction) reports every state", () => {
+    const s = { rollCount: 2, predicted: null };
+    expect(diceSubmittableState(spec({}), s)).toBe(s);
   });
 });

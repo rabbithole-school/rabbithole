@@ -27,7 +27,7 @@ import {
   factOpGlyph,
   type FactOp,
 } from "@/shared/factKey";
-import { factGridCellValid } from "@/components/practice/factHeatmapGrid";
+import { factGridAxes, factGridCellValid } from "@/components/practice/factHeatmapGrid";
 import {
   type AutomaticityState,
   automaticityLabel,
@@ -153,24 +153,18 @@ function LegendSwatch({ state, children }: { state: AutomaticityState; children:
 }
 
 /**
- * Build the square operand grid for one operation. Commutative ops (add / mul)
- * fold their two operands onto one canonical cell; the renderer paints only the
+ * Build the operand grid for one operation. Commutative ops (add / mul) fold
+ * their two operands onto one canonical cell; the renderer paints only the
  * LO≤HI triangle. Subtraction keeps order: rows are the minuends, columns the
- * subtrahends.
+ * subtrahends. `factGridAxes` keeps only rows and columns that hold a cell.
  */
 function useGrid(cells: FastMathFactCell[], op: FactOp) {
   return useMemo(() => {
     const opCells = cells.filter((c) => c.op === op);
     const byKey = new Map(opCells.map((c) => [c.factKey, c]));
     const glyph = factOpGlyph(op);
-
-    if (op === "sub") {
-      const rows = [...new Set(opCells.map((c) => c.a))].sort((x, y) => x - y);
-      const cols = [...new Set(opCells.map((c) => c.b))].sort((x, y) => x - y);
-      return { rows, cols, byKey, glyph };
-    }
-    const operands = [...new Set(opCells.flatMap((c) => [c.a, c.b]))].sort((x, y) => x - y);
-    return { rows: operands, cols: operands, byKey, glyph };
+    const { rows, cols } = factGridAxes(op, opCells);
+    return { rows, cols, byKey, glyph };
   }, [cells, op]);
 }
 

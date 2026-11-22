@@ -342,7 +342,12 @@ export function isScanObservable(
     item.processingStatus === "ready" &&
     scholarIds.length > 0 &&
     item.activityId == null &&
-    item.fileStorageId != null
+    item.fileStorageId != null &&
+    // The assessor reads pages and pictures. A video or a sound recording
+    // (a capture station's clip, a Decibel meter take) would go to Claude as a
+    // PDF and fail.
+    !item.fileMimeType?.startsWith("video/") &&
+    !item.fileMimeType?.startsWith("audio/")
   );
 }
 

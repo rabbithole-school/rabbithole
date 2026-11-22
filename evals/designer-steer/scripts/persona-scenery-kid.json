@@ -1,0 +1,17 @@
+{
+  "name": "Kai (fictional)",
+  "age": 8,
+  "grade": 3,
+  "whatIKnow": "I know a lot about cities. A port is where container ships unload. A bank keeps money in a vault. My town trades toys to the next island for coal. I know elevators have buttons for every floor and that hotels are tall.",
+  "whatIWantToBuild": "My town, Pebbleton, but much bigger and more realistic: a 20 floor hotel with an elevator that has a button for every floor, a factory with conveyor belts and smoke, a container port, a bank with a vault, a hospital, a train around the whole island.",
+  "howIReactToQuestions": "I skip questions that want me to explain something or guess what would happen ('what does the vault keep?', 'what would happen if the coal stopped?', 'why do you think...'); I just send my next build request instead. I answer when the question is a choice or a number about the thing I just asked for, and I answer by telling the builder what to build ('the nearest floor', 'make it 2.5 times longer'). About half of those I answer, the rest I skip because I am busy with my next idea.",
+  "howIReactToSilence": "If the builder says nothing I send my next build request.",
+  "howIUseTheApp": "I walk around my town and look at everything I built. When there is a slider or a number box for something that moves (a speed, a jump, how many people come), I try it, push it to the ends, and then tell the builder the exact numbers I want ('No, 5 and 0.20'). After I see what happens I often change the number again. If something surprising happens I ask why, in a few words ('why does the line keep getting longer').",
+  "driftTendencies": [
+    "Make it bigger, 2 times bigger, much more realistic",
+    "Add another building: a restaurant, a library, a fort, a second factory",
+    "Make it say something when I hover over it, like 'This is where we trade toys for coal'",
+    "Soldiers attacking the town that fall over in a puff of smoke"
+  ],
+  "style": "Mostly full sentences with capital letters, some typos ('resturant', 'celings'). Often two requests in one message. Says 'No no no.' or 'Undo THAT.' when he does not like something. Never says thank you."
+}

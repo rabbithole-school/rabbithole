@@ -67,7 +67,7 @@ const EMPTY_SLICE = { automaticCount: 0, denominator: 0, percent: 0 };
 function seedFixtures(scope: PracticeScope = { kind: "open" }) {
   convex.answers.clear();
   convex.answers.set("cohortPractice:crossDomainMasteryForScholars", {
-    scholars: [{ scholarId: SCHOLAR_ID, domains: [] }],
+    scholars: [{ scholarId: SCHOLAR_ID, domains: [], overallLevel: null }],
   });
   convex.answers.set("cohortPractice:masteryForScholars", {
     scholars: [{ scholarId: SCHOLAR_ID, readings: [] }],

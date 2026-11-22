@@ -201,7 +201,13 @@ describe("text artifact revisions", () => {
 describe("App designer G3: scholarUpdate autosaves to the activity starter", () => {
   async function seedBuildFixture(
     t: ReturnType<typeof convexTest>,
-    options: { isTestDrive: boolean; ownerRole: "teacher" | "scholar"; appRequest?: string | null },
+    options: {
+      isTestDrive: boolean;
+      ownerRole: "teacher" | "scholar";
+      appRequest?: string | null;
+      playOnlyBrief?: string;
+      foreignStarter?: boolean;
+    },
   ) {
     return await t.run(async (ctx) => {
       const teacherId = await ctx.db.insert("users", {
@@ -235,6 +241,9 @@ describe("App designer G3: scholarUpdate autosaves to the activity starter", () 
         ...(options.appRequest === null
           ? {}
           : { appRequest: options.appRequest ?? "Build a counter app" }),
+        ...(options.playOnlyBrief !== undefined
+          ? { systemPrompt: options.playOnlyBrief, editAccess: "never" as const }
+          : {}),
       });
       const sessionId = await ctx.db.insert("sessions", {
         userId: ownerId,
@@ -252,6 +261,19 @@ describe("App designer G3: scholarUpdate autosaves to the activity starter", () 
         type: "code",
         language: "html",
       });
+      if (options.foreignStarter) {
+        const starterAppId = await ctx.db.insert("customApps", {
+          token: `installed-${Math.random()}`,
+          name: "Installed counter",
+          kind: "static",
+          status: "live",
+          html: "<p>installed</p>",
+          origin: "starter",
+          createdBy: teacherId,
+          updatedAt: Date.now(),
+        });
+        await ctx.db.patch(activityId, { starterAppId });
+      }
       return { teacherId, ownerId, activityId, sessionId, artifactId };
     });
   }
@@ -343,6 +365,29 @@ describe("App designer G3: scholarUpdate autosaves to the activity starter", () 
     });
 
     expect(await scheduledAutosaves(t)).toHaveLength(0);
+  });
+
+  test("a rehearsal building a play-only app from its brief schedules; one beside an existing starter does not", async () => {
+    const t = convexTest(schema, modules);
+    for (const [foreignStarter, expected] of [
+      [false, 1],
+      [true, 0],
+    ] as const) {
+      const { teacherId, artifactId } = await seedBuildFixture(t, {
+        isTestDrive: true,
+        ownerRole: "teacher",
+        appRequest: null,
+        playOnlyBrief: "Build a counter scholars play.",
+        foreignStarter,
+      });
+      const before = (await scheduledAutosaves(t)).length;
+      await t.withIdentity({ subject: teacherId }).mutation(api.artifacts.scholarUpdate, {
+        artifactId,
+        content: "<!doctype html><html><body>v2</body></html>",
+        baseRevision: 0,
+      });
+      expect((await scheduledAutosaves(t)).length - before).toBe(expected);
+    }
   });
 });
 
@@ -489,9 +534,61 @@ describe("rewriting an app in place", () => {
     expect(await t.query(internal.artifacts.aiFocusApp, { sessionId })).toMatchObject({ _id: newerApp });
     expect(await t.query(internal.artifacts.aiFocusApp, {
       sessionId, focusArtifactId: olderApp,
-    })).toEqual({ _id: olderApp, title: "Older", revision: 4 });
+    })).toEqual({ _id: olderApp, title: "Older", revision: 4, fixed: false });
     expect(await t.query(internal.artifacts.aiFocusApp, {
       sessionId, focusArtifactId: notesId,
     })).toMatchObject({ _id: newerApp });
+  });
+});
+
+describe("fixed apps are read-only to the scholar (TRA-687)", () => {
+  test("scholarUpdate and a History restore cannot overwrite the Python bench", async () => {
+    const t = convexTest(schema, modules);
+    const { userId, sessionId } = await makeArtifact(t, { content: "x" });
+    const benchId = await t.run(async (ctx) =>
+      ctx.db.insert("artifacts", {
+        sessionId,
+        title: "Python bench",
+        content: "<html>canonical bench</html>",
+        lastEditedBy: "ai",
+        revision: 0,
+        type: "code",
+        fixedApp: "python-bench",
+      }),
+    );
+    const asScholar = t.withIdentity({ subject: userId });
+    await expect(
+      asScholar.mutation(api.artifacts.scholarUpdate, {
+        artifactId: benchId, content: "<html>mine</html>", baseRevision: 0,
+      }),
+    ).rejects.toThrow("fixed");
+    await expect(
+      asScholar.mutation(api.artifacts.scholarUpdate, {
+        artifactId: benchId, content: "<html>old</html>", baseRevision: 0,
+        restoredFromRevision: 1,
+      }),
+    ).rejects.toThrow("fixed");
+    expect(await t.run(async (ctx) => ctx.db.get(benchId))).toMatchObject({
+      content: "<html>canonical bench</html>", revision: 0,
+    });
+  });
+
+  test("an ordinary code app the scholar owns still updates", async () => {
+    const t = convexTest(schema, modules);
+    const { userId, sessionId } = await makeArtifact(t, { content: "x" });
+    const appId = await t.run(async (ctx) =>
+      ctx.db.insert("artifacts", {
+        sessionId, title: "My app", content: "<html>a</html>",
+        lastEditedBy: "ai", revision: 0, type: "code",
+      }),
+    );
+    expect(
+      await t.withIdentity({ subject: userId }).mutation(api.artifacts.scholarUpdate, {
+        artifactId: appId, content: "<html>b</html>", baseRevision: 0,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(await t.run(async (ctx) => ctx.db.get(appId))).toMatchObject({
+      content: "<html>b</html>",
+    });
   });
 });

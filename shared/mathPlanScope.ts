@@ -30,6 +30,21 @@ export function scopeAllowsChoice(
   return scopeAllowsStrand(scope, choice.domain, choice.strand);
 }
 
+/**
+ * The ONE domain the Home playlist card previews for a Limited plan.
+ * The plan stores its domains sorted by slug, so the first entry is whichever
+ * sorts first (`algebra-1` for any plan that includes it), not one the scholar
+ * works in. An unstarted first domain previews an empty set, which hides the
+ * native card and reads "all caught up" on web while the blend that Start
+ * serves has plenty. Prefer the first plan domain the scholar has started.
+ */
+export function previewPlanDomain(
+  planDomains: readonly string[],
+  startedDomains: readonly string[],
+): string | undefined {
+  return planDomains.find((domain) => startedDomains.includes(domain)) ?? planDomains[0];
+}
+
 function naturalList(items: string[]): string {
   if (items.length <= 1) return items[0] ?? "";
   if (items.length === 2) return `${items[0]} and ${items[1]}`;

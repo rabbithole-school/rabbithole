@@ -13,7 +13,10 @@
 
 import { authedQuery } from "./lib/customFunctions";
 import { ROLES } from "./lib/roles";
-import { questionQueueForScholar } from "./lib/questionQueue";
+import {
+  questionQueueForScholar,
+  startersForScholar,
+} from "./lib/questionQueue";
 
 /** Self-only: the signed-in scholar's own queue (no subject-id argument, so
  *  there is no cross-scholar or cross-tenant read to gate). Non-scholars get
@@ -23,5 +26,19 @@ export const forSelf = authedQuery({
   handler: async (ctx) => {
     if (ctx.user.role !== ROLES.SCHOLAR) return [];
     return await questionQueueForScholar(ctx, ctx.user._id);
+  },
+});
+
+/**
+ * "Things to wonder about" at the bottom of the Quests tab (TRA-669): the same
+ * queue as `forSelf`, as starter rows (`lib/questionQueue.ts`
+ * `startersForScholar`). "Ask" on a row is `sessions.createFromSeed({ seedId })`.
+ * Self-only, like `forSelf`; non-scholars get `[]`.
+ */
+export const startersForSelf = authedQuery({
+  args: {},
+  handler: async (ctx) => {
+    if (ctx.user.role !== ROLES.SCHOLAR) return [];
+    return await startersForScholar(ctx, ctx.user._id);
   },
 });

@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "convex/react";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { usePreventRemove } from "expo-router/react-navigation";
 import {
   ActivityIndicator,
+  Pressable,
   StyleSheet,
   Text,
   View,
@@ -12,9 +13,15 @@ import {
 
 import { ThreadList } from "@/components/messages/ThreadList";
 import { ThreadView } from "@/components/messages/ThreadView";
+import { WriteToTeacherSheet } from "@/components/messages/WriteToTeacherSheet";
 import { api, type Id } from "@/lib/convex";
-import { kindFilterFrom, type KindFilter } from "@/lib/scholarMessages";
+import {
+  kindFilterFrom,
+  mergeThreadLists,
+  type KindFilter,
+} from "@/lib/scholarMessages";
 import { fonts, useColors, type Colors } from "@/theme";
+import { WRITE_TO_TEACHER_COPY } from "../../vendor/shared/writeToTeacher";
 
 // Two panes (list | thread) once there's room for both — the iPad in
 // landscape. Below it (portrait split-screen, a narrow window) the list and
@@ -32,8 +39,8 @@ const TWO_PANE_MIN_WIDTH = 900;
  *                                     in; the toggle shows only when both
  *                                     kinds exist)
  *
- * A scholar never starts a thread here: an adult opens every mentor thread and
- * ideas are filed from the Workshop, so there is deliberately no "New message".
+ * "New message" (header) writes to one teacher at the scholar's school
+ * (WriteToTeacherSheet); ideas are still filed from the Workshop.
  */
 export default function MessagesScreen() {
   const colors = useColors();
@@ -43,7 +50,21 @@ export default function MessagesScreen() {
   const { thread, kind } = useLocalSearchParams<{ thread?: string; kind?: string }>();
   const kindFilter = kindFilterFrom(kind);
   const selectedId = thread ? (thread as Id<"parentThreads">) : null;
-  const list = useQuery(api.scholarMessages.listThreads, {});
+  const [composing, setComposing] = useState(false);
+  // "New message" only when there is someone to write to.
+  const teachers = useQuery(api.scholarMessages.listTeachersForScholar, {});
+  const canCompose = (teachers?.length ?? 0) > 0;
+  const plain = useQuery(api.scholarMessages.listThreads, {});
+  // About threads (a wonder a teacher replied to, a Quest) are their own read:
+  // a plain listThreads call leaves them out for older builds.
+  const about = useQuery(api.scholarMessages.listThreads, { flavor: "about" });
+  const list = useMemo(
+    () =>
+      plain && about
+        ? { threads: mergeThreadLists(plain.threads, about.threads) }
+        : undefined,
+    [plain, about],
+  );
 
   // Selecting a thread is a param change on THIS screen in both layouts
   // (never a pushed screen), so the layout can change under it on rotation.
@@ -89,7 +110,33 @@ export default function MessagesScreen() {
   const showThread = twoPane || !!selectedId;
   return (
     <>
-      <Stack.Screen options={{ title: "Messages" }} />
+      <Stack.Screen
+        options={{
+          title: "Messages",
+          headerRight: canCompose
+            ? () => (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setComposing(true)}
+                  hitSlop={8}
+                  testID="messages-new"
+                  style={styles.newButton}
+                >
+                  <Text style={styles.newButtonText}>{WRITE_TO_TEACHER_COPY.button}</Text>
+                </Pressable>
+              )
+            : undefined,
+        }}
+      />
+      <WriteToTeacherSheet
+        visible={composing}
+        onClose={() => setComposing(false)}
+        onSent={(threadId) => {
+          setComposing(false);
+          // Open it in the People list, whatever filter was showing.
+          router.setParams({ thread: threadId, kind: undefined });
+        }}
+      />
       <View style={twoPane ? styles.split : styles.flex}>
         <View
           style={
@@ -123,6 +170,8 @@ function makeStyles(c: Colors) {
     },
     threadColumn: { flex: 1 },
     hidden: { display: "none" },
+    newButton: { paddingHorizontal: 10, paddingVertical: 6 },
+    newButtonText: { fontSize: 16, fontFamily: fonts.semibold, color: c.violet },
     centered: {
       flex: 1,
       alignItems: "center",

@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import type { TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
@@ -96,7 +97,7 @@ async function dispatchAndStart(
   const asScholar = await withUser(t, scholarId);
   const { assignmentId, activityId } = await asTeacher.mutation(
     api.assignments.dispatchActivity,
-    { scholarId, title },
+    { scholarId, title, finish: { kind: "inClass" } },
   );
   const { id: sessionId } = await asScholar.mutation(api.sessions.create, {
     activityId,
@@ -233,7 +234,7 @@ describe("ad-hoc dispatch is conversation-completable", () => {
         order: 0,
         systemPrompt: "Explore.",
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         scholarIds: [scholarId],
         title: "Standing",
@@ -328,7 +329,7 @@ describe("teacher closes lesson-less ad-hoc homework for the group", () => {
         order: 0,
         webUrl: "https://example.test/loose",
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         scholarIds: [scholarId],
         title: "Standing",

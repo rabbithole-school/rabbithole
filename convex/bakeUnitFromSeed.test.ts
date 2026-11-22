@@ -1,4 +1,12 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+
+// These cover the Quest build paths, which are OFF in the product
+// (shared/missionCopy.ts SCHOLAR_LED_APP_BUILDING) but kept for a revisit, so
+// they run with it on. scholarAppBuildingOff.test.ts covers the off state.
+vi.mock("../shared/missionCopy", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../shared/missionCopy")>()),
+  SCHOLAR_LED_APP_BUILDING: true,
+}));
 import type { Id } from "./_generated/dataModel";
 import {
   buildBakeInstruction,
@@ -72,7 +80,8 @@ describe("build-path bake (TRA-519 B4)", () => {
     });
     expect(instruction).toContain("EXACTLY 4 activities");
     expect(instruction).toContain('kind:"app"');
-    expect(instruction).toContain("The mechanism runs once with default settings.");
+    expect(instruction).toContain("ONE open understanding goal of at most 60 characters");
+    expect(instruction).not.toContain("runs once");
     expect(instruction).toContain("NEVER for the app activity");
   });
 

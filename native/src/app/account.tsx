@@ -21,11 +21,15 @@ import { readManagedClaim } from "@/lib/managedClaim";
 import { resolveUserImageUri } from "@/lib/webEmbedConfig";
 import { fonts, palette, useColors } from "@/theme";
 import { AppTextInput } from "@/components/AppTextInput";
+import { CODING_CHALLENGES_COPY } from "../../vendor/shared/questRows";
 
 // Account Details — the scholar's self-service account screen. Parity with the
 // web ProfileEditModal: identity, email (turns on magic-link sign-in; their
 // username + password keep working), and the reading font (dyslexia-friendly
-// options). Sign Out lives here too on personal devices.
+// options), and for a scholar the "Coding challenges" switch that turns the
+// unlocked "Code it" Python Quests on or off (its row's ⋯ on the Quests tab
+// turns them off; this is where they come back on). Sign Out lives here too
+// on personal devices.
 
 const FONTS: { value: string | null; label: string }[] = [
   { value: null, label: "System default" },
@@ -48,6 +52,7 @@ export default function AccountScreen() {
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const setMyEmail = useMutation(api.users.setMyEmail);
   const updatePreferredFont = useMutation(api.users.updatePreferredFont);
+  const setCodeItEnabled = useMutation(api.users.setCodeItEnabled);
   const { signOut } = useAuthActions();
   const managed = readManagedClaim() !== null;
 
@@ -121,6 +126,15 @@ export default function AccountScreen() {
     Haptics.selectionAsync();
     updatePreferredFont({ preferredFont: value });
   };
+
+  const pickCodingChallenges = (on: boolean) => {
+    Haptics.selectionAsync();
+    setCodeItEnabled({ enabled: on }).catch((e: unknown) => {
+      console.warn("[account] setCodeItEnabled failed", e);
+    });
+  };
+  // Off unless the scholar (or staff) turned it on.
+  const codingChallengesOn = me?.codeItEnabled === true;
 
   const handleSignOut = () => {
     Haptics.selectionAsync();
@@ -218,6 +232,34 @@ export default function AccountScreen() {
           );
         })}
       </View>
+
+      {/* coding challenges (scholars only) */}
+      {me?.role === "scholar" && (
+        <>
+          <Text style={styles.sectionLabel}>
+            {CODING_CHALLENGES_COPY.label.toUpperCase()}
+          </Text>
+          <View style={styles.card}>
+            {[true, false].map((on, i) => (
+              <Pressable
+                key={on ? "on" : "off"}
+                accessibilityRole="button"
+                accessibilityState={{ selected: codingChallengesOn === on }}
+                onPress={() => pickCodingChallenges(on)}
+                style={[styles.fontRow, i === 0 && styles.fontRowBorder]}
+              >
+                <Text style={styles.fontLabel}>
+                  {on ? CODING_CHALLENGES_COPY.on : CODING_CHALLENGES_COPY.off}
+                </Text>
+                {codingChallengesOn === on && (
+                  <SymbolView name="checkmark" size={18} tintColor={colors.violet} />
+                )}
+              </Pressable>
+            ))}
+            <Text style={styles.hint}>{CODING_CHALLENGES_COPY.hint}</Text>
+          </View>
+        </>
+      )}
 
       {/* appearance — placeholder (theming owned by a separate workstream) */}
       <Text style={styles.sectionLabel}>APPEARANCE</Text>

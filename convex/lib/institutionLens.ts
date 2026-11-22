@@ -1,7 +1,7 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx } from "../_generated/server";
 import { ROLES, isPlatformAdminRole } from "./roles";
-import { isEnrolledScholar } from "./enrollmentStanding";
+import { isEnrolledScholar, isWithdrawn } from "./enrollmentStanding";
 import {
   authorizedInstitutionIds,
   staffCapabilityInstitutionIds,
@@ -10,6 +10,7 @@ import {
 import {
   allScholarIds,
   scholarIdsForInstitution,
+  scholarInstitutionId,
 } from "./scholarEnrollment";
 
 export type InstitutionLensScope = "institution" | "all";
@@ -263,20 +264,66 @@ export function institutionLensClientPayload(lens: ResolvedInstitutionLens) {
  * scholar set by institution (the aide, Messages, Quests, the class lenses).
  *
  * Rules (mirrors the roster): an "all" lens shows every allowed institution (a
- * platform admin: all); an "institution" lens shows that one school, and
- * unassigned scholars (institutionId === undefined) ride the PRIMARY school's
- * lens during the pre-backfill window so they never vanish.
+ * platform admin: all); an "institution" lens shows that one school. A scholar
+ * with no `users.institutionId` is placed by `lensInstitutionForScholar`: their
+ * learner membership's school when they have one, the PRIMARY school only when
+ * they have no learner membership at all (the legacy pre-backfill state), and
+ * nowhere when the memberships do not resolve to one school (TRA-654).
  *
  * Beyond the lens, a non-admin must hold scholar-read standing at the school
  * (`scholarReadInstitutionIds`): an honored ?inst= for a school where the
  * caller only designs curriculum or holds a non-operations grant scopes that
  * caller's curriculum/program surfaces but yields no scholars (TRA-374).
  */
-export function scholarInLens(
+export async function scholarInLens(
+  ctx: Pick<QueryCtx, "db">,
   lens: ResolvedInstitutionLens,
   scholar: Doc<"users">,
-): boolean {
-  return scholarInstitutionReadableInLens(lens, scholar.institutionId);
+): Promise<boolean> {
+  const placement = await lensInstitutionForScholar(ctx, scholar);
+  return (
+    placement.resolved &&
+    scholarInstitutionReadableInLens(lens, placement.institutionId)
+  );
+}
+
+/**
+ * The institution a scholar counts toward in a lens (TRA-654).
+ *
+ * `users.institutionId` wins while it exists. Without it, the school comes
+ * from the scholar's learner membership (`scholarInstitutionId`), so a
+ * scholar enrolled elsewhere through `memberships` alone is never counted as
+ * the primary school's. Only a scholar with NO learner membership keeps the
+ * legacy rule and rides the primary school (`institutionId: undefined`). A
+ * scholar whose memberships do not resolve to one school is unresolved and
+ * belongs to no lens: fail closed rather than guess.
+ */
+export async function lensInstitutionForScholar(
+  ctx: Pick<QueryCtx, "db">,
+  scholar: Doc<"users">,
+): Promise<
+  | { resolved: true; institutionId: Id<"institutions"> | undefined }
+  | { resolved: false }
+> {
+  if (scholar.institutionId) {
+    return { resolved: true, institutionId: scholar.institutionId };
+  }
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", scholar._id))
+    .collect();
+  const hasLearnerMembership = memberships.some(
+    (membership) =>
+      membership.role === ROLES.SCHOLAR ||
+      membership.role === ROLES.LIFELONG_LEARNER,
+  );
+  if (!hasLearnerMembership) {
+    return { resolved: true, institutionId: undefined };
+  }
+  const institutionId = await scholarInstitutionId(ctx, scholar._id);
+  return institutionId
+    ? { resolved: true, institutionId }
+    : { resolved: false };
 }
 
 /**
@@ -336,9 +383,11 @@ export async function parentInLens(
     .collect();
   for (const guardianship of guardianships) {
     const scholar = await ctx.db.get(guardianship.scholarUserId);
+    if (scholar?.role !== ROLES.SCHOLAR) continue;
+    const placement = await lensInstitutionForScholar(ctx, scholar);
     if (
-      scholar?.role === ROLES.SCHOLAR &&
-      institutionIdInLens(lens, scholar.institutionId)
+      placement.resolved &&
+      institutionIdInLens(lens, placement.institutionId)
     ) {
       return true;
     }
@@ -351,21 +400,32 @@ export async function parentInLens(
  *
  * Institution-scoped lenses read only the matching institution rows. The
  * platform-admin "all" lens intentionally retains the global scholar index.
+ *
+ * Withdrawn scholars (users.withdrawnOn) are left out by default: this is the
+ * current roster. A caller using the set to decide what history stays
+ * readable (a withdrawn scholar's authored units, a past class digest) passes
+ * `includeWithdrawn: true`.
  */
 export async function scholarIdsInLens(
   ctx: QueryCtx,
   lens: ResolvedInstitutionLens,
-  { includeProgramGuests = false }: { includeProgramGuests?: boolean } = {},
+  {
+    includeProgramGuests = false,
+    includeWithdrawn = false,
+  }: { includeProgramGuests?: boolean; includeWithdrawn?: boolean } = {},
 ): Promise<Set<Id<"users">>> {
+  const keep = (scholar: Doc<"users">) =>
+    (includeProgramGuests || isEnrolledScholar(scholar)) &&
+    (includeWithdrawn || !isWithdrawn(scholar));
   if (lens.scope === "all" && lens.isAdmin) {
     const ids = await allScholarIds(ctx);
-    if (includeProgramGuests) return ids;
-    const enrolled = new Set<Id<"users">>();
+    if (includeProgramGuests && includeWithdrawn) return ids;
+    const kept = new Set<Id<"users">>();
     for (const id of ids) {
       const scholar = await ctx.db.get(id);
-      if (scholar && isEnrolledScholar(scholar)) enrolled.add(id);
+      if (scholar && keep(scholar)) kept.add(id);
     }
-    return enrolled;
+    return kept;
   }
 
   const institutionIds = (
@@ -380,7 +440,7 @@ export async function scholarIdsInLens(
     const ids = await scholarIdsForInstitution(ctx, institutionId);
     for (const id of ids) {
       const scholar = await ctx.db.get(id);
-      if (scholar && (includeProgramGuests || isEnrolledScholar(scholar))) {
+      if (scholar && keep(scholar)) {
         scholarIds.add(id);
       }
     }
@@ -392,9 +452,14 @@ export async function scholarIdsInLens(
       .withIndex("by_institution", (q) => q.eq("institutionId", undefined))
       .collect();
     for (const user of unassignedUsers) {
+      if (user.role !== ROLES.SCHOLAR || !keep(user)) continue;
+      // An unstamped scholar enrolled through `memberships` belongs to that
+      // school, not the primary one; only a scholar with no learner
+      // membership rides the primary lens (TRA-654).
+      const placement = await lensInstitutionForScholar(ctx, user);
       if (
-        user.role === ROLES.SCHOLAR &&
-        (includeProgramGuests || isEnrolledScholar(user))
+        placement.resolved &&
+        scholarInstitutionReadableInLens(lens, placement.institutionId)
       ) {
         scholarIds.add(user._id);
       }

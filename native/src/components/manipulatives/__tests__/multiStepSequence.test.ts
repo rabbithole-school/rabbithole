@@ -40,7 +40,11 @@ import {
   isSolved,
   sequenceProgress,
 } from "../../../../vendor/manipulative/logic";
-import type { ArraySpec, MultiStepSequenceSpec } from "../../../../vendor/manipulative/types";
+import type {
+  ArraySpec,
+  FunctionMachineSpec,
+  MultiStepSequenceSpec,
+} from "../../../../vendor/manipulative/types";
 import { isNativeManipulativeKind } from "../nativeManipulativeKinds";
 import { MultiStepSequenceNative } from "../MultiStepSequence.native";
 
@@ -89,6 +93,27 @@ const EXPLORE_THEN_CHALLENGE_SEQUENCE: MultiStepSequenceSpec = {
   concept: "Explore, then solve",
   title: "You finished both steps!",
   steps: [exploreArrayStep("explore", 2, 2), arrayStep("challenge", 1, 1, 4)],
+};
+
+const FUNCTION_MACHINE_SEQUENCE: MultiStepSequenceSpec = {
+  id: "seq-function-machine",
+  concept: "The hidden rule",
+  title: "You found the hidden rule.",
+  steps: [
+    {
+      kind: "functionMachine",
+      id: "doubling",
+      concept: "Doubling",
+      prompt: "This machine doubles. Send 7 through.",
+      rule: { op: "affine", m: 2, b: 0 },
+      examples: [
+        { in: 1, out: 2 },
+        { in: 3, out: 6 },
+      ],
+      queryInput: 7,
+      answer: { value: 14, prompt: "What comes out when 7 goes in?" },
+    } satisfies FunctionMachineSpec,
+  ],
 };
 
 function button(renderer: ReactTestRenderer, label: string) {
@@ -205,6 +230,35 @@ describe("multi-step sequence progression contract", () => {
     });
     expect(visibleText(renderer)).toContain("That's it!");
     expect(() => button(renderer, "Next step")).not.toThrow();
+
+    act(() => renderer.unmount());
+  });
+
+  it("marks an empty function machine prediction not quite instead of throwing", () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(createElement(MultiStepSequenceNative, { spec: FUNCTION_MACHINE_SEQUENCE }));
+    });
+
+    // The prediction box starts empty, so the kind has reported no state.
+    expect(() =>
+      act(() => {
+        button(renderer, "Done").props.onPress();
+      }),
+    ).not.toThrow();
+    expect(visibleText(renderer)).toContain("Not quite");
+
+    const manipulativeProps = nativeManipulative.mock.lastCall?.[0] as
+      | { onStateChange: (state: unknown) => void; onSolvedChange: (solved: boolean) => void }
+      | undefined;
+    act(() => {
+      manipulativeProps?.onStateChange({ predicted: 14 });
+      manipulativeProps?.onSolvedChange(true);
+    });
+    act(() => {
+      button(renderer, "Done").props.onPress();
+    });
+    expect(visibleText(renderer)).toContain("That's it!");
 
     act(() => renderer.unmount());
   });

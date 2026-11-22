@@ -52,11 +52,12 @@ describe("classifyPreviousLaunch", () => {
     expect(report?.description).toContain("JS hung");
   });
 
-  it("ignores a clean background exit, a reported crash, an update, and no history", () => {
+  it("ignores a clean background exit, a reported crash, a deliberate reload, an update, and no history", () => {
     const at = (j: LaunchJournal | null, build = BUILD) =>
       classifyPreviousLaunch(j, T0, build, null);
     expect(at(journal({ appState: "background" }))).toBeNull();
     expect(at(journal({ fatalAt: T0 }))).toBeNull();
+    expect(at(journal({ reloadedAt: T0 }))).toBeNull();
     expect(at(journal(), "canary 1.0.71 (71) fff")).toBeNull();
     expect(at(null)).toBeNull();
   });
@@ -105,6 +106,37 @@ describe("classifyPreviousLaunch", () => {
     );
     expect(report?.description).toContain("The iPad restarted");
     expect(report?.description).toContain("9 min before the iPad booted again");
+  });
+});
+
+describe("classifyPreviousLaunch: last touch and lock change", () => {
+  it("says when touches last reached the app and the lock last changed", () => {
+    const report = classifyPreviousLaunch(
+      journal({
+        lastTouchAt: T0 - 8 * 60_000,
+        lastLockChange: {
+          kind: "asam_enter",
+          reason: "reassert",
+          ok: true,
+          at: T0 - 8 * 60_000 - 2_000,
+        },
+      }),
+      T0 + 10_000,
+      BUILD,
+      3_700_000,
+    );
+    expect(report?.description).toContain(
+      "Last touch reached the app: 2026-10-15 15:38:10 HST (8 min before JS last responded)",
+    );
+    expect(report?.description).toContain(
+      "Last Rabbithole Lock change: enter (reassert, accepted) at 2026-10-15 15:38:08 HST",
+    );
+  });
+
+  it("says no touch reached an on-screen launch, and stays quiet without a lock change", () => {
+    const report = classifyPreviousLaunch(journal(), T0 + 10_000, BUILD, 3_700_000);
+    expect(report?.description).toContain("Last touch reached the app: none this launch");
+    expect(report?.description).not.toContain("Rabbithole Lock");
   });
 });
 

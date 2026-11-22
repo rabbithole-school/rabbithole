@@ -33,6 +33,11 @@ import {
   type StaticRadicalNode,
 } from "../../vendor/shared/fractions";
 import { MathView } from "../../modules/expo-math-view";
+import { hasStemMath, renderableMathLatex, splitStemMath } from "../../vendor/shared/stemMath";
+
+// Fira Math's x-height runs a little taller than Hanken Grotesk's; this keeps
+// an inline span's letters level with the words around it.
+const INLINE_MATH_SCALE = 0.95;
 import { wordTokens } from "../../vendor/shared/beginnerReading";
 import { useSpokenWordIn } from "@/lib/nativeTTS";
 
@@ -69,15 +74,32 @@ type Props = {
 // proportion (keeps a mixed number's whole part visually dominant).
 const FRAC_SCALE = 0.82;
 
+/** A typeset `\( … \)` / `\[ … \]` span (shared/stemMath), drawn by SwiftMath. */
+type LatexNode = { type: "latex"; latex: string; display: boolean };
+type TextNode = ReturnType<typeof parsePracticeText>[number] | LatexNode;
+
+/** Parse a label into render nodes. A string with no math spans takes exactly
+ *  the old path; otherwise each prose run between spans is parsed as before
+ *  and each span becomes one LaTeX node. */
+function parseNodes(value: string): TextNode[] {
+  if (!hasStemMath(value)) return parsePracticeText(value);
+  const out: TextNode[] = [];
+  for (const segment of splitStemMath(value)) {
+    if (segment.kind === "math") out.push({ type: "latex", latex: segment.latex, display: segment.display });
+    else out.push(...parsePracticeText(segment.text));
+  }
+  return out;
+}
+
 /** A bare-digits text node that is the whole part of the next mixed number. */
-function isMixedWhole(nodes: ReturnType<typeof parsePracticeText>, i: number): boolean {
+function isMixedWhole(nodes: TextNode[], i: number): boolean {
   const n = nodes[i];
   return n.type === "text" && nodes[i + 1]?.type === "frac" && /^\d+$/.test(n.value);
 }
 
 /** The prose a FractionText draws as words, in order (what read-along lights). */
 export function proseWords(value: string): string {
-  const nodes = parsePracticeText(value);
+  const nodes = parseNodes(value);
   const out: string[] = [];
   nodes.forEach((n, i) => {
     if (n.type !== "text" || isMixedWhole(nodes, i)) return;
@@ -90,7 +112,7 @@ export function FractionText({ value, fontSize = 28, color, align = "center", ac
   const colors = useColors();
   const resolved = color ?? colors.fg;
   const tokenFont = weight === "regular" ? fonts.regular : fonts.semibold;
-  const nodes = useMemo(() => parsePracticeText(value), [value]);
+  const nodes = useMemo(() => parseNodes(value), [value]);
   const shown = useMemo(() => (readAlong ? proseWords(value) : ""), [readAlong, value]);
   const lit = useSpokenWordIn(shown);
   // Only claim image/collapsed semantics when the rendering actually diverges
@@ -125,7 +147,7 @@ type ReadAlongLight = { lit: number | null; bg: string };
  * the whole part and its stack and split the number in half.
  */
 function renderNodes(
-  nodes: ReturnType<typeof parsePracticeText>,
+  nodes: TextNode[],
   fontSize: number,
   color: string,
   blankBg: string,
@@ -139,6 +161,26 @@ function renderNodes(
   let wordAt = 0;
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
+    if (n.type === "latex") {
+      out.push(
+        n.display ? (
+          // A display span (`\[ … \]`) takes its own centred line.
+          <View key={i} style={styles.displayMath}>
+            <MathView latex={renderableMathLatex(n.latex, true)} fontSize={fontSize} color={color} typesettingStyle="display" />
+          </View>
+        ) : (
+          <View key={i} style={styles.inlineMath}>
+            <MathView
+              latex={renderableMathLatex(n.latex, false)}
+              fontSize={Math.round(fontSize * INLINE_MATH_SCALE)}
+              color={color}
+              typesettingStyle="text"
+            />
+          </View>
+        ),
+      );
+      continue;
+    }
     if (n.type === "frac") {
       out.push(
         <Frac
@@ -408,6 +450,11 @@ const styles = StyleSheet.create({
   // unbreakable box so a wrap can never land between "9" and its "4/9".
   mixed: { flexDirection: "row", alignItems: "center", marginHorizontal: 2 },
   radical: { flexDirection: "row", alignItems: "center", marginHorizontal: 1 },
+  // Inline math sits in the wrapping row like a word: a little air either side,
+  // centred on the line like the stacked fractions beside it.
+  inlineMath: { marginHorizontal: 3, maxWidth: "100%" },
+  // Display math breaks the line and centres on its own.
+  displayMath: { width: "100%", alignItems: "center", marginVertical: 6 },
   // A stacked fraction: a centered column, num / bar / den. Small horizontal
   // padding so the vinculum slightly overhangs the digits (typographic norm).
   frac: { flexDirection: "column", alignItems: "center", paddingHorizontal: 3 },

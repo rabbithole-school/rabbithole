@@ -4,7 +4,7 @@ import { useSyncExternalStore } from "react";
 
 // ── Single-owner microphone across all dictation instances ──────────────
 // Browsers grant two concurrent getUserMedia streams, so the chat composer
-// (useStreamingDictation, WebRTC) and the writing-box / handoff mics
+// (useStreamingDictation) and the writing-box / handoff mics
 // (useVoiceDictation) could otherwise record at once. One module-level owner
 // token — claimed once a recording actually starts, released on every end
 // path — makes the mic single-owner across every mounted instance. (The

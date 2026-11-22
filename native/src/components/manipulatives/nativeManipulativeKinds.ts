@@ -37,6 +37,7 @@ export const NATIVE_MANIPULATIVE_KINDS = [
   "liquid",
   "money",
   "molecule",
+  "functionGraph",
 ] as const satisfies readonly ManipulativeKind[];
 
 /**

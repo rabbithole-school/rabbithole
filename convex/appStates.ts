@@ -14,9 +14,13 @@ import {
   staffQuery,
   teacherQuery,
 } from "./lib/customFunctions";
-import { requireActiveScholarAccess } from "./lib/access";
+import {
+  accessibleScholarIds,
+  requireActiveScholarAccess,
+  resolveActiveMembership,
+} from "./lib/access";
+import { assertCanWrite, getCurrentUser } from "./lib/auth";
 import { isPlatformAdminRole, isTeacherRole } from "./lib/roles";
-import { requireRoomAccess } from "./lib/rooms";
 import {
   assertNotTeacherArchived,
   mayReadTeacherArchived,
@@ -29,17 +33,6 @@ import {
   type CustomAppStateRateLimitErrorData,
 } from "../shared/appStatePolicy";
 import {
-  MAX_SHARED_APP_STATE_DOC_BYTES,
-  MAX_SHARED_APP_STATE_STRING_CHARS,
-  ROOM_APP_STATE_MIN_WRITE_INTERVAL_MS,
-  ROOM_PRESENCE_KEY,
-  ROOM_PRESENCE_STALE_MS,
-  ROOM_SHARED_STATE_KEY,
-  ROOM_SHARED_USER_ID,
-  ROOM_WRITE_RATE_KEY,
-  type RoomAppStateRateLimitErrorData,
-} from "../shared/roomAppState";
-import {
   APP_ACTION_TIMEOUT_MS,
   MAX_APP_ACTION_ARGS_BYTES,
   MAX_APP_ACTION_ERROR_CHARS,
@@ -51,6 +44,11 @@ import {
   normalizeAppActionRegistry,
 } from "../shared/appActionPolicy";
 import { characterLineValidator } from "./lib/appAiValidators";
+import {
+  readLatestAppPlayForArtifact,
+  readLatestAppPlayForSession,
+  type LatestAppPlay,
+} from "./appPlaySessions";
 
 export const MAX_APP_STATE_DOC_BYTES = 8 * 1024;
 export const MAX_APP_STATE_LOG_ENTRIES = 30;
@@ -60,9 +58,6 @@ export {
   MAX_CUSTOM_APP_STATE_KEY_CHARS,
   MAX_CUSTOM_APP_STATE_ROWS,
   MAX_CUSTOM_APP_STATE_USER_ID_CHARS,
-  MAX_SHARED_APP_STATE_DOC_BYTES,
-  MAX_SHARED_APP_STATE_STRING_CHARS,
-  ROOM_APP_STATE_MIN_WRITE_INTERVAL_MS,
   MAX_APP_ACTION_ARGS_BYTES,
   MAX_APP_ACTION_RESULT_BYTES,
 };
@@ -104,7 +99,7 @@ export type AppStateSnapshot = {
 };
 
 type StateKey = {
-  scope: "session" | "customApp" | "room";
+  scope: "session" | "customApp";
   scopeId: string;
   userId: string;
   key: string;
@@ -135,14 +130,11 @@ function validatePatch(patch: unknown): asserts patch is Record<string, unknown>
   }
 }
 
-function validateDocSize(
-  doc: unknown,
-  maxBytes = MAX_APP_STATE_DOC_BYTES,
-): void {
+function validateDocSize(doc: unknown): void {
   const bytes = serializedBytes(doc);
-  if (bytes > maxBytes) {
+  if (bytes > MAX_APP_STATE_DOC_BYTES) {
     throw new Error(
-      `App state exceeds the ${maxBytes}-byte limit (${bytes} bytes)`,
+      `App state exceeds the ${MAX_APP_STATE_DOC_BYTES}-byte limit (${bytes} bytes)`,
     );
   }
 }
@@ -199,58 +191,6 @@ function validateActionResult(result: AppActionResult): AppActionResult {
         ? result.error.trim().slice(0, MAX_APP_ACTION_ERROR_CHARS)
         : "Action failed",
   };
-}
-
-const ansiControlSequence =
-  /\u001b(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g;
-const unsafeControlCharacters =
-  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
-
-function sanitizeSharedString(value: string): string {
-  const sanitized = value
-    .replace(ansiControlSequence, "")
-    .replace(unsafeControlCharacters, "")
-    .replace(/<(\/?live_app_state_data)/gi, "&lt;$1");
-  if (sanitized.length > MAX_SHARED_APP_STATE_STRING_CHARS) {
-    throw new Error(
-      `Shared app state strings are limited to ${MAX_SHARED_APP_STATE_STRING_CHARS} characters`,
-    );
-  }
-  return sanitized;
-}
-
-function sanitizeSharedValue(value: unknown, depth = 0): unknown {
-  if (depth > 8) throw new Error("Shared app state is nested too deeply");
-  if (typeof value === "string") return sanitizeSharedString(value);
-  if (
-    value === null ||
-    typeof value === "boolean" ||
-    (typeof value === "number" && Number.isFinite(value))
-  ) {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.slice(0, 100).map((entry) =>
-      sanitizeSharedValue(entry, depth + 1),
-    );
-  }
-  if (isObject(value)) {
-    const sanitized: Record<string, unknown> = {};
-    for (const [rawKey, entry] of Object.entries(value).slice(0, 100)) {
-      const key = sanitizeSharedString(rawKey).slice(0, 128);
-      if (!key || entry === undefined) continue;
-      sanitized[key] = sanitizeSharedValue(entry, depth + 1);
-    }
-    return sanitized;
-  }
-  throw new Error("Shared app state must contain JSON values");
-}
-
-export function sanitizeSharedAppStatePatch(
-  patch: unknown,
-): Record<string, unknown> {
-  validatePatch(patch);
-  return sanitizeSharedValue(patch) as Record<string, unknown>;
 }
 
 function validateKeyPart(label: string, value: string, maxChars: number): string {
@@ -314,7 +254,6 @@ async function writeState(
   limits?: {
     maxScopeRows?: number;
     minWriteIntervalMs?: number;
-    maxDocBytes?: number;
   },
 ): Promise<AppStateSnapshot> {
   if (
@@ -361,7 +300,7 @@ async function writeState(
   const baseDoc = isObject(previous?.doc) ? previous.doc : {};
   const doc =
     args.patch === undefined ? baseDoc : { ...baseDoc, ...args.patch };
-  validateDocSize(doc, limits?.maxDocBytes);
+  validateDocSize(doc);
 
   const appendedLog = (args.logs ?? [])
     .slice(-MAX_APP_STATE_LOG_ENTRIES)
@@ -486,6 +425,12 @@ export const getSessionState = authedQuery({
  * archived app that never saved state still appears, as its newest code
  * artifact with an empty snapshot (doc null, no log, version 0, updatedAt =
  * the archive time).
+ *
+ * Each row also carries `latestPlay`, the newest on-screen interval from
+ * appPlaySessions.ts, so "when did they last play it?" has an answer even for
+ * an app that never saves. A session with play history but no saved state
+ * (any sessionMode — a normal session's app counts) appears with an empty
+ * snapshot whose `updatedAt` is 0 (never saved).
  */
 export const listSessionStatesForScholar = teacherQuery({
   args: { scholarId: v.id("users") },
@@ -505,14 +450,29 @@ export const listSessionStatesForScholar = teacherQuery({
       version: number;
       updatedAt: number;
       teacherArchivedAt?: number;
+      latestPlay?: LatestAppPlay;
     }> = [];
 
     for (const session of sessions) {
       if (session.isTestDrive) continue;
       const teacherArchivedAt = session.teacherArchivedAt;
-      if (session.sessionMode !== "vibecode" && teacherArchivedAt == null) {
+      const played = await readLatestAppPlayForSession(ctx, session._id);
+      if (
+        session.sessionMode !== "vibecode" &&
+        teacherArchivedAt == null &&
+        played === null
+      ) {
         continue;
       }
+      const playStamp = played ? { latestPlay: played.play } : {};
+      // A session can hold more than one app: a row titled for the saved app
+      // carries THAT app's play, not the session's newest.
+      const latestPlayStampFor = async (artifactId: Id<"artifacts">) => {
+        if (!played) return {};
+        if (played.artifactId === artifactId) return playStamp;
+        const play = await readLatestAppPlayForArtifact(ctx, artifactId);
+        return play ? { latestPlay: play } : {};
+      };
       const artifacts = await ctx.db
         .query("artifacts")
         .withIndex("by_session", (q) => q.eq("sessionId", session._id))
@@ -526,10 +486,15 @@ export const listSessionStatesForScholar = teacherQuery({
         artifacts,
       );
       if (!latest) {
-        if (teacherArchivedAt == null) continue;
-        const newestApp = artifacts
-          .filter((artifact) => artifact.type === "code")
-          .sort((a, b) => b._creationTime - a._creationTime)[0];
+        if (teacherArchivedAt == null && played === null) continue;
+        const playedApp = played
+          ? artifacts.find((artifact) => artifact._id === played.artifactId)
+          : undefined;
+        const newestApp =
+          playedApp ??
+          artifacts
+            .filter((artifact) => artifact.type === "code")
+            .sort((a, b) => b._creationTime - a._creationTime)[0];
         if (!newestApp) continue;
         snapshots.push({
           sessionId: session._id,
@@ -539,8 +504,9 @@ export const listSessionStatesForScholar = teacherQuery({
           doc: null,
           log: [],
           version: 0,
-          updatedAt: teacherArchivedAt,
+          updatedAt: teacherArchivedAt ?? 0,
           ...archivedStamp,
+          ...(await latestPlayStampFor(newestApp._id)),
         });
         continue;
       }
@@ -551,10 +517,13 @@ export const listSessionStatesForScholar = teacherQuery({
         artifactTitle: latest.artifact.title,
         ...latest.snapshot,
         ...archivedStamp,
+        ...(await latestPlayStampFor(latest.artifact._id)),
       });
     }
 
-    return snapshots.sort((a, b) => b.updatedAt - a.updatedAt);
+    const lastTouched = (row: (typeof snapshots)[number]) =>
+      Math.max(row.updatedAt, row.latestPlay?.lastActiveAt ?? 0);
+    return snapshots.sort((a, b) => lastTouched(b) - lastTouched(a));
   },
 });
 
@@ -644,9 +613,43 @@ export const updateSessionState = authedMutation({
 });
 
 /**
- * The static custom-app launcher has no Convex identity. Its unguessable app
- * token is therefore the bearer credential, matching `resolveByToken`; the
- * host-origin device id only partitions state and is not an additional secret.
+ * Where a static custom app's state lives for this caller. Signed in (a
+ * scholar on their BunnyPad or in a browser), it is theirs: keyed to their
+ * own user id, which comes from their auth and never from the client, so it
+ * follows them across devices and nobody else on the same device sees it.
+ * Signed out, it is the device's, keyed by the host's device id as before.
+ * Viewing as a scholar (getCurrentUser's effective user), staff read that
+ * scholar's work; writes are refused then (assertCanWrite).
+ *
+ * There is deliberately no fallback to the device's row for a signed-in
+ * user: a device row records no writer, so on a shared iPad it is whoever
+ * used the tile last, and reading or copying it would hand one child's work
+ * to the next. Device rows saved before this are kept, readable signed out.
+ */
+const USER_PARTITION_PREFIX = "user:";
+
+async function customAppPartition(
+  ctx: QueryCtx | MutationCtx,
+  customAppId: Id<"customApps">,
+  deviceUserId: string,
+  key: string,
+): Promise<StateKey> {
+  const user = await getCurrentUser(ctx);
+  if (user) return customAppStateKey(customAppId, `user:${user._id}`, key);
+  // `user:` keys are minted only above, from auth. A signed-out caller holding
+  // the tile's token must not name one, or it could read or overwrite any
+  // scholar's saved work.
+  if (deviceUserId.trim().startsWith(USER_PARTITION_PREFIX)) {
+    throw new Error("userId must be a device id");
+  }
+  return customAppStateKey(customAppId, deviceUserId, key);
+}
+
+/**
+ * The static custom-app launcher may run without a Convex identity. Its
+ * unguessable app token is therefore the bearer credential, matching
+ * `resolveByToken`. Which partition the state lives in is
+ * `customAppPartition`'s call; the device id is not an additional secret.
  */
 export const getCustomAppState = query({
   args: {
@@ -659,7 +662,7 @@ export const getCustomAppState = query({
     return snapshotFromRow(
       await findStateRow(
         ctx,
-        customAppStateKey(app._id, args.userId, args.key),
+        await customAppPartition(ctx, app._id, args.userId, args.key),
       ),
     );
   },
@@ -676,10 +679,16 @@ export const updateCustomAppState = mutation({
     actions: v.optional(v.array(appActionRegistrationInput)),
   },
   handler: async (ctx, args) => {
+    // The token is the credential here and the app host may call anonymously,
+    // so that path is unchanged. A caller that IS signed in as a read-only
+    // identity, or is viewing as someone else, is refused: holding a token
+    // must not let it write. (Read-only identities are also never handed the
+    // token: ./lib/readOnlyRedaction.ts.)
+    await assertCanWrite(ctx);
     const app = await liveStaticAppForToken(ctx, args.token);
     return await writeState(
       ctx,
-      customAppStateKey(app._id, args.userId, args.key),
+      await customAppPartition(ctx, app._id, args.userId, args.key),
       { patch: args.patch, logs: args.logs, actions: args.actions },
       undefined,
       {
@@ -850,7 +859,12 @@ export const cancelSessionActionForTutor = internalMutation({
   },
 });
 
-/** Staff-only read surface for a custom app's per-device snapshots. */
+/**
+ * Staff-only read of a custom app's saved state, for the app's maker. A
+ * signed-in scholar's row (`user:<id>`) is listed only when the caller can
+ * reach that scholar, so an app opened at another school never shows its
+ * scholars' work here. Signed-out device rows are listed as before.
+ */
 export const listCustomAppStatesForStaff = staffQuery({
   args: { customAppId: v.id("customApps") },
   handler: async (ctx, args) => {
@@ -868,177 +882,24 @@ export const listCustomAppStatesForStaff = staffQuery({
         q.eq("scope", "customApp").eq("scopeId", String(args.customAppId)),
       )
       .collect();
-    return rows.map((row) => ({
+    const membership = isPlatformAdminRole(ctx.user.role)
+      ? null
+      : await resolveActiveMembership(ctx, ctx.user);
+    const reachable = isPlatformAdminRole(ctx.user.role)
+      ? null
+      : membership
+        ? await accessibleScholarIds(ctx, membership)
+        : new Set<Id<"users">>();
+    const visible = rows.filter((row) => {
+      if (!row.userId?.startsWith("user:")) return true;
+      const id = row.userId.slice("user:".length);
+      return reachable === null || id === ctx.user._id || reachable.has(id as Id<"users">);
+    });
+    return visible.map((row) => ({
       userId: row.userId,
       key: row.key,
       ...snapshotFromRow(row)!,
     }));
-  },
-});
-
-function roomStateKey(roomId: Id<"rooms">): StateKey {
-  return {
-    scope: "room",
-    scopeId: String(roomId),
-    userId: ROOM_SHARED_USER_ID,
-    key: ROOM_SHARED_STATE_KEY,
-  };
-}
-
-function roomUserStateKey(
-  roomId: Id<"rooms">,
-  userId: Id<"users">,
-  key: typeof ROOM_PRESENCE_KEY | typeof ROOM_WRITE_RATE_KEY,
-): StateKey {
-  return {
-    scope: "room",
-    scopeId: String(roomId),
-    userId: String(userId),
-    key,
-  };
-}
-
-async function enforceRoomWriterRate(
-  ctx: MutationCtx,
-  roomId: Id<"rooms">,
-  userId: Id<"users">,
-): Promise<void> {
-  const stateKey = roomUserStateKey(roomId, userId, ROOM_WRITE_RATE_KEY);
-  const existing = await findStateRow(ctx, stateKey);
-  const now = Date.now();
-  if (
-    existing &&
-    now - existing.updatedAt < ROOM_APP_STATE_MIN_WRITE_INTERVAL_MS
-  ) {
-    throw new ConvexError<RoomAppStateRateLimitErrorData>({
-      code: "ROOM_APP_STATE_RATE_LIMITED",
-      message: `Room app state may be updated at most once every ${ROOM_APP_STATE_MIN_WRITE_INTERVAL_MS}ms`,
-      retryAfterMs: ROOM_APP_STATE_MIN_WRITE_INTERVAL_MS,
-    });
-  }
-  const value = {
-    ...stateKey,
-    doc: {},
-    log: [],
-    version: (existing?.version ?? 0) + 1,
-    updatedAt: now,
-  };
-  if (existing) await ctx.db.patch(existing._id, value);
-  else await ctx.db.insert("appStates", value);
-}
-
-/** Reactive shared document read for a room member or the owning teacher. */
-export const getRoomState = authedQuery({
-  args: { roomId: v.id("rooms") },
-  handler: async (ctx, args) => {
-    await requireRoomAccess(ctx, ctx.user, args.roomId);
-    return snapshotFromRow(await findStateRow(ctx, roomStateKey(args.roomId)));
-  },
-});
-
-/** LWW shallow-merge into the room's one shared, sanitized document. */
-export const updateRoomState = authedMutation({
-  args: {
-    roomId: v.id("rooms"),
-    patch: v.any(),
-  },
-  handler: async (ctx, args) => {
-    await requireRoomAccess(ctx, ctx.user, args.roomId);
-    const patch = sanitizeSharedAppStatePatch(args.patch);
-    await enforceRoomWriterRate(ctx, args.roomId, ctx.user._id);
-    return await writeState(
-      ctx,
-      roomStateKey(args.roomId),
-      { patch },
-      undefined,
-      { maxDocBytes: MAX_SHARED_APP_STATE_DOC_BYTES },
-    );
-  },
-});
-
-/** Server-authoritative presence: the authenticated user is always the subject. */
-export const joinRoomPresence = authedMutation({
-  args: { roomId: v.id("rooms") },
-  handler: async (ctx, args) => {
-    await requireRoomAccess(ctx, ctx.user, args.roomId);
-    const stateKey = roomUserStateKey(
-      args.roomId,
-      ctx.user._id,
-      ROOM_PRESENCE_KEY,
-    );
-    const existing = await findStateRow(ctx, stateKey);
-    const previous = snapshotFromRow(existing);
-    const previousDoc = isObject(previous?.doc) ? previous.doc : {};
-    const now = Date.now();
-    const joinedAt =
-      typeof previousDoc.joinedAt === "number" ? previousDoc.joinedAt : now;
-    const value = {
-      ...stateKey,
-      doc: { joinedAt },
-      log: [],
-      version: (existing?.version ?? 0) + 1,
-      updatedAt: now,
-    };
-    if (existing) await ctx.db.patch(existing._id, value);
-    else await ctx.db.insert("appStates", value);
-    return { joinedAt, lastSeenAt: now };
-  },
-});
-
-export const leaveRoomPresence = authedMutation({
-  args: { roomId: v.id("rooms") },
-  handler: async (ctx, args) => {
-    // Cleanup remains available just after a teacher removes this member.
-    // The authenticated user can only delete their own presence partition.
-    const existing = await findStateRow(
-      ctx,
-      roomUserStateKey(args.roomId, ctx.user._id, ROOM_PRESENCE_KEY),
-    );
-    if (existing) await ctx.db.delete(existing._id);
-  },
-});
-
-export const getRoomPresence = authedQuery({
-  args: { roomId: v.id("rooms") },
-  handler: async (ctx, args) => {
-    const room = await requireRoomAccess(ctx, ctx.user, args.roomId);
-    const allowedUserIds = new Set([
-      String(room.ownerTeacherId),
-      ...room.memberIds.map(String),
-    ]);
-    const cutoff = Date.now() - ROOM_PRESENCE_STALE_MS;
-    const rows = await ctx.db
-      .query("appStates")
-      .withIndex("by_scope_scopeId", (q) =>
-        q.eq("scope", "room").eq("scopeId", String(args.roomId)),
-      )
-      .collect();
-    const active = rows.filter(
-      (row) =>
-        row.key === ROOM_PRESENCE_KEY &&
-        row.updatedAt >= cutoff &&
-        row.userId !== undefined &&
-        allowedUserIds.has(row.userId),
-    );
-    return (
-      await Promise.all(
-        active.map(async (row) => {
-          const userId = ctx.db.normalizeId("users", row.userId!);
-          const user = userId ? await ctx.db.get(userId) : null;
-          if (!user || !userId) return null;
-          const doc = isObject(row.doc) ? row.doc : {};
-          return {
-            userId,
-            name: user.name ?? user.username ?? "Scholar",
-            joinedAt:
-              typeof doc.joinedAt === "number"
-                ? doc.joinedAt
-                : row.updatedAt,
-            lastSeenAt: row.updatedAt,
-          };
-        }),
-      )
-    ).filter((entry) => entry !== null);
   },
 });
 
@@ -1049,8 +910,6 @@ async function readSessionState(
   userId: Id<"users">,
   artifactId: Id<"artifacts">,
 ): Promise<AppStateSnapshot | null> {
-  // Peer-authored room state is app-only UGC. Model context reads only the
-  // scholar's own session partition.
   return snapshotFromRow(
     await findStateRow(
       ctx,

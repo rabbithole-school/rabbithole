@@ -57,6 +57,7 @@ import {
 import { buildGameSessionDigest } from "../lib/games/digest";
 import { renderDigestForModel } from "../lib/games/promptContext";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule } from "./lib/scheduleStore";
 import { internal } from "./_generated/api";
 import { internalQuery, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { maybeAwardUnitBadge } from "./lib/badgeAward";
@@ -134,7 +135,7 @@ async function validateAssignmentScope(
   }
   if (assignment.selfPaced) return assignmentId;
   const now = Date.now();
-  const entry = (assignment.activitySchedule ?? []).find(
+  const entry = (await readSchedule(ctx, assignment)).find(
     (e) => String(e.activityId) === String(activity._id),
   );
   if (!entry || !entryTargetsScholar(entry, scholarId)) {

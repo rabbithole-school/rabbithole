@@ -26,6 +26,7 @@ import type { Anthropic } from "@anthropic-ai/sdk";
 import { modelLabel } from "./models";
 import { aideEffort, aideRefusalFallback, aideThinking } from "./aideModel";
 import { UNREPORTED_TOOL_RESULT } from "./toolActivityGroups";
+import { withToolSearch } from "./aideToolSearch";
 import {
   emptyUsage,
   addStartUsage,
@@ -542,15 +543,44 @@ export async function runAideLoop(config: {
    * in place; we simply drop the now-unwanted trailing turn.
    */
   shouldStop?: () => boolean;
+  /**
+   * A person's stop, recorded somewhere else (Slack's Stop button lands as an
+   * `agent_session_stopped` event, handled by a different function). Polled
+   * at most every 1.5s while the model streams, and always at the start and
+   * end of each model message and at a tool call. The end-of-message check
+   * comes before the SDK runs that message's tools, so a stop recorded in
+   * time keeps any further tool from running.
+   *
+   * A stop never aborts a request mid-reply. In a Convex action, aborting
+   * an Anthropic stream while its body is still arriving throws an uncaught
+   * `TypeError: The stream is not in a state that permits close` from the
+   * fetch underneath, and that kills the action: on the dev rig 2026-11-08
+   * it took the stream close, the status reset and the persist with it.
+   * Breaking out after a message has ended is safe (the SDK does it at the
+   * end of every turn). So from the stop on, the rest of the current
+   * message is read but not shown, recorded or acted on, and the loop ends
+   * at its boundary. No refusal retry or notice follows, and the result
+   * says `stopped`.
+   */
+  isStopRequested?: () => Promise<boolean>;
+  /** Fires once, the moment a stop is seen, so the transport can close its
+   * reply right away rather than after the rest of the message is read. */
+  onStop?: () => void;
   /** See `AideStreamConfig.maxIterations` — cap on the tool loop's API
    * requests. Undefined → uncapped (the SDK treats falsy as unlimited). */
   maxIterations?: number;
+  /** How a refusal notice is set off from the reply. "markdown" (default)
+   * italicizes it; "plain" is for a channel that renders nothing (SMS),
+   * where `_…_` would arrive as literal underscores. */
+  noticeStyle?: "markdown" | "plain";
   label: string;
 }): Promise<{
   content: string;
   model: string;
   tokensUsed: number;
   usage: UsageBreakdown;
+  /** True when `isStopRequested` ended the run early. */
+  stopped: boolean;
 }> {
   const {
     anthropic,
@@ -564,7 +594,10 @@ export async function runAideLoop(config: {
     onToolUse,
     onThinking,
     shouldStop,
+    isStopRequested,
+    onStop,
     maxIterations,
+    noticeStyle = "markdown",
     label,
   } = config;
 
@@ -577,7 +610,20 @@ export async function runAideLoop(config: {
   let thinkingSignaled = false;
   // Any tool call started in this run — half of the retry-safety gate below.
   let toolsUsed = false;
-  const runnerTools = observeToolResults(tools, onToolResult);
+  let stopped = false;
+  // Rare tools ride along deferred behind tool search (see aideToolSearch).
+  const runnerTools = withToolSearch(observeToolResults(tools, onToolResult));
+  const stopPredicate = createStreamStopPredicate({
+    isLocallyStopped: () => stopped,
+    isStopRequested,
+  });
+  const checkStop = async (force = false) => {
+    if (stopped) return true;
+    if (!(await stopPredicate(force))) return false;
+    stopped = true;
+    onStop?.();
+    return true;
+  };
 
   // One full tool-loop pass on `activeModel`. Mutates the accumulators above
   // so a refusal retry (below) continues the same usage/token accounting —
@@ -599,58 +645,86 @@ export async function runAideLoop(config: {
       ...(effort ? { output_config: { effort } } : {}),
     });
 
-    for await (const messageStream of runner) {
-      // A tool from the PREVIOUS turn asked us to stop (e.g. Slack's
-      // react_only decided to stay silent). The SDK has already run that tool
-      // and started this next turn; we break before consuming it so its text
-      // is never streamed or accumulated. The runner's async-iterator cleanup
-      // aborts the in-flight request.
-      if (shouldStop?.()) break;
-      for await (const event of messageStream) {
-        if (
-          event.type === "content_block_start" &&
-          event.content_block?.type === "tool_use"
-        ) {
-          if (fullContent.trim() && !fullContent.endsWith("\n\n")) {
-            needsSeparator = true;
+    try {
+      for await (const messageStream of runner) {
+        // A tool from the PREVIOUS turn asked us to stop (e.g. Slack's
+        // react_only decided to stay silent). The SDK has already run that tool
+        // and started this next turn; we break before consuming it so its text
+        // is never streamed or accumulated. The runner's async-iterator cleanup
+        // aborts the in-flight request.
+        if (shouldStop?.()) break;
+        // A person's stop (isStopRequested) is checked here too, but answered
+        // by reading this message unseen (below), never by aborting it.
+        await checkStop(true);
+        for await (const event of messageStream) {
+          // Usage is counted whatever happens: the tokens are billed.
+          if (event.type === "message_start") {
+            model_ = event.message.model;
+            // input + cache counts for this message (each tool-loop message
+            // has its own prefill — they sum correctly across the loop).
+            addStartUsage(usage, event.message.usage);
+            continue;
           }
-          toolsUsed = true;
-          const name = (event.content_block as { name?: string }).name;
-          if (name) onToolUse?.(name);
-        } else if (
-          event.type === "content_block_start" &&
-          event.content_block?.type === "thinking"
-        ) {
-          if (!thinkingSignaled) {
-            thinkingSignaled = true;
-            onThinking?.();
-          }
-        } else if (event.type === "message_start") {
-          model_ = event.message.model;
-          // input + cache counts for this message (each tool-loop message
-          // has its own prefill — they sum correctly across the loop).
-          addStartUsage(usage, event.message.usage);
-        } else if (event.type === "content_block_delta") {
-          const delta = event.delta;
-          if ("text" in delta) {
-            let textOut = delta.text;
-            if (needsSeparator) {
-              textOut = "\n\n" + textOut.replace(/^\s+/, "");
-              needsSeparator = false;
-            }
-            fullContent += textOut;
-            onText?.(textOut);
-          }
-        } else if (event.type === "message_delta") {
-          if (event.usage) {
+          if (event.type === "message_delta" && event.usage) {
             tokensUsed += event.usage.output_tokens;
             addDeltaOutput(usage, event.usage.output_tokens);
           }
-          if (event.delta?.stop_reason === "refusal") {
-            refused = true;
+          // From a person's stop on, nothing is shown or recorded.
+          if (await checkStop()) continue;
+          if (
+            event.type === "content_block_start" &&
+            event.content_block?.type === "tool_use"
+          ) {
+            // Always ask at a tool call, before it shows up as work.
+            if (await checkStop(true)) continue;
+            if (fullContent.trim() && !fullContent.endsWith("\n\n")) {
+              needsSeparator = true;
+            }
+            toolsUsed = true;
+            const name = (event.content_block as { name?: string }).name;
+            if (name) onToolUse?.(name);
+          } else if (
+            event.type === "content_block_start" &&
+            event.content_block?.type === "server_tool_use"
+          ) {
+            // A tool search runs server-side: nothing to execute or report, but
+            // text after it must not run into text before it.
+            if (fullContent.trim() && !fullContent.endsWith("\n\n")) {
+              needsSeparator = true;
+            }
+          } else if (
+            event.type === "content_block_start" &&
+            event.content_block?.type === "thinking"
+          ) {
+            if (!thinkingSignaled) {
+              thinkingSignaled = true;
+              onThinking?.();
+            }
+          } else if (event.type === "content_block_delta") {
+            const delta = event.delta;
+            if ("text" in delta) {
+              let textOut = delta.text;
+              if (needsSeparator) {
+                textOut = "\n\n" + textOut.replace(/^\s+/, "");
+                needsSeparator = false;
+              }
+              fullContent += textOut;
+              onText?.(textOut);
+            }
+          } else if (event.type === "message_delta") {
+            if (event.delta?.stop_reason === "refusal") {
+              refused = true;
+            }
           }
         }
+        // This message has ended and its tools have not run yet: the SDK runs
+        // them when we come back for the next one. Last chance to stop first,
+        // and breaking out of a finished message is safe.
+        if (await checkStop(true)) break;
       }
+    } catch (error) {
+      // After a stop the rest of the turn is being thrown away anyway.
+      if (!stopped) throw error;
     }
   };
 
@@ -658,7 +732,9 @@ export async function runAideLoop(config: {
 
   try {
     await attempt(model);
-    retriedOnto = refusalRetryTarget({ refused, fullContent, toolsUsed, model });
+    retriedOnto = stopped
+      ? null
+      : refusalRetryTarget({ refused, fullContent, toolsUsed, model });
     if (retriedOnto) {
       console.warn(
         `${label} loop: ${model} refused with nothing committed — retrying on ${retriedOnto}`,
@@ -670,18 +746,21 @@ export async function runAideLoop(config: {
     throw error;
   }
 
-  const notice = refusalNoticeFor({
-    refusedModel: String(model),
-    retriedOnto,
-    stillRefused: refused,
-  });
+  const notice = stopped
+    ? null
+    : refusalNoticeFor({
+        refusedModel: String(model),
+        retriedOnto,
+        stillRefused: refused,
+      });
   if (notice) {
-    const block = fullContent.trim() ? `\n\n_${notice}_` : `_${notice}_`;
+    const styled = noticeStyle === "plain" ? notice : `_${notice}_`;
+    const block = fullContent.trim() ? `\n\n${styled}` : styled;
     fullContent += block;
     onText?.(block);
   }
 
-  return { content: fullContent, model: model_, tokensUsed, usage };
+  return { content: fullContent, model: model_, tokensUsed, usage, stopped };
 }
 
 const SSE_HEADERS = {
@@ -718,7 +797,6 @@ export function runAideStream(config: AideStreamConfig): Response {
 
   const encoder = new TextEncoder();
   let cancelled = false;
-  let activeMessageStream: { abort: () => void } | null = null;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -759,7 +837,8 @@ export function runAideStream(config: AideStreamConfig): Response {
       // Any tool call started in this run — half of the retry-safety gate.
       let toolsUsed = false;
       let stopped = false;
-      const runnerTools = observeToolResults(tools, onToolResult);
+      // Rare tools ride along deferred behind tool search (see aideToolSearch).
+      const runnerTools = withToolSearch(observeToolResults(tools, onToolResult));
       const stopPredicate = createStreamStopPredicate({
         isLocallyStopped: () => cancelled || stopped,
         isStopRequested,
@@ -799,8 +878,7 @@ export function runAideStream(config: AideStreamConfig): Response {
         });
 
         try {
-          streamLoop: for await (const messageStream of runner) {
-            activeMessageStream = messageStream;
+          for await (const messageStream of runner) {
             // The SDK executes the previous turn's tools while we await THIS
             // messageStream, so any tool that started last turn has finished
             // exactly now — settle any that never reported. On the first
@@ -808,23 +886,30 @@ export function runAideStream(config: AideStreamConfig): Response {
             // (Settling after the inner event loop instead would fire BEFORE the
             // tool runs, wrongly settling a tool about to report normally.)
             tracker.settleUnreported();
-            if (await checkStop()) {
-              messageStream.abort();
-              break;
-            }
+            // A stop (or the client going away) is answered by reading the
+            // rest of this message unseen and ending at its boundary, never by
+            // aborting it mid-reply: that throws an uncaught TypeError from
+            // the fetch underneath and can kill the action before `finalize`
+            // (see runAideLoop's `isStopRequested`).
+            await checkStop();
             for await (const event of messageStream) {
-              if (await checkStop()) {
-                messageStream.abort();
-                break streamLoop;
+              // Usage is counted whatever happens: the tokens are billed.
+              if (event.type === "message_start") {
+                model_ = event.message.model;
+                addStartUsage(usage, event.message.usage);
+                continue;
               }
+              if (event.type === "message_delta" && event.usage) {
+                tokensUsed += event.usage.output_tokens;
+                addDeltaOutput(usage, event.usage.output_tokens);
+              }
+              // From a stop on, nothing is shown, persisted or acted on.
+              if (await checkStop()) continue;
               if (
                 event.type === "content_block_start" &&
                 event.content_block?.type === "tool_use"
               ) {
-                if (await checkStop(true)) {
-                  messageStream.abort();
-                  break streamLoop;
-                }
+                if (await checkStop(true)) continue;
                 if (fullContent.trim() && !fullContent.endsWith("\n\n")) {
                   needsSeparator = true;
                 }
@@ -836,6 +921,15 @@ export function runAideStream(config: AideStreamConfig): Response {
                 // stray failed row instead). Mirrors `runAideLoop`'s `if (name)`.
                 if (toolName) tracker.started(toolName);
                 emit({ toolStart: { name: toolName } });
+              } else if (
+                event.type === "content_block_start" &&
+                event.content_block?.type === "server_tool_use"
+              ) {
+                // Tool search runs server-side: no toolStart (nothing for the
+                // client to run or settle), just keep the text separated.
+                if (fullContent.trim() && !fullContent.endsWith("\n\n")) {
+                  needsSeparator = true;
+                }
               } else if (
                 event.type === "content_block_start" &&
                 event.content_block?.type === "thinking"
@@ -854,9 +948,6 @@ export function runAideStream(config: AideStreamConfig): Response {
                   thinkingSignaled = true;
                   emit({ thinking: true });
                 }
-              } else if (event.type === "message_start") {
-                model_ = event.message.model;
-                addStartUsage(usage, event.message.usage);
               } else if (event.type === "content_block_delta") {
                 const delta = event.delta;
                 if ("text" in delta) {
@@ -872,8 +963,6 @@ export function runAideStream(config: AideStreamConfig): Response {
                     const persistResult = await persist(fullContent);
                     if (stopRequestedFromPersistResult(persistResult)) {
                       stopped = true;
-                      messageStream.abort();
-                      break streamLoop;
                     }
                   }
                 } else if (streamThinking && "thinking" in delta && delta.thinking) {
@@ -881,24 +970,18 @@ export function runAideStream(config: AideStreamConfig): Response {
                   emit({ thinkingText: delta.thinking });
                 }
               } else if (event.type === "message_delta") {
-                if (event.usage) {
-                  tokensUsed += event.usage.output_tokens;
-                  addDeltaOutput(usage, event.usage.output_tokens);
-                }
                 if (event.delta?.stop_reason === "refusal") {
                   refused = true;
                 }
               }
             }
-            if (await checkStop(true)) {
-              break streamLoop;
-            }
-            activeMessageStream = null;
+            // This message has ended and its tools have not run yet: the SDK
+            // runs them when we come back for the next one. Breaking out of a
+            // finished message is safe.
+            if (await checkStop(true)) break;
           }
         } catch (error) {
           if (!cancelled && !stopped) throw error;
-        } finally {
-          activeMessageStream = null;
         }
 
         // Settle any tool that started in the final turn and never reported
@@ -976,8 +1059,10 @@ export function runAideStream(config: AideStreamConfig): Response {
       }
     },
     cancel() {
+      // The client went away. The loop sees `cancelled` and ends at the
+      // current message's boundary; aborting here, mid-reply, could kill the
+      // action before it finalizes the row.
       cancelled = true;
-      activeMessageStream?.abort();
     },
   });
 

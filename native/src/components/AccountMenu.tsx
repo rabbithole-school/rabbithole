@@ -26,7 +26,9 @@ import { readManagedClaim } from "@/lib/managedClaim";
 import { resolveUserImageUri } from "@/lib/webEmbedConfig";
 import { fonts, palette, useColors } from "@/theme";
 import { ScholarAvatar } from "@/components/ScholarAvatar";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { usePresentationAsam } from "@/contexts/AsamControllerContext";
+import { TALK_COPY } from "@/components/talk/talkCopy";
 
 const ROLE_LABELS: Record<string, string> = {
   scholar: "Scholar",
@@ -44,7 +46,7 @@ const ROLE_LABELS: Record<string, string> = {
  *
  * Full parity with the web scholar AccountMenu (components/AccountMenu.tsx):
  * identity header (avatar + name + @username), My Learning, Messages (once
- * the scholar has a conversation), The Workshop,
+ * the scholar has a conversation or a teacher to write to), The Workshop,
  * Account Details, Sign Out. Teacher/admin-only items (Admin Tools, remote
  * "Viewing as", pulse orb) are intentionally absent — this is the scholar app.
  *
@@ -57,14 +59,19 @@ const ROLE_LABELS: Record<string, string> = {
  */
 export function AccountMenuButton() {
   const me = useQuery(api.users.currentUser, {});
-  // Messages (scholar ↔ staff conversations) — shown only once the scholar has
-  // a thread: an adult opens every mentor thread, so a kid with none gets no
-  // empty door. Scholar callers only; this is the scholar app.
+  // Messages (scholar ↔ staff conversations) — shown once the scholar has a
+  // thread or a teacher they can write to, so it's never an empty door.
+  // Scholar callers only; this is the scholar app.
   const messages = useQuery(
     api.scholarMessages.listThreads,
     me?.role === "scholar" ? {} : "skip",
   );
-  const hasMessages = (messages?.threads.length ?? 0) > 0;
+  const teachers = useQuery(
+    api.scholarMessages.listTeachersForScholar,
+    me?.role === "scholar" ? {} : "skip",
+  );
+  const hasMessages =
+    (messages?.threads.length ?? 0) > 0 || (teachers?.length ?? 0) > 0;
   const unreadMessages = hasMessages ? (messages?.unreadCount ?? 0) : 0;
   const memberships = useQuery(api.memberships.myMemberships, {});
   const { signOut } = useAuthActions();
@@ -131,6 +138,12 @@ export function AccountMenuButton() {
       ? (ROLE_LABELS[me.role] ?? me.role)
       : null;
 
+  // Until the user loads there is no name to draw initials from; a pulsing
+  // circle holds the avatar's place instead of a placeholder initial.
+  if (me === undefined) {
+    return <Skeleton width={30} height={30} radius={15} />;
+  }
+
   return (
     <>
       <Pressable
@@ -192,6 +205,9 @@ export function AccountMenuButton() {
                 />
               )}
               <Item icon="wrench.and.screwdriver.fill" label="The Workshop" onPress={() => go("/workshop")} colors={colors} styles={styles} />
+              {/* Native-only, like Teacher unlock: audience mode films a talk with
+                  this BunnyPad's camera, which the web app has no part in. */}
+              <Item icon="gauge.with.dots.needle.67percent" label={TALK_COPY.audienceMenuItem} onPress={() => go("/audience")} colors={colors} styles={styles} />
               <Item
                 icon="person.crop.circle"
                 label="Account details"

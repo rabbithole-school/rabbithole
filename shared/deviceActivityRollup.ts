@@ -57,6 +57,30 @@ export const UNRETURNED_EXTERNAL_LAUNCH_ESTIMATE_MS = 10 * 60 * 1000;
  */
 export const FOREGROUND_PRESENCE_GAP_MS = 5 * 60 * 1000;
 
+/**
+ * How long an `app_foreground` with no heartbeat after it may vouch for.
+ *
+ * Coming to the front is not proof that anyone is there. A BunnyPad held in
+ * Rabbithole Lock tries to lock every two minutes and iOS undoes it, so the app
+ * goes background → foreground on its own, over and over, with nobody
+ * touching it; the 5 a.m. fleet release reopens the app the same way. Each of
+ * those foregrounds used to book up to FOREGROUND_PRESENCE_GAP_MS. Measured on
+ * prod for Nov 13–17 2026, that was 7% of all in-school minutes and 23% of
+ * after-school minutes, and 106 of one scholar's 158 in-school minutes on a
+ * single day.
+ *
+ * The client heartbeats every 60 s while a touch from the last
+ * PRESENCE_IDLE_TIMEOUT_MS vouches for presence (native/src/lib/
+ * deviceActivityQueue.ts). So a person who is really there produces a
+ * heartbeat within about a minute of the foreground. A foreground followed by
+ * anything but a heartbeat or an `external_launch` (a tap) after longer than
+ * this produced no heartbeat because nobody had touched the iPad: it books
+ * nothing. A shorter stretch (a quick look
+ * that ends before the first heartbeat could fire) still counts. 60 s for the
+ * heartbeat timer, plus 5 s of timer and clock slack.
+ */
+export const UNCONFIRMED_FOREGROUND_MAX_MS = 65 * 1000;
+
 export type DeviceActivityKind =
   | "app_foreground"
   | "app_background"
@@ -103,9 +127,25 @@ export type AppRollup = MeasuredEstimated & {
   estimatedIntervals: number;
 };
 
+/**
+ * One MEASURED stretch the roll-up booked, so a caller can ask WHEN the time
+ * fell (outside school hours, or overlapping some other source) without
+ * re-deriving the pairing rule. Estimates have no span: their real duration is
+ * the thing we don't know.
+ */
+export type MeasuredSpan = {
+  start: number;
+  end: number;
+  source: "foreground" | "app";
+  /** On an `app` span: the launched app, when the launch named one. */
+  externalAppId?: string;
+};
+
 export type DeviceActivityDayRollup = {
   /** Rabbithole itself in the foreground. Always measured. */
   foregroundMs: number;
+  /** Every measured stretch, in time order; they never overlap. */
+  measuredSpans: MeasuredSpan[];
   /** Per external app, ordered by total attributed time descending. */
   apps: AppRollup[];
   /**
@@ -154,6 +194,7 @@ export function rollupDeviceActivityDay(
   const byContext: Record<string, MeasuredEstimated> = {};
   const apps = new Map<string, AppRollup>();
   let foregroundMs = 0;
+  const measuredSpans: MeasuredSpan[] = [];
   let unattributedBackgroundMs = 0;
   let estimatedIntervals = 0;
 
@@ -217,6 +258,16 @@ export function rollupDeviceActivityDay(
         (next.kind === "external_return" || FOREGROUND_KINDS.has(next.kind));
       if (returned && gapMs !== null) {
         contextBucket(event.context).measuredMs += gapMs;
+        if (gapMs > 0) {
+          measuredSpans.push({
+            start: event.clientAt,
+            end: event.clientAt + gapMs,
+            source: "app",
+            ...(event.externalAppId
+              ? { externalAppId: event.externalAppId }
+              : {}),
+          });
+        }
         if (event.externalAppId) appBucket(event.externalAppId).measuredMs += gapMs;
       } else {
         bookUnreturnedLaunch(event, gapMs);
@@ -227,8 +278,26 @@ export function rollupDeviceActivityDay(
     if (gapMs === null) continue; // trailing non-launch event closes the day
 
     if (FOREGROUND_KINDS.has(event.kind)) {
-      const measured = Math.min(gapMs, FOREGROUND_PRESENCE_GAP_MS);
+      // A foreground that no heartbeat confirmed vouches for nothing once the
+      // gap is long enough that a present, touching scholar would have sent
+      // one (see UNCONFIRMED_FOREGROUND_MAX_MS).
+      const unconfirmed =
+        event.kind === "app_foreground" &&
+        next?.kind !== "heartbeat" &&
+        // Opening another app takes a tap, so a launch confirms presence too.
+        next?.kind !== "external_launch" &&
+        gapMs > UNCONFIRMED_FOREGROUND_MAX_MS;
+      const measured = unconfirmed
+        ? 0
+        : Math.min(gapMs, FOREGROUND_PRESENCE_GAP_MS);
       foregroundMs += measured;
+      if (measured > 0) {
+        measuredSpans.push({
+          start: event.clientAt,
+          end: event.clientAt + measured,
+          source: "foreground",
+        });
+      }
       contextBucket(event.context).measuredMs += measured;
       unattributedBackgroundMs += gapMs - measured;
       continue;
@@ -254,6 +323,7 @@ export function rollupDeviceActivityDay(
 
   return {
     foregroundMs,
+    measuredSpans,
     apps: appList,
     unattributedBackgroundMs,
     totals,

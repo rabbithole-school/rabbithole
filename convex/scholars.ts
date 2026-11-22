@@ -1,5 +1,11 @@
 import { v } from "convex/values";
-import { authedQuery, scholarAdminQuery, teacherMutation, teacherQuery } from "./lib/customFunctions";
+import {
+  authedQuery,
+  scholarAdminMutation,
+  scholarAdminQuery,
+  teacherMutation,
+  teacherQuery,
+} from "./lib/customFunctions";
 import { internalQuery, internalMutation } from "./_generated/server";
 import {
   isNonTeachingOperationsRole,
@@ -43,6 +49,7 @@ import { dayStartForTimezone } from "../shared/institutionDay";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { hasScholarMembership } from "./lib/scholarEnrollment";
+import { isIsoCalendarDate } from "../shared/scholarWithdrawal";
 
 /**
  * Resolve a scholar URL slug → its non-sensitive header identity. The slug is normally the
@@ -146,17 +153,9 @@ export const getProfile = authedQuery({
       // Offline projects (scanned-deliverable containers) and test-drive
       // dry-runs aren't real chat sessions — keep them out of the stats.
       .filter((p) => !p.isOffline && !p.isTestDrive);
-
-    let messageCount = 0;
-    for (const proj of sessions) {
-      const msgs = await ctx.db
-        .query("messages")
-        .withIndex("by_session", (q) =>
-          q.eq("sessionId", proj._id)
-        )
-        .collect();
-      messageCount += msgs.length;
-    }
+    // No message total (TRA-655): it meant reading every message the scholar
+    // ever sent, on every scholar page and again on each new message. The
+    // session list keeps its per-session counts.
 
     // Count mastery observations (replaces topicCount)
     const observations = await ctx.db
@@ -195,6 +194,8 @@ export const getProfile = authedQuery({
           ? (scholar.pronouns ?? null)
           : null,
         enrollmentStanding: scholar.enrollmentStanding ?? "enrolled",
+        // ISO date the scholar left the school; null = a current scholar.
+        withdrawnOn: scholar.withdrawnOn ?? null,
         externalSchoolName: scholar.externalSchoolName ?? null,
         // Which institution (school) the scholar belongs to. Roster info, not
         // a measurement — operations staff manage it. See convex/institutions.ts.
@@ -225,7 +226,6 @@ export const getProfile = authedQuery({
       },
       stats: {
         sessionCount: sessions.length,
-        messageCount,
         observationCount: observations.length,
       },
     };
@@ -397,6 +397,55 @@ export const setGradeLevelInternal = internalMutation({
   },
 });
 
+async function setWithdrawalCore(
+  ctx: MutationCtx,
+  scholarId: Id<"users">,
+  withdrawnOn: string | null,
+) {
+  const scholar = await ctx.db.get(scholarId);
+  if (!scholar || scholar.role !== "scholar") {
+    throw new Error("Scholar not found");
+  }
+  if (withdrawnOn !== null && !isIsoCalendarDate(withdrawnOn)) {
+    throw new Error("Withdrawal date must be a date like 2026-11-14.");
+  }
+  await ctx.db.patch(scholarId, { withdrawnOn: withdrawnOn ?? undefined });
+  return { scholarId, withdrawnOn };
+}
+
+/**
+ * Mark a scholar as withdrawn (left the school) on a date, or undo it with
+ * `withdrawnOn: null`. Nothing is deleted: the scholar's sessions, records and
+ * forms stay readable to staff. A withdrawn scholar just leaves current-scholar
+ * lists (see users.withdrawnOn in schema.ts). Same gate as the rest of the
+ * profile's account details: scholar admins, within their own school.
+ */
+export const setWithdrawal = scholarAdminMutation({
+  args: {
+    scholarId: v.id("users"),
+    withdrawnOn: v.union(v.string(), v.null()),
+  },
+  handler: async (ctx, args) => {
+    await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    return setWithdrawalCore(ctx, args.scholarId, args.withdrawnOn);
+  },
+});
+
+/**
+ * CLI twin for operator corrections (the setEnrollmentStandingInternal
+ * pattern). Usage:
+ *   npx convex run scholars:setWithdrawalInternal
+ *     '{"scholarId":"<id>","withdrawnOn":"2026-11-14"}'
+ */
+export const setWithdrawalInternal = internalMutation({
+  args: {
+    scholarId: v.id("users"),
+    withdrawnOn: v.union(v.string(), v.null()),
+  },
+  handler: async (ctx, args) =>
+    setWithdrawalCore(ctx, args.scholarId, args.withdrawnOn),
+});
+
 /**
  * Internal: correct a scholar's enrollment standing from the CLI.
  *
@@ -456,18 +505,6 @@ export interface LevelSignalRow {
     /** When a human last ratified this exact value; null if unrecorded. */
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
-  };
-  /**
-   * DEPLOY-SKEW SHIM (TRA-513): always the empty stub. The estimate left this
-   * read model, but a tab still running the previous frontend reads
-   * `signals.estimate.level` and would throw on `undefined`. Delete this field
-   * (and the stub below) one release after TRA-513 ships.
-   */
-  estimate: {
-    level: null;
-    computedAt: null;
-    ageDays: null;
-    disagreesWithConfirmed: false;
   };
 }
 
@@ -659,13 +696,6 @@ export const levelSignalsForScholars = teacherQuery({
           setAt: ratifiedMatches && ratified ? ratified._creationTime : null,
           setBy: ratifiedMatches && ratified ? ratified.source : null,
         },
-        // Deploy-skew shim, see `LevelSignalRow.estimate`.
-        estimate: {
-          level: null,
-          computedAt: null,
-          ageDays: null,
-          disagreesWithConfirmed: false,
-        },
       });
     }
 
@@ -748,23 +778,51 @@ export async function rosterPulseForScholarIds(
   until: number = Number.POSITIVE_INFINITY,
 ): Promise<ScholarPulse[]> {
   const rows: RosterAnalysisRow[] = [];
+  // The window as index bounds, keeping exactly the analyses the in-memory test
+  // `!(t < since) && !(t >= until)` keeps for every number: a NaN or -Infinity
+  // `since`, or a NaN or +Infinity `until`, is no bound at all (scholarPulse's
+  // `windowDays` is a client-supplied `v.number()`, which admits NaN), and a
+  // window that holds no time reads nothing.
+  const lower = Number.isFinite(since) ? since : null;
+  const upper = Number.isFinite(until) ? until : null;
+  const emptyWindow =
+    since === Number.POSITIVE_INFINITY ||
+    until === Number.NEGATIVE_INFINITY ||
+    (lower !== null && upper !== null && lower >= upper);
+  if (emptyWindow) return Object.values(computeRosterPulse(rows).byScholar);
+
   for (const uid of scholarIds) {
+    // Same exclusions as the Today lane's stalled-quest session lookup:
+    // archived/offline work shouldn't narrate a scholar's "Lately" pulse.
+    // Archived sessions are left out by the index (`isArchived` is required),
+    // so their rows are never read.
     const sessions = await ctx.db
       .query("sessions")
-      .withIndex("by_user", (q) => q.eq("userId", uid))
+      .withIndex("by_user_and_archived", (q) =>
+        q.eq("userId", uid).eq("isArchived", false),
+      )
       .collect();
     for (const session of sessions) {
-      // Same exclusions as the Today lane's stalled-quest session lookup:
-      // archived/offline work shouldn't narrate a scholar's "Lately" pulse.
-      if (session.isTestDrive || session.isArchived || session.isOffline)
-        continue;
+      if (session.isTestDrive || session.isOffline) continue;
+      // Only the analyses inside the window: the range is on the index's
+      // implicit `_creationTime`, so a session's older observer runs are never
+      // read. This runs for every scholar on a roster, and a session gains an
+      // analysis on each observer run, so reading them all and filtering here
+      // grew with every school day.
       const analyses = await ctx.db
         .query("analyses")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+        .withIndex("by_session", (q) => {
+          const bySession = q.eq("sessionId", session._id);
+          if (lower === null) {
+            return upper === null
+              ? bySession
+              : bySession.lt("_creationTime", upper);
+          }
+          const fromLower = bySession.gte("_creationTime", lower);
+          return upper === null ? fromLower : fromLower.lt("_creationTime", upper);
+        })
         .collect();
       for (const analysis of analyses) {
-        if (analysis._creationTime < since) continue;
-        if (analysis._creationTime >= until) continue;
         rows.push({
           scholarId: String(uid),
           sessionId: String(session._id),

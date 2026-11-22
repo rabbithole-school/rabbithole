@@ -17,6 +17,8 @@ import {
   coordinatePlaneGeometry,
   fractionPartAccessibilityLabel,
   fractionPartGeometry,
+  functionPlotAccessibilityLabel,
+  functionPlotGeometry,
   groupsAccessibilityLabel,
   groupsGeometry,
   labeledRectangleAccessibilityLabel,
@@ -38,6 +40,7 @@ import {
   type CoordinatePlanePromptVisual,
   type CountablePoint,
   type FractionPartPromptVisual,
+  type FunctionPlotPromptVisual,
   type GeometryLabel,
   type GroupsPromptVisual,
   type LabeledRectanglePromptVisual,
@@ -49,6 +52,7 @@ import {
   type PracticePromptVisual as PracticePromptVisualSpec,
   type RectangularPrismPromptVisual,
 } from "@/shared/practicePromptVisual";
+import { useId } from "react";
 import { CountablesPromptVisual } from "@/components/practice/CountablesPromptVisual";
 
 const DOT_FILL = "#16707e";
@@ -67,6 +71,10 @@ const SERIES_B_STROKE = "#8a5a24";
 // category, so they must not borrow a series hue — teal is Set A, warm/orange is
 // Set B, and nothing else. A medium warm-gray keeps hue doing exactly one job.
 const MARKER_NEUTRAL = "#8a857c";
+// Function-plot curves in order: teal, warm, violet (a third piece of a
+// piecewise function). Labels use the darker ink of the same hue.
+const FUNCTION_CURVE_STROKES = [DOT_FILL, WARM_ACCENT, "#a960bc"] as const;
+const FUNCTION_CURVE_INKS = [DOT_STROKE, SERIES_B_STROKE, "#7b3f8c"] as const;
 
 const svgStyle = { width: "100%", maxWidth: 340, height: "auto", display: "block" } as const;
 
@@ -102,6 +110,8 @@ export function PromptVisual({ spec }: { spec: PracticePromptVisualSpec }) {
       return <LinePlotPromptVisual spec={spec} />;
     case "numberLine":
       return <NumberLinePromptVisual spec={spec} />;
+    case "functionPlot":
+      return <FunctionPlotPromptVisual spec={spec} />;
     default:
       return null;
   }
@@ -548,6 +558,135 @@ function CoordinatePlanePromptVisual({ spec }: { spec: CoordinatePlanePromptVisu
           <text x={point.labelX} y={point.labelY} fontSize={14} fill={TEXT} fontWeight={800}>
             {point.label}
           </text>
+        </g>
+      ))}
+      {geometry.axisLabels ? (
+        <>
+          <text x={geometry.axisLabels.x.x} y={geometry.axisLabels.x.y} fontSize={13} fill={DOT_STROKE} fontWeight={800} textAnchor="end">
+            {geometry.axisLabels.x.text}
+          </text>
+          <text x={geometry.axisLabels.y.x} y={geometry.axisLabels.y.y} fontSize={13} fill={DOT_STROKE} fontWeight={800} textAnchor="start">
+            {geometry.axisLabels.y.text}
+          </text>
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
+/** Display-only function graph (Algebra 2). Twin of the native FunctionPlotPromptVisual. */
+function FunctionPlotPromptVisual({ spec }: { spec: FunctionPlotPromptVisual }) {
+  const geometry = functionPlotGeometry(spec);
+  // One page can hold several plots (a review list), so the clip id is unique.
+  const clipId = `function-plot-clip-${useId().replace(/:/g, "")}`;
+  return (
+    <svg
+      role="img"
+      aria-label={functionPlotAccessibilityLabel(spec)}
+      viewBox={`0 0 ${geometry.width} ${geometry.height}`}
+      style={svgStyle}
+    >
+      <defs>
+        <clipPath id={clipId}>
+          <rect x={geometry.plotX} y={geometry.plotY} width={geometry.plotWidth} height={geometry.plotHeight} />
+        </clipPath>
+      </defs>
+      <rect
+        x={geometry.plotX}
+        y={geometry.plotY}
+        width={geometry.plotWidth}
+        height={geometry.plotHeight}
+        fill={FRAME_FILL}
+        stroke={FRAME_STROKE}
+        strokeWidth={1.5}
+      />
+      {geometry.shade ? (
+        <rect x={geometry.shade.x} y={geometry.shade.y} width={geometry.shade.width} height={geometry.shade.height} fill={WARM_ACCENT} opacity={0.18} />
+      ) : null}
+      {[...geometry.verticalLines, ...geometry.horizontalLines].map((line, index) => (
+        <line
+          key={index}
+          x1={line.x1}
+          y1={line.y1}
+          x2={line.x2}
+          y2={line.y2}
+          stroke={line.axis ? DOT_STROKE : FRAME_STROKE}
+          strokeWidth={line.axis ? 2.2 : 1}
+        />
+      ))}
+      {geometry.asymptotes.map((line, index) => (
+        <line key={`asym-${index}`} x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2} stroke={MARKER_NEUTRAL} strokeWidth={2} strokeDasharray="7 5" />
+      ))}
+      {geometry.referenceLine ? (
+        <line
+          x1={geometry.referenceLine.x1}
+          y1={geometry.referenceLine.y1}
+          x2={geometry.referenceLine.x2}
+          y2={geometry.referenceLine.y2}
+          stroke={MARKER_NEUTRAL}
+          strokeWidth={1.6}
+          strokeDasharray="3 5"
+        />
+      ) : null}
+      <g clipPath={`url(#${clipId})`}>
+        {geometry.curves.map((curve) => (
+          <path
+            key={curve.index}
+            d={curve.d}
+            fill="none"
+            stroke={FUNCTION_CURVE_STROKES[curve.index] ?? DOT_FILL}
+            strokeWidth={3}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+        ))}
+      </g>
+      {geometry.curves.map((curve) =>
+        curve.arrows.map((d, i) => (
+          <path key={`arrow-${curve.index}-${i}`} d={d} fill={FUNCTION_CURVE_STROKES[curve.index] ?? DOT_FILL} />
+        )),
+      )}
+      {geometry.curves.map((curve) =>
+        curve.holes.map((hole, i) => (
+          <circle
+            key={`hole-${curve.index}-${i}`}
+            cx={hole.x}
+            cy={hole.y}
+            r={5}
+            fill={FRAME_FILL}
+            stroke={FUNCTION_CURVE_STROKES[curve.index] ?? DOT_FILL}
+            strokeWidth={2.4}
+          />
+        )),
+      )}
+      {geometry.xTicks.map((tick) => (
+        <FractionAwareLabel key={`x-${tick.value}`} text={tick.text} x={tick.x} y={tick.y} fontSize={11} textAnchor="middle" />
+      ))}
+      {geometry.yTicks.map((tick) => (
+        <FractionAwareLabel key={`y-${tick.value}`} text={tick.text} x={tick.x} y={tick.y} fontSize={11} textAnchor="end" />
+      ))}
+      {geometry.curves.map((curve) =>
+        curve.label ? (
+          <text key={`cl-${curve.index}`} x={curve.label.x} y={curve.label.y} fontSize={14} fontWeight={800} fill={FUNCTION_CURVE_INKS[curve.index] ?? DOT_STROKE}>
+            {curve.label.text}
+          </text>
+        ) : null,
+      )}
+      {geometry.points.map((point) => (
+        <g key={`p-${point.index}`}>
+          <circle
+            cx={point.plotX}
+            cy={point.plotY}
+            r={5}
+            fill={point.open ? FRAME_FILL : DOT_FILL}
+            stroke={DOT_STROKE}
+            strokeWidth={point.open ? 2.2 : 1.5}
+          />
+          {point.label ? (
+            <text x={point.label.x} y={point.label.y} fontSize={13} fill={TEXT} fontWeight={800}>
+              {point.label.text}
+            </text>
+          ) : null}
         </g>
       ))}
     </svg>

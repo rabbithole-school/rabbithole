@@ -7,6 +7,7 @@
  * every scholar-facing assertion goes through the real public functions.
  */
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -170,7 +171,7 @@ describe("unit publication", () => {
     // Assigned, then unpublished afterwards: the assignment keeps it open
     // to the scholar it names, and only to them.
     const assignmentId = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: school.teacher.id,
         unitId,
         scholarIds: [scholar.id],
@@ -318,7 +319,7 @@ describe("unit publication", () => {
     expect(details?.unpublished).toBe(true);
   });
 
-  test("assigning through coreAssignWork (the aide's assign_unit) publishes", async () => {
+  test("assigning through coreAssignWork (the aide's give) publishes", async () => {
     const { t, school, scholar, asScholar } = await seed();
     const { unitId } = await t.mutation(
       internal.teacherAide.createCurriculumUnit,
@@ -330,6 +331,7 @@ describe("unit publication", () => {
       scholarIds: [scholar.id],
       startsAt: Date.now(),
       target: { kind: "unit" },
+      finish: { kind: "inClass" },
     });
     expect((await t.run((ctx) => ctx.db.get(unitId)))?.unpublished).toBe(
       undefined,
@@ -354,6 +356,7 @@ describe("unit publication", () => {
         scholarIds: [foreign.scholars[0].id],
         startsAt: Date.now(),
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       })
       .catch(() => undefined);
     const asForeignTeacher = await world.as.staffOf(foreign);
@@ -386,7 +389,7 @@ describe("unit publication", () => {
         participation: "includes_program_guests",
         scholarIds: [scholar.id],
       });
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId: school.teacher.id,
         unitId: assignedId,
         scholarGroupId: groupId,

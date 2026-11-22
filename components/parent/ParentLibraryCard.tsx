@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useReducer } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 import {
   Box,
   Button,
@@ -10,7 +10,6 @@ import {
   HStack,
   IconButton,
   Input,
-  Spinner,
   Stack,
   Text,
   VStack,
@@ -48,10 +47,12 @@ export type ParentLibraryCardStatus = {
 
 export function ParentLibraryCard({
   scholarId,
+  status,
 }: {
   scholarId: Id<"users">;
+  /** The masked status, from the Records tab's `parents.recordsTab`. */
+  status: ParentLibraryCardStatus;
 }) {
-  const status = useQuery(api.libraryCards.getStatus, { scholarId });
   const replaceCard = useMutation(api.libraryCards.replace);
   const removeCard = useMutation(api.libraryCards.remove);
   const [state, dispatch] = useReducer(
@@ -65,7 +66,6 @@ export function ParentLibraryCard({
   }, [scholarId]);
 
   const handleSave = async () => {
-    if (!status) return;
     const issue = libraryCardValidationIssue(state.cardNumber, state.pin);
     if (issue) {
       dispatch({
@@ -95,7 +95,6 @@ export function ParentLibraryCard({
   };
 
   const handleRemove = async () => {
-    if (!status) return;
     dispatch({ type: "submit" });
     try {
       await removeCard({
@@ -110,14 +109,6 @@ export function ParentLibraryCard({
       dispatch({ type: "failure", ...publicLibraryCardError(error) });
     }
   };
-
-  if (status === undefined) {
-    return (
-      <HStack justify="center" py={6} aria-label="Loading library card">
-        <Spinner size="sm" color="violet.500" />
-      </HStack>
-    );
-  }
 
   return (
     <ParentLibraryCardView

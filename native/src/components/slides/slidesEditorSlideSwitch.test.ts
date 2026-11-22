@@ -14,6 +14,11 @@ import { describe, expect, it, vi } from "vitest";
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 
+const { showActionSheet, dismissActionSheet } = vi.hoisted(() => ({
+  showActionSheet: vi.fn(),
+  dismissActionSheet: vi.fn(),
+}));
+
 vi.mock("react-native", async () => {
   const react = await vi.importActual<typeof import("react")>("react");
   const host =
@@ -21,8 +26,10 @@ vi.mock("react-native", async () => {
     ({ children, ...props }: Props) =>
       react.createElement(name, props, children);
   return {
+    ActionSheetIOS: { showActionSheetWithOptions: showActionSheet, dismissActionSheet },
     ActivityIndicator: () => null,
     Alert: { alert: vi.fn() },
+    findNodeHandle: () => 1,
     AppState: {
       currentState: "active",
       addEventListener: () => ({ remove: () => {} }),
@@ -63,8 +70,15 @@ vi.mock("react-native-reanimated", async () => {
   const view = ({ children, ...props }: Props) =>
     react.createElement("animated-view", props, children);
   return {
-    default: { View: view },
+    default: {
+      View: view,
+      ScrollView: ({ children, ...props }: Props) =>
+        react.createElement("scroll-view", props, children),
+    },
+    useAnimatedRef: () => ({ current: null }),
     runOnJS: <T,>(fn: T) => fn,
+    useAnimatedReaction: () => undefined,
+    withTiming: <T,>(value: T) => value,
     useAnimatedStyle: () => ({}),
     useSharedValue: <T,>(initial: T) => {
       let current = initial;
@@ -84,11 +98,13 @@ vi.mock("react-native-reanimated", async () => {
   };
 });
 
+vi.mock("react-native-sortables", () => import("./sortablesTestMock"));
 vi.mock("expo-symbols", () => ({ SymbolView: () => null }));
 vi.mock("phosphor-react-native", () => ({ ScribbleIcon: () => null }));
 vi.mock("@/theme", () => ({
   fonts: new Proxy<Record<string, string>>({}, { get: () => "font" }),
-  useColors: () => new Proxy<Record<string, string>>({}, { get: () => "#000" }),
+  // Each colour is its own name, so a test can tell the highlight from a border.
+  useColors: () => new Proxy<Record<string, string>>({}, { get: (_, key) => String(key) }),
 }));
 vi.mock("@/lib/commandTextInput", async () => {
   const react = await vi.importActual<typeof import("react")>("react");
@@ -114,8 +130,10 @@ import { SlidesEditorNative } from "./SlidesEditorNative";
 import {
   CANVAS_H,
   CANVAS_W,
+  applySlideOps,
   emptySlide,
   emptyDeck,
+  makeDeckIdFactory,
   type Deck,
   type SlideOp,
 } from "../../../vendor/shared/slidesScene";
@@ -132,17 +150,13 @@ function findByTestID(renderer: ReactTestRenderer, testID: string) {
 async function mountEditorMidTextEdit(text: string) {
   const ops: SlideOp[][] = [];
   let renderer!: ReactTestRenderer;
+  const onOps = (batch: SlideOp[]) => {
+    ops.push(batch);
+    return true;
+  };
 
   await act(async () => {
-    renderer = create(
-      createElement(SlidesEditorNative, {
-        deck: twoSlideDeck(),
-        onOps: (batch: SlideOp[]) => {
-          ops.push(batch);
-          return true;
-        },
-      }),
-    );
+    renderer = create(createElement(SlidesEditorNative, { deck: twoSlideDeck(), onOps }));
   });
 
   // Give the canvas a size — the text overlay only renders once it has scale.
@@ -177,7 +191,18 @@ async function mountEditorMidTextEdit(text: string) {
     input.props.onChangeText(text);
   });
 
-  return { renderer, ops, opsBefore: () => ops.length };
+  return { renderer, ops, onOps, opsBefore: () => ops.length };
+}
+
+/** The deck the server holds after the editor's own batches, as a later revision. */
+function serverDeckAfter(ops: SlideOp[][], extra: SlideOp[]): Deck {
+  let deck = twoSlideDeck();
+  for (const batch of [...ops, extra]) {
+    const result = applySlideOps(deck, batch, makeDeckIdFactory(deck));
+    if (!result.ok) throw new Error(result.error);
+    deck = result.deck;
+  }
+  return { ...deck, revision: deck.revision + 100 };
 }
 
 function textCommits(ops: SlideOp[][], from: number) {
@@ -227,6 +252,151 @@ describe("SlidesEditorNative — editing text across a slide change", () => {
     );
     expect(thumbnails.size).toBe(3);
 
+    await act(async () => renderer.unmount());
+  });
+
+  it("stays on the scholar's slide and saves the draft there when the tutor reorders slides (TRA-704)", async () => {
+    const { renderer, ops, onOps } = await mountEditorMidTextEdit("Light reactions");
+    const before = ops.length;
+
+    // The tutor moves the slide being edited to the end. The scholar's slide
+    // was at index 0; slide-2 now sits there.
+    const reordered = serverDeckAfter(ops, [
+      { op: "moveSlide", slideId: "slide-1" },
+    ]);
+    expect(reordered.slides.map((s) => s.id)).toEqual(["slide-2", "slide-1"]);
+    await act(async () => {
+      renderer.update(createElement(SlidesEditorNative, { deck: reordered, onOps }));
+    });
+
+    // The text box is still open under the scholar's fingers.
+    const input = renderer.root.find(
+      (node) => node.props.accessibilityLabel === "Slide text",
+    );
+    expect(input.props.value ?? input.props.defaultValue).toBe("Light reactions");
+
+    // The unmount backstop persists the draft; it must land on slide-1.
+    await act(async () => renderer.unmount());
+    const committed = textCommits(ops, before);
+    expect(committed).toHaveLength(1);
+    expect(committed[0]).toMatchObject({ slideId: "slide-1", text: "Light reactions" });
+  });
+});
+
+describe("SlidesEditorNative — dragging a thumbnail", () => {
+  async function mount() {
+    const ops: SlideOp[][] = [];
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        createElement(SlidesEditorNative, {
+          deck: twoSlideDeck(),
+          onOps: (batch: SlideOp[]) => {
+            ops.push(batch);
+            return true;
+          },
+        }),
+      );
+    });
+    const railOrder = () =>
+      renderer.root
+        .findAll((node) => String(node.props?.testID ?? "").startsWith("slides-thumbnail-"))
+        .map((node) => (node.props.testID as string).replace("slides-thumbnail-", ""));
+    return { renderer, ops, railOrder };
+  }
+
+  it("moves the slide with one moveSlide op and redraws the rail in the new order", async () => {
+    const { renderer, ops, railOrder } = await mount();
+
+    await act(async () => {
+      findByTestID(renderer, "slides-thumbnail-slide-2").props.onDropAt(0);
+    });
+
+    expect(ops).toEqual([[{ op: "moveSlide", slideId: "slide-2", afterSlideId: null }]]);
+    expect(railOrder()).toEqual(["slide-2", "slide-1"]);
+
+    // One undo puts it back.
+    await act(async () => {
+      findByTestID(renderer, "slides-toolbar-undo").props.onPress();
+    });
+    expect(railOrder()).toEqual(["slide-1", "slide-2"]);
+
+    await act(async () => renderer.unmount());
+  });
+
+  it("opens the slide menu only after a still hold, and a drag after it closes it", async () => {
+    const { renderer, ops } = await mount();
+    showActionSheet.mockClear();
+    const hold = (slideId: string, gesture: string, ...args: number[]) =>
+      act(async () => {
+        findByTestID(renderer, `slides-thumbnail-${slideId}`).props[gesture](...args);
+      });
+
+    // Lifted and let go before the hold became a long press: no menu.
+    await hold("slide-1", "onShortHold");
+    expect(showActionSheet).not.toHaveBeenCalled();
+
+    // Lifted and dragged straight away: a drag, so no menu, and nothing moved.
+    await hold("slide-1", "onDragAway");
+    expect(showActionSheet).not.toHaveBeenCalled();
+    expect(ops).toEqual([]);
+
+    // A real reorder opens no menu either.
+    await hold("slide-2", "onDropAt", 0);
+    expect(showActionSheet).not.toHaveBeenCalled();
+    ops.length = 0;
+
+    // Held still past the long-press time and let go: the menu opens.
+    await hold("slide-1", "onLongPress");
+    expect(showActionSheet).toHaveBeenCalledTimes(1);
+    expect(dismissActionSheet).not.toHaveBeenCalled();
+    expect(ops).toEqual([]);
+
+    // Held until the menu opens, then dragged to another slot after all: the
+    // menu goes and the slide moves. (The reorder above put slide-1 second.)
+    showActionSheet.mockClear();
+    await hold("slide-1", "onHoldThenDropAt", 0);
+    expect(showActionSheet).toHaveBeenCalledTimes(1);
+    expect(dismissActionSheet).toHaveBeenCalledTimes(1);
+    expect(ops.flat()).toEqual([expect.objectContaining({ op: "moveSlide", slideId: "slide-1" })]);
+
+    await act(async () => renderer.unmount());
+  });
+
+  it("runs the chosen menu action", async () => {
+    const { renderer, ops } = await mount();
+    showActionSheet.mockClear();
+    await act(async () => {
+      findByTestID(renderer, "slides-thumbnail-slide-2").props.onLongPress();
+    });
+    const [{ options, destructiveButtonIndex }, choose] = showActionSheet.mock.calls[0] as [
+      { options: string[]; destructiveButtonIndex: number },
+      (index: number) => void,
+    ];
+    expect(options[destructiveButtonIndex]).toBe("Delete slide");
+    await act(async () => choose(destructiveButtonIndex));
+    expect(ops.flat()).toEqual([
+      expect.objectContaining({ op: "removeSlide", slideId: "slide-2" }),
+    ]);
+    await act(async () => renderer.unmount());
+  });
+
+  it("keeps the slide on screen when another slide is dragged past it", async () => {
+    const { renderer, railOrder } = await mount();
+    // slide-1 is on screen; drag slide-2 in front of it.
+    await act(async () => {
+      findByTestID(renderer, "slides-thumbnail-slide-2").props.onDropAt(0);
+    });
+    expect(railOrder()).toEqual(["slide-2", "slide-1"]);
+    expect(
+      findByTestID(renderer, "slides-thumbnail-slide-1").props.accessibilityLabel,
+    ).toBe("Open slide 2");
+    const current = renderer.root.findAll(
+      (node) =>
+        String(node.props?.testID ?? "").startsWith("slides-thumbnail-") &&
+        [node.props.style].flat(Infinity).some((s) => s?.borderColor === "cyan"),
+    );
+    expect(current.map((node) => node.props.testID)).toEqual(["slides-thumbnail-slide-1"]);
     await act(async () => renderer.unmount());
   });
 });

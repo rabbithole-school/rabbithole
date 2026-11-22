@@ -59,6 +59,8 @@ import {
   type ScholarParticipationSelection,
 } from "@/components/ScholarParticipationFilter";
 import { pasteKeepingLinks } from "@/components/messaging/pasteKeepingLinks";
+import { aboutLine } from "@/shared/messageAbout";
+import { flavorOf } from "@/shared/scholarThreadFlavor";
 
 /** Format one guardian as an email "To"-field recipient: `"Name" <email>`. */
 function toRecipient(p: { name: string; email: string | null }): string | null {
@@ -75,8 +77,10 @@ const INBOX_KIND_LABELS: Record<InboxKind, string> = {
   workshop: "Workshop",
 };
 
-/** The conversation kind each scholar-side inbox lists. */
-const SCHOLAR_THREAD_KIND = {
+/** The scholar-conversation flavor each scholar-side inbox lists, under the
+ *  `kind` argument's old names ("mentor" = general). Sent as `kind` until the
+ *  narrow: this page can briefly meet a backend that predates `flavor`. */
+const SCHOLAR_THREAD_LEGACY_KIND = {
   scholars: "mentor",
   workshop: "workshop",
 } as const;
@@ -95,10 +99,11 @@ function inboxKindFrom(value: string | null): InboxKind | null {
  *  - Families — teacher↔guardian threads: compose targets a scholar's
  *    guardians (or several scholars for a broadcast). A broadcast explodes
  *    per-parent (leak-safe) server-side.
- *  - Scholars — mentor threads. "Message scholars" fans out into one thread
+ *  - Scholars — general scholar conversations. "Message scholars" fans out into one thread
  *    per scholar, never a group chat.
  *  - Workshop — a scholar's ideas and bug reports, plus conversations the team
- *    starts.
+ *    starts, and the conversations about a scholar's wonders and Quests (a
+ *    Quest proposal's Approve and Not this one buttons sit in its thread).
  *
  * Every kind opens on "Mine": the conversations the viewer is part of, plus
  * any no one on staff has picked up yet (server-side, per kind). A
@@ -150,7 +155,7 @@ export function TeacherMessages() {
       : "skip",
   );
   const deepLinkKind: InboxKind | null = requestedScholarThread
-    ? requestedScholarThread.kind === "mentor"
+    ? flavorOf(requestedScholarThread) === "general"
       ? "scholars"
       : "workshop"
     : null;
@@ -196,13 +201,32 @@ export function TeacherMessages() {
     api.scholarMessages.listThreads,
     kind === "scholars" || kind === "workshop"
       ? {
-          kind: SCHOLAR_THREAD_KIND[kind],
+          kind: SCHOLAR_THREAD_LEGACY_KIND[kind],
           filter: effectiveScope,
           institutionScope: messagingScope,
         }
       : "skip",
   );
-  const scholarThreads = scholarThreadsResult?.threads;
+  // The wonder and Quest conversations sit beside a scholar's Workshop ones.
+  // A plain listThreads call leaves them out, so ask for them on their own.
+  const aboutThreadsResult = useQuery(
+    api.scholarMessages.listThreads,
+    kind === "workshop"
+      ? {
+          kind: "about",
+          filter: effectiveScope,
+          institutionScope: messagingScope,
+        }
+      : "skip",
+  );
+  const scholarThreads =
+    kind === "workshop"
+      ? scholarThreadsResult && aboutThreadsResult
+        ? [...scholarThreadsResult.threads, ...aboutThreadsResult.threads].sort(
+            (a, b) => b.lastMessageAt - a.lastMessageAt,
+          )
+        : undefined
+      : scholarThreadsResult?.threads;
   const [composing, setComposing] = useState<InboxKind | null>(null);
   // Family threads can only be confirmed through a list (their read throws on
   // a thread the caller can't reach), so remember every family id a list has
@@ -361,9 +385,11 @@ export function TeacherMessages() {
               }
               primary={t.scholarName}
               secondary={
-                t.kind === "workshop"
+                flavorOf(t) === "workshop"
                   ? (t.suggestionTitle ?? t.topic)
-                  : withLine
+                  : flavorOf(t) === "about"
+                    ? aboutLine(t.about, t.aboutTitle, "staff")
+                    : withLine
               }
               preview={threadPreview(
                 t.lastMessagePreview,
@@ -1062,6 +1088,8 @@ function MessageableScholarPicker({
   onToggle,
   onSetMany,
 }: {
+  /** The `listMessageableScholars` filter under its old argument name
+   *  ("mentor" = general), sent as `kind` until the narrow. */
   kind: "mentor" | "workshop";
   institutionScope: string | undefined;
   mode: "single" | "multi";

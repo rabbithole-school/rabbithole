@@ -494,7 +494,7 @@ async function observe(
       const scholar = await ctx.db.get(ids.scholar[i]);
       return (
         (await scholarIdsInLens(ctx, lens)).has(ids.scholar[i]) ||
-        (!!scholar && scholarInLens(lens, scholar))
+        (!!scholar && (await scholarInLens(ctx, lens, scholar)))
       );
     }),
     principalLensAllScholars: has(await scholarIdsInLens(ctx, principalLens)),

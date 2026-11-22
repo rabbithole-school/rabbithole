@@ -24,9 +24,12 @@ import { buildDailyRecap, type DailyRecap } from "./lib/dailyRecap";
 import { isFluent } from "./lib/practice/scheduler";
 import {
   dayKeyForTimezone,
-  dayStartForTimezone,
+  dayStartForDayKey,
 } from "../shared/institutionDay";
-import { timeZoneForScholar } from "./lib/institutionTime";
+import {
+  institutionDayForRequest,
+  timeZoneForScholar,
+} from "./lib/institutionTime";
 
 const EMPTY_RECAP: DailyRecap = {
   practiced: [],
@@ -44,20 +47,32 @@ export const forScholar = authedQuery({
     // Legacy clients send device-local midnight. Kept optional for compatibility;
     // the server now derives the authoritative institution-local boundary.
     dayStart: v.optional(v.number()),
-    // Subscription cache-buster changed by current clients at local midnight.
+    // The institution-local day the recap is for, from the client's
+    // useInstitutionDay (re-armed at institution midnight). Every current web
+    // and native caller sends it; answering for it keeps the subscription off
+    // the server clock (T11).
     dayKey: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<DailyRecap> => {
     const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
     if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
 
+    // t11-ok: two harmless uses. Retention for the "fluent now" claim decays on
+    // a days-scale half-life, so a recap that lags by hours says the same; and
+    // the day for a legacy client that sends no dayKey, as it always got.
     const now = Date.now();
     const timeZone = await timeZoneForScholar(ctx, args.scholarId);
-    const currentDayKey = dayKeyForTimezone(now, timeZone);
-    if (args.dayKey !== undefined && args.dayKey !== currentDayKey) {
-      return EMPTY_RECAP;
+    let dayKey: string;
+    if (args.dayKey === undefined) {
+      // Only a legacy client that predates the dayKey arg lands here.
+      dayKey = dayKeyForTimezone(now, timeZone);
+    } else {
+      const requested = institutionDayForRequest(args.dayKey, timeZone);
+      // A key the server won't honor is not "today" for anyone: show nothing.
+      if (!requested.honored) return EMPTY_RECAP;
+      dayKey = requested.dayKey;
     }
-    const dayStart = dayStartForTimezone(now, timeZone);
+    const dayStart = dayStartForDayKey(dayKey, timeZone);
 
     const [masteryRows, revealedRows] = await Promise.all([
       ctx.db

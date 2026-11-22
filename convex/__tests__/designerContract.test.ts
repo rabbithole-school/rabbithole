@@ -13,10 +13,9 @@ import {
 } from "./institutionTestHelpers";
 
 /**
- * The vibecode MODEL CONTRACT (activities.buildContract) + allowSilence get
- * WRITTEN by every authoring surface: the web editor's mutations, the aide's
- * two vibecode tools, the unit designer tools — and travel on duplicate and
- * fork. Limits live in lib/buildContract.ts.
+ * The vibecode MODEL CONTRACT (activities.buildContract) is written by every
+ * authoring surface and travels on duplicate and fork. Limits live in
+ * lib/buildContract.ts.
  */
 
 const modules = (
@@ -419,7 +418,7 @@ describe("model contract on activities", () => {
 });
 
 describe("model contract via the aide and unit tools", () => {
-  test("create_scholar_activity writes both fields on a vibecode activity", async () => {
+  test("create_scholar_activity writes the contract without retired allowSilence", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await seedTestInstitution(t, {
       name: "Voyager Academy",
@@ -445,15 +444,14 @@ describe("model contract via the aide and unit tools", () => {
       kind: "vibecode",
       systemPrompt: "Build a seed you can launch and watch land.",
       buildContract: CONTRACT,
-      allowSilence: true,
     });
     expect(JSON.parse(reply).kind).toBe("app");
     const row = await activityByTitle(t, "Seed launcher");
     expect(row?.buildContract).toEqual(CONTRACT);
-    expect(row?.allowSilence).toBe(true);
+    expect(row?.allowSilence).toBeUndefined();
   });
 
-  test("make_app_a_coached_activity writes both fields on the drafted activity", async () => {
+  test("make_app_a_coached_activity writes the contract without retired allowSilence", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await seedTestInstitution(t, {
       name: "Voyager Academy",
@@ -477,6 +475,7 @@ describe("model contract via the aide and unit tools", () => {
       appRequest: "A bridge you load with trucks until it sags.",
       title: "Bridge loader",
       buildBrief: "Let the scholar find how span length changes sag.",
+      subject: "Science",
       buildContract: { invariants: [], freedoms: [] },
     });
     expect(refused).toMatch(/^Not created/);
@@ -488,14 +487,14 @@ describe("model contract via the aide and unit tools", () => {
       appRequest: "A bridge you load with trucks until it sags.",
       title: "Bridge loader",
       buildBrief: "Let the scholar find how span length changes sag.",
+      subject: "Science",
       buildContract: CONTRACT,
-      allowSilence: true,
     });
     const row = await activityByTitle(t, "Bridge loader");
     // TRA-519: an app activity is stored as online + appActivity.
     expect(row).toMatchObject({ kind: "online", appActivity: true });
     expect(row?.buildContract).toEqual(CONTRACT);
-    expect(row?.allowSilence).toBe(true);
+    expect(row?.allowSilence).toBeUndefined();
   });
 
   test("unit create_activity and update_activity write the contract", async () => {
@@ -514,18 +513,16 @@ describe("model contract via the aide and unit tools", () => {
       kind: "vibecode",
       systemPrompt: "Build a seed you can launch.",
       buildContract: CONTRACT,
-      allowSilence: true,
     });
     let row = await activityByTitle(t, "Seed launcher");
     expect(row?.buildContract).toEqual(CONTRACT);
-    expect(row?.allowSilence).toBe(true);
+    expect(row?.allowSilence).toBeUndefined();
 
     const next = { invariants: ["Heavier seeds fall faster"], freedoms: [] };
     await runTool(tools, "update_activity", {
       lessonTitle: "How seeds travel",
       activityTitle: "Seed launcher",
       buildContract: next,
-      allowSilence: false,
     });
     row = await activityByTitle(t, "Seed launcher");
     expect(row?.buildContract).toEqual(next);
@@ -693,5 +690,39 @@ describe("scholar edit policy via the aide and unit tools", () => {
     });
     expect(refused).toMatch(/^Not updated/);
     expect((await activityByTitle(t, "Seed walk"))?.editAccess).toBeUndefined();
+  });
+});
+
+// A play-only app the designer writes from a brief alone has no app until the
+// teacher builds it by rehearsing (lib/appActivity.ts rehearsalBuildRequest);
+// the tool says so, so the bot doesn't call it ready.
+describe("play-only app note via the unit tools", () => {
+  test("create_activity tells the bot to have the teacher rehearse a new play-only app", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher", "build-note-teacher");
+    const { unitId } = await seedLesson(t, teacherId);
+    const tools = (await assembleUnitDesignerTools(actionCtxFor(t), () => {}, {
+      teacherId,
+      unitId,
+      role: "teacher",
+    })) as Array<{ name: string }>;
+    const create = (title: string, fields: Record<string, unknown>) =>
+      runTool(tools, "create_activity", {
+        lessonTitle: "How seeds travel",
+        title,
+        kind: "app",
+        ...fields,
+      });
+
+    const play = { systemPrompt: "Build a seed game.", scholarEdit: "play" };
+    expect(await create("Seed game", play)).toMatch(/rehearse the activity/);
+    // A retry on the same row is not a new app; a scholar-built app and a
+    // play-only app with no brief get no such note.
+    expect(await create("Seed game", play)).not.toMatch(/rehearse/);
+    expect(
+      await create("Seed builder", { systemPrompt: "Build yours.", scholarEdit: "build" }),
+    ).not.toMatch(/rehearse/);
+    expect(await create("Seed toy", { scholarEdit: "play" })).not.toMatch(/rehearse/);
+    expect((await activityByTitle(t, "Seed game"))?.appRequest).toBeUndefined();
   });
 });

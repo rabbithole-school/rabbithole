@@ -134,6 +134,18 @@ describe("template worked-step generation — every priority family", () => {
           `${skillKey} seed=${seed}: final step "${finalText}" must contain answer "${answerStr}"`,
         ).toBe(true);
 
+        // (b2) the blank the scholar fills in never prints its own answer.
+        //      "Write 3/5 in simplest form: ?" when the answer IS 3/5 is a
+        //      copy, not a step (decision board, 2026-11-20).
+        if (answerStr.includes("/")) {
+          const blank = steps[steps.length - 1].blankText ?? "";
+          const esc = answerStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          expect(
+            new RegExp(`(^|[^\\d/])${esc}(?![\\d/])`).test(blank),
+            `${skillKey} seed=${seed}: final blank "${blank}" prints the answer "${answerStr}"`,
+          ).toBe(false);
+        }
+
         // (c) the teaching-moment single-blank fade: exactly one blank, ≥1
         //     revealed, and the faded step's real text never leaks.
         const fade = applyFade(steps, 1);
@@ -254,9 +266,7 @@ const BREAK_NODE_INT_FAMILIES: { skillKey: string; minSteps: number; revealOnlyM
   { skillKey: "count_list_outcomes", minSteps: 2, revealOnlyMax: 0 },
   { skillKey: "nt_prime_gaps", minSteps: 2, revealOnlyMax: 0 },
   { skillKey: "nt_twin_primes", minSteps: 2, revealOnlyMax: 0 },
-  // ~46% of prime_factorization draws ask the implicit-exponent-1 prime, where
-  // the only helpful rule IS the answer — those honestly emit no scaffold.
-  { skillKey: "prime_factorization", minSteps: 2, revealOnlyMax: 0.55 },
+  { skillKey: "prime_factorization", minSteps: 2, revealOnlyMax: 0 },
   { skillKey: "divisibility_rules_2_5_10", minSteps: 2, revealOnlyMax: 0 },
   { skillKey: "common_factors", minSteps: 3, revealOnlyMax: 0 },
   { skillKey: "exponents_repeated_mult", minSteps: 2, revealOnlyMax: 0 },

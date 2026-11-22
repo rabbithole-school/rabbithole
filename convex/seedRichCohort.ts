@@ -22,17 +22,19 @@ import type { Id } from "./_generated/dataModel";
 import { ROLES } from "./lib/roles";
 import { richSeed } from "./seed/rich";
 import { assignDevInstitutions } from "./seed/institutions";
-import type { Key } from "./seed/rich/types";
+import { assertSeedRostersSingleSchool } from "./seed/rosterTenancy";
+import type { Key, SeedPortfolioItem } from "./seed/rich/types";
 import { sha256Hex } from "./lib/oauthCrypto";
 import { emptyHealthRecordFields } from "./lib/healthRecord";
 import { SCHOLAR_GROUP_PARTICIPATION } from "../shared/scholarGroupRouting";
-import { reconcilePlacementById } from "./masterSchedule";
+import { reconcilePlacementsById } from "./masterSchedule";
 import { deleteSessionCascade } from "./lib/cascade";
 import {
   LEVEL_EVIDENCE_SCHOLAR,
   levelEvidenceReadAlouds,
   levelEvidenceSessions,
 } from "./seed/rich/levelEvidence";
+import { writeSchedule } from "./lib/scheduleStore";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_MS = 60 * 1000;
@@ -178,7 +180,7 @@ export async function insertRichCohort(
   }
 
   // ── Institutions: drop the cohort into the fictional "Moli School" (most)
-  //    with a couple of outside testers in "Guests", so the roster's
+  //    with the base seed's outside tester in "Guests", so the roster's
   //    hide-guests default is testable straight out of the seed. ───────────
   const { moli, assignedMoli, assignedGuests } =
     await assignDevInstitutions(ctx);
@@ -231,13 +233,18 @@ export async function insertRichCohort(
 
   // ── Shared Robotics captures: one item, many scholar attributions. The
   // seedRoboticsMedia action attaches each pre-baked SVG after this mutation.
+  // Class-work items are filed to their assignment once assignments exist.
+  const filedPortfolioItems: {
+    portfolioItemId: Id<"portfolioItems">;
+    filedTo: NonNullable<SeedPortfolioItem["filedTo"]>;
+  }[] = [];
   for (const item of s.portfolioItems) {
     const scholarIds = item.scholarKeys.map(reqUser);
     const portfolioItemId = await ctx.db.insert("portfolioItems", {
       scholarId: scholarIds[0],
       institutionId: moli,
       title: item.title,
-      source: "capture_station",
+      source: item.source ?? "capture_station",
       fileMimeType: "image/svg+xml",
       fileSizeBytes: new TextEncoder().encode(item.svg).byteLength,
       aiCaption: item.caption,
@@ -248,6 +255,9 @@ export async function insertRichCohort(
       processingStatus: "ready",
     });
     bump("portfolioItems");
+    if (item.filedTo) {
+      filedPortfolioItems.push({ portfolioItemId, filedTo: item.filedTo });
+    }
     for (const scholarKey of item.scholarKeys) {
       await ctx.db.insert("portfolioAttributions", {
         portfolioItemId,
@@ -396,7 +406,6 @@ export async function insertRichCohort(
           systemPrompt: a.systemPrompt,
           durationMinutes: a.durationMinutes,
           deliverable: a.deliverable,
-          defaultMode: a.defaultMode,
           hasScholarAngles: a.hasScholarAngles,
           recipe: a.recipe,
           webUrl: a.webUrl,
@@ -428,7 +437,8 @@ export async function insertRichCohort(
       scholarIds: a.scholarKeys.map(reqUser),
       title: a.title,
       startedAt: daysAgo(now, a.startedAgoDays),
-      activitySchedule: a.schedule?.map((e) => ({
+    });
+    await writeSchedule(ctx, id, (a.schedule ?? []).map((e) => ({
         activityId: reqActivity(e.activityKey),
         mode: e.mode,
         startsAt:
@@ -436,18 +446,28 @@ export async function insertRichCohort(
         setAt: e.setAgoMinutes != null ? minsAgo(now, e.setAgoMinutes) : undefined,
         endsAt: e.endsInMinutes != null ? now + e.endsInMinutes * MIN_MS : undefined,
         dueAt: e.dueInDays != null ? now + e.dueInDays * DAY_MS : undefined,
-      })),
-    });
+      })));
     assignmentId.set(a.key, id);
     bump("assignments");
   }
   const reqAssignment = (k: Key) => mustGet(assignmentId, k, "assignment");
   const optAssignment = (k?: Key) => (k ? reqAssignment(k) : undefined);
+  // Dev-seed shortcut: the class-work scans are filed in place, without the
+  // offline session, deliverable and completion a real filing materializes,
+  // so the seeded Home and session fixtures stay as they are.
+  for (const { portfolioItemId, filedTo } of filedPortfolioItems) {
+    await ctx.db.patch(portfolioItemId, {
+      assignmentId: reqAssignment(filedTo.assignmentKey),
+      activityId: reqActivity(filedTo.activityKey),
+      assignmentStatus: "confirmed",
+    });
+  }
   const reqExternalApp = (k: Key) => mustGet(externalAppId, k, "external app");
 
   // The timetable remains structural. Rich assignments use this same subject
   // vocabulary directly, so the auto-materializer cannot replace their
   // durable showcase pushes with future planned entries.
+  const placementIds: Id<"schedulePlacements">[] = [];
   for (const placement of s.schedulePlacements) {
     const placementId = await ctx.db.insert("schedulePlacements", {
       periodId: reqPeriod(placement.periodKey),
@@ -462,17 +482,11 @@ export async function insertRichCohort(
         ? reqExternalApp(placement.externalAppKey)
         : undefined,
     });
-    // An app-target placement is inserted directly (bypassing corePlaceClass),
-    // so give it the same write-time materialization a teacher's edit gets —
-    // otherwise the standing-assignment demo (LEGO SPIKE / Robotics Block E)
-    // sits inert until the 15-minute cron backstop next runs. Every other
-    // seeded placement is bare structure (no assignmentId/activityId), for
-    // which this is a no-op, so it's safe to leave unscoped to just app rows.
-    if (placement.externalAppKey) {
-      await reconcilePlacementById(ctx, placementId);
-    }
+    placementIds.push(placementId);
     bump("schedulePlacements");
   }
+  // Sync complete class patterns once per group, then materialize the app windows.
+  await reconcilePlacementsById(ctx, placementIds.map((id) => ({ id })));
 
   // ── 8. Execution: sessions + their messages ─────────────────────────────
   for (const sess of s.sessions) {
@@ -494,7 +508,6 @@ export async function insertRichCohort(
       seedExemplar: sess.seedExemplar ?? true,
       pulseScore: sess.pulseScore,
       analysisSummary: sess.analysisSummary,
-      teacherWhisper: sess.teacherWhisper,
       activityCompletedAt:
         sess.activityCompletedAgoMinutes != null
           ? minsAgo(now, sess.activityCompletedAgoMinutes)
@@ -977,6 +990,12 @@ export async function insertRichCohort(
     bump("practiceAttempts");
   }
 
+  // ── Tenancy invariant: no seeded roster spans two schools (TRA-615). ────
+  await assertSeedRostersSingleSchool(ctx, {
+    groupIds: [...groupId.values()],
+    assignmentIds: [...assignmentId.values()],
+  });
+
   return { inserted: true, counts, captureStationToken };
 }
 
@@ -1126,15 +1145,17 @@ export const seedAll = internalMutation({
 });
 
 export const findRoboticsPortfolioItem = internalQuery({
-  args: { title: v.string() },
-  handler: async (ctx, { title }) =>
+  args: {
+    title: v.string(),
+    source: v.optional(
+      v.union(v.literal("capture_station"), v.literal("google_drive")),
+    ),
+  },
+  handler: async (ctx, { title, source = "capture_station" }) =>
     await ctx.db
       .query("portfolioItems")
       .filter((q) =>
-        q.and(
-          q.eq(q.field("source"), "capture_station"),
-          q.eq(q.field("title"), title),
-        ),
+        q.and(q.eq(q.field("source"), source), q.eq(q.field("title"), title)),
       )
       .first(),
 });
@@ -1147,13 +1168,15 @@ export const attachRoboticsPortfolioMedia = internalMutation({
   },
   handler: async (ctx, args) => {
     const item = await ctx.db.get(args.portfolioItemId);
-    if (!item || item.source !== "capture_station") return;
+    if (!item) return;
     if (!item.fileStorageId) {
       await ctx.db.patch(args.portfolioItemId, {
         fileStorageId: args.fileStorageId,
         fileSizeBytes: args.fileSizeBytes,
       });
     }
+    // Seeded class-work scans get their file only; capture rows are Robotics'.
+    if (item.source !== "capture_station") return;
 
     const attributions = await ctx.db
       .query("portfolioAttributions")

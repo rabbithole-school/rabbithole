@@ -39,6 +39,7 @@ const DEVICE_TOOLS = [
   "set_rabbithole_lock",
   "set_freeze_mode",
   "restart_managed_device",
+  "reassign_managed_device",
 ];
 const ROLES: Role[] = [
   "teacher",

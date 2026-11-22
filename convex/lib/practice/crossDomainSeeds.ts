@@ -29,6 +29,7 @@
 // Type-only import (erased at build — no runtime/bundler coupling to the
 // Next-side lib) so a spawned activity reuses the canonical kind taxonomy.
 import type { ActivityKind } from "../../../lib/activityKinds";
+import { seedScholarText } from "../seedLabel";
 import { DISCRETE_MATH_DOMAIN } from "../../seed/discreteMathGraph";
 import { EARLY_ALGEBRA_DOMAIN } from "../../seed/earlyAlgebraGraph";
 import { FRACTION_ARITHMETIC_DOMAIN } from "../../seed/fractionArithmeticGraph";
@@ -468,11 +469,14 @@ export type SeedCardCopy = {
  * registry text it was minted with, so a copy rewrite here would never reach
  * already-minted seeds; matching on `topic` (the minting idempotency key)
  * lets every reader show the current copy. Non-cross-domain seeds and topics
- * the registry no longer carries fall back to the row's own text.
+ * the registry no longer carries fall back to the row's own scholar text
+ * (`seedScholarText`), and to no teaser at all when it has none.
  */
 export function seedCardCopy(seed: {
   topic: string;
   suggestionType?: string;
+  origin?: string;
+  connectionTo?: string;
   scholarInvitation?: string;
   rationale: string;
 }): SeedCardCopy {
@@ -487,6 +491,6 @@ export function seedCardCopy(seed: {
   }
   return {
     title: seed.topic,
-    teaser: seed.scholarInvitation ?? seed.rationale,
+    teaser: seedScholarText(seed) ?? "",
   };
 }

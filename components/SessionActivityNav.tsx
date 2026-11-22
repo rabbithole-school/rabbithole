@@ -42,6 +42,7 @@ import { toaster } from "@/lib/toaster";
 import { serverRefusal } from "@/lib/serverErrorMessage";
 import { upNextCandidates } from "@/lib/missionApi";
 import { effectiveActivityKind } from "@/shared/appSurface";
+import { MARK_NOT_DONE_COPY } from "@/shared/markNotDone";
 
 interface OfflineDialogState {
   activityId: Id<"activities">;
@@ -68,6 +69,10 @@ export interface ProjectActivityNavData {
   open: () => void;
   /** Mark / unmark the current activity complete. */
   toggleComplete: () => Promise<void>;
+  /** Mark (true) or unmark (false) the current activity complete — explicit,
+   *  for a confirm step whose answer must not flip if the state changed
+   *  while it was open. */
+  setComplete: (done: boolean) => Promise<void>;
   /** Mark the current activity complete (idempotent) and open + navigate to
    *  the next online activity. No-op when there's no next online activity. */
   continueToNext: () => Promise<void>;
@@ -179,13 +184,10 @@ export function useSessionActivityNav(
   );
 
   // "Up next" walks every activity that opens a session here: online ones and
-  // app activities (a Quest's build step), like the iPad's useUnitProgress. A
-  // build step still locked by a learning step OTHER than this one is skipped;
-  // one this activity's completion unlocks stays (continueToNext completes
-  // this activity first).
+  // app activities (a Quest's build step), like the iPad's useUnitProgress.
   const nextOnlineActivity = useMemo(() => {
     if (!activity) return null;
-    const candidates = upNextCandidates(unitActivities ?? [], activity, unit);
+    const candidates = upNextCandidates(unitActivities ?? []);
     const idx = candidates.findIndex((a) => a._id === activity._id);
     // Forward-only: never wrap backward to an earlier incomplete activity (see
     // shared/nextIncompleteActivity.ts). Home owns routing to earlier holes.
@@ -195,7 +197,7 @@ export function useSessionActivityNav(
       (a) => completedSet.has(String(a._id)),
     );
     return next ? { _id: next._id, title: next.title } : null;
-  }, [activity, completedSet, unit, unitActivities]);
+  }, [activity, completedSet, unitActivities]);
 
   const existingSessionForActivity = (activityId: Id<"activities">) =>
     activeSessions?.find(
@@ -208,9 +210,9 @@ export function useSessionActivityNav(
           : s.assignmentId === undefined),
     );
 
-  const toggleComplete = async () => {
+  const setComplete = async (done: boolean) => {
     if (!activity) return;
-    if (isCurrentDone) {
+    if (!done) {
       await unmarkComplete({
         activityId: activity._id,
         scholarId: remoteUserId ? (remoteUserId as Id<"users">) : undefined,
@@ -224,6 +226,7 @@ export function useSessionActivityNav(
       });
     }
   };
+  const toggleComplete = () => setComplete(!isCurrentDone);
 
   // "Continue to the next part" — one action that both completes the current
   // activity (so it counts toward unit progress + the badge) and opens the
@@ -359,6 +362,7 @@ export function useSessionActivityNav(
     unitCompletedOnlineCount,
     open: () => setModalOpen(true),
     toggleComplete,
+    setComplete,
     continueToNext,
     _modal: {
       modalOpen,
@@ -604,7 +608,7 @@ export function ProjectTitleMenu({
                   color={data.isCurrentDone ? "charcoal.600" : "green.700"}
                 >
                   {data.isCurrentDone ? <ArrowClockwise /> : <CheckCircle />}
-                  {data.isCurrentDone ? "Mark not done" : "Mark complete"}
+                  {data.isCurrentDone ? MARK_NOT_DONE_COPY.action : "Mark complete"}
                 </Menu.Item>
               )}
             </Menu.Content>

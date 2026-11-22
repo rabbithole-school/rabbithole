@@ -8,6 +8,7 @@ const config = [
       ".claude/**",
       "convex/_generated/**",
       "convex/lib/pdfiumWasm.generated.ts",
+      "convex/lib/threeIifeSource.generated.ts",
       "marshal-ui/dist/**",
       "native/.expo/**",
       "native/vendor/convex_generated/**",

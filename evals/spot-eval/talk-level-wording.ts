@@ -128,12 +128,12 @@ const cases: Case[] = [
 ];
 
 function systemFor(c: Case, isFirstTurn: boolean, arm: "old" | "new"): string {
-  const args: unknown[] = new Array(55).fill(undefined);
-  args.splice(0, 6, null, c.talk, "Kai", null, null, null);
-  args[21] = isFirstTurn;
-  args[22] = false; // isFirstSession
-  args[23] = null; // lastSessionAt
-  args[54] = { read: c.read, write: c.write, beginnerTeams: ["sh", "ck"] };
+  const args: unknown[] = new Array(54).fill(undefined);
+  args.splice(0, 5, c.talk, "Kai", null, null, null);
+  args[20] = isFirstTurn;
+  args[21] = false; // isFirstSession
+  args[22] = null; // lastSessionAt
+  args[53] = { read: c.read, write: c.write, beginnerTeams: ["sh", "ck"] };
   const parts = (
     buildSystemPromptParts as unknown as (
       ...a: unknown[]

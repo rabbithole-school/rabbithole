@@ -100,6 +100,7 @@ const coordinatePlanePromptVisualValidator = v.object({
   gridStep: v.number(),
   points: v.array(coordinatePointValidator),
   connect: v.optional(v.union(v.literal("segments"), v.literal("polygon"))),
+  axisLabels: v.optional(v.object({ x: v.string(), y: v.string() })),
 });
 
 const rectangularPrismPromptVisualValidator = v.object({
@@ -182,6 +183,79 @@ const numberLinePromptVisualValidator = v.object({
   axisLabel: v.optional(v.string()),
 });
 
+const functionParentValidator = v.union(
+  v.literal("linear"),
+  v.literal("quadratic"),
+  v.literal("cubic"),
+  v.literal("abs"),
+  v.literal("sqrt"),
+  v.literal("exp2"),
+  v.literal("log2"),
+  v.literal("reciprocal"),
+);
+
+const functionPlotCurveOptions = {
+  label: v.optional(v.string()),
+  domain: v.optional(v.object({ from: v.optional(v.number()), to: v.optional(v.number()) })),
+  arrows: v.optional(v.boolean()),
+};
+
+const functionPlotCurveValidator = v.union(
+  v.object({
+    form: v.literal("transform"),
+    parent: functionParentValidator,
+    a: v.number(),
+    h: v.number(),
+    k: v.number(),
+    b: v.optional(v.number()),
+    ...functionPlotCurveOptions,
+  }),
+  v.object({
+    form: v.literal("polynomial"),
+    zeros: v.array(v.object({ x: v.number(), multiplicity: v.number() })),
+    leading: v.number(),
+    sketch: v.optional(v.boolean()),
+    ...functionPlotCurveOptions,
+  }),
+  v.object({
+    form: v.literal("rational"),
+    rational: v.object({
+      vertical: v.array(v.number()),
+      horizontal: v.number(),
+      scale: v.number(),
+      holes: v.optional(v.array(v.number())),
+    }),
+    ...functionPlotCurveOptions,
+  }),
+);
+
+const functionPlotPromptVisualValidator = v.object({
+  kind: v.literal("functionPlot"),
+  xMin: v.number(),
+  xMax: v.number(),
+  yMin: v.number(),
+  yMax: v.number(),
+  curves: v.array(functionPlotCurveValidator),
+  points: v.optional(
+    v.array(
+      v.object({
+        x: v.number(),
+        y: v.number(),
+        label: v.optional(v.string()),
+        open: v.optional(v.boolean()),
+      }),
+    ),
+  ),
+  asymptotes: v.optional(
+    v.object({
+      vertical: v.optional(v.array(v.number())),
+      horizontal: v.optional(v.array(v.number())),
+    }),
+  ),
+  shadeX: v.optional(v.object({ from: v.number(), to: v.number() })),
+  referenceLine: v.optional(v.literal("y=x")),
+});
+
 export const promptVisualValidator = v.union(
   countablesPromptVisualValidator,
   groupsPromptVisualValidator,
@@ -198,4 +272,5 @@ export const promptVisualValidator = v.union(
   barGraphPromptVisualValidator,
   linePlotPromptVisualValidator,
   numberLinePromptVisualValidator,
+  functionPlotPromptVisualValidator,
 );

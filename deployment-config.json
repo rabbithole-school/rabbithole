@@ -401,9 +401,9 @@
       "path": "lib/primaryInstitutionBrand.ts",
       "name": "Institution brand",
       "kind": "file",
-      "description": "Your school's name, logo, tagline, and contact details for printed materials.",
+      "description": "Your school's name, logo, tagline, website, and contact details for printed materials and the credit line on public tools, plus optional Google Analytics and Vercel Web Analytics for the signed-out public pages.",
       "publishedAs": "A neutral 'Rabbithole' identity with no logo or contact details.",
-      "unsetBehavior": "Printed forms and branded surfaces show 'Rabbithole' and omit your logo and contacts.",
+      "unsetBehavior": "Printed forms and branded surfaces show 'Rabbithole' and omit your logo and contacts; public tools such as the worksheet maker show no school credit; no analytics loads anywhere.",
       "setBy": "Replace the values in PRIMARY_INSTITUTION_BRAND with your school's identity."
     },
     {
@@ -414,6 +414,42 @@
       "publishedAs": "A neutral 'Rabbithole' profile located nowhere, in UTC.",
       "unsetBehavior": "The tutor refers to a generic school and reasons about time in UTC.",
       "setBy": "Replace the values in PRIMARY_INSTITUTION_PROMPT_PROFILE with your school's identity and time zone."
+    },
+    {
+      "path": "convex/lib/claudeDispatchTarget.ts",
+      "name": "Claude Tag dispatch target",
+      "kind": "file",
+      "description": "The repository Claude Tag scopes automatic requests in, and who reviews its draft PRs.",
+      "publishedAs": "The public rabbithole-school/rabbithole repository, reviewed by 'A maintainer'.",
+      "unsetBehavior": "Automatic Claude Tag requests name the public repository and a generic reviewer. Nothing posts until an admin binds a Claude channel.",
+      "setBy": "Replace the values in CLAUDE_DISPATCH_TARGET with your repository and reviewer."
+    },
+    {
+      "path": "convex/lib/testAccounts.ts",
+      "name": "Test scholar accounts",
+      "kind": "file",
+      "description": "Scholar accounts that are staff tests, which staff roundups and the screen-time page leave out.",
+      "publishedAs": "An empty list.",
+      "unsetBehavior": "Every scholar account counts as a real scholar in roundups and screen time.",
+      "setBy": "Add your test scholar account ids to TEST_ACCOUNT_IDS."
+    },
+    {
+      "path": "convex/lib/chartRaster.ts",
+      "name": "Chart rasterizer",
+      "kind": "file",
+      "description": "Turns the screen-time chart SVGs into PNGs for the Friday check-in thread.",
+      "publishedAs": "A stub that throws, because the original renderer's license (MPL-2.0) is outside the dependency policy.",
+      "unsetBehavior": "The roundup text posts; its chart images are skipped.",
+      "setBy": "Implement rasterizeChartSvg with a renderer that runs in a Convex \"use node\" action."
+    },
+    {
+      "path": "app/oauth/authorize/useListAdmissionsTools.ts",
+      "name": "Connector consent: admissions tools",
+      "kind": "file",
+      "description": "Which admissions tools the connector sign-in screen lists.",
+      "publishedAs": "A hook that returns an empty list, since this copy ships no admissions toolset.",
+      "unsetBehavior": "The consent screen lists curriculum and unit-designer tools only.",
+      "setBy": "Return your admissions MCP list action from useListAdmissionsTools."
     },
     {
       "path": "convex/lib/primaryInstitutionPrintIdentity.ts",
@@ -553,7 +589,7 @@
       "reason": "MCP route with the private admissions tools removed. The remaining tools register as before. No adopter action required."
     },
     {
-      "path": "app/page.tsx",
+      "path": "app/HomeLanding.tsx",
       "reason": "First-party landing-page branding, biographies, images, and links removed; public links stay neutral. No adopter action required."
     },
     {
@@ -563,6 +599,10 @@
     {
       "path": "app/school/__tests__/nav.test.ts",
       "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "app/school/devices/page.tsx",
+      "reason": "Staff device view with a private status line removed. No adopter action required."
     },
     {
       "path": "app/school/directory/staff/page.tsx",
@@ -693,12 +733,28 @@
       "reason": "Default-institution seed neutralized to a generic primary. Create institutions with institutions:ensureDefaults (see the external entry); identity lives in the brand and prompt-profile files."
     },
     {
+      "path": "convex/lib/__tests__/deviceOpsTools.test.ts",
+      "reason": "Device-tool gating test without the primary school's admissions check-in link tools. No adopter action required."
+    },
+    {
       "path": "convex/lib/aideTools.ts",
       "reason": "Staff-aide tools. Private, deployment-specific tools were removed; the rest is published as-is."
     },
     {
+      "path": "convex/lib/cascade.ts",
+      "reason": "Scholar and institution deletion cascades. Private-table entries removed; the rest is published as-is."
+    },
+    {
       "path": "convex/lib/customAppTools.ts",
       "reason": "Custom-app tools. Private sections removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/lib/deviceAppAccess.ts",
+      "reason": "Managed-app display names with the primary school's own check-in kiosk app removed. No adopter action required."
+    },
+    {
+      "path": "convex/lib/deviceOpsTools.ts",
+      "reason": "iPad operations tools with the primary school's admissions check-in link tools removed. No adopter action required."
     },
     {
       "path": "convex/lib/googleDocsCommentTools.ts",
@@ -717,12 +773,32 @@
       "reason": "Slack bot tools. Published and inert unless the SLACK_* variables are set (see the environment entries)."
     },
     {
+      "path": "convex/lib/staticRouteSegments.ts",
+      "reason": "Bug-report route words with the primary school's private display route removed. No adopter action required."
+    },
+    {
+      "path": "convex/lib/storageReferences.ts",
+      "reason": "Storage-reference check with the private tables removed. No adopter action required."
+    },
+    {
+      "path": "convex/lib/toolLabels.ts",
+      "reason": "Tool-activity labels with the private signage-panel labels removed. No adopter action required."
+    },
+    {
+      "path": "convex/managedDeviceClaims.ts",
+      "reason": "Managed device roster with private status fields removed. No adopter action required."
+    },
+    {
       "path": "convex/mcp.ts",
       "reason": "MCP connector functions with the private admissions tools removed. No adopter action required."
     },
     {
       "path": "convex/metaPrompts.ts",
       "reason": "Code-explorer repository URL neutralized to the public repository. No adopter action required."
+    },
+    {
+      "path": "convex/parents.ts",
+      "reason": "Parent portal reads. The guardian-forms list is removed from the Records tab query; the rest is published as-is."
     },
     {
       "path": "convex/practiceDigest.ts",
@@ -817,12 +893,36 @@
       "reason": "Native app dependency and script manifest, regenerated for the published tree. Housekeeping."
     },
     {
+      "path": "native/src/app/_layout.tsx",
+      "reason": "Native app root layout with a private background task removed. No adopter action required."
+    },
+    {
       "path": "native/src/app/how-it-works.tsx",
       "reason": "Native explainer copy neutralized. No adopter action required."
     },
     {
+      "path": "native/src/app/index.tsx",
+      "reason": "Scholar home with a private status card removed. No adopter action required."
+    },
+    {
+      "path": "native/src/components/AppLauncher.tsx",
+      "reason": "App launcher with the private app-folder status line removed. No adopter action required."
+    },
+    {
+      "path": "native/src/components/AsamParentGate.tsx",
+      "reason": "Device settings modal with a private panel removed. No adopter action required."
+    },
+    {
       "path": "native/src/components/ExternalAppHost.tsx",
       "reason": "External-app embedding. Private sections removed; the rest is published as-is."
+    },
+    {
+      "path": "native/src/contexts/NativeAppLaunchContext.tsx",
+      "reason": "Native app launcher with the private app-folder sync hold removed. No adopter action required."
+    },
+    {
+      "path": "native/src/contexts/__tests__/NativeAppLaunchContext.test.ts",
+      "reason": "Test file with the private app-folder sync mocks removed. Published and runnable; not a configuration point."
     },
     {
       "path": "native/src/lib/externalAppBundledIcons.ts",

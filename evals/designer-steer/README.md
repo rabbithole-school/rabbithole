@@ -37,6 +37,19 @@ node $H judge  --run <id>
   the session's parking lot, and the elapsed time. A turn that finishes with
   no text is `SILENT`, not an error. Lines file: one message per line; a line
   that is a JSON string is decoded, so multi-line messages survive.
+- `--free-play <prelude lines>` (replay and sim) measures building AFTER
+  "Finish and send", where most building hours go. It replays the prelude
+  lines in the assignment session (they must build an app), makes sure the
+  parking lot holds an idea (when the designer parked nothing, it parks
+  `--idea <text>` through the dev CLI, since `sessions:parkIdea` is internal),
+  marks the activity complete as the scholar, and calls
+  `sessions.startFreePlay`, the done screen's "Build it now". Since one-session
+  building that returns the SAME session (the contract stays, its gate counts
+  as met), so a `--contract` on `setup` now applies here too; on a deployment
+  from before, it returned a contract-free copy. The prelude's turns go to
+  `prelude.jsonl`; only the turns after it land in `turns.jsonl` and are
+  judged, with the app as it stood as `version@turn0`. The persona opens on
+  that app.
 - `--prior <file>` first gives the scholar an earlier online activity in the
   same unit (`Earlier: my design and questions`) and submits the file's text
   as its deliverable, so the run exercises prior-work loading.
@@ -52,6 +65,17 @@ node $H judge  --run <id>
   unanswered question, parked ideas, domain-twin offers, false claims about
   the app checked against its HTML, and a 0–10 academic value with a
   paragraph. Without a contract the judge derives the gate from the brief.
+  It also counts who makes the world's rules: rule decisions in the child's
+  own words (set or changed, after a run or not, with a reason or not)
+  against scenery requests (`ruleShare`), rule choices the designer offered
+  and how many were answered, quizzes and how many were answered, builds
+  held for an answer, problems the designer added on its own, and the rules
+  a child can see and change on screen at the end, split by what the screen
+  says about who set each one (`rulesOnScreenGuess`, `rulesOnScreenScholar`,
+  `rulesOnScreenUnmarked`). It also counts the designer's picks the child
+  changed (`guessesEdited`), scenery requests whose reply still asked
+  something (`sceneryQuestions`, which should be 0), and whether the questions
+  read as nagging (`nagging`).
 
 Runs live in `<RUNS_DIR>/<runId>/` (`meta.json`, `turns.jsonl`,
 `artifacts/turn-NN.html`, `log.md`, `judge.json`, `debrief.md`).
@@ -90,7 +114,20 @@ skips school-like questions, drifts toward lasers, a coin shop and 3D),
 `persona-cooperative-kid.json` (answers in a sentence with a reason, reports
 what she sees, still wants a race mode and a pet bird but takes a good offer)
 and `persona-bridge-kid.json` (a bridge-load builder who drifts toward
-explosions and a destruction mode). A real scholar's lines or brief never go
+explosions and a destruction mode). Free play (`--free-play`): subject 3, a
+town, `town-brief.txt` with the prelude `town-prelude.txt`, the replay lines
+`town-lines.txt` and `persona-scenery-kid.json` (keeps ordering buildings and machines, skips
+questions whose answer is an explanation, answers choices about his own
+things with a build, and gets exact about numbers in things that move);
+subject 4, a race, `race-brief.txt` with `race-prelude.txt` and
+`persona-tuner-kid.json` (races his own characters, reads the results and
+rebalances their numbers, ignores prediction questions); subject 5, an island
+harbor on `town-brief.txt`, with the preludes `harbor-prelude.txt` (2D) and
+`harbor-prelude-3d.txt` (first person), the replay lines
+`harbor-carrier-lines.txt` (a carrier, a jet, rooms, portholes, an elevator,
+a pause key) and two personas: `persona-decorator-kid.json` (asks only for
+looks and skips every question) and `persona-order-giver-kid.json` (adds
+machines as orders and sets exact numbers on the ones it can see). A real scholar's lines or brief never go
 in the repo; keep them in the session scratchpad.
 
 ## Where it differs from the browser
@@ -104,6 +141,16 @@ in the repo; keep them in the session scratchpad.
 - The persona reads the app as text, not pixels.
 
 ## Measuring depth honestly
+
+For free-play lawmaker work, `closedLoops` is the headline measure: the
+child sees a result in their app, changes a rule because of it, and then
+reports what that rule now does. `loopAttempts` also counts changes the
+child never checked, and `kidWhyQuestions` counts questions about their
+app's behavior. Raw `kidRuleDecisions` and `ruleShare` are secondary: they
+also count size multipliers and reasserted resets, and `reassertedRules`
+flags a designer bug. The judge is noisy: the same transcript judged twice
+can differ by two or three on a count, so read the listed loops, not only
+the numbers.
 
 - Matrix: three personas x two subjects (the personas fit their own subject;
   cross them with the other subject's brief where it makes sense), 40 turns

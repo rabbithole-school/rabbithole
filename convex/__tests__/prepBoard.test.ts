@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -148,7 +149,7 @@ async function seedGroupWorld(t: ReturnType<typeof convexTest>) {
   //   show       → due the NEXT open school day (Thu)   ← assigned, not last-night
   //   old        → due two open days ago (Mon)          ← neither
   const assignmentId = await t.run((ctx) =>
-    ctx.db.insert("assignments", {
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds: [leilaniId, koaId],
@@ -188,17 +189,6 @@ async function seedGroupWorld(t: ReturnType<typeof convexTest>) {
     }),
   );
 
-  // A note Leilani chose for tonight (direct insert keyed to today's dayKey).
-  await t.run((ctx) =>
-    ctx.db.insert("takeHomePlanItems", {
-      scholarId: leilaniId,
-      institutionId,
-      dayKey: todayKey,
-      kind: "note",
-      text: "bring tide-pool photos",
-    }),
-  );
-
   const groupId = await t.run((ctx) =>
     ctx.db.insert("scholarGroups", {
       teacherId,
@@ -226,7 +216,7 @@ async function seedGroupWorld(t: ReturnType<typeof convexTest>) {
 }
 
 describe("prep board read model", () => {
-  test("forScholarAsTeacher returns the exact same plan as forSelf", async () => {
+  test("a teacher row's Due list is the scholar's own Due list", async () => {
     const t = convexTest(schema, modules);
     const world = await seedGroupWorld(t);
     const asScholar = await withUser(t, world.leilaniId);
@@ -235,107 +225,16 @@ describe("prep board read model", () => {
     const own = await asScholar.query(api.takeHomePlans.forSelf, {
       now: world.now,
     });
-    const asRead = await asTeacher.query(
-      api.takeHomePlans.forScholarAsTeacher,
-      { scholarId: world.leilaniId, now: world.now },
+    const view = await asTeacher.query(
+      api.takeHomePlans.forVisibleScholarsAsTeacher,
+      { scholarIds: [world.leilaniId], now: world.now },
     );
 
-    // One computation, two auth gates — never a re-derivation.
-    expect(asRead).toEqual(own);
-    // And it's genuinely non-trivial: assigned homework + a chosen note.
+    // One composition (composePlan), two auth gates — never a re-derivation.
     expect(own.assigned.length).toBeGreaterThan(0);
-    expect(own.selected).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "note", text: "bring tide-pool photos" }),
-      ]),
-    );
-  });
-
-  test("forGroupAsTeacher denies a teacher from another institution", async () => {
-    const t = convexTest(schema, modules);
-    const world = await seedGroupWorld(t);
-
-    const otherInstitutionId = await seedTestInstitution(t, {
-      slug: "other-prep-school",
-    });
-    const otherTeacherId = await seedStaffWithMembership(t, {
-      institutionId: otherInstitutionId,
-      name: "Avery Stone",
-      username: "other-prep-teacher",
-    });
-    const asOther = await withUser(t, otherTeacherId);
-
-    await expect(
-      asOther.query(api.takeHomePlans.forGroupAsTeacher, {
-        groupId: world.groupId,
-        now: world.now,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-
-    // The home teacher CAN read it.
-    const asTeacher = await withUser(t, world.teacherId);
-    const board = await asTeacher.query(api.takeHomePlans.forGroupAsTeacher, {
-      groupId: world.groupId,
-      now: world.now,
-    });
-    expect(board.scholars).toHaveLength(3);
-    expect(board.group).toMatchObject({ name: "Honu" });
-  });
-
-  test("forGroupAsTeacher forbids an EMPTY foreign group (no roster to intersect)", async () => {
-    const t = convexTest(schema, modules);
-    const world = await seedGroupWorld(t);
-
-    // A group stamped with a DIFFERENT institution, with an empty roster. The
-    // roster intersection is vacuously "not forbidden", so only the independent
-    // group-institution check can stop the home teacher leaking its name/emoji.
-    const foreignInstitutionId = await seedTestInstitution(t, {
-      slug: "empty-foreign-school",
-    });
-    const foreignGroupId = await t.run((ctx) =>
-      ctx.db.insert("scholarGroups", {
-        teacherId: world.teacherId,
-        institutionId: foreignInstitutionId,
-        name: "Foreign empty",
-        scholarIds: [],
-      }),
-    );
-    const asTeacher = await withUser(t, world.teacherId);
-
-    await expect(
-      asTeacher.query(api.takeHomePlans.forGroupAsTeacher, {
-        groupId: foreignGroupId,
-        now: world.now,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-  });
-
-  test("forGroupAsTeacher forbids a foreign group that contains an accessible scholar", async () => {
-    const t = convexTest(schema, modules);
-    const world = await seedGroupWorld(t);
-
-    // A group stamped with a DIFFERENT institution, but whose roster includes a
-    // scholar the home teacher CAN read (Leilani). Roster intersection alone
-    // would accept it; the group resource is still foreign and must be denied.
-    const foreignInstitutionId = await seedTestInstitution(t, {
-      slug: "overlap-foreign-school",
-    });
-    const foreignGroupId = await t.run((ctx) =>
-      ctx.db.insert("scholarGroups", {
-        teacherId: world.teacherId,
-        institutionId: foreignInstitutionId,
-        name: "Foreign overlap",
-        scholarIds: [world.leilaniId],
-      }),
-    );
-    const asTeacher = await withUser(t, world.teacherId);
-
-    await expect(
-      asTeacher.query(api.takeHomePlans.forGroupAsTeacher, {
-        groupId: foreignGroupId,
-        now: world.now,
-      }),
-    ).rejects.toThrow(/forbidden/i);
+    expect(view.scholars).toHaveLength(1);
+    expect(view.scholars[0].assigned).toEqual(own.assigned);
+    expect(view.scholars[0].dayKey).toBe(own.dayKey);
   });
 
   test("empty-list flag is zero due homework for the local dayKey", async () => {
@@ -343,10 +242,13 @@ describe("prep board read model", () => {
     const world = await seedGroupWorld(t);
     const asTeacher = await withUser(t, world.teacherId);
 
-    const board = await asTeacher.query(api.takeHomePlans.forGroupAsTeacher, {
-      groupId: world.groupId,
-      now: world.now,
-    });
+    const board = await asTeacher.query(
+      api.takeHomePlans.forVisibleScholarsAsTeacher,
+      {
+        scholarIds: [world.leilaniId, world.koaId, world.emmaId],
+        now: world.now,
+      },
+    );
     const byId = new Map(board.scholars.map((s) => [String(s.scholarId), s]));
 
     // Emma has no assignments → neutral empty list.
@@ -366,10 +268,13 @@ describe("prep board read model", () => {
     const world = await seedGroupWorld(t);
     const asTeacher = await withUser(t, world.teacherId);
 
-    const board = await asTeacher.query(api.takeHomePlans.forGroupAsTeacher, {
-      groupId: world.groupId,
-      now: world.now,
-    });
+    const board = await asTeacher.query(
+      api.takeHomePlans.forVisibleScholarsAsTeacher,
+      {
+        scholarIds: [world.leilaniId, world.koaId, world.emmaId],
+        now: world.now,
+      },
+    );
     const byId = new Map(board.scholars.map((s) => [String(s.scholarId), s]));
 
     // Only the fractions homework (due the prior open school day) is in the
@@ -393,28 +298,6 @@ describe("prep board read model", () => {
     // Emma had nothing due.
     const emma = byId.get(String(world.emmaId))!;
     expect(emma.lastNight).toHaveLength(0);
-  });
-
-  test("forVisibleScholarsAsTeacher composes the SAME rows as forGroupAsTeacher", async () => {
-    const t = convexTest(schema, modules);
-    const world = await seedGroupWorld(t);
-    const asTeacher = await withUser(t, world.teacherId);
-
-    const group = await asTeacher.query(api.takeHomePlans.forGroupAsTeacher, {
-      groupId: world.groupId,
-      now: world.now,
-    });
-    const view = await asTeacher.query(
-      api.takeHomePlans.forVisibleScholarsAsTeacher,
-      {
-        scholarIds: [world.leilaniId, world.koaId, world.emmaId],
-        now: world.now,
-      },
-    );
-
-    // One composition (buildTonightPlanRows), reachable by group or by roster —
-    // never a re-derivation. Sorted by name in both, so they line up row-for-row.
-    expect(view.scholars).toEqual(group.scholars);
   });
 
   test("forVisibleScholarsAsTeacher filters out a scholar the caller cannot access", async () => {

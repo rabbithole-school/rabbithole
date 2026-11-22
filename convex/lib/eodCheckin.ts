@@ -1,4 +1,9 @@
-import { escapeSlackText } from "./slackApi";
+import {
+  escapeSlackInline,
+  escapeSlackText,
+  type SlackMessageMetadata,
+} from "./slackApi";
+import type { SlackPart } from "./slackGreyLine";
 import {
   DEFAULT_TIMEZONE,
   dayKeyForTimezone,
@@ -17,6 +22,7 @@ import type { Id } from "../_generated/dataModel";
 import type { SessionSignalType } from "../../shared/learningSignals";
 import { sessionSignalMeta } from "../../shared/learningSignals";
 import { scoreSignal } from "./momentInterestingness";
+import { formatScreenMinutes } from "../../shared/screenTimeWeek";
 
 export interface EodScholarDay {
   name: string;
@@ -123,6 +129,30 @@ export interface EodKeyMoment {
   detail: string;
 }
 
+/** Every check-in message carries this, so a retry can find what landed. */
+export const EOD_MESSAGE_EVENT_TYPE = "rabbithole_eod_checkin";
+
+export type DeliveryPart =
+  | "parent"
+  | "builds"
+  | "reply"
+  | "screenTime"
+  | "screenTimeCharts";
+
+export function deliveryId(checkinId: Id<"eodCheckins">, part: DeliveryPart) {
+  return `eod:${checkinId}:${part}`;
+}
+
+export function deliveryMetadata(
+  checkinId: Id<"eodCheckins">,
+  part: DeliveryPart,
+): SlackMessageMetadata {
+  return {
+    event_type: EOD_MESSAGE_EVENT_TYPE,
+    event_payload: { delivery_id: deliveryId(checkinId, part) },
+  };
+}
+
 export interface EodChannelInput {
   dateLabel: string;
   groupNames: string[];
@@ -133,6 +163,248 @@ export interface EodChannelInput {
   overdueHomework: EodOverdueHomework[];
   queuedDigestIds: Id<"slackNotificationQueue">[];
   queuedDigestLines: string[];
+  /**
+   * Fridays only (TRA-589): each scholar's BunnyPad week, Saturday through
+   * Friday. Rendered verbatim as its own channel message and never shown to
+   * the model, so its numbers are exactly what School › Screen time shows.
+   */
+  weekScreenTime?: EodWeekScreenTime;
+}
+
+/**
+ * The newest picture of an app a scholar built today: the render-check
+ * screenshot the Workshop already takes after every build change. Posted into
+ * the thread as an image, never shown to the model.
+ */
+export interface EodBuildSnapshot {
+  scholarId: Id<"users">;
+  sessionId: Id<"sessions">;
+  scholarName: string;
+  sessionTitle: string;
+  sessionUrl: string;
+  storageId: Id<"_storage">;
+}
+
+/**
+ * What the check-in row stores so a retry posts the same images. The ids let
+ * delivery re-check the roster and the session before posting.
+ */
+export interface EodBuildSnapshotPost {
+  scholarId: Id<"users">;
+  sessionId: Id<"sessions">;
+  storageId: Id<"_storage">;
+  /** Plain session title: the upload's title and the image's alt text. */
+  title: string;
+  /** mrkdwn line above the image: who built it, linked to the session. */
+  caption: string;
+}
+
+// Session titles are free text. Slack refuses a whole message over one long
+// field (alt text 2,000 characters, section 3,000), so names are capped well
+// under that.
+const BUILD_TITLE_MAX_CHARS = 120;
+const BUILD_NAME_MAX_CHARS = 80;
+
+function capChars(text: string, max: number): string {
+  const chars = Array.from(text);
+  return chars.length <= max ? text : `${chars.slice(0, max - 1).join("").trimEnd()}…`;
+}
+
+export function renderBuildSnapshotPost(
+  snapshot: EodBuildSnapshot,
+): EodBuildSnapshotPost {
+  const title =
+    capChars(snapshot.sessionTitle.replace(/\s+/g, " ").trim(), BUILD_TITLE_MAX_CHARS) ||
+    "Untitled app";
+  // The caption is Slack mrkdwn in a section block. escapeSlackInline strips
+  // markup delimiters from the names; a `|` would end the link label.
+  const name =
+    escapeSlackInline(capChars(snapshot.scholarName, BUILD_NAME_MAX_CHARS)) ||
+    "A scholar";
+  const label = escapeSlackInline(title).replace(/\s*\|\s*/g, " ") || "Untitled app";
+  return {
+    scholarId: snapshot.scholarId,
+    sessionId: snapshot.sessionId,
+    storageId: snapshot.storageId,
+    title,
+    caption: `*${name}* · <${snapshot.sessionUrl}|${label}>`,
+  };
+}
+
+/**
+ * The thread message that shows the day's builds: each scholar's name, linked
+ * to the session, above the screenshot. `fileId` is the private upload an image
+ * block shows by id, which keeps the screenshots in one message posted in
+ * order rather than in file shares Slack posts whenever it gets to them.
+ */
+export function buildSnapshotBlocks(
+  uploads: Array<{ fileId: string; post: EodBuildSnapshotPost }>,
+): unknown[] {
+  return uploads.flatMap(({ fileId, post }) => [
+    { type: "section", text: { type: "mrkdwn", text: post.caption } },
+    {
+      type: "image",
+      slack_file: { id: fileId },
+      alt_text: `Screenshot of ${post.title}`,
+    },
+  ]);
+}
+
+export interface EodWeekScreenTime {
+  /** School-local day keys, Saturday and Friday. */
+  startDayKey: string;
+  endDayKey: string;
+  /** Weekdays in the window the school was open (closures skipped). */
+  schoolDays: number;
+  /** The same count for the week before, for the change from last week. */
+  lastWeekSchoolDays?: number;
+  /** Test accounts are already left out. */
+  scholars: Array<{
+    scholarId: string;
+    name: string;
+    /** That scholar's row on School › Screen time, for this same week. */
+    url: string;
+    inSchoolMinutes: number;
+    outsideSchoolMinutes: number;
+    /** Their own app on screen near their own turns. */
+    buildingMinutes: number;
+    /** Their own app on screen the rest of the time. */
+    playingMinutes: number;
+    /** The week before; absent when they had no BunnyPad time then. */
+    lastWeek?: { inSchoolMinutes: number; outsideSchoolMinutes: number };
+  }>;
+}
+
+/**
+ * This week with last week's time beside each scholar, for the change from
+ * last week. A scholar with no BunnyPad time last week gets no comparison.
+ */
+export function withLastWeek(
+  thisWeek: EodWeekScreenTime,
+  lastWeek: EodWeekScreenTime | null,
+): EodWeekScreenTime {
+  if (!lastWeek) return thisWeek;
+  const before = new Map(lastWeek.scholars.map((scholar) => [scholar.scholarId, scholar]));
+  return {
+    ...thisWeek,
+    lastWeekSchoolDays: lastWeek.schoolDays,
+    scholars: thisWeek.scholars.map((scholar) => {
+      const then = before.get(scholar.scholarId);
+      return then && then.inSchoolMinutes + then.outsideSchoolMinutes >= 1
+        ? {
+            ...scholar,
+            lastWeek: {
+              inSchoolMinutes: then.inSchoolMinutes,
+              outsideSchoolMinutes: then.outsideSchoolMinutes,
+            },
+          }
+        : scholar;
+    }),
+  };
+}
+
+/** "2026-11-07" → "Sat Nov 7". A day key names a calendar day, so read it in UTC. */
+function weekDayLabel(dayKey: string): string {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  const weekday = date.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+  });
+  const monthDay = date.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+  });
+  return `${weekday} ${monthDay}`;
+}
+
+function minutesText(minutes: number): string {
+  if (minutes <= 0) return "none";
+  return minutes < 1 ? "under 1m" : formatScreenMinutes(minutes);
+}
+
+/** ", up 40m from last week": one average against the same average last week. */
+function changeText(now: number, before: number | null): string {
+  if (before === null) return "";
+  const delta = Math.round(now - before);
+  if (delta === 0) return ", same as last week";
+  return `, ${delta > 0 ? "up" : "down"} ${formatScreenMinutes(Math.abs(delta))} from last week`;
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * The Friday screen-time roundup, posted as its own message in the class
+ * channel: every scholar who used a BunnyPad, by name, then the class median.
+ * No guideline and no flags (Andy, 2026-11-17: numbers for "too much" would be
+ * premature); the charts in the thread do the comparing. Null when nobody in
+ * the class used a BunnyPad.
+ */
+export function renderWeekScreenTime(
+  week: EodWeekScreenTime | undefined,
+): string | null {
+  if (!week) return null;
+  const active = week.scholars.filter(
+    (scholar) => scholar.inSchoolMinutes + scholar.outsideSchoolMinutes >= 1,
+  );
+  if (active.length === 0) return null;
+  const hasSchoolDays = week.schoolDays > 0;
+  const perSchoolDay = (minutes: number) =>
+    hasSchoolDays ? minutes / week.schoolDays : 0;
+  const perDay = (minutes: number) => minutes / 7;
+
+  const scholars = [...active].sort((a, b) => a.name.localeCompare(b.name));
+
+  const lines = [
+    `**Screen time this week** (${weekDayLabel(week.startDayKey)} – ${weekDayLabel(week.endDayKey)})`,
+  ];
+  for (const scholar of scholars) {
+    const name = `<${scholar.url}|${escapeSlackText(scholar.name)}>`;
+    const inSchoolAverage = perSchoolDay(scholar.inSchoolMinutes);
+    const outsideAverage = perDay(scholar.outsideSchoolMinutes);
+    const lastWeekSchoolDays = week.lastWeekSchoolDays ?? 0;
+    const inSchoolBefore =
+      scholar.lastWeek && lastWeekSchoolDays > 0
+        ? scholar.lastWeek.inSchoolMinutes / lastWeekSchoolDays
+        : null;
+    const outsideBefore = scholar.lastWeek
+      ? perDay(scholar.lastWeek.outsideSchoolMinutes)
+      : null;
+    const parts: string[] = [];
+    if (hasSchoolDays) {
+      parts.push(
+        scholar.inSchoolMinutes < 1
+          ? "none at school"
+          : `${minutesText(inSchoolAverage)} a school day at school${changeText(inSchoolAverage, inSchoolBefore)}`,
+      );
+    }
+    parts.push(
+      scholar.outsideSchoolMinutes < 1
+        ? "none outside school"
+        : `${minutesText(outsideAverage)} a day outside school${changeText(outsideAverage, outsideBefore)}`,
+    );
+    let line = `• ${name}: ${parts.join("; ")}.`;
+    if (scholar.buildingMinutes + scholar.playingMinutes >= 1) {
+      line += ` Apps they made: ${minutesText(scholar.buildingMinutes)} building, ${minutesText(scholar.playingMinutes)} playing.`;
+    }
+    lines.push(line);
+  }
+  const medianOutside = minutesText(
+    median(active.map((scholar) => perDay(scholar.outsideSchoolMinutes))),
+  );
+  lines.push(
+    hasSchoolDays
+      ? `Class median: ${minutesText(median(active.map((scholar) => perSchoolDay(scholar.inSchoolMinutes))))} a school day at school, ${medianOutside} a day outside school.`
+      : `Class median: ${medianOutside} a day outside school.`,
+  );
+  return lines.join("\n");
 }
 
 // End-of-day boundaries in the TARGET institution's timezone. Defaulting to
@@ -193,7 +465,10 @@ export function hasAnyActivity(input: EodChannelInput): boolean {
     input.keyMoments.length > 0 ||
     input.scheduled.length > 0 ||
     input.overdueHomework.length > 0 ||
-    input.scholars.some(scholarHasActivity)
+    input.scholars.some(scholarHasActivity) ||
+    (input.weekScreenTime?.scholars.some(
+      (scholar) => scholar.inSchoolMinutes + scholar.outsideSchoolMinutes >= 1,
+    ) ?? false)
   );
 }
 
@@ -449,6 +724,15 @@ export function sanitizeEodSlackText(
   );
 }
 
+/** The reply's last line, which posts in Slack's grey line (`threadMessageParts`). */
+export const EOD_THREAD_ANSWER_HINT =
+  "_Answer here in the thread — I'll record it so today's record stays complete._";
+
+/**
+ * The threaded wrap-up as one string. It is stored on the check-in row
+ * (`replyText`) and carried through retries unchanged, so the hint stays part
+ * of it; `threadMessageParts` splits it off when posting.
+ */
 export function renderThreadMessage(
   wrapUp: string,
   questions: string[],
@@ -456,7 +740,18 @@ export function renderThreadMessage(
   const numbered = questions
     .map((question, index) => `${index + 1}. ${question}`)
     .join("\n");
-  return `${wrapUp}\n\n**Questions for you**\n${numbered}\n\n_Answer here in the thread — I'll record it so today's record stays complete._`;
+  return `${wrapUp}\n\n**Questions for you**\n${numbered}\n\n${EOD_THREAD_ANSWER_HINT}`;
+}
+
+/**
+ * A stored reply as Slack parts: the wrap-up and questions full size, the
+ * answer hint grey. A row whose text doesn't end with the hint posts whole,
+ * full size, as before.
+ */
+export function threadMessageParts(replyText: string): SlackPart[] {
+  const suffix = `\n\n${EOD_THREAD_ANSWER_HINT}`;
+  if (!replyText.endsWith(suffix)) return [replyText];
+  return [replyText.slice(0, -suffix.length), { grey: EOD_THREAD_ANSWER_HINT }];
 }
 
 function countLabel(count: number, singular: string, plural = `${singular}s`): string {

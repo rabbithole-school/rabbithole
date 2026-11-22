@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useEffectEvent, useMemo, useState } from "react";
-import { useQuery, useMutation } from "convex/react";
+import { useEffect, useEffectEvent, useMemo } from "react";
+import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { Box, Button, Flex, HStack, VStack, Text, Spinner } from "@chakra-ui/react";
-import { ArrowRight, Check, Plant } from "@phosphor-icons/react";
+import { Box, Flex, HStack, VStack, Text, Spinner } from "@chakra-ui/react";
+import { ArrowRight } from "@phosphor-icons/react";
 import { Surface } from "@/components/ui/Surface";
 import { ObservationCard, type ObservationCardRow } from "@/components/ObservationCard";
 import { useAideDockOptional } from "@/components/aide/AideDockProvider";
@@ -17,6 +17,7 @@ import { BloomLadder } from "@/components/BloomLadder";
 import { Automaticity } from "@/components/Automaticity";
 import type { ScholarTabKey } from "@/components/ScholarProfile";
 import { readingTileCaption } from "@/components/readingTileCaption";
+import { AppTileIcon } from "@/components/ui/AppTileIcon";
 import { useNow } from "@/hooks/useNow";
 import { roundsWeekLabel } from "@/lib/roundsCadence";
 import { talkLevelLabel, talkLevelToNumber } from "@/convex/lib/readingLevels";
@@ -99,14 +100,15 @@ type FeedItem = {
   meta: string;
   chip?: string;
   href?: string;
-  // A right-aligned "Add Seed" CTA: promotes a pending exploration seed to
-  // active (status "active"). `added` reflects the seed already being active.
-  seedAction?: { seedId: Id<"seeds">; added: boolean };
   // A learning-record item carries a Tree-coloured square MARKER (mastery /
-  // misconception); an event carries a soft emoji ORB. Exactly one is set.
+  // misconception); an event carries a soft emoji ORB (or, for a tile session, the
+  // app's tile mark). Exactly one is set.
   marker?: { kind: "mastery" | "misconception"; stop: MasteryStop | null };
   emoji?: string;
   iconBg?: string;
+  // A tile session (the scholar opened an app tile themselves) shows that
+  // app's own tile mark in place of the orb, so it reads as their choice.
+  appTile?: { name: string; iconUrl: string | null; iconEmoji: string | null; color: string | null };
   // Extra learning-record glyphs in the meta line (neutral, never colour).
   bloomLevel?: number;
   fluencyLevel?: number | null;
@@ -161,7 +163,7 @@ export function ScholarFeed({
   onOpenReading?: () => void;
   /** Open one observation's evidence record (a ?obs= deep link). */
   onOpenObservation?: (observationId: string) => void;
-  /** Teacher/admin only: enables the "Add Seed" action (seeds.review). */
+  /** Teacher/admin only: shows teacher-only feed sections. */
   canCurate?: boolean;
   /** Rounds is a teaching-team surface, not an operations view. Also `false`
    *  when the feed is composed INTO Rounds, so the surface never links to
@@ -362,7 +364,6 @@ export function ScholarFeed({
         iconBg: "violet.100",
         lead: (<>New spark — <b>{s.topic}</b></>),
         meta: s.suggestionType.replace(/_/g, " "),
-        seedAction: { seedId: s._id, added: s.status === "active" },
       });
     }
     // Talk level-ups: each history entry that rose above the previous.
@@ -380,13 +381,14 @@ export function ScholarFeed({
       }
     }
     for (const s of sessions ?? []) {
+      const messages = `${s.messageCount} message${s.messageCount === 1 ? "" : "s"}`;
       out.push({
         id: `sess-${s._id}`,
         ts: s.lastMessageAt ?? s._creationTime,
-        emoji: "💬",
-        iconBg: "violet.50",
+        ...(s.sourceApp
+          ? { appTile: s.sourceApp, meta: `${s.sourceApp.name} · free play · ${messages}` }
+          : { emoji: "💬", iconBg: "violet.50", meta: `Tutoring session · ${messages}` }),
         lead: (<><b>{s.title}</b></>),
-        meta: `Tutoring session · ${s.messageCount} message${s.messageCount === 1 ? "" : "s"}`,
         href: href(String(s._id)),
       });
     }
@@ -412,9 +414,14 @@ export function ScholarFeed({
     // rather than one that only exists in Slack scrollback. Glyphs match the
     // Slack ones where a kind has its own (🧗 practice, 😫 overwhelm) so the two
     // surfaces read as one vocabulary.
+    // A chat alert from a tile session names the app, as its session row does.
+    const sourceAppBySession = new Map(
+      (sessions ?? []).flatMap((s) => (s.sourceApp ? [[String(s._id), s.sourceApp.name]] : [])),
+    );
     for (const a of alertRecord ?? []) {
       const p = ALERT_PRESENTATION[a.kind];
       if (!p) continue;
+      const tileApp = a.sessionId ? sourceAppBySession.get(String(a.sessionId)) : undefined;
       // Producer bodies are Slack-shaped; take the one informative sentence.
       const summary = alertLead(a.body);
       out.push({
@@ -423,7 +430,7 @@ export function ScholarFeed({
         emoji: p.emoji,
         iconBg: p.iconBg,
         lead: (<><b>{p.label}</b>{summary ? <> — {summary}</> : null}</>),
-        meta: p.meta,
+        meta: tileApp && p.meta === "Tutoring session" ? `${tileApp} · free play` : p.meta,
         href: a.sessionId ? href(String(a.sessionId)) : undefined,
       });
     }
@@ -685,7 +692,6 @@ export function ScholarFeed({
                   ),
                   meta: "Noticed by the observer",
                 }}
-                canCurate={canCurate}
               />
             )}
 
@@ -707,7 +713,7 @@ export function ScholarFeed({
                     onDiscuss={aide ? (prompt) => aide.seedComposer(prompt) : undefined}
                   />
                 ) : (
-                  <Post key={it.id} item={it} onOpenObservation={onOpenObservation} canCurate={canCurate} />
+                  <Post key={it.id} item={it} onOpenObservation={onOpenObservation} />
                 ),
               )
             )}
@@ -777,88 +783,12 @@ function ReadingSpark({ history }: { history: { level: string; _creationTime: nu
   );
 }
 
-function SeedItButton({
-  seedId,
-  added,
-  canCurate,
-}: {
-  seedId: Id<"seeds">;
-  added: boolean;
-  canCurate: boolean;
-}) {
-  const review = useMutation(api.seeds.review);
-  const [busy, setBusy] = useState(false);
-
-  const handleAdd = async () => {
-    setBusy(true);
-    try {
-      await review({ id: seedId, action: "accept" });
-    } catch (err) {
-      console.error("Error adding seed:", err);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Already in the scholar's sky — a settled, read-only "Added" state.
-  if (added) {
-    return (
-      <HStack gap={1} flexShrink={0} alignSelf="center" color="green.600">
-        <Check weight="bold" size={12} />
-        <Text fontSize="xs" fontWeight="700" fontFamily="heading">Added</Text>
-      </HStack>
-    );
-  }
-
-  // Registrars see the feed but can't curate seeds — show a neutral spark chip.
-  if (!canCurate) {
-    return (
-      <Text
-        flexShrink={0}
-        alignSelf="center"
-        fontSize="2xs"
-        fontWeight="700"
-        color="violet.700"
-        bg="violet.50"
-        borderWidth="1px"
-        borderColor="violet.100"
-        borderRadius="md"
-        px="6px"
-        py="1px"
-        fontFamily="heading"
-      >
-        spark
-      </Text>
-    );
-  }
-
-  return (
-    <Button
-      size="xs"
-      variant="ghost"
-      color="violet.500"
-      fontFamily="heading"
-      fontSize="xs"
-      flexShrink={0}
-      alignSelf="center"
-      _hover={{ bg: "violet.50" }}
-      onClick={handleAdd}
-      loading={busy}
-      disabled={busy}
-    >
-      <Plant weight="duotone" style={{ marginRight: "3px" }} /> Add Seed
-    </Button>
-  );
-}
-
 function Post({
   item,
   onOpenObservation,
-  canCurate,
 }: {
   item: FeedItem;
   onOpenObservation?: (observationId: string) => void;
-  canCurate?: boolean;
 }) {
   const clickable = !!(item.observationId && onOpenObservation);
   const bloom = item.bloomLevel != null ? bloomLabel(item.bloomLevel) : null;
@@ -878,6 +808,16 @@ function Post({
     >
       {item.marker ? (
         <MasteryMarker kind={item.marker.kind} stop={item.marker.stop} size={34} />
+      ) : item.appTile ? (
+        <AppTileIcon
+          name={item.appTile.name}
+          iconUrl={item.appTile.iconUrl}
+          iconEmoji={item.appTile.iconEmoji}
+          color={item.appTile.color}
+          boxSize="34px"
+          markFontSize="14px"
+          decorative
+        />
       ) : (
         <Flex
           w="34px"
@@ -919,13 +859,6 @@ function Post({
           )}
         </HStack>
       </Box>
-      {item.seedAction && (
-        <SeedItButton
-          seedId={item.seedAction.seedId}
-          added={item.seedAction.added}
-          canCurate={!!canCurate}
-        />
-      )}
     </Flex>
   );
   if (item.href) {

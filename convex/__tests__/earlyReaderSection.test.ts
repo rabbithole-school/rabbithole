@@ -46,7 +46,7 @@ describe("isEarlyReader — the K–2.9 band", () => {
 
 describe("buildSystemPrompt — reading-level slot selection", () => {
   const build = (readingLevel: string | null) =>
-    buildSystemPrompt(null, readingLevel, "Kai", null, null, null);
+    buildSystemPrompt(readingLevel, "Kai", null, null, null);
 
   test.each(["K", "1.4", "2.9"])("%s renders the early-reader register", (level) => {
     expect(build(level)).toContain(buildEarlyReaderSection(level));
@@ -75,7 +75,7 @@ describe("buildSystemPrompt — reading-level slot selection", () => {
   });
 
   test("the register sits in the cached stable prefix", () => {
-    const { stable, dynamic } = buildSystemPromptParts(null, "1", "Kai", null, null, null);
+    const { stable, dynamic } = buildSystemPromptParts("1", "Kai", null, null, null);
     expect(stable).toContain(buildEarlyReaderSection("1"));
     expect(dynamic).not.toContain(buildEarlyReaderSection("1"));
   });
@@ -101,7 +101,7 @@ describe("needsYoungReaderTurnRules — the one seam", () => {
 
   test("the prompt carries the turn rules exactly when the helper says so", () => {
     const build = (readingLevel: string | null) =>
-      buildSystemPrompt(null, readingLevel, "Kai", null, null, null);
+      buildSystemPrompt(readingLevel, "Kai", null, null, null);
     for (const level of [PRE_READER_LEVEL, ...VALID_READING_LEVELS, null]) {
       expect(build(level).includes(buildYoungReaderTurnRules())).toBe(
         needsYoungReaderTurnRules(levelsOf(level)),
@@ -111,7 +111,7 @@ describe("needsYoungReaderTurnRules — the one seam", () => {
 
   test("the turn rules follow the register in the cached stable prefix", () => {
     for (const level of [PRE_READER_LEVEL, "1"]) {
-      const { stable, dynamic } = buildSystemPromptParts(null, level, "Kai", null, null, null);
+      const { stable, dynamic } = buildSystemPromptParts(level, "Kai", null, null, null);
       const register =
         level === PRE_READER_LEVEL
           ? buildPreReaderSection()

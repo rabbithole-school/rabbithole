@@ -13,3 +13,12 @@
 delete process.env.GEMINI_API_KEY;
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.OPENAI_API_KEY;
+
+// Same rule for outbound SMS: a worktree deployment's env can carry live Twilio
+// credentials, and deliverOffPortal sends a real text when they're all present.
+// Tests that exercise the SMS path set fake values and stub fetch themselves.
+delete process.env.TWILIO_ACCOUNT_SID;
+delete process.env.TWILIO_API_KEY_SID;
+delete process.env.TWILIO_API_KEY_SECRET;
+delete process.env.TWILIO_FROM_NUMBER;
+delete process.env.TWILIO_AUTH_TOKEN;

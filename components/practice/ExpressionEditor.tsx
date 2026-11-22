@@ -195,9 +195,11 @@ function slotChildren(slot: Slot, ctx: Ctx): React.ReactNode[] {
       out.push(<FractionView key={`i${i}`} item={item} ctx={ctx} />);
     } else if (item.kind === "root") {
       out.push(<RootView key={`i${i}`} item={item} ctx={ctx} />);
-    } else {
+    } else if (item.kind === "power") {
       out.push(<PowerView key={`i${i}`} item={item} ctx={ctx} />);
     }
+    // log / group items exist only in the algebra mode, which the web editor
+    // does not enable yet (web algebra items use a plain text field).
   }
   return out;
 }

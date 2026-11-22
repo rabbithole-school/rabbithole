@@ -310,7 +310,6 @@ describe("activity resources land in the cached stable prefix", () => {
   // scholarName + the trailing activityResourceContext are set.
   function parts(resources: ActivityResourceContext[] | null) {
     return buildSystemPromptParts(
-      null, // teacherWhisper
       null, // readingLevel
       "Kai", // scholarName
       null, // unitContext

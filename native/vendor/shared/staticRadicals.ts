@@ -8,6 +8,8 @@
  * engines consume; every unsupported shape remains ordinary text.
  */
 
+import { parseRootIndex, rootIndexName } from "../react-native-math-keypad/model/rootIndex";
+
 export type StaticRadicalSegment =
   | { type: "text"; value: string }
   | {
@@ -34,38 +36,10 @@ function radicalLatex(
   return `${coefficient ?? ""}\\sqrt${index ? `[${index}]` : ""}{${radicand}}`;
 }
 
-function ordinal(index: string): string {
-  const value = Number(index);
-  const mod100 = value % 100;
-  if (mod100 >= 11 && mod100 <= 13) return `${value}th`;
-  switch (value % 10) {
-    case 1:
-      return `${value}st`;
-    case 2:
-      return `${value}nd`;
-    case 3:
-      return `${value}rd`;
-    default:
-      return `${value}th`;
-  }
-}
-
-/** A root index is a canonical base-10 safe integer no smaller than two.
- * Leading zeroes are deliberately rejected: each index has one visual,
- * spoken, and serialized representation. */
-export function parseRootIndex(index: string): number | null {
-  if (!/^(?:[2-9]\d*|1\d+)$/.test(index)) return null;
-  const value = Number(index);
-  return Number.isSafeInteger(value) ? value : null;
-}
-
-/** Human-readable root name for static prose and editor accessibility. */
-export function rootIndexName(index: string | null | undefined): string | null {
-  if (!index || index === "2") return "square";
-  if (index === "3") return "cube";
-  if (parseRootIndex(index) === null) return null;
-  return ordinal(index);
-}
+// The root-index rules (`parseRootIndex`, `rootIndexName`) live in the keypad
+// package, whose 2-D editor needs them too; this module re-exports them so
+// prose and the editor name every root the same way.
+export { parseRootIndex, rootIndexName };
 
 function radicalSpeech(
   coefficient: string | undefined,

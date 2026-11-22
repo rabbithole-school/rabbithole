@@ -202,6 +202,17 @@ export function CoordinatePlaneNative({
                   {String(v)}
                 </SvgText>
               ))}
+            {/* axis names (e.g. Re / Im for the complex plane) at each axis's positive end */}
+            {spec.axisLabels && (
+              <>
+                <SvgText x={plane.x(xMax) + pad * cell * 0.15} y={plane.y(xAxisVisible ? 0 : yMin) - 8} fontSize={labelSize + 2} fontFamily={fonts.bold} fill={palette.navy[500]} textAnchor="end">
+                  {spec.axisLabels.x}
+                </SvgText>
+                <SvgText x={plane.x(yAxisVisible ? 0 : xMin) + 8} y={plane.y(yMax) + labelSize * 0.4} fontSize={labelSize + 2} fontFamily={fonts.bold} fill={palette.navy[500]} textAnchor="start">
+                  {spec.axisLabels.y}
+                </SvgText>
+              </>
+            )}
             {/* fixed decorative segments */}
             {(spec.segments ?? []).map((seg, i) => (
               <Line key={`seg${i}`} x1={plane.x(seg[0].x)} y1={plane.y(seg[0].y)} x2={plane.x(seg[1].x)} y2={plane.y(seg[1].y)} stroke={palette.darkCyan[500]} strokeWidth={2} />

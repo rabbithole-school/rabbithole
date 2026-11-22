@@ -7,12 +7,13 @@
  * `homework`. The row carries the activity's full `scholarDescription` (the
  * instruction body the UI discloses in place) and NO session: nothing is
  * launched, nothing is created, and `offline` stays out of
- * SCHOLAR_SOLO_STARTABLE_KINDS so it can never drive the focus lock.
+ * SCHOLAR_SOLO_STARTABLE_KINDS so it can never be the headlined class focus.
  *
  * Offline CLASS FOCUS and shareBack stay excluded — those are run by the
  * teacher, in the room.
  */
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, withDefaultSchools } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -54,7 +55,7 @@ async function seedOfflinePush(
   scholarDescription: string | null = INSTRUCTIONS,
 ) {
   const now = Date.now();
-  return t.run(async (ctx) => {
+  const __mirrored = await t.run(async (ctx) => {
     const teacher = await ctx.db.insert("users", {
       name: "T",
       username: "t",
@@ -83,7 +84,7 @@ async function seedOfflinePush(
       description: TEACHER_NOTES,
       scholarDescription: scholarDescription ?? undefined,
     });
-    await ctx.db.insert("assignments", {
+    await insertAssignmentWithSchedule(ctx, {
       teacherId: teacher,
       unitId: unit,
       scholarIds: [scholar],
@@ -99,11 +100,12 @@ async function seedOfflinePush(
     });
     return { teacher, scholar, activity, lesson };
   });
+  return __mirrored;
 }
 
 describe("scholar plate — offline homework", () => {
   test("live offline HOMEWORK emits a not-started row with the full instructions and no session", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar } = await seedOfflinePush(t, "homework");
 
     const asScholar = await asUser(t, scholar);
@@ -129,7 +131,7 @@ describe("scholar plate — offline homework", () => {
   });
 
   test("live offline CLASS FOCUS emits no row — the teacher runs it in the room", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar } = await seedOfflinePush(t, "classFocus");
 
     const asScholar = await asUser(t, scholar);
@@ -141,7 +143,7 @@ describe("scholar plate — offline homework", () => {
   test("a shareBack activity pushed as homework is still excluded", async () => {
     // Widening the gate for offline must not widen it for share-back: those
     // are a teacher-run classroom ritual, not something a scholar does alone.
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar } = await seedOfflinePush(t, "homework", "shareBack");
 
     const asScholar = await asUser(t, scholar);
@@ -153,7 +155,7 @@ describe("scholar plate — offline homework", () => {
   });
 
   test("teacher-only description emits no dead Read control", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar } = await seedOfflinePush(t, "homework", "offline", null);
 
     const asScholar = await asUser(t, scholar);
@@ -165,7 +167,7 @@ describe("scholar plate — offline homework", () => {
   });
 
   test("blank offline homework emits no dead Read control", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar } = await seedOfflinePush(t, "homework", "offline", "   ");
 
     const asScholar = await asUser(t, scholar);
@@ -179,7 +181,7 @@ describe("scholar plate — offline homework", () => {
   test.each(["direct", "referenced"] as const)(
     "material-only offline homework with %s resources emits a readable row",
     async (resourcePlacement) => {
-      const t = convexTest(schema, modules);
+      const t = await withDefaultSchools(convexTest(schema, modules));
       const { teacher, scholar, activity, lesson } = await seedOfflinePush(
         t,
         "homework",

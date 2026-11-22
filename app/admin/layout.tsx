@@ -13,7 +13,7 @@ import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { useEffect, type ReactNode } from "react";
 import { Box, Container, Flex } from "@chakra-ui/react";
-import { Users, Tray, ChartBar, Coins, UserSwitch, Buildings, EnvelopeSimple } from "@phosphor-icons/react";
+import { Users, Tray, ChartBar, Coins, UserSwitch, Buildings, EnvelopeSimple, Bank } from "@phosphor-icons/react";
 import { AppHeader } from "@/components/AppHeader";
 import { AppLogo } from "@/components/AppLogo";
 import { AccountMenu } from "@/components/AccountMenu";
@@ -30,6 +30,7 @@ const NAV: NavItem[] = [
   { href: "/admin/institutions", label: "Institutions", icon: <Buildings /> },
   { href: "/admin/waitlist", label: "Waitlist", icon: <EnvelopeSimple /> },
   { href: "/admin/drive-sync", label: "Drive sync", icon: <Tray /> },
+  { href: "/admin/quickbooks", label: "QuickBooks", icon: <Bank /> },
   { href: "/admin/practice-instruments", label: "Practice instruments", icon: <ChartBar /> },
 ];
 const IMPERSONATE_NAV: NavItem = {

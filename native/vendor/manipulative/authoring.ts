@@ -42,6 +42,7 @@ import type {
   RulerSpec,
 } from "./types";
 import { isMoneyDenomination } from "./currency";
+import { functionGraphGoalIsUsable, initialFunctionGraph } from "./functionGraph";
 import {
   clockSnapMinutes,
   clockSolved,
@@ -551,6 +552,8 @@ export function isGradableManipulative(spec: ManipulativeSpec): boolean {
       return moneyGoalIsUsable(spec);
     case "molecule":
       return false;
+    case "functionGraph":
+      return functionGraphGoalIsUsable(spec);
   }
 }
 
@@ -620,6 +623,8 @@ function initialStateFor(spec: ManipulativeSpec): unknown {
       return initialMoney(spec);
     case "molecule":
       return {};
+    case "functionGraph":
+      return initialFunctionGraph(spec);
     default: {
       const exhaustive: never = spec;
       throw new Error(`initialStateFor: unhandled manipulative kind "${(exhaustive as ManipulativeSpec).kind}".`);

@@ -36,6 +36,7 @@ import { api, type Id } from "@/lib/convex";
 import { fonts, useColors } from "@/theme";
 import { flairChipDelayMs } from "../../vendor/shared/flairMotion";
 import { useFlairArrivals } from "../../vendor/shared/useFlairArrivals";
+import { withSpottedFlair } from "../../vendor/shared/spottedFlair";
 
 export type FlairEarned = {
   criterionId: string;
@@ -60,6 +61,9 @@ export type FlairChipsProps = {
   animateArrivals?: boolean;
   /** Enriches the immediate initial fallback with art scoped to this deliverable. */
   deliverableId?: Id<"deliverables"> | null;
+  /** The session whose spotted flair (the observer's award for an idea no
+   *  criterion listed) joins this strip. Null where there is no session. */
+  sessionId: Id<"sessions"> | null;
 };
 
 /**
@@ -85,6 +89,7 @@ export function FlairChips({
   resolved,
   animateArrivals = true,
   deliverableId,
+  sessionId,
 }: FlairChipsProps) {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const colors = useColors();
@@ -92,22 +97,36 @@ export function FlairChips({
     api.flairArt.forDeliverable,
     deliverableId ? { deliverableId } : "skip",
   );
+  const spotted = useQuery(
+    api.spottedFlair.forSession,
+    sessionId ? { sessionId } : "skip",
+  );
+  const merged = withSpottedFlair(flairEarned, criteria, spotted);
   // Baseline off the raw earned ids, not the rendered chips: criteria and the
   // generated art can resolve after the deliverable does, and baselining on what
   // happens to be renderable would replay every existing award when they land.
-  const arriving = useFlairArrivals(
+  // Deliverable and spotted flair resolve separately, so each keeps its own
+  // baseline: waiting for both would fold an award that lands in between
+  // into the first baseline and swallow its entrance.
+  const arrivingEarned = useFlairArrivals(
     resolved ? (flairEarned ?? []).map((flair) => flair.criterionId) : undefined,
   );
+  const arrivingSpotted = useFlairArrivals(
+    sessionId === null
+      ? []
+      : spotted?.map((flair) => flair.id),
+  );
+  const arriving = [...arrivingEarned, ...arrivingSpotted];
 
-  if (!flairEarned || flairEarned.length === 0) return null;
+  if (merged.flairEarned.length === 0) return null;
 
   const criterionById = new Map(
-    criteria.map((criterion) => [criterion.id, criterion]),
+    merged.criteria.map((criterion) => [criterion.id, criterion]),
   );
   const artByCriterionId = new Map(
     (art ?? []).map((item) => [item.criterionId, item]),
   );
-  const chips = flairEarned.flatMap((flair) => {
+  const chips = merged.flairEarned.flatMap((flair) => {
     const criterion = criterionById.get(flair.criterionId);
     if (!criterion) return [];
     const generated = artByCriterionId.get(flair.criterionId);
@@ -323,7 +342,7 @@ export function FlairMark({
   );
 }
 
-function flairInitial(label: string): string {
+export function flairInitial(label: string): string {
   return Array.from(label.trim())[0]?.toLocaleUpperCase() ?? "?";
 }
 

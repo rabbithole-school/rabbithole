@@ -1,4 +1,6 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
+import { asBellAdmin, seedSchoolAdmin } from "./bellScheduleAdmin";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
@@ -99,6 +101,20 @@ async function seedGroupWithRoster(
       name: "Geckos",
       emoji: "🦎",
       scholarIds,
+    }),
+  );
+}
+
+
+/** A class block on a term, for tests that need a placed cell. */
+async function seedClassBlock(
+  t: ReturnType<typeof convexTest>,
+  periodId: Id<"reportingPeriods">,
+) {
+  return await t.run((ctx) =>
+    ctx.db.insert("scheduleBlocks", {
+      periodId, key: "guard-a", label: "A", startLocal: "08:30", endLocal: "09:40",
+      weekdays: [1, 2, 3, 4, 5], order: 0,
     }),
   );
 }
@@ -357,18 +373,6 @@ describe("group-only query: metaChat.groupPrepControl", () => {
   });
 });
 
-// ── assignmentId write key (the #3559 follow-up: an accessible local group
-// combined with a foreign assignmentId) ────────────────────────────────────
-//
-// `placeClass`/`placeHomework`/`cascadeUnit` accept a client-supplied
-// `assignmentId` that's stored on the placement (and, for cascadeUnit, used
-// to fetch the assignment's unit + activities) without #3559's groupId/
-// teacherId checks ever touching it. `requireAssignmentAccessible` closes
-// that gap; direct unit coverage for the helper itself lives in
-// convex/lib/__tests__/access.test.ts. These tests exercise it through the
-// real handlers so the end-to-end write path (not just the pure guard) is
-// covered, and prove rejection happens BEFORE any placement/assignment write.
-
 async function seedUnitWithActivity(
   t: ReturnType<typeof convexTest>,
   teacherId: Id<"users">,
@@ -404,7 +408,7 @@ async function seedAssignmentRow(
   } = {},
 ) {
   return await t.run(async (ctx) =>
-    ctx.db.insert("assignments", {
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       scholarIds: overrides.scholarIds ?? [],
       scholarGroupId: overrides.scholarGroupId,
@@ -419,101 +423,70 @@ async function seedAssignmentRow(
 const placementCount = async (t: ReturnType<typeof convexTest>) =>
   (await t.run((ctx) => ctx.db.query("schedulePlacements").collect())).length;
 
-describe("assignmentId write key: masterSchedule.placeClass", () => {
-  test("a foreign assignment throws even when the group is local, before any placement is written", async () => {
+// Work keys (TRA-582): the teacher grid gives work to a class, so the public
+// placeClass / updatePlacement refuse an assignmentId or activityId outright,
+// local or foreign, before anything is written. The public placeHomework is
+// gone. updatePlacement still takes null, which unlinks an old card's work.
+describe("work keys are refused: masterSchedule.placeClass / updatePlacement", () => {
+  test("placeClass refuses an assignmentId or an activityId, writing nothing", async () => {
     const t = convexTest(schema, modules);
     const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
     const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
     await grantInstitutionMembership(t, teacherA, instA);
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const scholarB = await seedUser(t, "scholar", { username: "scholarB" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherB,
-      scholarIds: [scholarB],
-      institutionId: instB,
-    });
-    const localGroupId = await seedGroupWithRoster(t, teacherA, []);
-    const foreignAssignmentId = await seedAssignmentRow(t, teacherB, {
-      scholarIds: [scholarB],
-    });
+    const groupId = await seedGroupWithRoster(t, teacherA, []);
     const periodId = await seedPeriod(t);
     const asA = await asUser(t, teacherA);
+    const { activityId } = await seedUnitWithActivity(t, teacherA, instA);
+    const assignmentId = await seedAssignmentRow(t, teacherA);
+    const blockId = await seedClassBlock(t, periodId);
+
+    for (const work of [{ assignmentId }, { activityId }]) {
+      await expect(
+        asA.mutation(api.masterSchedule.placeClass, {
+          periodId, groupId, subject: "Math", weekday: 1, blockId, ...work,
+        } as never),
+      ).rejects.toThrow(/Validator|extra field/i);
+    }
+    expect(await placementCount(t)).toBe(0);
+    // Only the seeded assignment: nothing was auto-provisioned.
+    expect(await t.run((ctx) => ctx.db.query("assignments").collect())).toHaveLength(1);
+  });
+
+  test("updatePlacement refuses linking work but still unlinks an old card", async () => {
+    const t = convexTest(schema, modules);
+    const instA = await seedTestInstitution(t, { slug: "school-a" });
+    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
+    await grantInstitutionMembership(t, teacherA, instA);
+    const groupId = await seedGroupWithRoster(t, teacherA, []);
+    const periodId = await seedPeriod(t);
+    const asA = await asUser(t, teacherA);
+    const { activityId } = await seedUnitWithActivity(t, teacherA, instA);
+    const assignmentId = await seedAssignmentRow(t, teacherA);
+    const blockId = await seedClassBlock(t, periodId);
+    const bare = await asA.mutation(api.masterSchedule.placeClass, {
+      periodId, groupId, subject: "Math", weekday: 1, blockId,
+    });
 
     await expect(
-      asA.mutation(api.masterSchedule.placeClass, {
-        periodId,
-        groupId: localGroupId,
-        subject: "Math",
-        assignmentId: foreignAssignmentId,
+      asA.mutation(api.masterSchedule.updatePlacement, { placementId: bare, activityId } as never),
+    ).rejects.toThrow(/Validator/i);
+    await expect(
+      asA.mutation(api.masterSchedule.updatePlacement, { placementId: bare, assignmentId } as never),
+    ).rejects.toThrow(/Validator/i);
+    expect((await t.run((ctx) => ctx.db.get(bare)))?.activityId).toBeUndefined();
+
+    // A card placed before TRA-582 can still lose its work.
+    const card = await t.run((ctx) =>
+      ctx.db.insert("schedulePlacements", {
+        periodId, groupId, subject: "Math", weekday: 2, blockId, assignmentId, activityId,
       }),
-    ).rejects.toThrow(/forbidden/i);
-    expect(await placementCount(t)).toBe(0);
-    // Not just no NEW row — the foreign assignment itself was never touched.
-    const foreign = await t.run((ctx) => ctx.db.get(foreignAssignmentId));
-    expect(foreign?.scholarIds).toEqual([scholarB]);
-  });
-
-  test("a same-institution colleague's assignment succeeds", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const colleagueA = await seedUser(t, "teacher", { username: "teacherA2" });
-    await grantInstitutionMembership(t, colleagueA, instA);
-    const scholarA = await seedUser(t, "scholar", { username: "scholarA" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherA,
-      scholarIds: [scholarA],
-      institutionId: instA,
+    );
+    await asA.mutation(api.masterSchedule.updatePlacement, {
+      placementId: card, activityId: null, assignmentId: null,
     });
-    const groupId = await seedGroupWithRoster(t, teacherA, [scholarA]);
-    // Owned by the COLLEAGUE, not the caller — masterSchedule deliberately
-    // supports naming a colleague's assignment.
-    const assignmentId = await seedAssignmentRow(t, colleagueA, {
-      scholarIds: [scholarA],
-    });
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-
-    const placementId = await asA.mutation(api.masterSchedule.placeClass, {
-      periodId,
-      groupId,
-      subject: "Math",
-      assignmentId,
-    });
-    expect(placementId).toBeTruthy();
-    const row = await t.run((ctx) => ctx.db.get(placementId));
-    expect(row?.assignmentId).toBe(assignmentId);
-  });
-
-  test("platform_admin passes with a foreign group AND a foreign assignment", async () => {
-    const t = convexTest(schema, modules);
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const scholarB = await seedUser(t, "scholar", { username: "scholarB" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherB,
-      scholarIds: [scholarB],
-      institutionId: instB,
-    });
-    const foreignGroupId = await seedGroupWithRoster(t, teacherB, [scholarB]);
-    const foreignAssignmentId = await seedAssignmentRow(t, teacherB, {
-      scholarIds: [scholarB],
-    });
-    const admin = await seedUser(t, "platform_admin", { username: "admin" });
-    const periodId = await seedPeriod(t);
-    const asAdmin = await asUser(t, admin);
-
-    const placementId = await asAdmin.mutation(api.masterSchedule.placeClass, {
-      periodId,
-      groupId: foreignGroupId,
-      subject: "Math",
-      assignmentId: foreignAssignmentId,
-    });
-    expect(placementId).toBeTruthy();
+    const unlinked = await t.run((ctx) => ctx.db.get(card));
+    expect(unlinked?.activityId).toBeUndefined();
+    expect(unlinked?.assignmentId).toBeUndefined();
   });
 
   test("an undefined assignmentId is a no-op — the caller's own group is enough", async () => {
@@ -529,509 +502,6 @@ describe("assignmentId write key: masterSchedule.placeClass", () => {
       subject: "Math",
     });
     expect(placementId).toBeTruthy();
-  });
-});
-
-describe("assignmentId write key: masterSchedule.placeHomework", () => {
-  test("a foreign assignment throws even when the group is local", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const scholarB = await seedUser(t, "scholar", { username: "scholarB" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherB,
-      scholarIds: [scholarB],
-      institutionId: instB,
-    });
-    const localGroupId = await seedGroupWithRoster(t, teacherA, []);
-    const foreignAssignmentId = await seedAssignmentRow(t, teacherB, {
-      scholarIds: [scholarB],
-    });
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-
-    await expect(
-      asA.mutation(api.masterSchedule.placeHomework, {
-        periodId,
-        groupId: localGroupId,
-        subject: "Math",
-        assignmentId: foreignAssignmentId,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    expect(await placementCount(t)).toBe(0);
-  });
-
-  test("a same-institution colleague's assignment succeeds", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const colleagueA = await seedUser(t, "teacher", { username: "teacherA2" });
-    await grantInstitutionMembership(t, colleagueA, instA);
-    const scholarA = await seedUser(t, "scholar", { username: "scholarA" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherA,
-      scholarIds: [scholarA],
-      institutionId: instA,
-    });
-    const groupId = await seedGroupWithRoster(t, teacherA, [scholarA]);
-    const assignmentId = await seedAssignmentRow(t, colleagueA, {
-      scholarIds: [scholarA],
-    });
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-
-    const placementId = await asA.mutation(api.masterSchedule.placeHomework, {
-      periodId,
-      groupId,
-      subject: "Math",
-      assignmentId,
-    });
-    expect(placementId).toBeTruthy();
-  });
-});
-
-// ── activityId auto-provision (no assignmentId, an owner set): placeClass /
-// placeHomework both auto-ensure a NEW local assignment against the
-// activity's OWN unit (ensureAssignmentForGroupUnit) when no assignmentId is
-// supplied. A foreign activityId reaches the exact same escape as a foreign
-// assignmentId/unitId — just one derivation hop further away.
-describe("activityId auto-provision write key: masterSchedule.placeClass / placeHomework", () => {
-  async function seedUnitWithActivityIn(
-    t: ReturnType<typeof convexTest>,
-    teacherId: Id<"users">,
-    institutionId: Id<"institutions">,
-  ) {
-    const { activityId } = await seedUnitWithActivity(t, teacherId, institutionId);
-    return activityId;
-  }
-
-  test("placeClass: a foreign activityId throws before any assignment/placement is written", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const groupId = await seedGroupWithRoster(t, teacherA, []);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const foreignActivityId = await seedUnitWithActivityIn(t, teacherB, instB);
-
-    await expect(
-      asA.mutation(api.masterSchedule.placeClass, {
-        periodId,
-        groupId,
-        subject: "Math",
-        activityId: foreignActivityId,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    expect(await placementCount(t)).toBe(0);
-    const assignments = await t.run((ctx) => ctx.db.query("assignments").collect());
-    expect(assignments).toHaveLength(0);
-  });
-
-  test("placeClass: a same-institution activityId succeeds", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const groupId = await seedGroupWithRoster(t, teacherA, []);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const activityId = await seedUnitWithActivityIn(t, teacherA, instA);
-
-    const placementId = await asA.mutation(api.masterSchedule.placeClass, {
-      periodId,
-      groupId,
-      subject: "Math",
-      activityId,
-    });
-    expect(placementId).toBeTruthy();
-  });
-
-  test("placeHomework: a foreign activityId throws only once teacherId (the owner) is supplied", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const groupId = await seedGroupWithRoster(t, teacherA, []);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const foreignActivityId = await seedUnitWithActivityIn(t, teacherB, instB);
-
-    await expect(
-      asA.mutation(api.masterSchedule.placeHomework, {
-        periodId,
-        groupId,
-        subject: "Math",
-        activityId: foreignActivityId,
-        teacherId: teacherA,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-  });
-});
-
-describe("required assignmentId write key: masterSchedule.cascadeUnit", () => {
-  async function seedBlock(
-    t: ReturnType<typeof convexTest>,
-    asTeacher: Awaited<ReturnType<typeof asUser>>,
-    periodId: Id<"reportingPeriods">,
-  ) {
-    return await asTeacher.mutation(api.masterSchedule.createBlock, {
-      periodId,
-      label: "A",
-      startLocal: "08:30",
-      endLocal: "09:40",
-    });
-  }
-
-  test("a foreign assignment throws before any placement or assignment write", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const scholarB = await seedUser(t, "scholar", { username: "scholarB" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherB,
-      scholarIds: [scholarB],
-      institutionId: instB,
-    });
-    const localGroupId = await seedGroupWithRoster(t, teacherA, []);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const blockId = await seedBlock(t, asA, periodId);
-    // The foreign assignment carries a real unit — this is exactly the
-    // exploit shape: naming a foreign unit's assignment from a local group
-    // would otherwise cascade that unit's activities onto the local grid.
-    const { unitId: foreignUnitId } = await seedUnitWithActivity(t, teacherB, instB);
-    const foreignAssignmentId = await seedAssignmentRow(t, teacherB, {
-      unitId: foreignUnitId,
-      scholarIds: [scholarB],
-    });
-
-    await expect(
-      asA.mutation(api.masterSchedule.cascadeUnit, {
-        periodId,
-        groupId: localGroupId,
-        assignmentId: foreignAssignmentId,
-        startWeekday: 1,
-        startBlockId: blockId,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    expect(await placementCount(t)).toBe(0);
-  });
-
-  test("a same-institution colleague's assignment succeeds", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const colleagueA = await seedUser(t, "teacher", { username: "teacherA2" });
-    await grantInstitutionMembership(t, colleagueA, instA);
-    const scholarA = await seedUser(t, "scholar", { username: "scholarA" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherA,
-      scholarIds: [scholarA],
-      institutionId: instA,
-    });
-    const groupId = await seedGroupWithRoster(t, teacherA, [scholarA]);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const blockId = await seedBlock(t, asA, periodId);
-    const { unitId } = await seedUnitWithActivity(t, colleagueA, instA);
-    const assignmentId = await seedAssignmentRow(t, colleagueA, {
-      unitId,
-      scholarIds: [scholarA],
-    });
-
-    const result = await asA.mutation(api.masterSchedule.cascadeUnit, {
-      periodId,
-      groupId,
-      assignmentId,
-      startWeekday: 1,
-      startBlockId: blockId,
-    });
-    expect(result.placementIds.length).toBeGreaterThan(0);
-  });
-
-  test("platform_admin passes with a foreign group AND a foreign assignment", async () => {
-    const t = convexTest(schema, modules);
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const scholarB = await seedUser(t, "scholar", { username: "scholarB" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherB,
-      scholarIds: [scholarB],
-      institutionId: instB,
-    });
-    const foreignGroupId = await seedGroupWithRoster(t, teacherB, [scholarB]);
-    const admin = await seedUser(t, "platform_admin", { username: "admin" });
-    const periodId = await seedPeriod(t);
-    const asAdmin = await asUser(t, admin);
-    const blockId = await seedBlock(t, asAdmin, periodId);
-    const { unitId } = await seedUnitWithActivity(t, teacherB, instB);
-    const foreignAssignmentId = await seedAssignmentRow(t, teacherB, {
-      unitId,
-      scholarIds: [scholarB],
-    });
-
-    const result = await asAdmin.mutation(api.masterSchedule.cascadeUnit, {
-      periodId,
-      groupId: foreignGroupId,
-      assignmentId: foreignAssignmentId,
-      startWeekday: 1,
-      startBlockId: blockId,
-    });
-    expect(result.placementIds.length).toBeGreaterThan(0);
-  });
-
-  test("a missing assignment surfaces the core's own 'not found', not a Forbidden", async () => {
-    const t = convexTest(schema, modules);
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    const groupId = await seedGroupWithRoster(t, teacherA, []);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const blockId = await seedBlock(t, asA, periodId);
-    const assignmentId = await seedAssignmentRow(t, teacherA);
-    await t.run((ctx) => ctx.db.delete(assignmentId));
-
-    await expect(
-      asA.mutation(api.masterSchedule.cascadeUnit, {
-        periodId,
-        groupId,
-        assignmentId,
-        startWeekday: 1,
-        startBlockId: blockId,
-      }),
-    ).rejects.toThrow(/assignment not found/i);
-  });
-
-  test("an empty-roster ad-hoc assignment from a different institution's teacher still passes (nothing to leak)", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const groupId = await seedGroupWithRoster(t, teacherA, []);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const blockId = await seedBlock(t, asA, periodId);
-    const { unitId } = await seedUnitWithActivity(t, teacherA, instA);
-    // No scholarGroupId, no scholars — only the (LOCAL) unit resolves an
-    // institution, so this is decidable and local; the case with truly no
-    // signal at all is covered directly in access.test.ts.
-    const assignmentId = await seedAssignmentRow(t, teacherB, { unitId });
-
-    const result = await asA.mutation(api.masterSchedule.cascadeUnit, {
-      periodId,
-      groupId,
-      assignmentId,
-      startWeekday: 1,
-      startBlockId: blockId,
-    });
-    expect(result.placementIds.length).toBeGreaterThan(0);
-  });
-
-  test("an archived local assignment is not newly rejected by the guard", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const scholarA = await seedUser(t, "scholar", { username: "scholarA" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherA,
-      scholarIds: [scholarA],
-      institutionId: instA,
-    });
-    const groupId = await seedGroupWithRoster(t, teacherA, [scholarA]);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const blockId = await seedBlock(t, asA, periodId);
-    const { unitId } = await seedUnitWithActivity(t, teacherA, instA);
-    const assignmentId = await seedAssignmentRow(t, teacherA, {
-      unitId,
-      scholarIds: [scholarA],
-      archivedAt: Date.now(),
-    });
-
-    // Pre-existing (unrelated to this guard) behavior: coreCascadeUnit itself
-    // doesn't reject an archived assignment. The guard must not add a NEW
-    // rejection here — it should pass the institution check and let whatever
-    // happens next be exactly what happened before this PR.
-    const result = await asA.mutation(api.masterSchedule.cascadeUnit, {
-      periodId,
-      groupId,
-      assignmentId,
-      startWeekday: 1,
-      startBlockId: blockId,
-    });
-    expect(result.placementIds.length).toBeGreaterThan(0);
-  });
-});
-
-// ── client-supplied unitId: masterSchedule.cascadeUnitForGroup ─────────────
-//
-// Unlike cascadeUnit, this handler derives its assignmentId server-side (via
-// ensureAssignmentForGroupUnit) rather than accepting one from the client —
-// but it takes a client-supplied `unitId` directly, which reaches the SAME
-// underlying escape: ensureAssignmentForGroupUnit will happily provision a
-// LOCAL assignment against a FOREIGN institution's curriculum unit, and
-// coreCascadeUnit then materializes that foreign unit's activities as real
-// placements. Guarded with the same `requireUnitAccess` boundary every other
-// curriculum surface (activities.ts, lessons.ts, units.ts) already uses.
-describe("client-supplied unitId: masterSchedule.cascadeUnitForGroup", () => {
-  async function seedBlock(
-    asTeacher: Awaited<ReturnType<typeof asUser>>,
-    periodId: Id<"reportingPeriods">,
-  ) {
-    return await asTeacher.mutation(api.masterSchedule.createBlock, {
-      periodId,
-      label: "A",
-      startLocal: "08:30",
-      endLocal: "09:40",
-    });
-  }
-
-  test("a foreign unit throws before any assignment or placement is written", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const groupId = await seedGroupWithRoster(t, teacherA, []);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const blockId = await seedBlock(asA, periodId);
-    const { unitId: foreignUnitId } = await seedUnitWithActivity(t, teacherB, instB);
-
-    await expect(
-      asA.mutation(api.masterSchedule.cascadeUnitForGroup, {
-        periodId,
-        groupId,
-        unitId: foreignUnitId,
-        startWeekday: 1,
-        startBlockId: blockId,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    expect(await placementCount(t)).toBe(0);
-    const assignments = await t.run((ctx) => ctx.db.query("assignments").collect());
-    expect(assignments.filter((a) => a.unitId === foreignUnitId)).toHaveLength(0);
-  });
-
-  test("a same-institution unit succeeds", async () => {
-    const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "school-a" });
-    const teacherA = await seedUser(t, "teacher", { username: "teacherA" });
-    await grantInstitutionMembership(t, teacherA, instA);
-    const scholarA = await seedUser(t, "scholar", { username: "scholarA" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherA,
-      scholarIds: [scholarA],
-      institutionId: instA,
-    });
-    const groupId = await seedGroupWithRoster(t, teacherA, [scholarA]);
-    const periodId = await seedPeriod(t);
-    const asA = await asUser(t, teacherA);
-    const blockId = await seedBlock(asA, periodId);
-    const { unitId } = await seedUnitWithActivity(t, teacherA, instA);
-
-    const result = await asA.mutation(api.masterSchedule.cascadeUnitForGroup, {
-      periodId,
-      groupId,
-      unitId,
-      startWeekday: 1,
-      startBlockId: blockId,
-    });
-    expect(result.placementIds.length).toBeGreaterThan(0);
-  });
-
-  test("an unstamped (legacy) unit succeeds for the PRIMARY institution's teacher, throws for anyone else", async () => {
-    const t = convexTest(schema, modules);
-    const instPrimary = await seedTestInstitution(t, {
-      slug: "school-primary",
-      isPrimary: true,
-    });
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const primaryTeacher = await seedUser(t, "teacher", { username: "teacherPrimary" });
-    await grantInstitutionMembership(t, primaryTeacher, instPrimary);
-    const nonPrimaryTeacher = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, nonPrimaryTeacher, instB);
-    const { unitId: unstampedUnitId } = await seedUnitWithActivity(
-      t,
-      primaryTeacher,
-      undefined,
-    );
-    const periodId = await seedPeriod(t);
-
-    const primaryGroupId = await seedGroupWithRoster(t, primaryTeacher, []);
-    const asPrimary = await asUser(t, primaryTeacher);
-    const primaryBlockId = await seedBlock(asPrimary, periodId);
-    const primaryResult = await asPrimary.mutation(api.masterSchedule.cascadeUnitForGroup, {
-      periodId,
-      groupId: primaryGroupId,
-      unitId: unstampedUnitId,
-      startWeekday: 1,
-      startBlockId: primaryBlockId,
-    });
-    expect(primaryResult.placementIds.length).toBeGreaterThan(0);
-
-    const otherGroupId = await seedGroupWithRoster(t, nonPrimaryTeacher, []);
-    const asOther = await asUser(t, nonPrimaryTeacher);
-    const otherBlockId = await seedBlock(asOther, periodId);
-    await expect(
-      asOther.mutation(api.masterSchedule.cascadeUnitForGroup, {
-        periodId,
-        groupId: otherGroupId,
-        unitId: unstampedUnitId,
-        startWeekday: 1,
-        startBlockId: otherBlockId,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-  });
-
-  test("platform_admin passes with a foreign group AND a foreign unit", async () => {
-    const t = convexTest(schema, modules);
-    const instB = await seedTestInstitution(t, { slug: "school-b" });
-    const teacherB = await seedUser(t, "teacher", { username: "teacherB" });
-    await grantInstitutionMembership(t, teacherB, instB);
-    const scholarB = await seedUser(t, "scholar", { username: "scholarB" });
-    await grantStaffAccessToScholars(t, {
-      staffUserId: teacherB,
-      scholarIds: [scholarB],
-      institutionId: instB,
-    });
-    const foreignGroupId = await seedGroupWithRoster(t, teacherB, [scholarB]);
-    const admin = await seedUser(t, "platform_admin", { username: "admin" });
-    const periodId = await seedPeriod(t);
-    const asAdmin = await asUser(t, admin);
-    const blockId = await seedBlock(asAdmin, periodId);
-    const { unitId: foreignUnitId } = await seedUnitWithActivity(t, teacherB, instB);
-
-    const result = await asAdmin.mutation(api.masterSchedule.cascadeUnitForGroup, {
-      periodId,
-      groupId: foreignGroupId,
-      unitId: foreignUnitId,
-      startWeekday: 1,
-      startBlockId: blockId,
-    });
-    expect(result.placementIds.length).toBeGreaterThan(0);
   });
 });
 
@@ -1149,14 +619,14 @@ describe("resolved Master Schedule row ownership", () => {
       asB.mutation(api.masterSchedule.updatePlacement, {
         placementId: scheduleB.placementId,
         assignmentId: assignmentA,
-      }),
-    ).rejects.toThrow(/forbidden/i);
+      } as never),
+    ).rejects.toThrow(/Validator/i);
     await expect(
       asB.mutation(api.masterSchedule.updatePlacement, {
         placementId: scheduleB.placementId,
         activityId: activityA,
-      }),
-    ).rejects.toThrow(/forbidden/i);
+      } as never),
+    ).rejects.toThrow(/Validator/i);
 
     const [blockA, placementA, placementB] = await t.run(async (ctx) =>
       Promise.all([
@@ -1229,7 +699,9 @@ describe("resolved Master Schedule row ownership", () => {
     const asA = await asUser(t, teacherA);
     const asAdmin = await asUser(t, admin);
 
-    await asA.mutation(api.masterSchedule.updateBlock, {
+    // The bell schedule is school-admin-only, so the owning SCHOOL's admin
+    // edits the block; the owning teacher still edits the placement.
+    await asBellAdmin(t, api.masterSchedule.updateBlock, {
       blockId: scheduleA.blockId,
       label: "Owner changed",
     });
@@ -1257,131 +729,67 @@ describe("resolved Master Schedule row ownership", () => {
   });
 });
 
-describe("sequence and flag ownership", () => {
-  test("a foreign teacher cannot mutate any sequence or flag operation", async () => {
+describe("flag ownership", () => {
+  test("a foreign teacher cannot dismiss a flag", async () => {
     const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "sequence-school-a" });
-    const instB = await seedTestInstitution(t, { slug: "sequence-school-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "sequence-teacher-a" });
-    const teacherB = await seedUser(t, "teacher", { username: "sequence-teacher-b" });
-    const scholarA = await seedUser(t, "scholar", { username: "sequence-scholar-a" });
+    const instA = await seedTestInstitution(t, { slug: "flag-school-a" });
+    const instB = await seedTestInstitution(t, { slug: "flag-school-b" });
+    const teacherA = await seedUser(t, "teacher", { username: "flag-teacher-a" });
+    const teacherB = await seedUser(t, "teacher", { username: "flag-teacher-b" });
+    const scholarA = await seedUser(t, "scholar", { username: "flag-scholar-a" });
     const scheduleA = await seedOwnedSchedule(t, {
       institutionId: instA,
       teacherId: teacherA,
       scholarId: scholarA,
-      sequenceId: "foreign-sequence",
+      sequenceId: "foreign-flag",
     });
     await grantInstitutionMembership(t, teacherB, instB);
     const asB = await asUser(t, teacherB);
-
-    await expect(
-      asB.mutation(api.masterSchedule.acceptReorder, {
-        sequenceId: "foreign-sequence",
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    await expect(
-      asB.mutation(api.masterSchedule.moveSequence, {
-        sequenceId: "foreign-sequence",
-        deltaDays: 1,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    await expect(
-      asB.mutation(api.masterSchedule.reflowSequence, {
-        sequenceId: "foreign-sequence",
-        fromIndex: 0,
-      }),
-    ).rejects.toThrow(/forbidden/i);
     await expect(
       asB.mutation(api.masterSchedule.dismissFlag, {
         placementIds: [scheduleA.placementId],
         flagId: "slot:foreign",
       }),
     ).rejects.toThrow(/forbidden/i);
-
     const placement = await t.run((ctx) => ctx.db.get(scheduleA.placementId));
-    expect(placement?.orderOverride).toBeUndefined();
-    expect(placement?.weekday).toBe(1);
     expect(placement?.dismissedFlags).toBeUndefined();
   });
 
-  test("every affected placement is checked before sequence or flag writes begin", async () => {
+  test("every placement is checked before a dismiss writes", async () => {
     const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "mixed-sequence-a" });
-    const instB = await seedTestInstitution(t, { slug: "mixed-sequence-b" });
-    const teacherA = await seedUser(t, "teacher", { username: "mixed-teacher-a" });
-    const teacherB = await seedUser(t, "teacher", { username: "mixed-teacher-b" });
-    const scholarA = await seedUser(t, "scholar", { username: "mixed-scholar-a" });
-    const scholarB = await seedUser(t, "scholar", { username: "mixed-scholar-b" });
+    const instA = await seedTestInstitution(t, { slug: "mixed-flag-a" });
+    const instB = await seedTestInstitution(t, { slug: "mixed-flag-b" });
+    const teacherA = await seedUser(t, "teacher", { username: "mixed-flag-teacher-a" });
+    const teacherB = await seedUser(t, "teacher", { username: "mixed-flag-teacher-b" });
+    const scholarA = await seedUser(t, "scholar", { username: "mixed-flag-scholar-a" });
+    const scholarB = await seedUser(t, "scholar", { username: "mixed-flag-scholar-b" });
     const local = await seedOwnedSchedule(t, {
-      institutionId: instA,
-      teacherId: teacherA,
-      scholarId: scholarA,
-      sequenceId: "mixed-sequence",
+      institutionId: instA, teacherId: teacherA, scholarId: scholarA, sequenceId: "mixed-flag",
     });
     const foreign = await seedOwnedSchedule(t, {
-      institutionId: instB,
-      teacherId: teacherB,
-      scholarId: scholarB,
-      sequenceId: "mixed-sequence",
+      institutionId: instB, teacherId: teacherB, scholarId: scholarB, sequenceId: "mixed-flag",
     });
     const asA = await asUser(t, teacherA);
-
-    await expect(
-      asA.mutation(api.masterSchedule.acceptReorder, {
-        sequenceId: "mixed-sequence",
-      }),
-    ).rejects.toThrow(/forbidden/i);
     await expect(
       asA.mutation(api.masterSchedule.dismissFlag, {
         placementIds: [local.placementId, foreign.placementId],
         flagId: "slot:mixed",
       }),
     ).rejects.toThrow(/forbidden/i);
-    await expect(
-      asA.mutation(api.masterSchedule.moveSequence, {
-        sequenceId: "mixed-sequence",
-        deltaDays: 1,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    await expect(
-      asA.mutation(api.masterSchedule.reflowSequence, {
-        sequenceId: "mixed-sequence",
-        fromIndex: 0,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-
     const localPlacement = await t.run((ctx) => ctx.db.get(local.placementId));
-    expect(localPlacement?.orderOverride).toBeUndefined();
     expect(localPlacement?.dismissedFlags).toBeUndefined();
-    expect(localPlacement?.weekday).toBe(1);
   });
 
-  test("the owning institution and platform admin can still mutate a sequence", async () => {
+  test("platform admin can still dismiss a flag", async () => {
     const t = convexTest(schema, modules);
-    const instA = await seedTestInstitution(t, { slug: "sequence-owner-school" });
-    const teacherA = await seedUser(t, "teacher", {
-      username: "sequence-owner-teacher",
-    });
-    const scholarA = await seedUser(t, "scholar", {
-      username: "sequence-owner-scholar",
-    });
+    const instA = await seedTestInstitution(t, { slug: "flag-owner-school" });
+    const teacherA = await seedUser(t, "teacher", { username: "flag-owner-teacher" });
+    const scholarA = await seedUser(t, "scholar", { username: "flag-owner-scholar" });
     const scheduleA = await seedOwnedSchedule(t, {
-      institutionId: instA,
-      teacherId: teacherA,
-      scholarId: scholarA,
-      sequenceId: "owned-sequence",
+      institutionId: instA, teacherId: teacherA, scholarId: scholarA, sequenceId: "owned-flag",
     });
-    const admin = await seedUser(t, "platform_admin", {
-      username: "sequence-admin",
-    });
-    const asA = await asUser(t, teacherA);
+    const admin = await seedUser(t, "platform_admin", { username: "flag-admin" });
     const asAdmin = await asUser(t, admin);
-
-    expect(
-      await asA.mutation(api.masterSchedule.acceptReorder, {
-        sequenceId: "owned-sequence",
-      }),
-    ).toBe(1);
     expect(
       await asAdmin.mutation(api.masterSchedule.dismissFlag, {
         placementIds: [scheduleA.placementId],
@@ -1389,6 +797,7 @@ describe("sequence and flag ownership", () => {
       }),
     ).toBe(1);
   });
+
 });
 
 describe("period-scoped reassignTeacher ownership", () => {
@@ -1486,7 +895,7 @@ describe("period-scoped reassignTeacher ownership", () => {
       }),
     ).rejects.toThrow(/forbidden/i);
 
-    await asPrimary.mutation(api.masterSchedule.updateBlock, {
+    await asBellAdmin(t, api.masterSchedule.updateBlock, {
       blockId,
       label: "Primary change",
     });
@@ -1504,7 +913,7 @@ describe("period-scoped reassignTeacher ownership", () => {
 });
 
 describe("internal aide row ownership", () => {
-  test("a foreign teacher cannot mutate block, placement, sequence, or flag rows", async () => {
+  test("a foreign teacher cannot mutate block, placement, or flag rows", async () => {
     const t = convexTest(schema, modules);
     const instA = await seedTestInstitution(t, { slug: "aide-school-a" });
     const instB = await seedTestInstitution(t, { slug: "aide-school-b" });
@@ -1567,26 +976,6 @@ describe("internal aide row ownership", () => {
       }),
     ).rejects.toThrow(/forbidden/i);
     await expect(
-      t.mutation(internal.masterSchedule.aideAcceptReorder, {
-        callerUserId: teacherB,
-        sequenceId: "aide-foreign-sequence",
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    await expect(
-      t.mutation(internal.masterSchedule.aideMoveSequence, {
-        callerUserId: teacherB,
-        sequenceId: "aide-foreign-sequence",
-        deltaDays: 1,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    await expect(
-      t.mutation(internal.masterSchedule.aideReflowSequence, {
-        callerUserId: teacherB,
-        sequenceId: "aide-foreign-sequence",
-        fromIndex: 0,
-      }),
-    ).rejects.toThrow(/forbidden/i);
-    await expect(
       t.mutation(internal.masterSchedule.aideDismissFlag, {
         callerUserId: teacherB,
         placementIds: [scheduleA.placementId],
@@ -1604,7 +993,6 @@ describe("internal aide row ownership", () => {
     expect(blockA?.label).toBe("Block A");
     expect(placementA?.weekday).toBe(1);
     expect(placementA?.blockId).toBe(scheduleA.blockId);
-    expect(placementA?.orderOverride).toBeUndefined();
     expect(placementA?.dismissedFlags).toBeUndefined();
     expect(placementB).toMatchObject({
       weekday: 1,
@@ -1628,8 +1016,17 @@ describe("internal aide row ownership", () => {
       sequenceId: "aide-owned-sequence",
     });
 
+    // The bell schedule is school-admin-only (2026-11-08): the teacher's aide
+    // is refused, and the school's admin makes the change.
+    await expect(
+      t.mutation(internal.masterSchedule.aideUpdateBlock, {
+        callerUserId: teacherA,
+        blockId: scheduleA.blockId,
+        label: "Teacher changed",
+      }),
+    ).rejects.toThrow(/Only a school admin can change the bell schedule/);
     await t.mutation(internal.masterSchedule.aideUpdateBlock, {
-      callerUserId: teacherA,
+      callerUserId: await seedSchoolAdmin(t, instA),
       blockId: scheduleA.blockId,
       label: "Owner changed",
     });
@@ -1640,12 +1037,6 @@ describe("internal aide row ownership", () => {
         deltaDays: 1,
       }),
     ).toEqual({ ok: true, weekday: 2 });
-    expect(
-      await t.mutation(internal.masterSchedule.aideAcceptReorder, {
-        callerUserId: teacherA,
-        sequenceId: "aide-owned-sequence",
-      }),
-    ).toBe(1);
     expect(
       await t.mutation(internal.masterSchedule.aideDismissFlag, {
         callerUserId: teacherA,
@@ -1663,7 +1054,6 @@ describe("internal aide row ownership", () => {
     expect(block?.label).toBe("Owner changed");
     expect(placement).toMatchObject({
       weekday: 2,
-      orderOverride: true,
       dismissedFlags: ["slot:aide-owner"],
     });
   });

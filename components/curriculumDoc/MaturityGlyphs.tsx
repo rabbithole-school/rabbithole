@@ -66,8 +66,7 @@ export function HollowDot({
 }
 
 /** A ring with a small filled core — the app's existing "in progress /
- *  currently here" mark (the scholar plate's ActivityStatusDot "here" state,
- *  and kin to the schedule's static "Live" pip). Deliberately STATIC: it says
+ *  currently here" mark (kin to the schedule's static "Live" pip). Deliberately STATIC: it says
  *  "running now" without a spinner's "any second now" urgency, which is the
  *  right register for a session that may take scholars minutes, hours, or days
  *  to finish. The middle rung between {@link HollowDot} and {@link CircleCheck}. */

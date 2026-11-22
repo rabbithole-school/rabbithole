@@ -1,13 +1,13 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import {
   Box,
   Button,
   Heading,
   HStack,
-  Spinner,
   Stack,
   Text,
 } from "@chakra-ui/react";
@@ -31,12 +31,14 @@ import { describePhysicalExam } from "./parentPhysicalExamCardState";
  */
 export function ParentPhysicalExamCard({
   scholarId,
+  exam,
 }: {
   scholarId: Id<"users">;
+  /** The current physical, from the Records tab's `parents.recordsTab`. */
+  exam: FunctionReturnType<
+    typeof api.scholarHealthRecords.getPhysicalExamForGuardian
+  >;
 }) {
-  const exam = useQuery(api.scholarHealthRecords.getPhysicalExamForGuardian, {
-    scholarId,
-  });
   const generateUploadUrl = useMutation(
     api.scholarHealthRecords.generatePhysicalExamUploadUrl,
   );
@@ -90,8 +92,6 @@ export function ParentPhysicalExamCard({
       if (inputRef.current) inputRef.current.value = "";
     }
   }
-
-  if (exam === undefined) return <Spinner size="sm" color="violet.400" />;
 
   const state = describePhysicalExam(exam, (uploadedAt) =>
     new Date(uploadedAt).toLocaleDateString(),

@@ -44,7 +44,8 @@ export type ManipulativeKind =
   | "clock"
   | "liquid"
   | "money"
-  | "molecule";
+  | "molecule"
+  | "functionGraph";
 
 /**
  * The closed union as a RUNTIME array — the one place a server-side reader (with
@@ -75,6 +76,7 @@ export const ALL_MANIPULATIVE_KINDS = [
   "liquid",
   "money",
   "molecule",
+  "functionGraph",
 ] as const satisfies readonly ManipulativeKind[];
 
 // Compile-time totality: a new kind added to the union but missing from the
@@ -614,6 +616,12 @@ export interface CoordinatePlaneSpec extends ManipulativeMeta {
   /** Fixed decorative line segments (e.g. a polygon outline), each a pair of
    *  math-space endpoints. Purely visual — never read by `isSolved`. */
   segments?: Array<[{ x: number; y: number }, { x: number; y: number }]>;
+  /**
+   * Optional names for the two axes, drawn at their positive ends — `{ x: "Re",
+   * y: "Im" }` turns the plane into the complex plane (a point (a, b) is the
+   * number a + bi). Display only; never read by `isSolved`.
+   */
+  axisLabels?: { x: string; y: string };
   /** 1-3 draggable points. Each `start` MUST NOT already sit on its goal
    *  target once snapped (see `assertGradableManipulative`/authoring.ts). */
   draggable: Array<{ start: { x: number; y: number } }>;
@@ -855,6 +863,101 @@ export interface MoleculeSpec extends ManipulativeMeta {
   answer?: never;
 }
 
+// ── functionGraph — shape a graph by hand (Algebra 2 functions) ──────────────
+// Graph-first input for a scholar who reasons visually: the answer is a graph
+// the scholar BUILDS on a numbered grid, graded exactly server-side. Three goal
+// shapes, one window:
+//   • matchTransform  — the prompt gives y = a·f(x − h) + k for a named parent.
+//                       The parent is drawn faintly; the scholar drags the live
+//                       curve's anchor (vertex / corner / centre) to set h and k
+//                       and a second handle to set a (crossing the anchor's
+//                       height flips it upside down); a "Flip left–right" button
+//                       sets b = −1 (y = a·f(b(x − h)) + k), since a drag cannot
+//                       express a horizontal reflection. The live equation is never
+//                       shown — that would turn the task into symbol matching.
+//                       Graded on the GRAPH, so equivalent parameters pass (any
+//                       anchor on the target line for a linear parent; a·2^(x−h)
+//                       = 2a·2^(x−h−1) for exp2). With `targetUnstated` the
+//                       prompt only describes the target (an inverse, say), and
+//                       the describers treat it as COMPUTE-STYLE.
+//   • placeZeros      — the prompt gives a polynomial in factored form. The
+//                       scholar drags one marker per distinct real zero onto the
+//                       x-axis, taps each to say whether the graph crosses or
+//                       bounces there, and sets both ends up/down. COMPUTE-STYLE:
+//                       the zeros are the answer, never named by a describer.
+//   • placeAsymptotes — the prompt gives a rational function. The scholar drags
+//                       dashed lines onto its asymptotes; the true curve appears
+//                       only once they are right. COMPUTE-STYLE likewise.
+// The two curve forms (`zeros`+`leading`, `rational`) are the same shapes the
+// `functionPlot` prompt visual draws, so an item author writes one object.
+export type FunctionGraphParent =
+  | "linear"
+  | "quadratic"
+  | "cubic"
+  | "abs"
+  | "sqrt"
+  | "exp2"
+  | "log2"
+  | "reciprocal";
+
+/**
+ * y = a·f(b(x − h)) + k. `b` is 1 (default, omit it) or −1: a flip left–right
+ * across x = h, set on the board with its "Flip left–right" button. No
+ * horizontal stretch.
+ */
+export interface FunctionGraphTransform {
+  a: number;
+  h: number;
+  k: number;
+  b?: number;
+}
+
+/** One distinct real zero and its multiplicity (even = the graph bounces). */
+export interface FunctionGraphZero {
+  x: number;
+  multiplicity: number;
+}
+
+/**
+ * y = horizontal + scale / ((x − v₁)(x − v₂)…) — see `CurveRational` in
+ * shared/functionCurves.ts. `holes` lists removable discontinuities (a common
+ * factor cancelled from the prompt's rule): drawn as hollow dots once the
+ * asymptotes are right, and a vertical line placed at one is simply wrong.
+ */
+export interface FunctionGraphRational {
+  vertical: number[];
+  horizontal: number;
+  scale: number;
+  holes?: number[];
+}
+
+export type FunctionGraphGoal =
+  | {
+      type: "matchTransform";
+      parent: FunctionGraphParent;
+      target: FunctionGraphTransform;
+      /**
+       * Set when the prompt does NOT state the target rule and the scholar has
+       * to work it out ("Shape the graph of the inverse of y = 2^x + 1."). The
+       * tutor describers then never name the target equation or its
+       * parameters, and describe only the curve the scholar built.
+       */
+      targetUnstated?: true;
+    }
+  | { type: "placeZeros"; zeros: FunctionGraphZero[]; leading: number }
+  | { type: "placeAsymptotes"; rational: FunctionGraphRational };
+
+export interface FunctionGraphSpec extends ManipulativeMeta {
+  kind: "functionGraph";
+  /** Integer window. Grid lines and snapping are at every whole unit. */
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+  /** Required: the goal decides which board is drawn. */
+  goal: FunctionGraphGoal;
+}
+
 export type ManipulativeSpec =
   | PartitionSpec
   | NumberLineSpec
@@ -875,7 +978,8 @@ export type ManipulativeSpec =
   | ClockSpec
   | LiquidSpec
   | MoneySpec
-  | MoleculeSpec;
+  | MoleculeSpec
+  | FunctionGraphSpec;
 
 /** True when this spec is a self-correcting challenge (vs a free explainer). */
 export function isChallenge(spec: ManipulativeSpec): boolean {

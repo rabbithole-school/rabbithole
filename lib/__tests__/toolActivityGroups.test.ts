@@ -328,6 +328,7 @@ describe("scholar-safe failure redaction", () => {
     expect(isFailureResult("Failed: Pass artifact_id to score the document rubric.")).toBe(true);
     expect(isFailureResult("Error: boom")).toBe(true);
     expect(isFailureResult("  failed: lowercased + padded")).toBe(true);
+    expect(isFailureResult("Refused: lesson not found")).toBe(true);
     // Non-failures are left alone.
     expect(isFailureResult("Awarded flair: Strong opening")).toBe(false);
     expect(isFailureResult("Recorded 3 verdicts · overall full")).toBe(false);

@@ -9,19 +9,19 @@
 //   * **the scholar archived it** — `archivedAt`. The scholar's own act; staff
 //     have no way to set it. "Open" everywhere means NOT ARCHIVED.
 // Replying therefore does not close anything: it is a comment, never a
-// verdict, and the five-open cap is a prioritization lesson pointed at the
-// kid, so the kid — not a staffer — decides when a slot frees. No pipeline, no
+// verdict: the board is the kid's, so the kid — not a staffer — decides when
+// an idea is off their plate. No pipeline, no
 // tracking to shipped code; release-note credit is its own editorial act on
 // `changelogEntries`, not here.
 //
 // Phase 1 (this file): the manual composer (`createMine`), the scholar's own
-// board (`listMine`), the staff queue (`listOpenForStaff` +
-// `listForStaffInternal` for the aide tool), and the human reply (`respond`,
-// the aide tool's backing mutation). The reflection chat that auto-distills
+// board (`listMine`), the staff queue (`listForStaffInternal`, read by the
+// aide tool), and the human reply (`respond`, the aide tool's backing
+// mutation). The reflection chat that auto-distills
 // ideas is Phase 2.
 //
 // THE CONVERSATION (2026-09-25). Every idea now has a Workshop thread — a
-// `parentThreads` row of kind "workshop" (scholarMessages.ts), linked both
+// scholar `parentThreads` row of flavor "workshop" (scholarMessages.ts), linked both
 // ways (`scholarSuggestions.threadId` / `parentThreads.suggestionId`). The
 // scholar's words are its first message; every staff reply (dashboard, aide,
 // Slack) is a message in it, and the scholar can answer back. "A human
@@ -29,8 +29,8 @@
 // `responseSeenAt` are DEPRECATED (read only to backfill a legacy idea's
 // thread) until the narrow drops them.
 
-import { v } from "convex/values";
-import { authedQuery, authedMutation, teacherQuery, teacherMutation } from "./lib/customFunctions";
+import { ConvexError, v } from "convex/values";
+import { authedQuery, authedMutation } from "./lib/customFunctions";
 import {
   internalAction,
   internalQuery,
@@ -43,7 +43,6 @@ import { isTeacherRole } from "./lib/roles";
 import {
   resolveInstitutionLens,
   scholarInLens,
-  scholarIdsInLens,
 } from "./lib/institutionLens";
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
 import { firstLineToTitle } from "./lib/textToTitle";
@@ -57,11 +56,15 @@ import {
 import {
   scholarForThread,
   staffCanReachScholar,
+  threadFlavor,
 } from "./lib/scholarThreadAccess";
 import {
   attachmentPreview,
   previewOf,
+  stageServerStoredAttachments,
+  threadStaffWriterIds,
   userDisplayName,
+  type ServerStoredAttachment,
 } from "./parentMessages";
 import {
   escapeSlackText,
@@ -71,6 +74,9 @@ import {
   postMessage,
   type SlackMessageMetadata,
 } from "./lib/slackApi";
+import { greyLineMessage, type SlackPart } from "./lib/slackGreyLine";
+import { relevantTeacherSlackIds } from "./lib/slackTeacherMentions";
+import { withMentions } from "./parentMessageSlack";
 
 /**
  * Fail-CLOSED institution-lens check for the Workshop aide-tool paths — the
@@ -92,10 +98,6 @@ export function isScholarWithinAideLens(
   return allowedScholarIds.has(scholarId);
 }
 
-// Soft cap on OPEN (heard) ideas per scholar — a prioritization lesson, not a
-// hard wall (§9 "rate/volume sanity"). The friendly error names the number so
-// the UI can show it verbatim.
-const MAX_OPEN_SUGGESTIONS = 5;
 /** Slack message metadata `event_type` on a Workshop-idea notification. The
  * inbound reply path keys on it to tell OUR root apart from any other message
  * a human might start a thread under. */
@@ -126,14 +128,12 @@ export function suggestionIdFromDeliveryId(deliveryId: unknown): string | null {
   return /^[a-zA-Z0-9_-]+$/.test(raw) ? raw : null;
 }
 
-/** Shared with the meta-observer so its at-cap skip matches the composer's. */
-export const MAX_OPEN_SUGGESTIONS_EXPORT = MAX_OPEN_SUGGESTIONS;
-
 /**
- * A scholar's OPEN IDEAS — not archived, and not a bug-report card. The one
- * read behind the five-open cap (composer, chat capture, restore, observer) and
- * the reflection chat's duplicate-avoidance list, so a bug report can never
- * push a kid into the "which idea matters most?" moment.
+ * A scholar's OPEN IDEAS — not archived, and not a bug-report card. The read
+ * behind the reflection chat's duplicate-avoidance list and the observer's
+ * near-duplicate skip. There is no cap on how many a scholar may have open
+ * (Andy, 2026-10-23: a five-open cap blocked a kid for days and bytes are
+ * cheap).
  */
 export async function openIdeas(
   ctx: QueryCtx,
@@ -240,20 +240,34 @@ export function shortScholarName(fullName: string | undefined | null): string {
 // escaping so an escape entity can't be cut mid-way.
 const MAX_SLACK_IDEA_CHARS = 3500;
 
-export function workshopIdeaSlackText(
+/**
+ * The #workshop root for an idea or bug report: who filed it and their words,
+ * full size, then the asides in Slack's grey line. A plain reply under either
+ * kind of root reaches the scholar (slackBot `handleWorkshopIdeaThreadReply`
+ * binds the thread by the root's `delivery_id`), so both say so.
+ */
+export function workshopIdeaSlackParts(
   scholarName: string | undefined | null,
   scholarWords: string,
   kind: "idea" | "bug_report" = "idea",
-): string {
+): SlackPart[] {
   const trimmed = scholarWords.trim();
-  const clipped = trimmed.length > MAX_SLACK_IDEA_CHARS
-    ? `${trimmed.slice(0, MAX_SLACK_IDEA_CHARS)}…\n(truncated — the full idea is in Rabbithole)`
-    : trimmed;
+  const truncated = trimmed.length > MAX_SLACK_IDEA_CHARS;
+  const clipped = truncated ? `${trimmed.slice(0, MAX_SLACK_IDEA_CHARS)}…` : trimmed;
   const quotedIdea = escapeSlackText(clipped || "(no words captured)").replace(/\r?\n/g, "\n> ");
-  const name = `**${escapeSlackText(shortScholarName(scholarName))}**`;
-  return kind === "bug_report"
-    ? `🐛 ${name} reported a bug (triage is in the bug-report channel):\n> ${quotedIdea}`
-    : `💡 ${name} filed a Workshop idea:\n> ${quotedIdea}`;
+  const shownName = escapeSlackText(shortScholarName(scholarName));
+  const name = `**${shownName}**`;
+  // A missing name reads as "the scholar", and "Kai N." already ends the sentence.
+  const replyTo = (scholarName ?? "").trim() ? shownName : "the scholar";
+  const replyHint = `Reply in this thread to write back to ${replyTo}${replyTo.endsWith(".") ? "" : "."}`;
+  return [
+    kind === "bug_report"
+      ? `🐛 ${name} reported a bug:\n> ${quotedIdea}`
+      : `💡 ${name} filed a Workshop idea:\n> ${quotedIdea}`,
+    ...(kind === "bug_report" ? [{ grey: "(triage is in the bug-report channel)" }] : []),
+    ...(truncated ? [{ grey: "(truncated — the full idea is in Rabbithole)" }] : []),
+    { grey: replyHint },
+  ];
 }
 
 /**
@@ -285,7 +299,7 @@ export const workshopDeliveryContext = internalQuery({
     if (!institution?.isPrimary || institution.disabledAt !== undefined) return null;
     const scholar = await ctx.db.get(suggestion.scholarId);
     return {
-      text: workshopIdeaSlackText(
+      parts: workshopIdeaSlackParts(
         scholar?.name,
         suggestion.scholarWords,
         suggestion.bugReportId ? "bug_report" : "idea",
@@ -351,9 +365,8 @@ export const postWorkshopIdea = internalAction({
     };
     const posted = await postMessage(token, {
       channel: channelId,
-      text: context.text,
       metadata,
-      markdown: true,
+      ...greyLineMessage(context.parts, { markdown: true }),
     });
     if (!posted.ok) {
       await scheduleRetry(posted.retryAfterMs);
@@ -429,11 +442,13 @@ export const recordWorkshopSlackRoot = internalMutation({
  * for a colleague. The bot posts it, and slackBot ignores bot-authored
  * messages, so it can never be re-ingested as a staff reply (no echo loop).
  */
-function workshopScholarReplySlackText(
+export function workshopScholarReplySlackParts(
   scholarName: string | undefined | null,
   body: string,
   attachmentCount: number,
-): string {
+  /** Set when staff wrote it in the app; the scholar's name is then the addressee. */
+  staffName?: string,
+): SlackPart[] {
   const trimmed = body.trim();
   const clipped = trimmed.length > MAX_SLACK_IDEA_CHARS
     ? `${trimmed.slice(0, MAX_SLACK_IDEA_CHARS)}…`
@@ -441,28 +456,43 @@ function workshopScholarReplySlackText(
   const quoted = clipped
     ? `> ${escapeSlackText(clipped).replace(/\r?\n/g, "\n> ")}`
     : "";
-  const attached =
-    attachmentCount > 0
-      ? `_${attachmentCount === 1 ? "1 attachment" : `${attachmentCount} attachments`} — open it in Rabbithole_`
-      : "";
   return [
-    `↩ **${escapeSlackText(shortScholarName(scholarName))}** replied in the app:`,
-    quoted,
-    attached,
-  ]
-    .filter(Boolean)
-    .join("\n");
+    [
+      staffName
+        ? `↩ **${escapeSlackText(staffName)}** wrote to **${escapeSlackText(shortScholarName(scholarName))}** in the app:`
+        : `↩ **${escapeSlackText(shortScholarName(scholarName))}** replied in the app:`,
+      quoted,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    ...(attachmentCount > 0
+      ? [
+          {
+            grey: `_${attachmentCount === 1 ? "1 attachment" : `${attachmentCount} attachments`} — open it in Rabbithole_`,
+          },
+        ]
+      : []),
+  ];
 }
 
 export const scholarReplySlackContext = internalQuery({
   args: { messageId: v.id("parentMessages") },
   handler: async (ctx, { messageId }) => {
     const message = await ctx.db.get(messageId);
-    if (!message || message.authorType !== "scholar" || message.retractedAt) {
+    // The scholar's reply, or one staff wrote in the app (a reply typed in
+    // the Slack thread is there already).
+    if (
+      !message ||
+      message.retractedAt ||
+      !message.authorUserId ||
+      (message.authorType !== "scholar" &&
+        (message.authorType !== "teacher" || message.source === "slack"))
+    ) {
       return null;
     }
+    const fromScholar = message.authorType === "scholar";
     const thread = await ctx.db.get(message.threadId);
-    if (!thread || thread.kind !== "workshop" || !thread.suggestionId) return null;
+    if (!thread || threadFlavor(thread) !== "workshop" || !thread.suggestionId) return null;
     const scholar = await scholarForThread(ctx, thread);
     if (!scholar || !thread.institutionId) return null;
     // First-party only, exactly like the #workshop post itself.
@@ -491,11 +521,23 @@ export const scholarReplySlackContext = internalQuery({
       suggestionId: suggestion._id,
       deliveryId: workshopDeliveryId(suggestion._id),
       createdAt: suggestion.createdAt,
-      text: workshopScholarReplySlackText(
+      parts: workshopScholarReplySlackParts(
         scholar.name,
         message.body,
         attachments.length,
+        fromScholar
+          ? undefined
+          : userDisplayName(await ctx.db.get(message.authorUserId), "A teacher"),
       ),
+      // A scholar's reply @-mentions the teachers it concerns.
+      mentions: fromScholar
+        ? await relevantTeacherSlackIds(ctx, {
+            institutionId: thread.institutionId,
+            scholarIds: [scholar._id],
+            staffWriterIds: await threadStaffWriterIds(ctx, thread),
+            authorUserId: scholar._id,
+          })
+        : [],
     };
   },
 });
@@ -603,12 +645,11 @@ export const forwardScholarReplyToSlack = internalAction({
     const posted = await postMessage(token, {
       channel: root.channelId,
       threadTs: root.threadTs,
-      text: context.text,
-      markdown: true,
       metadata: {
         event_type: WORKSHOP_REPLY_EVENT_TYPE,
         event_payload: { delivery_id: deliveryId },
       },
+      ...withMentions(greyLineMessage(context.parts, { markdown: true }), context.mentions),
     });
     if (!posted.ok) {
       await retryOrGiveUp(`post failed: ${posted.error ?? "unknown"}`, posted.retryAfterMs);
@@ -707,19 +748,10 @@ export const createMine = authedMutation({
   handler: async (ctx, args) => {
     const text = args.text.trim();
     if (!text) {
-      throw new Error("Add a few words about your idea first.");
+      throw new ConvexError("Add a few words about your idea first.");
     }
 
     const scholarId = ctx.user._id;
-
-    // Soft cap: too many open ideas is a prioritization moment, not a bug.
-    const open = await openIdeas(ctx, scholarId);
-    if (open.length >= MAX_OPEN_SUGGESTIONS) {
-      throw new Error(
-        `You've already got ${MAX_OPEN_SUGGESTIONS} ideas open in the Workshop — that's the most at once. Let's see what happens with those first. Which one matters most to you?`,
-      );
-    }
-
     const now = Date.now();
     const title = firstLineToTitle(text);
     const suggestionId = await ctx.db.insert("scholarSuggestions", {
@@ -745,15 +777,11 @@ export const createMine = authedMutation({
  * idea-conversations, WORKSHOP_IDEA_CONVOS_ENABLED). A discriminated union so
  * the tool can speak naturally about what happened:
  *  - `captured`: the idea was sent (a row exists).
- *  - `at_cap`:   the scholar already has the max open ideas — nothing was sent;
- *                the tool relays a "help them prioritize" nudge (§9 cap parity
- *                with the composer's message).
  *  - `empty`:    no scholar words to send (defensive; the model must supply the
  *                kid's own phrasing).
  */
 export type CaptureFromChatResult =
   | { status: "captured"; suggestionId: Id<"scholarSuggestions">; title: string }
-  | { status: "at_cap"; cap: number }
   | { status: "empty" };
 
 /**
@@ -766,9 +794,7 @@ export type CaptureFromChatResult =
  * Records the kid's OWN words verbatim (`scholarWords`) and, when a thinking-
  * partner conversation reshaped the idea and the scholar agreed to it, the
  * `refined` framing too — staff see BOTH (QB guardrail #3, "the kid's words
- * survive"). At the open-ideas cap it captures NOTHING and returns `at_cap` so
- * the tool can help the scholar prioritize instead of erroring (guardrail #2 /
- * §9), never a hard wall that would block sending.
+ * survive").
  */
 export const captureFromChat = internalMutation({
   args: {
@@ -784,13 +810,6 @@ export const captureFromChat = internalMutation({
     if (!scholarWords) return { status: "empty" };
 
     const scholarId = args.scholarId;
-
-    // Soft cap, same number as the composer — the thinking partner helps the
-    // scholar prioritize rather than piling on. Nothing is written at the cap.
-    const open = await openIdeas(ctx, scholarId);
-    if (open.length >= MAX_OPEN_SUGGESTIONS) {
-      return { status: "at_cap", cap: MAX_OPEN_SUGGESTIONS };
-    }
 
     const title = args.title.trim() || firstLineToTitle(scholarWords);
     // Only persist `refined` when it's a real, distinct framing — a blank or a
@@ -882,43 +901,6 @@ export const listMine = authedQuery({
 });
 
 /**
- * Ideas that still OWE A REPLY — not archived by the scholar, and the scholar
- * spoke last in the idea's thread (nobody has written back yet, or the
- * scholar answered a reply) — oldest first, joined with each scholar's name + username.
- * Backs the teacher-dashboard queue (the aide tool reads through the internal
- * sibling below, since it runs in an action with a mapped principal, not a
- * Convex-auth identity).
- */
-export const listOpenForStaff = teacherQuery({
-  args: {},
-  handler: async (ctx) => {
-    // Indexed on the un-archived rows only — an archived idea is off the
-    // plate, and a global scan would grow without bound as the table does.
-    const rows = await ctx.db
-      .query("scholarSuggestions")
-      .withIndex("by_archived", (q) => q.eq("archivedAt", undefined))
-      .collect();
-    rows.sort((a, b) => a.createdAt - b.createdAt);
-    // Institution boundary (CLAUDE.md § Multi-tenancy): a role check alone is a
-    // cross-tenant leak, so a teacher only sees ideas from scholars in their
-    // context. Use the SAME lens the aide path uses (institutionLens) — NOT the
-    // access.ts helpers — so the dashboard and the aide cannot diverge: the aide
-    // lens deliberately includes UNASSIGNED scholars (institutionId undefined)
-    // under the primary institution during the pre-backfill window, and those
-    // scholars' ideas must not silently vanish from the queue that owes them a
-    // reply. Build the allowed set once, then filter BEFORE joining any scholar
-    // name/username PII.
-    const lens = await resolveInstitutionLens(ctx, ctx.user, "");
-    const allowed = await scholarIdsInLens(ctx, lens, {
-      includeProgramGuests: true,
-    });
-    const visible = rows.filter((r) => allowed.has(r.scholarId));
-    const joined = await Promise.all(visible.map((row) => joinScholar(ctx, row)));
-    return joined.filter((row) => row.needsReply);
-  },
-});
-
-/**
  * Staff-queue read for the aide tool (`list_scholar_suggestions`), gated at
  * the tool-assembly layer (teacher+). Optional filters: `filter` and a
  * scholar `username` (exact). Oldest first — the longest-waiting idea leads.
@@ -1003,9 +985,21 @@ export const listForStaffInternal = internalQuery({
 });
 
 /**
+ * `respondCore`'s refusal when the caller may not reply to this idea, or it
+ * does not exist. One class for both, so the two stay indistinguishable (see
+ * the lens comment inside), and distinct from a bug, which callers must not
+ * mistake for a refusal.
+ */
+class SuggestionNotFoundError extends Error {
+  constructor() {
+    super("Suggestion not found");
+  }
+}
+
+/**
  * Shared core for posting a human reply on an idea — used by the aide tool's
- * `respond` (internal, bot-mapped author), the dashboard's `respondAsStaff`
- * (teacherMutation, the signed-in teacher) and the #workshop Slack thread.
+ * `respond` (internal, bot-mapped author) and the #workshop Slack thread
+ * (`respondFromSlackThread`, the Slack-mapped staffer).
  * `authorId` must be teacher+ (checked here as defense-in-depth).
  *
  * A reply is a MESSAGE in the idea's Workshop thread (authorType "teacher"),
@@ -1019,8 +1013,7 @@ async function respondCore(
     suggestionId: Id<"scholarSuggestions">;
     authorId: Id<"users">;
     body: string;
-    // Institution boundary. The dashboard path (respondAsStaff) has a real
-    // authenticated staffer → the SAME institution lens the aide uses
+    // Institution boundary. The Slack path has a real mapped staffer → the SAME institution lens the aide uses
     // (resolveInstitutionLens + scholarInLens), so unassigned scholars under
     // the primary institution stay answerable; the aide path threads its
     // resolved lens in and is fail-closed the same way as listForStaffInternal.
@@ -1033,6 +1026,9 @@ async function respondCore(
         };
     /** Transport provenance ("via Slack") for the staff-facing badge. */
     source?: "slack";
+    /** Files the server stored itself (a Slack reply's uploads). A reply with
+     *  files needs no text, as in the in-app composer. */
+    attachments?: readonly ServerStoredAttachment[];
   },
 ) {
   const author = await ctx.db.get(args.authorId);
@@ -1040,22 +1036,24 @@ async function respondCore(
     throw new Error("Forbidden: teacher or admin role required");
   }
   const body = args.body.trim();
-  if (!body) throw new Error("A reply needs a message.");
+  if (!body && !args.attachments?.length) {
+    throw new Error("A reply needs a message.");
+  }
 
   const suggestion = await ctx.db.get(args.suggestionId);
-  if (!suggestion) throw new Error("Suggestion not found");
+  if (!suggestion) throw new SuggestionNotFoundError();
 
   // Institution boundary (CLAUDE.md § Multi-tenancy): a staffer may only reply
   // to an idea from a scholar in their context — the role gate above is not
   // enough. Enforced BEFORE any write, so an out-of-lens idea is left untouched.
-  // The dashboard path resolves the SAME lens the aide uses (institutionLens,
+  // The Slack path resolves the SAME lens the aide uses (institutionLens,
   // not access.ts) so unassigned scholars under the primary institution stay
   // answerable; the aide path uses its threaded, fail-closed set.
   let withinLens: boolean;
   if (args.lens.via === "userAccess") {
     const lens = await resolveInstitutionLens(ctx, author, "");
     const scholar = await ctx.db.get(suggestion.scholarId);
-    withinLens = !!scholar && scholarInLens(lens, scholar);
+    withinLens = !!scholar && (await scholarInLens(ctx, lens, scholar));
   } else {
     withinLens = isScholarWithinAideLens(
       suggestion.scholarId,
@@ -1070,7 +1068,7 @@ async function respondCore(
     // another school's suggestion exists (same principle as the username branch
     // in listForStaffInternal and the credit branch in changelog.createEntry).
     // Do NOT "improve" this into a specific "outside your institution" message.
-    throw new Error("Suggestion not found");
+    throw new SuggestionNotFoundError();
   }
 
   const now = Date.now();
@@ -1079,7 +1077,7 @@ async function respondCore(
   const threadScholar = thread ? await scholarForThread(ctx, thread) : null;
   if (!thread || !threadScholar) {
     // No institution to anchor a conversation to — same refusal shape.
-    throw new Error("Suggestion not found");
+    throw new SuggestionNotFoundError();
   }
   // The lens above is a VISIBILITY rule; posting requires the Workshop team
   // rule itself (a teacher/school admin at the scholar's school, or a platform
@@ -1087,15 +1085,23 @@ async function respondCore(
   // base staff or curriculum could otherwise write into a thread it can't
   // read. Same refusal shape as a nonexistent id.
   if (!(await staffCanReachScholar(ctx, author, threadScholar, "workshop")).ok) {
-    throw new Error("Suggestion not found");
+    throw new SuggestionNotFoundError();
   }
   const priorFacts = await scholarThreadFacts(ctx, thread);
+  // Staged only now, past every refusal above: a caller catching a throw would
+  // otherwise keep the writes made before it, leaving rows nothing claims.
+  const attachments = await stageServerStoredAttachments(
+    ctx,
+    args.authorId,
+    args.attachments ?? [],
+  );
   await postScholarThreadMessage(ctx, {
     thread,
     scholar: threadScholar,
     authorType: "teacher",
     authorUserId: args.authorId,
     body,
+    attachments,
     source: args.source,
     now,
   });
@@ -1141,27 +1147,6 @@ export const respond = internalMutation({
 });
 
 /**
- * The teacher-dashboard queue's reply action — the signed-in teacher IS the
- * author. Thin `teacherMutation` wrapper over the same core as the aide tool
- * (per-request principal from the auth identity, not an arg). Its lens comes
- * from the real
- * authenticated user (resolveInstitutionLens), so it needs no id-set plumbing.
- */
-export const respondAsStaff = teacherMutation({
-  args: {
-    suggestionId: v.id("scholarSuggestions"),
-    body: v.string(),
-  },
-  handler: async (ctx, args) =>
-    respondCore(ctx, {
-      suggestionId: args.suggestionId,
-      authorId: ctx.user._id,
-      body: args.body,
-      lens: { via: "userAccess" },
-    }),
-});
-
-/**
  * The result of routing a plain Slack thread reply onto its Workshop idea, so
  * the Slack layer can ACK legibly instead of repeating the silent drop this
  * path exists to fix (see convex/slackBot.ts → handleWorkshopIdeaThreadReply).
@@ -1194,6 +1179,8 @@ export type WorkshopSlackReplyResult =
  *  - **Every staff reply in the thread reaches the child.** That IS the
  *    feature; it also means the thread is not a staff-room. The ✅ ack on the
  *    Slack side makes that visible on every message.
+ *  - **Photos and files travel with the words.** The reply's uploads become
+ *    the message's attachments, and a reply that is only a photo is a message.
  *
  * `suggestionId` arrives as a raw string parsed out of Slack metadata, so it is
  * normalized against the real table rather than trusted as an id.
@@ -1203,10 +1190,22 @@ export const respondFromSlackThread = internalMutation({
     suggestionId: v.string(),
     authorId: v.id("users"),
     body: v.string(),
+    // The reply's Slack uploads, already downloaded into storage by the
+    // handler. Internal-only, so these ids never came from a client.
+    attachments: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id("_storage"),
+          fileName: v.string(),
+          mimeType: v.string(),
+        }),
+      ),
+    ),
   },
   handler: async (ctx, args): Promise<WorkshopSlackReplyResult> => {
     const body = args.body.trim();
-    if (!body) return { status: "empty" };
+    const attachments = args.attachments ?? [];
+    if (!body && attachments.length === 0) return { status: "empty" };
 
     // Pre-checked here (rather than left to respondCore's throw) so the Slack
     // layer can tell a staffer WHY nothing was recorded.
@@ -1230,6 +1229,7 @@ export const respondFromSlackThread = internalMutation({
         body,
         lens: { via: "userAccess" },
         source: "slack",
+        attachments,
       });
       return {
         status: "recorded",
@@ -1238,16 +1238,13 @@ export const respondFromSlackThread = internalMutation({
         scholarFirstName: result.scholarFirstName,
       };
     } catch (err) {
-      // The expected throw here is respondCore's institution-lens refusal,
-      // which is deliberately indistinguishable from "no such suggestion" (see
-      // the comment there) — keep the RESPONSE that way. But the assumption
-      // that nothing else can throw is unenforced, so log: a real bug degrading
-      // into a friendly "couldn't match that" is precisely the silent failure
-      // this whole path exists to eliminate.
-      console.error(
-        `scholarSuggestions.respondFromSlackThread: refused ${suggestionId}:`,
-        err,
-      );
+      // respondCore's refusals (the institution lens among them) are
+      // deliberately indistinguishable from "no such suggestion" (see the
+      // comment there) — keep the RESPONSE that way. Anything else is a bug:
+      // rethrow it, so the transaction rolls back instead of keeping whatever
+      // was written before the throw, and the Slack side says something went
+      // wrong rather than "couldn't match that".
+      if (!(err instanceof SuggestionNotFoundError)) throw err;
       return { status: "not_found" };
     }
   },
@@ -1256,15 +1253,13 @@ export const respondFromSlackThread = internalMutation({
 /**
  * Put one of MY OWN ideas away, or bring it back.
  *
- * This is the lever the five-open cap was always pointing at. The cap's message
- * asks the kid "which one matters most to you?" — but until now a STAFFER
- * closing an idea is what freed a slot, so the friction landed on the child and
- * the control sat with an adult. `scholarId` is ALWAYS the caller, never an
+ * The board is the kid's, so the kid decides what is still on their plate —
+ * a STAFFER replying never closes an idea. `scholarId` is ALWAYS the caller, never an
  * argument, and there is deliberately no staff-facing equivalent: an adult can
  * reply to an idea, and that is all.
  *
  * Reversible on purpose. Putting something away should never feel like losing
- * it, and a kid who archives to make room may want it back next week.
+ * it, and a kid may want it back next week.
  */
 export const setArchivedMine = authedMutation({
   args: {
@@ -1276,23 +1271,11 @@ export const setArchivedMine = authedMutation({
     // Same shape as every other "my own row" guard: a suggestion belonging to
     // someone else is indistinguishable from one that doesn't exist.
     if (!suggestion || suggestion.scholarId !== ctx.user._id) {
-      throw new Error("Idea not found");
+      throw new ConvexError("Idea not found");
     }
     const alreadyArchived = !!suggestion.archivedAt;
     if (alreadyArchived === args.archived) {
       return { archived: alreadyArchived, title: suggestion.title };
-    }
-
-    // Bringing an idea back can push the scholar over the five-open cap — say
-    // so plainly rather than silently exceeding it, and name the number the way
-    // the composer does. A bug-report card is not an idea, so it never waits.
-    if (!args.archived && !suggestion.bugReportId) {
-      const open = await openIdeas(ctx, ctx.user._id);
-      if (open.length >= MAX_OPEN_SUGGESTIONS) {
-        throw new Error(
-          `You've already got ${MAX_OPEN_SUGGESTIONS} ideas out — that's the most at once. Archive one first to make room for this one.`,
-        );
-      }
     }
 
     await ctx.db.patch(args.suggestionId, {

@@ -83,9 +83,10 @@ export const mintTranscriptionSecret = authedAction({
                 turn_detection: {
                   type: "semantic_vad",
                 },
-                noise_reduction: {
-                  type: "far_field",
-                },
+                // No server noise reduction. far_field was set with no
+                // measurement behind it, and on the iPad's raw mic audio it
+                // garbled transcripts (one take: "Her elephant dance on
+                // Tuesday morning." with it, word-perfect without; #4710).
               },
             },
           },

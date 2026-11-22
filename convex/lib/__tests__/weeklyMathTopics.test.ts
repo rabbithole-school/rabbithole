@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { SPIRAL_GAP_MS } from "../practice/spiralBreaker";
 import {
+  topicKey,
   weeklyMathTopics,
   type WeeklyMathTopicAttempt,
   type WeeklyMathTopicErrorEvent,
@@ -52,7 +53,7 @@ describe("weeklyMathTopics", () => {
     expect(weeklyMathTopics([], rows, SINCE, NOW)).toMatchObject([
       {
         nodeKey: "grouping",
-        tier: "practice",
+        tier: "watching",
         attemptCount: 2,
         missCount: 2,
         missSittingCount: 1,
@@ -61,11 +62,11 @@ describe("weeklyMathTopics", () => {
     ]);
   });
 
-  test("marks difficulty that returns across sittings as sustained", () => {
+  test("marks a topic still missed across three sittings as persistent", () => {
     const firstDay = NOW - 2 * DAY_MS;
     const attempts = [
       attempt("grouping", "a", firstDay),
-      attempt("grouping", "b", firstDay + 5 * 60_000),
+      attempt("grouping", "b", NOW - DAY_MS),
       attempt("grouping", "c", NOW),
     ];
 
@@ -74,20 +75,64 @@ describe("weeklyMathTopics", () => {
     ).toMatchObject([
       {
         nodeKey: "grouping",
-        tier: "sustained",
+        tier: "persistent",
         missCount: 3,
-        missSittingCount: 2,
-        dayCount: 2,
+        missSittingCount: 3,
+        dayCount: 3,
+        recurred: false,
       },
     ]);
 
-    const sameSittingAttempts = attempts.map((row, index) => ({
-      ...row,
-      createdAt: firstDay + index * 5 * 60_000,
-    }));
-    expect(
-      weeklyMathTopics([], sameSittingAttempts, SINCE, NOW)[0]?.tier,
-    ).toBe("practice");
+    const twoSittings = [attempts[0], attempts[1], { ...attempts[2], createdAt: NOW - DAY_MS + 60_000 }];
+    expect(weeklyMathTopics([], twoSittings, SINCE, NOW)[0]?.tier).toBe(
+      "watching",
+    );
+  });
+
+  test("marks a still-missed topic that also came up last week as persistent", () => {
+    const rows = [
+      attempt("grouping", "a", NOW - 60_000),
+      attempt("grouping", "b", NOW),
+    ];
+    const lastWeek = new Set([topicKey("whole-number-arithmetic", "grouping")]);
+    expect(weeklyMathTopics([], rows, SINCE, NOW, lastWeek)[0]).toMatchObject({
+      tier: "persistent",
+      recurred: true,
+    });
+    expect(weeklyMathTopics([], rows, SINCE, NOW)[0]?.tier).toBe("watching");
+  });
+
+  test("keeps unanswered misses apart as not learned yet until they recur", () => {
+    const rows = [
+      attempt("grouping", "a", NOW - 2 * DAY_MS, { explanationReason: "dont_know" }),
+      attempt("grouping", "b", NOW - DAY_MS, { answerText: " " }),
+      attempt("grouping", "c", NOW, { explanationReason: "dont_know" }),
+    ];
+    expect(weeklyMathTopics([], rows, SINCE, NOW)[0]).toMatchObject({
+      tier: "notYet",
+      notAttempted: true,
+      missSittingCount: 3,
+    });
+    const lastWeek = new Set([topicKey("whole-number-arithmetic", "grouping")]);
+    expect(weeklyMathTopics([], rows, SINCE, NOW, lastWeek)[0]?.tier).toBe(
+      "persistent",
+    );
+  });
+
+  test("settles a topic whose misses are a small share of mostly correct work", () => {
+    const rows = [
+      attempt("grouping", "a", NOW - 2 * DAY_MS),
+      attempt("grouping", "b", NOW - DAY_MS),
+      attempt("grouping", "c", NOW - 60_000),
+      ...Array.from({ length: 15 }, (_, i) =>
+        attempt("grouping", `ok${i}`, NOW - 2 * DAY_MS + 1_000 + i, { correct: true }),
+      ),
+    ].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    expect(weeklyMathTopics([], rows, SINCE, NOW)[0]).toMatchObject({
+      tier: "settled",
+      missCount: 3,
+      latestAttemptCorrect: false,
+    });
   });
 
   test("treats exactly thirty minutes as one sitting and a larger gap as another", () => {
@@ -100,7 +145,7 @@ describe("weeklyMathTopics", () => {
 
     expect(
       weeklyMathTopics([], sameDayAttempts, SINCE, NOW)[0],
-    ).toMatchObject({ tier: "practice", missSittingCount: 1 });
+    ).toMatchObject({ tier: "watching", missSittingCount: 1 });
 
     const nextDayAttempt = attempt("grouping", "c", first + DAY_MS);
     expect(
@@ -111,13 +156,13 @@ describe("weeklyMathTopics", () => {
         NOW,
       )[0],
     ).toMatchObject({
-      tier: "sustained",
+      tier: "watching",
       missSittingCount: 2,
       dayCount: 2,
     });
   });
 
-  test("keeps later correctness as nuance instead of erasing sustained difficulty", () => {
+  test("settles a topic that ends the week correct, keeping its misses as evidence", () => {
     const first = NOW - 2 * DAY_MS;
     const attempts = [
       attempt("grouping", "a", first),
@@ -128,7 +173,7 @@ describe("weeklyMathTopics", () => {
     expect(
       weeklyMathTopics([], attempts, SINCE, NOW)[0],
     ).toMatchObject({
-      tier: "sustained",
+      tier: "settled",
       missCount: 3,
       correctCount: 1,
       latestAttemptCorrect: true,
@@ -136,7 +181,29 @@ describe("weeklyMathTopics", () => {
     });
   });
 
-  test("uses the acute breaker cue without requiring classifier output", () => {
+  test("does not settle on a correct answer given with worked steps showing", () => {
+    const rows = [
+      attempt("grouping", "a", NOW - 2 * DAY_MS),
+      attempt("grouping", "b", NOW - DAY_MS),
+      attempt("grouping", "c", NOW - 60_000),
+      attempt("grouping", "helped", NOW, { correct: true, scaffolded: true }),
+    ];
+    expect(weeklyMathTopics([], rows, SINCE, NOW)[0]).toMatchObject({
+      tier: "persistent",
+      latestAttemptCorrect: true,
+    });
+    const unassisted = [...rows.slice(0, 3), attempt("grouping", "alone", NOW, { correct: true })];
+    expect(weeklyMathTopics([], unassisted, SINCE, NOW)[0]?.tier).toBe("settled");
+    // An unaided recovery followed by one helped answer stays settled.
+    const recoveredThenHelped = [
+      ...rows.slice(0, 3),
+      attempt("grouping", "alone", NOW - 30_000, { correct: true }),
+      attempt("grouping", "helped", NOW, { correct: true, scaffolded: true }),
+    ];
+    expect(weeklyMathTopics([], recoveredThenHelped, SINCE, NOW)[0]?.tier).toBe("settled");
+  });
+
+  test("treats an open three-misses-in-a-row step-in as persistent", () => {
     const first = NOW - 10 * 60_000;
     const rows = [
       attempt("grouping", "a", first),
@@ -150,7 +217,7 @@ describe("weeklyMathTopics", () => {
       }),
     ];
     expect(weeklyMathTopics([], rows, SINCE, NOW)[0]).toMatchObject({
-      tier: "acute",
+      tier: "persistent",
       missCount: 3,
       breakerCount: 1,
     });
@@ -225,7 +292,7 @@ describe("weeklyMathTopics", () => {
     ];
 
     expect(weeklyMathTopics([], rows, SINCE, NOW)[0]).toMatchObject({
-      tier: "practice",
+      tier: "settled",
       missCount: 3,
       breakerCount: 1,
       latestAttemptCorrect: true,
@@ -262,7 +329,7 @@ describe("weeklyMathTopics", () => {
     ];
 
     expect(weeklyMathTopics([], rows, SINCE, NOW)[0]).toMatchObject({
-      tier: "acute",
+      tier: "persistent",
       missCount: 4,
       breakerCount: 1,
       latestAttemptCorrect: false,
@@ -289,7 +356,7 @@ describe("weeklyMathTopics", () => {
         ({ nodeKey }) => nodeKey === "grouping",
       ),
     ).toMatchObject({
-      tier: "practice",
+      tier: "watching",
       missCount: 2,
       breakerCount: 0,
     });
@@ -312,7 +379,7 @@ describe("weeklyMathTopics", () => {
         NOW,
       )[0],
     ).toMatchObject({
-      tier: "practice",
+      tier: "watching",
       pattern: "REVERSED_OPERANDS",
       patternDescription: expect.any(String),
     });
@@ -335,18 +402,20 @@ describe("weeklyMathTopics", () => {
     ).toEqual([]);
   });
 
-  test("ranks sustained, acute, then ordinary topics deterministically", () => {
+  test("ranks persistent, watching, not learned yet, then settled", () => {
     const rows = [
-      attempt("ordinary", "o1", NOW - 20 * 60_000),
-      attempt("ordinary", "o2", NOW - 19 * 60_000),
-      attempt("acute", "a1", NOW - 10 * 60_000),
-      attempt("acute", "a2", NOW - 9 * 60_000),
-      attempt("acute", "a3", NOW - 8 * 60_000, {
-        breaker: { streak: 3, offer: "declined", recovery: "won" },
+      attempt("settled", "x1", NOW - 30 * 60_000),
+      attempt("settled", "x2", NOW - 29 * 60_000),
+      attempt("settled", "x3", NOW - 28 * 60_000, { correct: true }),
+      attempt("not-yet", "n1", NOW - 20 * 60_000, { explanationReason: "dont_know" }),
+      attempt("not-yet", "n2", NOW - 19 * 60_000, { explanationReason: "dont_know" }),
+      attempt("watching", "w1", NOW - 12 * 60_000),
+      attempt("watching", "w2", NOW - 11 * 60_000),
+      attempt("persistent", "p1", NOW - 10 * 60_000),
+      attempt("persistent", "p2", NOW - 9 * 60_000),
+      attempt("persistent", "p3", NOW - 8 * 60_000, {
+        breaker: { streak: 3, offer: "declined", recovery: "none" },
       }),
-      attempt("sustained", "s1", NOW - DAY_MS),
-      attempt("sustained", "s2", NOW - DAY_MS + 1_000),
-      attempt("sustained", "s3", NOW),
     ];
 
     expect(
@@ -355,9 +424,10 @@ describe("weeklyMathTopics", () => {
         tier,
       })),
     ).toEqual([
-      { nodeKey: "sustained", tier: "sustained" },
-      { nodeKey: "acute", tier: "acute" },
-      { nodeKey: "ordinary", tier: "practice" },
+      { nodeKey: "persistent", tier: "persistent" },
+      { nodeKey: "watching", tier: "watching" },
+      { nodeKey: "not-yet", tier: "notYet" },
+      { nodeKey: "settled", tier: "settled" },
     ]);
   });
 

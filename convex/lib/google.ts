@@ -147,7 +147,15 @@ export function missingAdmissionsScopes(
 }
 
 /** OAuth `purpose` values for the per-user link (`beginOAuth`). */
-export const PERSONAL_GOOGLE_PURPOSES = ["default", "admissions"] as const;
+export const PERSONAL_GOOGLE_PURPOSES = ["default", "admissions", "sheets"] as const;
+
+/**
+ * Editing spreadsheets the person didn't create through Rabbithole. Asked for
+ * only through the "sheets" purpose, from the moment someone's Sheets edit
+ * needs it, rather than in GOOGLE_OAUTH_SCOPES: adding it there would mark
+ * every staff link as needing re-consent for a permission few of them use.
+ */
+export const SHEETS_EDIT_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 export type PersonalGooglePurpose = (typeof PERSONAL_GOOGLE_PURPOSES)[number];
 
 /** Union of scope sets, normalized and de-duplicated, order-preserving. */
@@ -173,6 +181,12 @@ export function scopesForPersonalGooglePurpose(
       normalizeGoogleScopes(existingScopes).filter((s) => s !== GMAIL_METADATA_SCOPE),
       ADMISSIONS_GOOGLE_SCOPES,
     );
+  }
+  if (purpose === "sheets") {
+    // The default set plus Sheets editing. Nothing else is carried forward by
+    // name: incremental auth keeps the same account's earlier grants, and a
+    // different account must not inherit someone's Gmail or Calendar access.
+    return mergeGoogleScopes(GOOGLE_OAUTH_SCOPES, [SHEETS_EDIT_SCOPE]);
   }
   return [...GOOGLE_OAUTH_SCOPES];
 }

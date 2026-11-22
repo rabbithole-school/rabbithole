@@ -43,9 +43,11 @@ export const MAX_FACT_SPRINT_ITEMS = 5;
 /** A fact needs at least this many recorded attempts before it's sprint-eligible
  *  — one stray tap shouldn't conjure a targeted drill. */
 export const MIN_SEEN_FOR_SPRINT = 2;
-/** Bounded seed searches per target fact — the fact spaces are tiny (a handful
- *  of operands), so a match is found in a few draws or the target is skipped. */
-const SEED_SEARCH_TRIES = 256;
+/** Bounded seed searches per target fact. The generators keep zero facts
+ *  ("17 − 0", "0 + 10") rare so they don't crowd ordinary practice, which makes
+ *  the rarest ones about 1 draw in 2,000; at this budget even those are found
+ *  about 98% of the time. A generateItem draw costs microseconds. */
+const SEED_SEARCH_TRIES = 8192;
 
 /** A fact family present in the current run — the sprint only ever draws from a
  *  family the scholar is already working, never a cold one. */

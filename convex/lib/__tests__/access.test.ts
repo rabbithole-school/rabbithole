@@ -101,11 +101,11 @@ describe("requireStaffAccessible", () => {
 
 /**
  * Direct unit coverage for `requireAssignmentAccessible` (convex/lib/access.ts) —
- * the ASSIGNMENT-side twin the masterSchedule.ts write surface (`placeClass`,
- * `placeHomework`, `cascadeUnit`) uses to authorize a client-supplied
- * `assignmentId` before it's linked into a placement or cascaded. End-to-end
- * coverage through the actual handlers lives in
- * `convex/__tests__/scheduleTenantGuards.test.ts`.
+ * the ASSIGNMENT-side twin that authorized a client-supplied `assignmentId`
+ * on the master schedule's write surface. Since TRA-582 that surface refuses
+ * work keys outright (WORK_IS_GIVEN, covered in
+ * `convex/__tests__/scheduleTenantGuards.test.ts`), so the helper has no
+ * caller left.
  */
 describe("requireAssignmentAccessible", () => {
   async function seedScholarIn(

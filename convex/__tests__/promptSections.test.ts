@@ -7,12 +7,12 @@ import { buildSystemPrompt } from "../sessionHelpers";
 // corrupt the tutor's input in ways that wouldn't show up in a quick read.
 
 function build(opts: {
-  masteryContext?: Parameters<typeof buildSystemPrompt>[11];
-  signalContext?: Parameters<typeof buildSystemPrompt>[12];
-  timingContext?: Parameters<typeof buildSystemPrompt>[13];
+  masteryContext?: Parameters<typeof buildSystemPrompt>[10];
+  signalContext?: Parameters<typeof buildSystemPrompt>[11];
+  timingContext?: Parameters<typeof buildSystemPrompt>[12];
 }) {
   return buildSystemPrompt(
-    null, null, "Kai",
+    null, "Kai",
     null, null, null, null, null, null, null, null,
     opts.masteryContext ?? null,
     opts.signalContext ?? null,

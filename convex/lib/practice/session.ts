@@ -12,11 +12,15 @@
  */
 
 import {
+  type AnswerForm,
+  type AnswerPalette,
   type AnswerType,
   answersEqual,
+  formatAnswer,
   formatUnit,
   parseAnswerWithUnit,
   formatAnswerForDisplay,
+  meetsRequiredForm,
 } from "./answers";
 import {
   generateItem,
@@ -101,6 +105,15 @@ export type ServedItem = {
   //     gates it on fluency (kept until access-proven, then dropped for L3).
   answerShape?: "twoD";
   answerFormat?: string;
+  /** Which extra keys the algebra pad shows (`AnswerPalette` in answers.ts),
+   *  declared by the template. When present, `answerShape`/`answerFormat`
+   *  are deliberately ABSENT: the client picks its editor from `answerType` +
+   *  `answerPalette`, never the old box editor's locked skeletons. */
+  answerPalette?: AnswerPalette;
+  /** The representation the answer must use ("factored", "complexStandard",
+   *  "lowestTerms", …), for a one-line hint under the answer box. Names a
+   *  shape, never a value. */
+  answerForm?: AnswerForm;
   // ── Fact automaticity ("Fast math" sprint, FastMath analog) ────────────
   /** Marks this item as a member of a contiguous fact-sprint block — a bare
    *  single-digit fact selected for the scholar's weak facts in a fact family
@@ -251,7 +264,7 @@ export function buildSession(
       choices: item.choices,
       promptVisual: item.promptVisual,
       ...(factKey ? { factKey } : {}),
-      ...expressionAnswerSignals(item.answerType, item.answer),
+      ...templateInputHints(item),
     });
   }
 
@@ -307,7 +320,7 @@ function dedupeAgainstRecent(
         choices: item.choices,
         promptVisual: item.promptVisual,
         ...(factKey ? { factKey } : {}),
-        ...expressionAnswerSignals(item.answerType, item.answer),
+        ...templateInputHints(item),
       });
     }
     const chosen = preferUnseenCandidates(candidates, avoid, 1)[0];
@@ -316,6 +329,23 @@ function dedupeAgainstRecent(
       identityAt[p] = canonicalItemIdentity(chosen.itemId);
     }
   }
+}
+
+/**
+ * The input metadata a TEMPLATE item serves beside its stem: the algebra-pad
+ * palette and the required form when the template declares them, else the
+ * 2-D box-editor signals. Never both — an item with a palette routes to the
+ * algebra editor, not the box editor's skeletons.
+ */
+export function templateInputHints(
+  item: Pick<PracticeItem, "answerType" | "answer" | "answerPalette" | "answerForm">,
+): Pick<ServedItem, "answerPalette" | "answerForm" | "answerShape" | "answerFormat"> {
+  return {
+    ...(item.answerPalette
+      ? { answerPalette: item.answerPalette }
+      : expressionAnswerSignals(item.answerType, item.answer)),
+    ...(item.answerForm ? { answerForm: item.answerForm } : {}),
+  };
 }
 
 export type GradeResult = {
@@ -347,12 +377,14 @@ export function gradeTemplateItem(itemId: string, learnerRaw: string): GradeResu
   const item = generateItem(parsed.skillKey, parsed.seed, parsed.form);
   if (!item) return null;
   const { answer: learner, unit } = parseAnswerWithUnit(learnerRaw, item.answerType);
-  const valueMatches =
-    learner !== null &&
-    answersEqual(learner, item.answer, {
-      requireSimplifiedRadical: parsed.skillKey === "roots_simplify_radicals",
-    });
-  const correct = valueMatches && (!item.answerUnit || unit === item.answerUnit);
+  const valueMatches = learner !== null && answersEqual(learner, item.answer);
+  // The oracle has no scholar to nudge: a right value in the wrong form is
+  // simply not correct here, for every form (legacy and algebraic alike).
+  const correct =
+    valueMatches &&
+    (!item.answerForm ||
+      meetsRequiredForm(learnerRaw, formatAnswer(item.answer), item.answerForm, item.answerType)) &&
+    (!item.answerUnit || unit === item.answerUnit);
   const display = formatAnswerForDisplay(item.answer, item.choices);
   return {
     skillKey: parsed.skillKey,

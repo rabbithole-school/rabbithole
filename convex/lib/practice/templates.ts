@@ -39,10 +39,16 @@ import {
   type UnitKey,
   choiceAns,
   decAns,
+  exprAns,
   formatAnswer,
   fracAns,
   intAns,
+  solutionSetAns,
+  type AnswerForm,
+  type AnswerPalette,
 } from "./answers";
+import { algebra2Templates } from "./algebra2";
+import { algorithmsTemplates } from "./algorithms";
 import type { WorkedStep } from "./fadedSteps";
 import {
   addWithin20MakeTenSteps,
@@ -77,7 +83,7 @@ import {
   permutationsSteps,
   pigeonholeSteps,
   primeCompositeSteps,
-  primeFactorizationExponentSteps,
+  primeExponentByDivisionSteps,
   primeGapSteps,
   probabilityFractionSteps,
   rangeSteps,
@@ -145,6 +151,15 @@ export type PracticeItem = {
    *  hidden operand of an arithmetic fact ("? × 13 = 26"), which is a bare
    *  number no matter what the direct item measured. */
   answerUnit?: UnitKey;
+  /** A representation the answer must use beyond its value ("Simplify 72/80"
+   *  is not answered by 72/80). Server-only, like the answer; see `AnswerForm`.
+   *  NOT carried onto a FORM variant, for the same reason as `answerUnit`. */
+  answerForm?: AnswerForm;
+  /** Which extra keys the algebra pad shows (see `AnswerPalette`). A family-
+   *  level declaration, never derived from the answer, so it cannot leak it.
+   *  An item that declares one is never tagged `answerShape: "twoD"` — the
+   *  client chooses its editor from `answerType` + `answerPalette`. */
+  answerPalette?: AnswerPalette;
   source: "template";
   /** The FORM actually applied (C1, §6). Absent = the direct item. Encoded into
    *  the itemId so grading re-derives the same variant. */
@@ -167,9 +182,24 @@ export const YES_NO_CHOICES = ["No", "Yes"];
  *  0 = Prime, 1 = Composite. Items never use n = 1 (which is neither). */
 export const PRIME_COMPOSITE_CHOICES = ["Prime", "Composite"];
 
-/** Relational FORM variants a template can be served in (C1, §6). v1: the
- *  missing-operand form ("? × 8 = 56") — inverse thinking on the same fact. */
-export type ItemForm = "missing";
+/** FORM variants a template can be served in (C1, §6), each under its own
+ *  item id (`skillKey#seed#form`) so an un-formed id never changes meaning:
+ *   • "missing"    — the missing-operand form ("? × 8 = 56"), inverse thinking
+ *                    on the same fact;
+ *   • "precedence" — the draw pinned to the one shape that a strictly
+ *                    left-to-right worker gets wrong (see
+ *                    `PRECEDENCE_FORM_SKILLS`). */
+export type ItemForm = "missing" | "precedence";
+
+/**
+ * Templates whose draw can be pinned to the shape that tells precedence apart
+ * from left-to-right working. Of `order_of_operations`' five shapes only
+ * `a + b × c` gives a left-to-right worker a wrong answer; the serve-time chooser
+ * issues this form on part of a run's seeds so the scholar meets it about half
+ * the time. A FORM, not a re-weighted draw: un-formed ids regenerate at grading
+ * and in historical reads, so they must keep producing exactly what they did.
+ */
+export const PRECEDENCE_FORM_SKILLS: ReadonlySet<string> = new Set(["order_of_operations"]);
 
 /**
  * Templates that explicitly supported the missing-operand form before
@@ -240,14 +270,21 @@ export function makeRng(seed: number): Rng {
   };
 }
 
-type Template = {
+export type Template = {
   skillKey: string;
   answerType: AnswerType;
   /** The unit every item of this family must be answered in (see
    *  `PracticeItem.answerUnit`). A family-level constant, not a per-draw one —
    *  a template's stem names one unit for all its variants. */
   answerUnit?: UnitKey;
-  gen: (rng: Rng) => {
+  /** The algebra-pad key set for every item of this family. */
+  answerPalette?: AnswerPalette;
+  /** The form every item of this family must be written in, unless a draw
+   *  overrides it with its own `answerForm`. */
+  answerForm?: AnswerForm;
+  /** `form` is passed only for a form the template opted into (today:
+   *  "precedence" for `PRECEDENCE_FORM_SKILLS`); every other call omits it. */
+  gen: (rng: Rng, form?: ItemForm) => {
     stem: string;
     answer: TypedAnswer;
     variant?: ItemVariant;
@@ -258,6 +295,13 @@ type Template = {
     /** Optional deterministic worked steps for the teach-as-action moment
      *  (see PracticeItem.workedSteps / workedStepGen.ts). */
     workedSteps?: WorkedStep[];
+    /** See PracticeItem.answerForm. */
+    answerForm?: AnswerForm;
+    /** A draw whose answer is a different kind of object from the family's
+     *  (one family asking for a set of zeros in some draws and a single count
+     *  in others) names its own type. Items regenerate from (skillKey, seed)
+     *  at grading time, so the override is as stable as the stem. */
+    answerType?: AnswerType;
   };
 };
 
@@ -877,14 +921,36 @@ const NEW_COVERAGE_SKILL_KEYS = new Set([
   "lg_deduce_clues",
 ]);
 
+/** Family-level declarations a template may make beyond its answer type. */
+export type TemplateOptions = {
+  /** The unit every answer must carry (see `PracticeItem.answerUnit`). */
+  answerUnit?: UnitKey;
+  /** The algebra-pad key set (see `PracticeItem.answerPalette`). */
+  answerPalette?: AnswerPalette;
+  /** The form every answer must be written in (a draw may override it). */
+  answerForm?: AnswerForm;
+};
+
 const T = (
   skillKey: string,
   answerType: AnswerType,
   gen: Template["gen"],
   /** The unit this family's answers must carry — pass it whenever the stem
-   *  names a concrete unit ("…in cubic centimeters", sides labeled cm). */
-  answerUnit?: UnitKey,
-): Template => ({ skillKey, answerType, gen, ...(answerUnit ? { answerUnit } : {}) });
+   *  names a concrete unit ("…in cubic centimeters", sides labeled cm) — or the
+   *  full `TemplateOptions` (unit, algebra-pad palette, required form). */
+  options?: UnitKey | TemplateOptions,
+): Template => {
+  const opts: TemplateOptions =
+    typeof options === "string" ? { answerUnit: options } : (options ?? {});
+  return {
+    skillKey,
+    answerType,
+    gen,
+    ...(opts.answerUnit ? { answerUnit: opts.answerUnit } : {}),
+    ...(opts.answerPalette ? { answerPalette: opts.answerPalette } : {}),
+    ...(opts.answerForm ? { answerForm: opts.answerForm } : {}),
+  };
+};
 
 function countablesItem(k: number, layout: CountablesLayout, rng: Rng) {
   return {
@@ -1191,6 +1257,22 @@ function joinWithAnd(parts: string[]): string {
   if (parts.length <= 1) return parts.join("");
   if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
   return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+}
+
+/** The prime factorization of n ≥ 2 as ascending (prime, exponent) pairs. */
+function primePowers(n: number): { prime: number; exponent: number }[] {
+  const out: { prime: number; exponent: number }[] = [];
+  let rest = n;
+  for (let p = 2; p * p <= rest; p++) {
+    let exponent = 0;
+    while (rest % p === 0) {
+      rest /= p;
+      exponent++;
+    }
+    if (exponent > 0) out.push({ prime: p, exponent });
+  }
+  if (rest > 1) out.push({ prime: rest, exponent: 1 });
+  return out;
 }
 
 function isPrime(n: number): boolean {
@@ -1537,6 +1619,26 @@ const CONVERSE_ITEMS: { statement: string; correct: string; converseTrue: boolea
     ],
   },
   {
+    statement: "If a whole number is even, then it is divisible by 2",
+    correct: "If a whole number is divisible by 2, then it is even",
+    converseTrue: true,
+    distractors: [
+      "If a whole number is not even, then it is not divisible by 2",
+      "If a whole number is divisible by 2, then it is not even",
+      "An even whole number is divisible by 2",
+    ],
+  },
+  {
+    statement: "If a whole number ends in 0, then it is divisible by 10",
+    correct: "If a whole number is divisible by 10, then it ends in 0",
+    converseTrue: true,
+    distractors: [
+      "If a whole number does not end in 0, then it is not divisible by 10",
+      "If a whole number is divisible by 10, then it does not end in 0",
+      "A whole number ending in 0 is divisible by 10",
+    ],
+  },
+  {
     statement: "If it rains, then the ground is wet",
     correct: "If the ground is wet, then it rains",
     converseTrue: false,
@@ -1564,6 +1666,81 @@ const COUNTEREXAMPLE_ITEMS: { claim: string; correct: string; distractors: strin
 const KNIGHT_NAMES = ["Ann", "Ben", "Cara", "Dev", "Elle", "Finn", "Gia", "Hugo"];
 const FRIEND_NAMES = ["Ana", "Ben", "Cara", "Dee", "Evan", "Fay"];
 const PRIMES_TO_97 = primesUpTo(97);
+const PRIMES_100_TO_199 = primesUpTo(199).filter((p) => p >= 100);
+/** Odd composites in 100–199 that are not multiples of 5: the ones where the
+ *  √n test actually has work to do. */
+const ODD_COMPOSITES_100_TO_199 = Array.from({ length: 100 }, (_, i) => 100 + i).filter(
+  (n) => n % 2 === 1 && n % 5 !== 0 && !PRIMES_100_TO_199.includes(n),
+);
+
+/** A small addition fact a + b with a sum of at most `max`. Picks the SUM first
+ *  so totals come up evenly, and allows a zero addend only about 1 time in 10:
+ *  drawing a, then b from what was left, made "+ 0" half of a within-5 set. */
+function additionFact(r: Rng, max: number): { a: number; b: number } {
+  if (r.int(0, 9) === 0) {
+    const a = r.int(0, max);
+    return r.int(0, 1) === 0 ? { a, b: 0 } : { a: 0, b: a };
+  }
+  const sum = r.int(2, max);
+  const a = r.int(1, sum - 1);
+  return { a, b: sum - a };
+}
+
+/** A small subtraction fact a − b with a ≤ `max`. Picks the DIFFERENCE first so
+ *  answers come up evenly, and allows "− 0" or "a − a" only about 1 time in 10
+ *  (they were two-thirds of a within-5 set, with 0 the answer to 43%). */
+function subtractionFact(r: Rng, max: number): { a: number; b: number } {
+  if (r.int(0, 9) === 0) {
+    const a = r.int(0, max);
+    return r.int(0, 1) === 0 ? { a, b: 0 } : { a, b: a };
+  }
+  const difference = r.int(1, max - 1);
+  const b = r.int(1, max - difference);
+  return { a: b + difference, b };
+}
+
+/** A logic-family fact with a CHOSEN truth value, so a compound statement's
+ *  truth can be picked before it is built. Retries `randomFact`, which is true
+ *  about half the time; the fallback keeps it total. */
+function factWithTruth(r: Rng, truth: boolean): { text: string; truth: boolean } {
+  for (let i = 0; i < 40; i++) {
+    const fact = randomFact(r);
+    if (fact.truth === truth) return fact;
+  }
+  const a = r.int(2, 20);
+  const b = r.int(2, 20);
+  return { text: `${a} + ${b} = ${truth ? a + b : a + b + 1}`, truth };
+}
+
+/** A number in about [20, 120] that is a multiple of k exactly half the time. */
+function yesNoMultiple(r: Rng, k: number): number {
+  if (r.int(0, 1) === 0) return k * r.int(Math.ceil(20 / k), Math.floor(120 / k));
+  const n = r.int(20, 120);
+  return n % k === 0 ? n + r.int(1, k - 1) : n;
+}
+
+/** Two different whole numbers in [lo, hi]. */
+function distinctInts(r: Rng, lo: number, hi: number): [number, number] {
+  const a = r.int(lo, hi);
+  let b = r.int(lo, hi - 1);
+  if (b >= a) b += 1;
+  return [a, b];
+}
+
+/** What an Algebra 2 strand file needs from this module. Passed in (rather than
+ *  imported there) because the registry below spreads those families in. */
+const ALGEBRA_2_KIT = {
+  T,
+  choiceItem,
+  choiceAns,
+  intAns,
+  decAns,
+  fracAns,
+  exprAns,
+  solutionSetAns,
+  withWorkedSteps,
+};
+export type Algebra2Kit = typeof ALGEBRA_2_KIT;
 
 // ── The registry ──────────────────────────────────────────────────────────
 
@@ -1797,23 +1974,19 @@ const TEMPLATES: Template[] = [
 
   // Addition / subtraction fluency
   T("add_within_5", "integer", (r) => {
-    const a = r.int(0, 5);
-    const b = r.int(0, 5 - a);
+    const { a, b } = additionFact(r, 5);
     return { stem: `${a} + ${b} = ?`, answer: intAns(a + b), variant: { a, op: "+", b } };
   }),
   T("subtract_within_5", "integer", (r) => {
-    const a = r.int(0, 5);
-    const b = r.int(0, a);
+    const { a, b } = subtractionFact(r, 5);
     return { stem: `${a} − ${b} = ?`, answer: intAns(a - b), variant: { a, op: "−", b } };
   }),
   T("add_within_10", "integer", (r) => {
-    const a = r.int(0, 10);
-    const b = r.int(0, 10 - a);
+    const { a, b } = additionFact(r, 10);
     return { stem: `${a} + ${b} = ?`, answer: intAns(a + b), variant: { a, op: "+", b } };
   }),
   T("subtract_within_10", "integer", (r) => {
-    const a = r.int(0, 10);
-    const b = r.int(0, a);
+    const { a, b } = subtractionFact(r, 10);
     return { stem: `${a} − ${b} = ?`, answer: intAns(a - b), variant: { a, op: "−", b } };
   }),
   T("add_subtract_word_problems_within_10", "integer", (r) => {
@@ -1842,10 +2015,13 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("add_within_20_no_regroup", "integer", (r) => {
-    // ones columns sum ≤ 9, total ≤ 20
-    const ao = r.int(0, 9);
-    const bo = r.int(0, 9 - ao);
-    const a = ao + (r.int(0, 1) ? 10 : 0);
+    // ones columns sum ≤ 9, total ≤ 20. One draw in 10 keeps the old full
+    // operand space (zero addends included, so every zero fact stays reachable
+    // for Fast math); the rest have two nonzero addends.
+    const allowZero = r.int(0, 9) === 0;
+    const ao = r.int(0, allowZero ? 9 : 8);
+    const bo = r.int(allowZero ? 0 : 1, 9 - ao);
+    const a = ao + (r.int(0, 1) || (!allowZero && ao === 0) ? 10 : 0);
     return {
       stem: `${a} + ${bo} = ?`,
       answer: intAns(a + bo),
@@ -1870,12 +2046,10 @@ const TEMPLATES: Template[] = [
   }),
   T("add_subtract_fluency_within_20", "integer", (r) => {
     if (r.int(0, 1) === 0) {
-      const a = r.int(0, 20);
-      const b = r.int(0, 20 - a);
+      const { a, b } = additionFact(r, 20);
       return { stem: `${a} + ${b} = ?`, answer: intAns(a + b), variant: { a, op: "+", b } };
     }
-    const a = r.int(0, 20);
-    const b = r.int(0, a);
+    const { a, b } = subtractionFact(r, 20);
     return { stem: `${a} − ${b} = ?`, answer: intAns(a - b), variant: { a, op: "−", b } };
   }),
   T("make_ten_strategy", "integer", (r) => {
@@ -2083,23 +2257,25 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("prime_factorization", "integer", (r) => {
+    // The scholar factors. The stem used to print the factorization ("720 is
+    // 2^4 · 3^2 · 5") and ask for an exponent, which is reading, not factoring.
+    // The count is picked first so "1" is not the safe guess it was (46%).
     const cases = [
-      { n: 12, text: "2^2 · 3", asks: [{ prime: 2, exponent: 2 }, { prime: 3, exponent: 1 }] },
-      { n: 18, text: "2 · 3^2", asks: [{ prime: 2, exponent: 1 }, { prime: 3, exponent: 2 }] },
-      { n: 24, text: "2^3 · 3", asks: [{ prime: 2, exponent: 3 }, { prime: 3, exponent: 1 }] },
-      { n: 40, text: "2^3 · 5", asks: [{ prime: 2, exponent: 3 }, { prime: 5, exponent: 1 }] },
-      { n: 72, text: "2^3 · 3^2", asks: [{ prime: 2, exponent: 3 }, { prime: 3, exponent: 2 }] },
-      { n: 90, text: "2 · 3^2 · 5", asks: [{ prime: 2, exponent: 1 }, { prime: 3, exponent: 2 }, { prime: 5, exponent: 1 }] },
-      { n: 120, text: "2^3 · 3 · 5", asks: [{ prime: 2, exponent: 3 }, { prime: 3, exponent: 1 }, { prime: 5, exponent: 1 }] },
-      { n: 720, text: "2^4 · 3^2 · 5", asks: [{ prime: 2, exponent: 4 }, { prime: 3, exponent: 2 }, { prime: 5, exponent: 1 }] },
+      12, 18, 24, 40, 45, 48, 54, 56, 63, 72, 75, 80, 90, 96, 98, 108, 112, 120, 144, 162, 176, 200, 250,
+      324, 405, 720,
     ];
-    const item = r.pick(cases);
-    const ask = r.pick(item.asks);
-    const answer = intAns(ask.exponent);
+    const exponent = r.pick([1, 2, 3, 4]);
+    const asks = cases.flatMap((n) =>
+      primePowers(n)
+        .filter((power) => power.exponent === exponent)
+        .map((power) => ({ n, prime: power.prime })),
+    );
+    const ask = r.pick(asks);
+    const answer = intAns(exponent);
     return {
-      stem: `The prime factorization of ${item.n} is ${item.text}. What is the exponent of ${ask.prime}?`,
+      stem: `In the prime factorization of ${ask.n}, how many times does ${ask.prime} appear?`,
       answer,
-      ...withWorkedSteps(primeFactorizationExponentSteps(ask.prime, item.text, answer)),
+      ...withWorkedSteps(primeExponentByDivisionSteps(ask.n, ask.prime, answer)),
     };
   }),
   T("gcf", "integer", (r) => {
@@ -2186,15 +2362,20 @@ const TEMPLATES: Template[] = [
   }),
 
   // Order of operations
-  T("order_of_operations", "integer", (r) => {
+  T("order_of_operations", "integer", (r, form) => {
     const a = r.int(2, 9);
     const b = r.int(2, 9);
     const c = r.int(2, 9);
     const divisor = r.int(2, 9);
     const quotient = r.int(2, 9);
     const product = divisor * quotient;
+    // Keep this draw (and every draw above it) exactly as is: an un-formed
+    // `order_of_operations#<seed>` is regenerated at grading, on resume, from
+    // the offline outbox and in historical reads, so re-weighting it would
+    // change problems scholars were already shown. The "precedence" form
+    // (PRECEDENCE_FORM_SKILLS) pins shape 0 under its own id instead.
     const shape = r.int(0, 4);
-    if (shape === 0) {
+    if (shape === 0 || form === "precedence") {
       const answer = intAns(a + b * c);
       return {
         stem: `${a} + ${b} × ${c} = ?`,
@@ -2421,6 +2602,7 @@ const TEMPLATES: Template[] = [
     return {
       stem: `Simplify ${numerator * scale}/${denominator * scale} to lowest terms.`,
       answer: fracAns(numerator, denominator),
+      answerForm: "lowestTerms",
     };
   }),
   T("common_denominators", "integer", (r) => {
@@ -2466,17 +2648,11 @@ const TEMPLATES: Template[] = [
     let d = r.int(2, 12);
     // Two distinct proper numerators need d ≥ 3.
     if (d === 2) d = 3;
-    let a = r.int(1, d);
-    let b = r.int(1, d);
-    // Degenerate draws: a numerator equal to the denominator is a whole number
-    // in fraction clothing (whole_as_fraction's job, and the sibling compare_*
-    // templates already exclude it), and a == b makes the comparison trivial
-    // ("How does 6/6 compare to 6/6?"). Fold the top numerator down, then
-    // separate an equal pair — nudges, not re-draws, so non-degenerate seeds
-    // re-derive the same stem/answer as before.
-    if (a >= d) a = d - 1;
-    if (b >= d) b = d - 1;
-    if (b === a) b = a === 1 ? a + 1 : a - 1;
+    // Two different proper numerators. A numerator equal to the denominator is
+    // a whole number in fraction clothing (whole_as_fraction's job), and a == b
+    // makes the comparison trivial. Drawn as a distinct pair so "<" and ">" are
+    // equally likely (folding and nudging made ">" right 61% of the time).
+    const [a, b] = distinctInts(r, 1, d - 1);
     const idx = a < b ? 0 : a === b ? 1 : 2;
     return {
       stem: `How does ${a}/${d} compare to ${b}/${d}?`,
@@ -2586,6 +2762,7 @@ const TEMPLATES: Template[] = [
       return {
         stem: `Write ${a}/10 as a decimal.`,
         answer,
+        answerForm: "decimalNotation",
         workedSteps: decimalNotationSteps(a, 10, answer),
       };
     }
@@ -2596,6 +2773,7 @@ const TEMPLATES: Template[] = [
     return {
       stem: `Write ${a}/100 as a decimal.`,
       answer,
+      answerForm: "decimalNotation",
       workedSteps: decimalNotationSteps(a, 100, answer),
     };
   }),
@@ -2844,40 +3022,38 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("complement_probability", "fraction", (r) => {
-    if (r.int(0, 3) === 0) {
-      const parity = r.pick([
-        { name: "even number", favorable: 3 },
-        { name: "odd number", favorable: 3 },
-      ]);
-      const answer = fracAns(6 - parity.favorable, 6);
-      return {
-        stem: `A fair die is rolled. What is the probability of NOT rolling an ${parity.name}?`,
-        answer,
-        workedSteps: complementProbabilitySteps(parity.favorable, 6, answer),
-      };
-    }
-    const face = r.int(1, 6);
-    const answer = fracAns(5, 6);
+    // Choose the event's size first, then describe it, so the five complements
+    // come up equally often. (A single face used to be 3 draws in 4, so always
+    // answering 5/6 scored 73%.)
+    const favorable = r.int(1, 5);
+    const descriptions: Record<number, string[]> = {
+      1: [`a ${r.int(1, 6)}`, "a number greater than 5"],
+      2: ["a number greater than 4", "a number less than 3"],
+      3: ["an even number", "an odd number", "a number greater than 3"],
+      4: ["a number greater than 2", "a number less than 5"],
+      5: ["a number greater than 1", "a number less than 6"],
+    };
+    const answer = fracAns(6 - favorable, 6);
     return {
-      stem: `A fair die is rolled. What is the probability of NOT rolling a ${face}?`,
+      stem: `A fair die is rolled. What is the probability of NOT rolling ${r.pick(descriptions[favorable])}?`,
       answer,
-      workedSteps: complementProbabilitySteps(1, 6, answer),
+      workedSteps: complementProbabilitySteps(favorable, 6, answer),
     };
   }),
   T("probability_as_fraction", "fraction", (r) => {
-    const cases = [
-      { favorable: 3, total: 6, event: "faces are even" },
-      { favorable: 3, total: 6, event: "faces are odd" },
-      { favorable: 2, total: 6, event: "faces are greater than 4" },
-      { favorable: 4, total: 6, event: "faces are less than 5" },
-      { favorable: 1, total: 2, event: "coin sides are heads" },
-    ];
-    const item = r.pick(cases);
-    const answer = fracAns(item.favorable, item.total);
+    // Every pair shares a factor, so "simplest form" always asks for real
+    // simplifying, and the totals vary so no one answer dominates (the old five
+    // fixed cases reduced to 1/2 in three of five).
+    const total = r.pick([4, 6, 8, 9, 10, 12, 15, 16, 20]);
+    let favorable = r.int(2, total - 1);
+    while (gcd(favorable, total) === 1) favorable = favorable === total - 1 ? 2 : favorable + 1;
+    const color = r.pick(["red", "blue", "green", "yellow"]);
+    const answer = fracAns(favorable, total);
     return {
-      stem: `${item.favorable} of the ${item.total} ${item.event}. Write that probability in simplest form.`,
+      stem: `A bag holds ${total} marbles, and ${favorable} of them are ${color}. You draw one without looking. Write the probability that it is ${color} in simplest form.`,
       answer,
-      workedSteps: probabilityFractionSteps(item.favorable, item.total, answer),
+      answerForm: "lowestTerms",
+      workedSteps: probabilityFractionSteps(favorable, total, answer),
     };
   }),
   T("experimental_probability", "fraction", (r) => {
@@ -2910,10 +3086,17 @@ const TEMPLATES: Template[] = [
       workedSteps: expectedFrequencySteps(trials, 1, 6, answer),
     };
   }),
-  T("compound_two_dice", "integer", () => ({
-    stem: "You roll two fair dice and add them. Which total comes up most often?",
-    answer: intAns(7),
-  })),
+  T("compound_two_dice", "integer", (r) => {
+    // Count the ways to make a total. The count is picked first, so every count
+    // from 1 to 6 is equally likely. This used to be one fixed question ("which
+    // total comes up most often?") whose answer was always 7.
+    const ways = r.int(1, 6);
+    const total = ways === 6 ? 7 : r.pick([1 + ways, 13 - ways]);
+    return {
+      stem: `You roll two fair dice and add them. Of the 36 equally likely outcomes, how many give a total of ${total}?`,
+      answer: intAns(ways),
+    };
+  }),
   T("sample_space", "integer", (r) => {
     const cases = [
       { stem: "You roll a die and flip a coin. How many different outcomes are possible in all?", answer: 12, factors: [6, 2] },
@@ -2991,16 +3174,26 @@ const TEMPLATES: Template[] = [
       }),
     };
   }),
-  T("collect_measurement_data", "multipleChoice", (r) => choiceItem(
-    r,
-    "Which plan creates one honest data set for comparing pencil lengths?",
-    "Measure every pencil end to end in centimeters.",
-    [
-      "Measure some pencils in inches and others in centimeters.",
-      "Measure the length of some pencils and the weight of others.",
-      "Round each pencil to a different unit before recording it.",
-    ],
-  )),
+  T("collect_measurement_data", "multipleChoice", (r) => {
+    // Several contexts, so the right plan is not one memorized sentence (this
+    // was a single fixed question).
+    const c = r.pick([
+      { compare: "pencil lengths", each: "pencil", what: "length", how: "end to end", unit: "centimeters", other: "inches", wrong: "weight" },
+      { compare: "plant heights", each: "plant", what: "height", how: "from the soil to the top leaf", unit: "centimeters", other: "inches", wrong: "number of leaves" },
+      { compare: "long-jump distances", each: "jump", what: "distance", how: "from the takeoff line to the landing mark", unit: "meters", other: "feet", wrong: "time in the air" },
+      { compare: "ribbon lengths", each: "ribbon", what: "length", how: "laid flat from end to end", unit: "inches", other: "centimeters", wrong: "width" },
+    ]);
+    return choiceItem(
+      r,
+      `Which plan creates one honest data set for comparing ${c.compare}?`,
+      `Measure every ${c.each} ${c.how} in ${c.unit}.`,
+      [
+        `Measure some ${c.each}s in ${c.other} and the other ${c.each}s in ${c.unit}.`,
+        `Measure the ${c.what} of some ${c.each}s and the ${c.wrong} of the others.`,
+        `Round each ${c.each} to a different unit before you record it.`,
+      ],
+    );
+  }),
   T("compare_graph_categories", "integer", (r) => {
     const key = r.pick([1, 2]);
     const aIcons = r.int(3, 6);
@@ -3078,7 +3271,7 @@ const TEMPLATES: Template[] = [
       {
         correct: "How many minutes do students in our class read each evening?",
         distractors: [
-          "How many minutes are in one hour?",
+          "How many minutes did our teacher read aloud to the class yesterday?",
           "What time does school begin today?",
           "How many sides does a square have?",
         ],
@@ -3086,7 +3279,7 @@ const TEMPLATES: Template[] = [
       {
         correct: "How tall are the sunflower plants in our garden?",
         distractors: [
-          "How tall is this one sunflower plant?",
+          "How tall is the one sunflower plant growing beside the gate?",
           "How many centimeters are in one meter?",
           "What color is the garden gate?",
         ],
@@ -3111,8 +3304,23 @@ const TEMPLATES: Template[] = [
     ]);
   }),
   T("mean", "integer", (r) => {
-    const center = r.int(5, 12);
-    const values = shuffledNumbers([center - 3, center - 1, center, center + 1, center + 3], r);
+    // Uneven deviations that sum to zero, none of them zero, with the middle
+    // pair not cancelling: the mean is never one of the values, never the
+    // median, and never the midpoint of the range. The old symmetric
+    // [c−3, c−1, c, c+1, c+3] made the mean the middle value every time.
+    const deviations = r.pick([
+      [-4, -1, 2, 3],
+      [-5, 1, 2, 2],
+      [-3, -2, 1, 4],
+      [-6, 1, 2, 3],
+      [-4, -3, 2, 5],
+      [-5, -2, 1, 3, 3],
+      [-4, -2, 1, 2, 3],
+      [-6, -1, 2, 2, 3],
+    ]);
+    const sign = r.int(0, 1) === 0 ? 1 : -1;
+    const center = r.int(7, 14);
+    const values = shuffledNumbers(deviations.map((d) => center + sign * d), r);
     const answer = intAns(center);
     return {
       stem: `Find the mean of ${values.join(", ")}.`,
@@ -3251,7 +3459,7 @@ const TEMPLATES: Template[] = [
         stem: "A school wants to estimate which lunch option all students prefer. Which sampling plan is most likely to represent the whole school?",
         correct: "Use a random number generator to select students from the full school roster.",
         distractors: [
-          "Ask only students already waiting in the pizza line.",
+          "Ask every student who is already waiting in the pizza line at lunch today.",
           "Post a voluntary poll in the cooking club.",
           "Survey the first class that finishes lunch.",
         ],
@@ -3260,7 +3468,7 @@ const TEMPLATES: Template[] = [
         stem: "A town wants to estimate support for a new park among all households. Which sampling plan is most likely to represent the town?",
         correct: "Randomly select addresses from the complete town address list.",
         distractors: [
-          "Ask only households next to the proposed park.",
+          "Ask only the households on the streets right next to the proposed park.",
           "Invite responses on the parks department's social-media page.",
           "Survey people attending one weekend sports event.",
         ],
@@ -3269,7 +3477,7 @@ const TEMPLATES: Template[] = [
         stem: "A library wants to estimate satisfaction with weekend hours among all cardholders. Which sampling plan is most likely to represent its cardholders?",
         correct: "Randomly select cardholders from the complete membership list.",
         distractors: [
-          "Ask only people visiting on Saturday morning.",
+          "Survey everyone who visits the library on two Saturday mornings in a row.",
           "Survey volunteers in the library's book club.",
           "Use the first 50 complaint emails received.",
         ],
@@ -3296,6 +3504,8 @@ const TEMPLATES: Template[] = [
       [-5, -1, 2, 4],
     ]);
     const estimates = offsets.map((offset) => center + offset);
+    // Justified and unjustified phrasings are kept to similar lengths so the
+    // longest option is not a tell (it was the answer 75% of the time).
     const justified = [
       "Different random samples can produce different estimates for the same population.",
       "Some sample-to-sample variation is expected even when the population stays the same.",
@@ -3303,19 +3513,19 @@ const TEMPLATES: Template[] = [
     ];
     const unjustified = [
       [
-        "The population must have changed between samples.",
-        "Different estimates prove the population changed before each sample.",
-        "The population could not have stayed the same while these samples were taken.",
+        "The population must have changed between samples, or the estimates would all match.",
+        "Different estimates prove the population itself changed before each new sample.",
+        "The population could not have stayed the same while these four samples were taken.",
       ],
       [
-        "Only the largest sample estimate can be valid.",
-        "The greatest percentage must be the one true population value.",
-        "All estimates except the largest should be discarded as invalid.",
+        "Only the largest sample estimate can be valid; the other three should be ignored.",
+        "The greatest percentage must be the one true population value, and the rest are wrong.",
+        "All estimates except the largest one should be discarded as invalid sampling results.",
       ],
       [
-        "Random sampling failed because the estimates are not identical.",
-        "A proper random sample would give exactly the same percentage every time.",
-        "The differing estimates show that none of the samples was random.",
+        "Random sampling failed here, because truly random samples would give identical results.",
+        "A proper random sample of this size would give exactly the same percentage every time.",
+        "The differing estimates show that none of the four samples could have been random.",
       ],
     ];
     const askForUnjustified = r.int(0, 3) === 0;
@@ -3680,20 +3890,51 @@ const TEMPLATES: Template[] = [
     };
   }, "cm^2"),
   T("area_perimeter_relationship", "multipleChoice", (r) => {
-    const firstWidth = r.int(2, 5);
-    const firstHeight = r.int(firstWidth + 3, firstWidth + 8);
-    const halfPerimeter = firstWidth + firstHeight;
-    const secondWidth = firstWidth + 1;
-    const secondHeight = halfPerimeter - secondWidth;
+    // Which statement is true is picked first. It used to be "same perimeter,
+    // different areas" every time, so that sentence was always right.
+    const statements = {
+      samePerimeter: "They have the same perimeter but different areas.",
+      sameArea: "They have the same area but different perimeters.",
+      both: "They have both the same area and the same perimeter.",
+      neither: "They have different areas and different perimeters.",
+    };
+    const kind = r.pick(["samePerimeter", "sameArea", "neither"] as const);
+    let rects: [number, number, number, number];
+    if (kind === "samePerimeter") {
+      const w = r.int(2, 5);
+      const h = r.int(w + 3, w + 8);
+      rects = [w, h, w + 1, h - 1];
+    } else if (kind === "sameArea") {
+      rects = r.pick<[number, number, number, number]>([
+        [2, 12, 3, 8],
+        [2, 12, 4, 6],
+        [3, 8, 4, 6],
+        [2, 18, 3, 12],
+        [3, 12, 4, 9],
+        [2, 10, 4, 5],
+        [2, 15, 3, 10],
+        [3, 10, 5, 6],
+        [2, 16, 4, 8],
+      ]);
+    } else {
+      rects = [3, 7, 4, 9];
+      for (let i = 0; i < 30; i++) {
+        const w1 = r.int(2, 5);
+        const h1 = r.int(w1 + 2, w1 + 7);
+        const w2 = r.int(2, 6);
+        const h2 = r.int(w2 + 1, w2 + 8);
+        if (w1 * h1 !== w2 * h2 && w1 + h1 !== w2 + h2) {
+          rects = [w1, h1, w2, h2];
+          break;
+        }
+      }
+    }
+    const [w1, h1, w2, h2] = rects;
     return choiceItem(
       r,
-      `Rectangle A is ${firstWidth} cm by ${firstHeight} cm. Rectangle B is ${secondWidth} cm by ${secondHeight} cm. Which statement is true?`,
-      "They have the same perimeter but different areas.",
-      [
-        "They have the same area but different perimeters.",
-        "They have both the same area and the same perimeter.",
-        "They have different areas and different perimeters.",
-      ],
+      `Rectangle A is ${w1} cm by ${h1} cm. Rectangle B is ${w2} cm by ${h2} cm. Which statement is true?`,
+      statements[kind],
+      Object.values(statements).filter((statement) => statement !== statements[kind]),
     );
   }),
   T("perimeter_composite", "integer", (r) => {
@@ -4018,7 +4259,7 @@ const TEMPLATES: Template[] = [
       "Unfold this rectangular prism into a net. Which set of rectangles is the net made of?",
       correct,
       [
-        `One ${length}×${width}, one ${length}×${height}, and one ${width}×${height} rectangle`,
+        `Two ${length}×${width}, two ${length}×${height}, and two ${length}×${length} rectangles`,
         `Six ${length}×${width} rectangles`,
         `Two ${length}×${width} and four ${length}×${height} rectangles`,
       ],
@@ -4050,20 +4291,42 @@ const TEMPLATES: Template[] = [
 
   // Angles and shape classification.
   T("angle_concept", "multipleChoice", (r) => {
+    // Three questions about the same figure, each with its own right answer.
+    // There used to be one question, so the same sentence was right every time.
     const degrees = r.int(25, 155);
+    const figure = makeAngleFigurePromptVisual({
+      degrees,
+      orientation: r.int(185, 235),
+    });
+    const shape = r.int(0, 2);
+    if (shape === 0) {
+      return choiceItem(
+        r,
+        "Which description best matches the figure?",
+        "Two rays share an endpoint, and the opening shows an amount of turn.",
+        [
+          "Two unrelated line segments are drawn to show a distance between them.",
+          "One ray has two different endpoints, and the marked point sits between them.",
+          "The marked point alone is the angle, and the two rays are only decoration.",
+        ],
+        figure,
+      );
+    }
+    if (shape === 1) {
+      return choiceItem(
+        r,
+        "In the figure, what is the point where the two rays meet called?",
+        "the vertex",
+        ["the midpoint", "the arc", "the side"],
+        figure,
+      );
+    }
     return choiceItem(
       r,
-      "Which description best matches the figure?",
-      "Two rays share an endpoint, and the opening shows an amount of turn.",
-      [
-        "Two unrelated line segments show a distance.",
-        "One ray has two different endpoints.",
-        "The marked point alone is the angle.",
-      ],
-      makeAngleFigurePromptVisual({
-        degrees,
-        orientation: r.int(185, 235),
-      }),
+      "What does the size of the angle in the figure measure?",
+      "how much one ray turns from the other",
+      ["how long the two rays are", "how far apart the two ends of the rays are drawn", "how thick the rays are drawn"],
+      figure,
     );
   }),
   T("angle_turns_circle", "integer", (r) => {
@@ -4311,42 +4574,31 @@ const TEMPLATES: Template[] = [
     return choiceItem(r, "Which statement is always true?", item.correct, item.distractors);
   }),
   T("angle_sum_triangle", "integer", (r) => {
-    const item = r.pick([
-      {
-        first: 90,
-        second: 37,
-        third: 53,
-        points: [
-          { x: 0, y: 0, label: "A" },
-          { x: 4, y: 0, label: "B" },
-          { x: 0, y: 3, label: "C" },
-        ],
-      },
-      {
-        first: 90,
-        second: 45,
-        third: 45,
-        points: [
-          { x: 0, y: 0, label: "A" },
-          { x: 4, y: 0, label: "B" },
-          { x: 0, y: 4, label: "C" },
-        ],
-      },
-      {
-        first: 60,
-        second: 60,
-        third: 60,
-        points: [
-          { x: 0, y: 0, label: "A" },
-          { x: 4, y: 0, label: "B" },
-          { x: 2, y: 3.464, label: "C" },
-        ],
-      },
-    ]);
+    // Generated angles with a plot drawn to match. There used to be three fixed
+    // triangles (memorized after three items), and the equilateral one put the
+    // answer in the stem. The asked angle never equals a given one.
+    let first = r.int(25, 110);
+    let second = r.int(25, 150 - first);
+    let third = 180 - first - second;
+    if (third === first || third === second) {
+      first += 3;
+      second += 1;
+      third = 180 - first - second;
+    }
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const base = 6;
+    const apexX = (base * Math.sin(toRad(second)) * Math.cos(toRad(first))) / Math.sin(toRad(first + second));
+    const apexY = (base * Math.sin(toRad(first)) * Math.sin(toRad(second))) / Math.sin(toRad(first + second));
+    const round = (v: number) => Math.round(v * 100) / 100;
+    const points = [
+      { x: 0, y: 0, label: "A" },
+      { x: base, y: 0, label: "B" },
+      { x: round(apexX), y: round(apexY), label: "C" },
+    ];
     return {
-      stem: `Two angles in the plotted triangle measure ${item.first}° and ${item.second}°. What is the third angle?`,
-      answer: intAns(item.third),
-      promptVisual: coordinatePromptVisual(item.points, "polygon"),
+      stem: `In the plotted triangle, angle A is ${first}° and angle B is ${second}°. What is angle C?`,
+      answer: intAns(third),
+      promptVisual: coordinatePromptVisual(points, "polygon"),
     };
   }, "deg"),
 
@@ -4567,8 +4819,8 @@ const TEMPLATES: Template[] = [
     );
   }),
   T("ratio_equivalent_scale", "integer", (r) => {
-    const a = r.int(2, 9);
-    const b = r.int(2, 9);
+    // a ≠ b: a 1:1 ratio puts the answer in the stem ("8:8 = 48:?").
+    const [a, b] = distinctInts(r, 2, 9);
     const scale = r.int(2, 8);
     return {
       stem: `${a}:${b} = ${a * scale}:?`,
@@ -4594,8 +4846,10 @@ const TEMPLATES: Template[] = [
     );
   }),
   T("ratio_table_complete", "integer", (r) => {
+    // a ≠ b: a 1:1 table puts the answer in the column beside it.
     const a = r.int(2, 8);
-    const b = r.int(2, 9);
+    let b = r.int(2, 8);
+    if (b >= a) b += 1;
     const factor = r.int(3, 6);
     return {
       stem: `Complete the equivalent-ratio table.\nA | B\n${a} | ${b}\n${a * 2} | ${b * 2}\n${a * factor} | ?`,
@@ -4604,8 +4858,10 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("ratio_double_number_line", "integer", (r) => {
+    // Different steps: equal ones put the answer on the other scale.
     const firstStep = r.int(2, 8);
-    const secondStep = r.int(2, 9);
+    let secondStep = r.int(2, 8);
+    if (secondStep >= firstStep) secondStep += 1;
     return {
       stem: `Two aligned scales show equivalent ratios.\nMeters: 0 | ${firstStep} | ${firstStep * 2} | ${firstStep * 3}\nSeconds: 0 | ${secondStep} | ${secondStep * 2} | ?\nWhat value belongs at the final tick?`,
       answer: intAns(secondStep * 3),
@@ -4721,6 +4977,7 @@ const TEMPLATES: Template[] = [
     return {
       stem: `Write ${percent}% as a decimal.`,
       answer: decAns(percent / 100),
+      answerForm: "decimalNotation",
     };
   }),
   T("percent_benchmark_reasoning", "multipleChoice", (r) => {
@@ -4897,8 +5154,10 @@ const TEMPLATES: Template[] = [
     const proportional = r.int(0, 1) === 0;
     const badY = 3 * k + 1;
     const rows = [k, 2 * k, proportional ? 3 * k : badY, 4 * k];
+    // Option lengths interleave in both branches, so neither "longest" nor
+    // "shortest" picks the answer.
     const correct = proportional
-      ? `Yes. Every nonzero row has y/x = ${k}.`
+      ? `Yes. Every nonzero row has the same ratio, y/x = ${k}.`
       : `No. The row (3, ${badY}) has a different y/x ratio.`;
     return choiceItem(
       r,
@@ -4907,12 +5166,12 @@ const TEMPLATES: Template[] = [
       proportional
         ? [
             "No. Proportional tables must have equal x- and y-values.",
-            "No. The y-values increase from row to row.",
+            "No. The y-values grow.",
             "There is not enough information to decide.",
           ]
         : [
-            `Yes. The y-values are close to ${k} times x.`,
-            "Yes. Both columns increase from row to row.",
+            `Yes. The y-values are close to ${k} times x, so the ratio is about the same.`,
+            "Yes. Both columns grow.",
             "There is not enough information to decide.",
           ],
     );
@@ -4934,13 +5193,13 @@ const TEMPLATES: Template[] = [
         : "No. The straight line does not pass through the origin.",
       proportional
         ? [
-            "No. A proportional graph cannot contain the origin.",
+            "No. A proportional graph has to curve upward as x increases.",
             "No. The y-values are larger than the x-values.",
             "There is not enough information to decide.",
           ]
         : [
             "Yes. Any straight line is proportional.",
-            "Yes. The points rise at a constant rate.",
+            "Yes. The points rise by the same amount each time, so it is proportional.",
             "There is not enough information to decide.",
           ],
       coordinatePromptVisual(points, "segments", true),
@@ -5021,8 +5280,8 @@ const TEMPLATES: Template[] = [
       askUnit
         ? [
             `${rate} hours correspond to 1 liter.`,
-            `The starting amount is ${rate} liters at 0 hours.`,
-            `Every hour adds ${rate + 1} liters.`,
+            `The starting amount, before any time has passed, is ${rate} liters at 0 hours.`,
+            `Every hour that passes adds ${rate + 1} liters to the amount.`,
           ]
         : [
             `At 0 hours, the amount is ${rate} liters.`,
@@ -5094,9 +5353,8 @@ const TEMPLATES: Template[] = [
     );
   }),
   T("compare_integers", "multipleChoice", (r) => {
-    const a = r.int(-9, 7);
-    let b = r.int(-8, 9);
-    if (b === a) b = a === 9 ? a - 1 : a + 1;
+    // Same range for both, so "<" and ">" are equally likely ("<" was 62%).
+    const [a, b] = distinctInts(r, -9, 9);
     return {
       stem: `How does ${a} compare to ${b}?`,
       answer: choiceAns(comparisonIndex(a, b)),
@@ -5396,9 +5654,8 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("rational_inequalities_contexts", "multipleChoice", (r) => {
-    const a = r.int(-10, 8);
-    let b = r.int(-9, 10);
-    if (b === a) b += 1;
+    // Same range for both, so "<" and ">" are equally likely ("<" was 62%).
+    const [a, b] = distinctInts(r, -10, 10);
     const aLabel = signedFractionLabel(a, 4);
     const bLabel = signedFractionLabel(b, 4);
     return {
@@ -6166,10 +6423,11 @@ const TEMPLATES: Template[] = [
       },
     ];
     const correct = r.pick(moves);
-    const distractors = moves
-      .filter((move) => move.property !== correct.property)
-      .map((move) => move.property)
-      .slice(0, 3);
+    // Three of the other four, chosen at random. Taking the first three meant
+    // "Distributive Property" (listed last) appeared only when it was right.
+    const others = moves.filter((move) => move.property !== correct.property);
+    others.splice(r.int(0, others.length - 1), 1);
+    const distractors = others.map((move) => move.property);
     return choiceItem(
       r,
       `While solving an equation, a student ${correct.step}. Which property justifies this step?`,
@@ -6424,17 +6682,38 @@ const TEMPLATES: Template[] = [
 
   // Systems of linear equations (grades 8–9).
   T("sys_solution_meaning", "multipleChoice", (r) => {
+    // Three questions about one intersection point, each with its own right
+    // answer. The old single question had the same right sentence every time.
     const sx = r.int(-5, 6);
-    const sy = r.int(-5, 6);
+    // sy ≠ 0: at (x, 0) "the x-intercept shared by both lines" is also true.
+    let sy = r.int(-5, 5);
+    if (sy >= 0) sy += 1;
+    const shape = r.int(0, 2);
+    if (shape === 0) {
+      return choiceItem(
+        r,
+        `The graphs of a two-equation system intersect at (${sx}, ${sy}). What does this point represent?`,
+        "the ordered pair that satisfies both equations",
+        [
+          "a solution of only the first equation",
+          "a point that satisfies neither equation",
+          "the x-intercept shared by both lines",
+        ],
+      );
+    }
+    if (shape === 1) {
+      return choiceItem(
+        r,
+        `Two lines in a system cross only at (${sx}, ${sy}). Which equations does (${sx}, ${sy}) make true?`,
+        "both equations",
+        ["only the first equation", "only the second equation", "neither equation"],
+      );
+    }
     return choiceItem(
       r,
-      `The graphs of a two-equation system intersect at (${sx}, ${sy}). What does this point represent?`,
-      "the ordered pair that satisfies both equations",
-      [
-        "a solution of only the first equation",
-        "a point that satisfies neither equation",
-        "the x-intercept shared by both lines",
-      ],
+      `Two lines in a system meet at (${sx}, ${sy}) and nowhere else. How many solutions does the system have?`,
+      "exactly one",
+      ["none", "exactly two", "infinitely many"],
     );
   }),
   T("sys_solve_graphing", "integer", (r) => {
@@ -6610,7 +6889,9 @@ const TEMPLATES: Template[] = [
       stem: `Simplify ${symbol}${p}.`,
       answer: { type: "expression", canonical: `${a}${symbol}${b}` },
     };
-  }),
+    // The skill IS the representation: an unsimplified radical ("√54") has the
+    // right value, so it earns the no-penalty form nudge, never a pass.
+  }, { answerForm: "simplifiedRadical" }),
   T("sci_notation_convert", "integer", (r) => {
     const d1 = r.int(1, 9);
     const d2 = r.int(0, 9);
@@ -6832,14 +7113,17 @@ const TEMPLATES: Template[] = [
         ],
       );
     }
+    // Both signs, so (x − c)² is sometimes the answer rather than a distractor
+    // that never is.
+    const s = r.int(0, 1) === 0 ? 1 : -1;
     return choiceItem(
       r,
-      `Factor ${quadExpr(1, 2 * c, c * c)}.`,
-      `(${xTerm(c)})²`,
+      `Factor ${quadExpr(1, 2 * s * c, c * c)}.`,
+      `(${xTerm(s * c)})²`,
       [
-        `(${xTerm(-c)})²`,
+        `(${xTerm(-s * c)})²`,
         `(x + ${c})(x - ${c})`,
-        `(${xTerm(2 * c)})²`,
+        `(${xTerm(2 * s * c)})²`,
       ],
     );
   }),
@@ -6999,13 +7283,14 @@ const TEMPLATES: Template[] = [
     return { stem: `How many factor pairs does ${n} have?`, answer: intAns(factorPairCount(n)) };
   }),
   T("is_factor", "multipleChoice", (r) => {
+    // Yes and No equally often; a random n made "No" right 79% of the time.
     const k = r.int(2, 12);
-    const n = r.int(20, 120);
+    const n = yesNoMultiple(r, k);
     return { stem: `Is ${k} a factor of ${n}?`, answer: choiceAns(n % k === 0 ? 1 : 0), choices: YES_NO_CHOICES };
   }),
   T("is_multiple", "multipleChoice", (r) => {
     const k = r.int(2, 9);
-    const n = r.int(20, 120);
+    const n = yesNoMultiple(r, k);
     return { stem: `Is ${n} a multiple of ${k}?`, answer: choiceAns(n % k === 0 ? 1 : 0), choices: YES_NO_CHOICES };
   }),
   T("prime_or_composite", "multipleChoice", (r) => {
@@ -7037,9 +7322,20 @@ const TEMPLATES: Template[] = [
     let b = r.int(2, 9);
     if (b === a) b = a === 9 ? a - 1 : a + 1;
     const l = lcm(a, b);
-    // Half the time pose a guaranteed common multiple; either way the answer is
-    // computed from m, so it's correct regardless of which branch produced m.
-    const m = r.int(0, 1) === 0 ? l * r.int(1, 6) : a * r.int(2, 14);
+    // Half the time a common multiple; otherwise a multiple of just one of them
+    // (a bare multiple of a was often also one of b, so "Yes" was right two
+    // times in three). The answer is still computed from m.
+    let m = l * r.int(1, 6);
+    if (r.int(0, 1) === 0) {
+      m = l + 1;
+      for (let i = 0; i < 40; i++) {
+        const candidate = r.pick([a, b]) * r.int(2, 14);
+        if (candidate % l !== 0) {
+          m = candidate;
+          break;
+        }
+      }
+    }
     return {
       stem: `Is ${m} a common multiple of ${a} and ${b}?`,
       answer: choiceAns(m % a === 0 && m % b === 0 ? 1 : 0),
@@ -7340,10 +7636,20 @@ const TEMPLATES: Template[] = [
     ]);
   }),
   T("gt_euler_path", "multipleChoice", (r) => {
-    const n = r.int(4, 6);
-    const edges = addExtraEdges(n, randomTree(n, r), r.int(0, 3), r);
-    const oddCount = degreesOf(n, edges).filter((d) => d % 2 === 1).length;
-    const exists = oddCount === 0 || oddCount === 2;
+    // Whether a path exists is picked first, then graphs are drawn until one
+    // matches ("yes" was right 61% of the time). The answer is still computed
+    // from the graph actually shown.
+    const want = r.int(0, 1) === 0;
+    let n = 4;
+    let edges: [number, number][] = [];
+    let exists = false;
+    for (let i = 0; i < 30; i++) {
+      n = r.int(4, 6);
+      edges = addExtraEdges(n, randomTree(n, r), r.int(0, 3), r);
+      const oddCount = degreesOf(n, edges).filter((d) => d % 2 === 1).length;
+      exists = oddCount === 0 || oddCount === 2;
+      if (exists === want) break;
+    }
     return choiceItem(
       r,
       `A graph has edges ${edgeListString(edges)} and is connected. Does an Euler path exist?`,
@@ -7433,11 +7739,19 @@ const TEMPLATES: Template[] = [
     return choiceItem(r, stem, correct, [correct === "even" ? "odd" : "even", "neither"]);
   }),
   T("nt_parity_argument", "multipleChoice", (r) => {
-    const op = r.pick(["plus", "times"] as const);
-    const p1 = r.pick(["odd", "even"] as const);
-    const p2 = r.pick(["odd", "even"] as const);
-    const flag = (p: "odd" | "even") => (p === "odd" ? 1 : 0);
-    const resultOdd = op === "plus" ? (flag(p1) + flag(p2)) % 2 === 1 : flag(p1) === 1 && flag(p2) === 1;
+    // The result's parity is picked first: three of the eight combinations are
+    // odd, so "even" used to be right 62% of the time.
+    const resultOdd = r.int(0, 1) === 0;
+    const combos: ["plus" | "times", "odd" | "even", "odd" | "even"][] = resultOdd
+      ? [["plus", "odd", "even"], ["plus", "even", "odd"], ["times", "odd", "odd"]]
+      : [
+          ["plus", "odd", "odd"],
+          ["plus", "even", "even"],
+          ["times", "even", "even"],
+          ["times", "odd", "even"],
+          ["times", "even", "odd"],
+        ];
+    const [op, p1, p2] = r.pick(combos);
     const correct = resultOdd ? "odd" : "even";
     return choiceItem(r, `An ${p1} number ${op} an ${p2} number is always…`, correct, [
       correct === "odd" ? "even" : "odd",
@@ -7515,8 +7829,17 @@ const TEMPLATES: Template[] = [
     // more than one (every multiple of 9 is a multiple of 3; 284/500 sampled
     // items had two correct options — Sol review 2026-08-19, finding 2).
     const shape = r.pick(["digitSum", "alternating"] as const);
+    // Each answer is picked first, then a number drawn to match: "neither" was
+    // right two times in three, and "no" (not divisible by 11) about 91%.
     if (shape === "digitSum") {
-      const n = r.int(120, 9999);
+      const want = r.pick(["both 3 and 9", "3 but not 9", "neither"] as const);
+      let n = r.int(120, 9999);
+      for (let i = 0; i < 60; i++) {
+        const candidateSum = digitSum(n);
+        const kind = candidateSum % 9 === 0 ? "both 3 and 9" : candidateSum % 3 === 0 ? "3 but not 9" : "neither";
+        if (kind === want) break;
+        n = r.int(120, 9999);
+      }
       const sum = digitSum(n);
       const by9 = sum % 9 === 0;
       const by3 = sum % 3 === 0;
@@ -7528,7 +7851,7 @@ const TEMPLATES: Template[] = [
         ["both 3 and 9", "3 but not 9", "neither"].filter((c) => c !== correct),
       );
     }
-    const n = r.int(120, 9999);
+    const n = r.int(0, 1) === 0 ? 11 * r.int(11, 909) : r.int(120, 9999);
     const alt = altDigitSum(n);
     const by11 = alt % 11 === 0;
     return choiceItem(
@@ -7539,8 +7862,10 @@ const TEMPLATES: Template[] = [
     );
   }),
   T("nt_prime_test_deeper", "multipleChoice", (r) => {
-    const n = r.int(100, 199);
-    const prime = isPrime(n);
+    // Prime half the time. Composites are odd and not multiples of 5, the ones
+    // the √n test is actually for; a random n was composite 81% of the time.
+    const prime = r.int(0, 1) === 0;
+    const n = r.pick(prime ? PRIMES_100_TO_199 : ODD_COMPOSITES_100_TO_199);
     const rootApprox = Math.round(Math.sqrt(n));
     return choiceItem(r, `Is ${n} prime or composite? (Hint: test to √${n} ≈ ${rootApprox}.)`, prime ? "prime" : "composite", [
       prime ? "composite" : "prime",
@@ -7568,9 +7893,22 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("nt_gcd_euclid", "integer", (r) => {
-    const a = r.int(12, 96);
-    const b = r.int(12, 96);
-    return { stem: `Use the Euclidean algorithm: what is gcd(${a}, ${b})?`, answer: intAns(gcd(a, b)) };
+    // The gcd is picked first: two random numbers are coprime about 60% of the
+    // time, so "1" used to be right more often than not.
+    const g = r.pick([1, 2, 3, 4, 5, 6, 7, 8, 9, 12]);
+    const lo = Math.ceil(12 / g);
+    const hi = Math.floor(96 / g);
+    let p = lo;
+    let q = lo + 1;
+    for (let i = 0; i < 50; i++) {
+      const [x, y] = distinctInts(r, lo, hi);
+      if (gcd(x, y) === 1) {
+        p = x;
+        q = y;
+        break;
+      }
+    }
+    return { stem: `Use the Euclidean algorithm: what is gcd(${g * p}, ${g * q})?`, answer: intAns(g) };
   }),
   T("nt_linear_congruence", "integer", (r) => {
     const n = r.pick([5, 7, 11, 13]);
@@ -7607,18 +7945,22 @@ const TEMPLATES: Template[] = [
     return choiceItem(r, stem, truth ? "true" : "false", [truth ? "false" : "true", "cannot be determined"]);
   }),
   T("lg_and", "multipleChoice", (r) => {
-    const f1 = randomFact(r);
-    const f2 = randomFact(r);
-    const truth = f1.truth && f2.truth;
+    // Truth picked first: two random facts made an AND false 71% of the time.
+    const truth = r.int(0, 1) === 0;
+    const [t1, t2] = truth ? [true, true] : r.pick([[true, false], [false, true], [false, false]]);
+    const f1 = factWithTruth(r, t1);
+    const f2 = factWithTruth(r, t2);
     return choiceItem(r, `'${f1.text} AND ${f2.text}.' Is the whole statement true?`, truth ? "true" : "false", [
       truth ? "false" : "true",
       "cannot be determined",
     ]);
   }),
   T("lg_or", "multipleChoice", (r) => {
-    const f1 = randomFact(r);
-    const f2 = randomFact(r);
-    const truth = f1.truth || f2.truth;
+    // Truth picked first: two random facts made an OR true 76% of the time.
+    const truth = r.int(0, 1) === 0;
+    const [t1, t2] = truth ? r.pick([[true, true], [true, false], [false, true]]) : [false, false];
+    const f1 = factWithTruth(r, t1);
+    const f2 = factWithTruth(r, t2);
     return choiceItem(r, `'${f1.text} OR ${f2.text}.' True or false?`, truth ? "true" : "false", [
       truth ? "false" : "true",
       "cannot be determined",
@@ -7662,16 +8004,21 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("lg_if_then", "multipleChoice", (r) => {
-    const hyp = randomFact(r);
-    const con = randomFact(r);
-    const truth = !hyp.truth || con.truth;
+    // Truth picked first: random parts made the conditional true 75% of the time.
+    const truth = r.int(0, 1) === 0;
+    const [th, tc] = truth ? r.pick([[true, true], [false, true], [false, false]]) : [true, false];
+    const hyp = factWithTruth(r, th);
+    const con = factWithTruth(r, tc);
     return choiceItem(r, `'If ${hyp.text}, then ${con.text}.' Is this conditional true?`, truth ? "true" : "false", [
       truth ? "false" : "true",
       "cannot be determined",
     ]);
   }),
   T("lg_converse", "multipleChoice", (r) => {
-    const item = r.pick(CONVERSE_ITEMS);
+    // Whether the converse holds is picked first (only one item in five used to
+    // have a true converse, so "no" was right 81% of the time on judge items).
+    const converseTrue = r.int(0, 1) === 0;
+    const item = r.pick(CONVERSE_ITEMS.filter((candidate) => candidate.converseTrue === converseTrue));
     // Two shapes per the node's label ("write the converse AND judge its truth
     // separately" — Sol review 2026-08-19, finding 5): recognize the converse,
     // or judge the converse's truth independently of the original.
@@ -7749,9 +8096,21 @@ const TEMPLATES: Template[] = [
       names.filter((n) => n !== correct),
     );
   }),
+  // ── Algebra 2 (one file per strand under ./algebra2) ─────────────────────
+  ...algebra2Templates(ALGEBRA_2_KIT),
+  // ── discrete-math algorithms strand (./algorithms) ───────────────────────
+  ...algorithmsTemplates(ALGEBRA_2_KIT),
 ];
 
 const BY_KEY = new Map(TEMPLATES.map((t) => [t.skillKey, t]));
+
+/** Algebra 2 and the algorithms strand have their own suites
+ *  (convex/__tests__/algebra2*, algorithmsTemplates.test.ts), so
+ *  the legacy exhaustive sweep skips their keys the way it skips every key in
+ *  `NEW_COVERAGE_SKILL_KEYS`. Derived, so a new family cannot be forgotten. */
+const ALGEBRA_2_TEMPLATE_KEYS = new Set(
+  [...algebra2Templates(ALGEBRA_2_KIT), ...algorithmsTemplates(ALGEBRA_2_KIT)].map((t) => t.skillKey),
+);
 
 /** Whether a parameterized template exists for a skill. */
 export function hasTemplate(skillKey: string): boolean {
@@ -7760,7 +8119,7 @@ export function hasTemplate(skillKey: string): boolean {
 
 /** Legacy exhaustive-regression keys; Wave A+ templates have dedicated coverage. */
 export function templatedSkillKeys(): string[] {
-  return [...BY_KEY.keys()].filter((key) => !NEW_COVERAGE_SKILL_KEYS.has(key) && key !== "order_of_operations");
+  return [...BY_KEY.keys()].filter((key) => !NEW_COVERAGE_SKILL_KEYS.has(key) && !ALGEBRA_2_TEMPLATE_KEYS.has(key) && key !== "order_of_operations");
 }
 
 /** EVERY registered template family key — the authoritative set the placement
@@ -7808,7 +8167,8 @@ export function generateItem(skillKey: string, seed: number, form?: string): Pra
   const t = BY_KEY.get(skillKey);
   if (!t) return null;
   const rng = makeRng(seed);
-  const base = t.gen(rng);
+  const precedence = form === "precedence" && PRECEDENCE_FORM_SKILLS.has(skillKey);
+  const base = precedence ? t.gen(rng, "precedence") : t.gen(rng);
   if (
     form === "missing" &&
     MISSING_OPERAND_FORM_SKILLS.has(skillKey) &&
@@ -7826,17 +8186,26 @@ export function generateItem(skillKey: string, seed: number, form?: string): Pra
       form: "missing",
     };
   }
+  const answerType = base.answerType ?? t.answerType;
+  // The algebra pad's palette only means something where that pad is shown.
+  const showsAlgebraPad = answerType === "expression" || answerType === "solutionSet";
+  // A draw that changed the type states its own form or has none: the family's
+  // form was written for the family's kind of answer.
+  const answerForm = base.answerForm ?? (base.answerType ? undefined : t.answerForm);
   return {
     skillKey,
     stem: base.stem,
     answer: base.answer,
-    answerType: t.answerType,
+    answerType,
     choices: base.choices,
     promptVisual: base.promptVisual,
     workedSteps: base.workedSteps,
     ...(base.variant ? { variant: base.variant } : {}),
     ...(t.answerUnit ? { answerUnit: t.answerUnit } : {}),
+    ...(answerForm ? { answerForm } : {}),
+    ...(t.answerPalette && showsAlgebraPad ? { answerPalette: t.answerPalette } : {}),
     source: "template",
+    ...(precedence ? { form: "precedence" as const } : {}),
   };
 }
 

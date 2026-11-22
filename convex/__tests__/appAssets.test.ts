@@ -114,6 +114,53 @@ describe("artifact app asset resolver", () => {
     );
   });
 
+  test("serves a chat photo's app-usable copy, for the copy's id and for the raw upload's", async () => {
+    // A BunnyPad chat photo is sized for the model (1568 px, often 400 KB+),
+    // over the app cap; prepareSessionPhotoAssets stores a copy within it on
+    // messages.appAssetId. An app built before the copy existed still names
+    // the raw id, so that reference must load too (two scholars'
+    // civilization maps, 2026-11-04).
+    const t = convexTest(schema, modules);
+    const owner = await seedUser(t, "owner-photo-copy");
+    const { sessionId, artifactId } = await seedArtifact(t, owner);
+    const { rawId, copyId } = await t.run(async (ctx) => {
+      const bytes = new Uint8Array(MAX_APP_ASSET_BYTES + 1);
+      bytes.set(JPEG);
+      const rawId = await ctx.storage.store(
+        new Blob([bytes], { type: "image/jpeg" }),
+      );
+      const copyId = await ctx.storage.store(
+        new Blob([JPEG], { type: "image/jpeg" }),
+      );
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "put my map in the app",
+        flagged: false,
+        imageId: rawId,
+        appAssetId: copyId,
+      });
+      return { rawId, copyId };
+    });
+    const asOwner = await withUser(t, owner);
+
+    const resolved = await asOwner.action(
+      api.appAssetHostActions.resolveArtifactAssets,
+      {
+        artifactId,
+        html: `<img src="${appAssetRef(String(rawId))}"><img src="${appAssetRef(String(copyId))}">`,
+      },
+    );
+    // Keyed by the id the HTML references, so the host can rewrite it.
+    expect(resolved.map((asset) => asset.id)).toEqual([
+      String(rawId),
+      String(copyId),
+    ]);
+    const copyUrl = await t.run((ctx) => ctx.storage.getUrl(copyId));
+    expect(resolved[0].url).toBe(copyUrl);
+    expect(resolved[1].url).toBe(copyUrl);
+  });
+
   test("rejects a raw ready charm cache id", async () => {
     const t = convexTest(schema, modules);
     const userId = await seedUser(t, "owner-charm-cache");

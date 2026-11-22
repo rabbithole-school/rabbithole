@@ -18,6 +18,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { getAuthSessionId } from "@convex-dev/auth/server";
 import { reconcilePortfolioMaterialization } from "./portfolioMaterialize";
 import { captureRosterName } from "./lib/schoolMediaConsent";
+import { storageReferencedByAnotherOwner } from "./lib/storageReferences";
 import {
   EXTENDED_EDUCATION_LABEL,
   includesProgramGuests,
@@ -131,11 +132,18 @@ async function expireUploadReservation(
     return "abandoned" as const;
   }
 
-  const capture = await ctx.db
-    .query("captureStationCaptures")
-    .withIndex("by_storage", (q) => q.eq("storageId", reservation.storageId!))
-    .first();
-  if (!capture) await ctx.storage.delete(reservation.storageId);
+  // A capture client chooses which storage id it reports, and the creation-time
+  // proof in `recordUploadedBlob` cannot tell its upload from another feature's
+  // blob created in the same window. Delete only a blob nothing else holds — a
+  // capture, a portfolio item, a family-message attachment, a health file, …
+  if (
+    !(await storageReferencedByAnotherOwner(ctx, reservation.storageId, {
+      table: "captureStationUploadReservations",
+      id: reservation._id,
+    }))
+  ) {
+    await ctx.storage.delete(reservation.storageId);
+  }
   await ctx.db.delete(reservation._id);
   return "deleted" as const;
 }
@@ -369,7 +377,7 @@ async function currentManagedBinding(
   return claim;
 }
 
-async function requireCurrentManagedBinding(
+export async function requireCurrentManagedBinding(
   ctx: Pick<QueryCtx, "db"> | Pick<MutationCtx, "db">,
   binding: Doc<"pairedDevices">,
 ) {
@@ -1380,6 +1388,18 @@ export const recordUploadedBlob = mutation({
     if (metadata && metadata._creationTime <= reservation.createdAt) {
       throw new Error("Upload does not belong to this reservation.");
     }
+    // A newer blob is still not proof: another feature can create one in the
+    // same window. A blob some other owner already holds was not uploaded
+    // here, so it is never adopted (a later undo/delete would destroy it, and
+    // the kiosk could read it) and never handed to cleanup.
+    if (
+      await storageReferencedByAnotherOwner(ctx, args.storageId, {
+        table: "captureStationUploadReservations",
+        id: reservation._id,
+      })
+    ) {
+      throw new Error("Upload does not belong to this reservation.");
+    }
     // A poster is a small still, and the client that uploads one always sends a
     // Content-Type, so it is held to the tighter contract: image/* only, the
     // poster ceiling, and a declared content type (no undefined tolerance).
@@ -1403,9 +1423,14 @@ export const recordUploadedBlob = mutation({
           metadata.contentType.toLowerCase() === mimeType);
     const now = Date.now();
     if (!valid) {
+      // The client that uploaded a blob knows its exact size. A wrong size
+      // means it is naming a blob it did not upload, so the id is not bound to
+      // this reservation and cleanup never deletes it. Type and size-cap
+      // failures are the client's own upload and are swept.
+      const ownUpload = metadata !== null && args.sizeBytes === metadata.size;
       await ctx.db.patch(reservation._id, {
         status: "cancelled",
-        ...(metadata
+        ...(ownUpload
           ? {
               storageId: args.storageId,
               mimeType,
@@ -1686,6 +1711,37 @@ export const cleanupUploadReservation = internalMutation({
   },
 });
 
+/**
+ * Deletes a removed capture's blobs, keeping any blob another owner still
+ * holds. The capture's own row, portfolio item, and finalized reservations do
+ * not count; anything else (a portfolio scan, a family attachment, a health
+ * file, …) means the blob was never this capture's to delete.
+ */
+async function deleteCaptureBlobs(
+  ctx: MutationCtx,
+  capture: Doc<"captureStationCaptures">,
+  item: Doc<"portfolioItems">,
+) {
+  for (const storageId of new Set([
+    capture.storageId,
+    item.thumbStorageId,
+    item.magicStorageId,
+    item.magicThumbStorageId,
+    capture.videoThumbStorageId,
+  ])) {
+    if (
+      storageId &&
+      !(await storageReferencedByAnotherOwner(ctx, storageId, {
+        table: "captureStationCaptures",
+        id: capture._id,
+        portfolioItemId: capture.portfolioItemId,
+      }))
+    ) {
+      await ctx.storage.delete(storageId);
+    }
+  }
+}
+
 export const undoCapture = mutation({
   args: { sessionToken: v.string(), deviceId: v.string(), captureId: v.id("captureStationCaptures") },
   handler: async (ctx, args) => {
@@ -1737,15 +1793,7 @@ export const undoCapture = mutation({
     }
     await ctx.db.delete(capture.portfolioItemId);
     await reconcilePortfolioMaterialization(ctx, capture.portfolioItemId);
-    for (const storageId of new Set([
-      capture.storageId,
-      item.thumbStorageId,
-      item.magicStorageId,
-      item.magicThumbStorageId,
-      capture.videoThumbStorageId,
-    ])) {
-      if (storageId) await ctx.storage.delete(storageId);
-    }
+    await deleteCaptureBlobs(ctx, capture, item);
     const now = Date.now();
     await ctx.db.patch(capture._id, { undoneAt: now, scholarIds: [] });
     await ctx.db.patch(session._id, {
@@ -2010,15 +2058,7 @@ export const deleteCapture = mutation({
     }
     await ctx.db.delete(capture.portfolioItemId);
     await reconcilePortfolioMaterialization(ctx, capture.portfolioItemId);
-    for (const storageId of new Set([
-      capture.storageId,
-      item.thumbStorageId,
-      item.magicStorageId,
-      item.magicThumbStorageId,
-      capture.videoThumbStorageId,
-    ])) {
-      if (storageId) await ctx.storage.delete(storageId);
-    }
+    await deleteCaptureBlobs(ctx, capture, item);
     const now = Date.now();
     await ctx.db.patch(capture._id, { undoneAt: now, scholarIds: [] });
     const owningSession = await ctx.db.get(capture.sessionId);

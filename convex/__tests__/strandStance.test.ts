@@ -7,7 +7,6 @@ import { buildSystemPrompt } from "../sessionHelpers";
 
 function buildWithLesson(lessonContext: LessonContext | null): string {
   return buildSystemPrompt(
-    null, // teacherWhisper
     null, // readingLevel
     "Kai", // scholarName
     null, // unitContext

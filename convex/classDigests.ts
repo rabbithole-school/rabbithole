@@ -540,7 +540,10 @@ async function scopeDigestToLens(
 ): Promise<{ digest: Doc<"classDigests"> | null; lensNarrowed: boolean }> {
   if (requestedScope === undefined) return { digest, lensNarrowed: false };
   const lens = await resolveInstitutionLens(ctx, user, requestedScope);
-  const lensScholarIds = await scholarIdsInLens(ctx, lens);
+  // A past digest keeps the moments of a scholar who has since withdrawn.
+  const lensScholarIds = await scholarIdsInLens(ctx, lens, {
+    includeWithdrawn: true,
+  });
   const lensNarrowed = assignment.scholarIds.some(
     (id) => !lensScholarIds.has(id),
   );

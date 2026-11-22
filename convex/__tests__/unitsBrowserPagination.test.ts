@@ -67,6 +67,13 @@ async function seedWorld(t: ReturnType<typeof convexTest>) {
     title: "Home scholar's quest",
     authorScholarId: home.scholars[0].id,
   });
+  // A Quest the scholar owns outright: `teacherId` is the scholar too, as
+  // `createAndOfferQuestForScholar` and the aide write it.
+  const homeOwnQuest = await makeUnit(t, home.scholars[0].id, home, {
+    title: "Home scholar's own quest",
+    subject: "Art",
+    authorScholarId: home.scholars[0].id,
+  });
   const foreignCatalog = await makeUnit(t, foreign.teacher, foreign, {
     title: "Foreign catalog",
     subject: "Math",
@@ -92,6 +99,7 @@ async function seedWorld(t: ReturnType<typeof convexTest>) {
       mineArchived,
       colleagueScience,
       homeIndependentStudy,
+      homeOwnQuest,
       foreignCatalog,
       foreignIndependentStudy,
       mineNewest,
@@ -106,7 +114,9 @@ async function browseAll(
     scope?: string;
     authorId?: Id<"users">;
     subject?: string;
+    grade?: string;
     showArchived: boolean;
+    showScholarQuests?: boolean;
   },
 ) {
   const rows = [];
@@ -131,7 +141,10 @@ describe("units.listForBrowser", () => {
     const asTeacher = await world.as.staffOf(home);
 
     const full = await asTeacher.query(api.units.list, {});
-    const paged = await browseAll(asTeacher, { showArchived: true });
+    const paged = await browseAll(asTeacher, {
+      showArchived: true,
+      showScholarQuests: true,
+    });
     expect(paged.map((row) => row._id)).toEqual(full.map((row) => row._id));
   });
 
@@ -141,15 +154,19 @@ describe("units.listForBrowser", () => {
     const asTeacher = await world.as.staffOf(home);
 
     for (const scope of [undefined, "", "moli", "kona", "all"]) {
-      const ids = (await browseAll(asTeacher, { scope, showArchived: true })).map(
-        (row) => row._id,
-      );
+      const ids = (
+        await browseAll(asTeacher, {
+          scope,
+          showArchived: true,
+          showScholarQuests: true,
+        })
+      ).map((row) => row._id);
       expect(ids).not.toContain(units.foreignCatalog);
       expect(ids).not.toContain(units.foreignIndependentStudy);
     }
-    const ids = (await browseAll(asTeacher, { showArchived: true })).map(
-      (row) => row._id,
-    );
+    const ids = (
+      await browseAll(asTeacher, { showArchived: true, showScholarQuests: true })
+    ).map((row) => row._id);
     expect(ids).toContain(units.homeIndependentStudy);
     expect(ids[0]).toBe(units.mineNewest);
   });
@@ -162,9 +179,21 @@ describe("units.listForBrowser", () => {
     const mineActive = await browseAll(asTeacher, {
       authorId: home.teacher.id,
       showArchived: false,
+      showScholarQuests: false,
+    });
+    // The scholar's Quest shares this teacherId but is hidden by default.
+    expect(mineActive.map((row) => row._id)).toEqual([
+      units.mineNewest,
+      units.mineMath,
+    ]);
+
+    const mineWithQuests = await browseAll(asTeacher, {
+      authorId: home.teacher.id,
+      showArchived: false,
+      showScholarQuests: true,
     });
     // The foreign scholar's quest shares this teacherId but stays out (lens).
-    expect(mineActive.map((row) => row._id)).toEqual([
+    expect(mineWithQuests.map((row) => row._id)).toEqual([
       units.mineNewest,
       units.homeIndependentStudy,
       units.mineMath,
@@ -192,6 +221,88 @@ describe("units.listForBrowser", () => {
     expect(colleagueOnly.map((row) => row._id)).toEqual([units.colleagueScience]);
   });
 
+  test("scholar Quests stay out of the list until asked for", async () => {
+    const t = convexTest(schema, modules);
+    const { world, home, units } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(home);
+
+    const byDefault = (
+      await browseAll(asTeacher, { showArchived: true, showScholarQuests: false })
+    ).map((row) => row._id);
+    expect(byDefault).not.toContain(units.homeIndependentStudy);
+    expect(byDefault).not.toContain(units.homeOwnQuest);
+    expect(byDefault).toEqual(
+      expect.arrayContaining([
+        units.mineNewest,
+        units.colleagueScience,
+        units.mineArchived,
+        units.mineMath,
+      ]),
+    );
+
+    const shown = (
+      await browseAll(asTeacher, { showArchived: false, showScholarQuests: true })
+    ).map((row) => row._id);
+    expect(shown).toContain(units.homeIndependentStudy);
+    expect(shown).toContain(units.homeOwnQuest);
+    expect(shown).not.toContain(units.foreignIndependentStudy);
+
+    // The scholar owns their Quest outright, so filtering by them still
+    // serves nothing until Quests are shown.
+    const byScholar = await browseAll(asTeacher, {
+      authorId: home.scholars[0].id,
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    expect(byScholar).toEqual([]);
+  });
+
+  test("a caller that predates the toggle still gets scholar Quests", async () => {
+    const t = convexTest(schema, modules);
+    const { world, home, units } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(home);
+
+    // An open tab running the old client sends no showScholarQuests and has
+    // no toggle to bring Quests back, so omitted means shown.
+    const ids = (await browseAll(asTeacher, { showArchived: false })).map(
+      (row) => row._id,
+    );
+    expect(ids).toContain(units.homeIndependentStudy);
+    expect(ids).toContain(units.homeOwnQuest);
+
+    const options = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: false,
+    });
+    expect(options.authors.map((author) => author.id)).toContain(
+      String(home.scholars[0].id),
+    );
+  });
+
+  test("the subject filter matches by meaning, not spelling (TRA-723)", async () => {
+    const t = convexTest(schema, modules);
+    const { world, home, units } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(home);
+    const legacy = await makeUnit(t, home.teacher, home, {
+      title: "Counting the odds",
+      subject: "Mathematics",
+    });
+
+    const math = await browseAll(asTeacher, {
+      subject: "math",
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    expect(math.map((row) => row._id)).toEqual([legacy, units.mineNewest, units.mineMath]);
+
+    const options = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    // One option for the three spellings. Each has one unit, so the tie goes
+    // to the alphabetically first spelling.
+    expect(options.subjects).toEqual(["math", "science"]);
+  });
+
   test("rows are slim and carry the lesson count", async () => {
     const t = convexTest(schema, modules);
     const { world, home, units } = await seedWorld(t);
@@ -207,8 +318,87 @@ describe("units.listForBrowser", () => {
       unpublished: false,
       teacherId: home.teacher.id,
       teacherName: "Home teacher",
+      subject: "Math",
+      gradeLevel: null,
       lessonCount: 2,
     });
+  });
+
+  test("the grade filter shows units whose span covers the grade", async () => {
+    const t = convexTest(schema, modules);
+    const { world, home } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(home);
+    const span = await makeUnit(t, home.teacher, home, {
+      title: "Ecosystems",
+      gradeLevel: "3-5",
+    });
+    const single = await makeUnit(t, home.teacher, home, {
+      title: "Place value",
+      gradeLevel: "4",
+    });
+    await makeUnit(t, home.teacher, home, {
+      title: "Phonics",
+      gradeLevel: "K-2",
+    });
+    await makeUnit(t, home.teacher, home, {
+      title: "Unreadable",
+      gradeLevel: "Middle school",
+    });
+
+    const fourth = await browseAll(asTeacher, {
+      grade: "4",
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    expect(fourth.map((row) => row._id)).toEqual([single, span]);
+    expect(fourth[0].gradeLevel).toBe("4");
+
+    const options = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    expect(options.grades).toEqual(["K", "1", "2", "3", "4", "5"]);
+  });
+
+  test("grade and subject filters combine, and grades follow the archived toggle", async () => {
+    const t = convexTest(schema, modules);
+    const { world, home } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(home);
+    const scienceFourth = await makeUnit(t, home.teacher, home, {
+      title: "Circuits",
+      subject: "Science",
+      gradeLevel: "3-5",
+    });
+    await makeUnit(t, home.teacher, home, {
+      title: "Long division",
+      subject: "Math",
+      gradeLevel: "4",
+    });
+    await makeUnit(t, home.teacher, home, {
+      title: "Old map unit",
+      subject: "History",
+      gradeLevel: "7",
+      isActive: false,
+    });
+
+    const both = await browseAll(asTeacher, {
+      grade: "4",
+      subject: "Science",
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    expect(both.map((row) => row._id)).toEqual([scienceFourth]);
+
+    const active = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    expect(active.grades).toEqual(["3", "4", "5"]);
+    const withArchived = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: true,
+      showScholarQuests: false,
+    });
+    expect(withArchived.grades).toEqual(["3", "4", "5", "7"]);
   });
 
   test("a scholar (no curriculum access) gets nothing", async () => {
@@ -232,9 +422,11 @@ describe("units.browserFilterOptions", () => {
 
     const active = await asTeacher.query(api.units.browserFilterOptions, {
       showArchived: false,
+      showScholarQuests: false,
     });
     expect(active.subjects).toEqual(["math", "science"]);
     expect(active.archivedCount).toBe(1);
+    expect(active.scholarQuestCount).toBe(2);
     const authorIds = active.authors.map((author) => author.id);
     expect(authorIds).toEqual(
       expect.arrayContaining([String(home.teacher.id), String(colleague.id)]),
@@ -243,6 +435,7 @@ describe("units.browserFilterOptions", () => {
 
     const withArchived = await asTeacher.query(api.units.browserFilterOptions, {
       showArchived: true,
+      showScholarQuests: false,
     });
     expect(withArchived.subjects).toEqual(["History", "math", "science"]);
 
@@ -253,5 +446,62 @@ describe("units.browserFilterOptions", () => {
     expect(foreignScope.authors.map((author) => author.id)).not.toContain(
       String(foreign.teacher.id),
     );
+  });
+
+  test("a scholar is offered as an author only while their Quests are shown", async () => {
+    const t = convexTest(schema, modules);
+    const { world, home } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(home);
+    const scholarId = String(home.scholars[0].id);
+
+    const hidden = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    expect(hidden.authors.map((author) => author.id)).not.toContain(scholarId);
+    expect(hidden.subjects).not.toContain("Art");
+
+    const shown = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: false,
+      showScholarQuests: true,
+    });
+    expect(shown.authors.map((author) => author.id)).toContain(scholarId);
+    expect(shown.subjects).toContain("Art");
+    expect(shown.scholarQuestCount).toBe(2);
+  });
+
+  test("archived Quests stay reachable when neither count has anything", async () => {
+    const t = convexTest(schema, modules);
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    const asTeacher = await world.as.staffOf(school);
+    await makeUnit(t, school.teacher, school, { title: "Catalog" });
+    const archivedQuest = await makeUnit(t, school.scholars[0].id, school, {
+      title: "Put-away quest",
+      isActive: false,
+      authorScholarId: school.scholars[0].id,
+    });
+
+    const options = await asTeacher.query(api.units.browserFilterOptions, {
+      showArchived: false,
+      showScholarQuests: false,
+    });
+    // Archived excludes Quests and the Quest count excludes archived units,
+    // so both counts are zero; the flags keep both toggles on screen.
+    expect(options.archivedCount).toBe(0);
+    expect(options.scholarQuestCount).toBe(0);
+    expect(options.hasArchived).toBe(true);
+    expect(options.hasScholarQuests).toBe(true);
+
+    const both = await browseAll(asTeacher, {
+      showArchived: true,
+      showScholarQuests: true,
+    });
+    expect(both.map((row) => row._id)).toContain(archivedQuest);
   });
 });

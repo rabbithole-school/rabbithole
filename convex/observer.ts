@@ -32,6 +32,11 @@ import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
 import { SESSION_SIGNAL_TYPES } from "../shared/learningSignals";
 import { resolveObserverOrigin } from "./lib/observerOrigin";
+import {
+  cleanSpottedFlairText,
+  spottedFlairCorroborated,
+  spottedFlairListedGoals,
+} from "./lib/spottedFlair";
 
 const sessionSignalTypes = new Set<string>(SESSION_SIGNAL_TYPES);
 const observerInterestHows = new Set(["said", "picked", "menu"]);
@@ -122,7 +127,22 @@ export const analyzeSession = internalAction({
       return null;
     }
     const origin = resolveObserverOrigin(context);
-    const observerContext = { ...context, origin };
+    // Spotted flair (convex/lib/spottedFlair.ts): tell the model what is
+    // already listed and whether the caps leave room, so a spent session
+    // costs no output tokens. The award mutation re-checks both.
+    const spottedFlairOpen = await ctx.runQuery(
+      internal.spottedFlair.canAward,
+      { sessionId: args.sessionId },
+    );
+    const observerContext = {
+      ...context,
+      origin,
+      listedGoals: spottedFlairListedGoals({
+        rubric: context.standaloneDeliverableContext?.rubric,
+        buildContract: context.lessonActivityContext?.buildContract,
+      }),
+      spottedFlairOpen,
+    };
     const institutionId = await ctx.runQuery(
       internal.usage.resolveInstitution,
       { userId: context.scholarId, principal: "scholar" },
@@ -668,6 +688,40 @@ export const analyzeSession = internalAction({
           transcriptExcerpt: conn.transcriptExcerpt ?? undefined,
           pcmDimension: conn.pcmDimension ?? undefined,
         });
+      }
+
+      // 10b. Spotted flair — flair for an idea nobody listed. Only when the
+      // same pass also recorded that line as the scholar's own unprompted
+      // work (the corroboration gate); caps and dedupe live in the mutation.
+      if (!result.spottedFlair && result.spottedFlairReason) {
+        console.log(`[Observer] ✨ Spotted flair: none — ${result.spottedFlairReason}`);
+      }
+      if (result.spottedFlair) {
+        const proposal = result.spottedFlair;
+        const grounded = groundSessionSignalEvidence(
+          { sourceMessageId: proposal.sourceMessageId },
+          context.chatHistory,
+        );
+        const source = grounded
+          ? context.chatHistory.find((m) => m.id === grounded.sourceMessageId)
+          : undefined;
+        const text = cleanSpottedFlairText(proposal);
+        if (!grounded || !source) {
+          console.log(`[Observer] ✨ Spotted flair dropped — sourceMessageId is not a scholar line`);
+        } else if (!text) {
+          console.log(`[Observer] ✨ Spotted flair dropped — label or note unusable`);
+        } else if (!spottedFlairCorroborated(result, source.content)) {
+          console.log(`[Observer] ✨ Spotted flair dropped — "${text.label}" has no corroborating connection or observation on that line`);
+        } else {
+          const outcome = await ctx.runMutation(internal.spottedFlair.award, {
+            sessionId: args.sessionId,
+            sourceMessageId: grounded.sourceMessageId,
+            excerpt: grounded.transcriptExcerpt,
+            label: text.label,
+            note: text.note,
+          });
+          console.log(`[Observer] ✨ Spotted flair "${text.label}": ${outcome}`);
+        }
       }
 
       // 11. Seeds

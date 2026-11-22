@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -153,7 +154,7 @@ describe("units.remove — hard delete + cascade", () => {
     const { unitId } = await seedUnit(t, teacher);
 
     await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId,
         scholarIds: [scholar],
@@ -254,7 +255,7 @@ describe("units.deletionImpact", () => {
     const { unitId } = await seedUnit(t, teacher);
 
     await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId,
         scholarIds: [scholar],

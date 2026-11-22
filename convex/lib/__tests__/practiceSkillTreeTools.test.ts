@@ -42,7 +42,7 @@ function actionCtxFor(t: ReturnType<typeof convexTest>): ActionCtx {
 
 async function seedTeacherAndScholar(
   t: ReturnType<typeof convexTest>,
-  scholarName = "Henry",
+  scholarName = "Makoa",
 ) {
   const institutionId = await seedTestInstitution(t);
   const teacherId = await seedStaffWithMembership(t, {
@@ -53,7 +53,7 @@ async function seedTeacherAndScholar(
   const scholarId = await seedScholarInInstitution(t, {
     institutionId,
     name: scholarName,
-    username: `henry-${Math.random().toString(36).slice(2)}`,
+    username: `makoa-${Math.random().toString(36).slice(2)}`,
   });
   return { institutionId, teacherId, scholarId };
 }
@@ -186,7 +186,7 @@ describe("practice skill-tree aide tool (end-to-end)", () => {
     const tools = await toolsFor(t, teacherId);
     const tree = parse(
       await tools.get_scholar_skill_tree.run({
-        scholarName: "Henry",
+        scholarName: "Makoa",
         domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
       }),
     );
@@ -237,7 +237,7 @@ describe("practice skill-tree aide tool (end-to-end)", () => {
     const tools = await toolsFor(t, teacherId);
     const tree = parse(
       await tools.get_scholar_skill_tree.run({
-        scholarName: "Henry",
+        scholarName: "Makoa",
         domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
         allDomains: true,
       }),
@@ -256,13 +256,13 @@ describe("practice skill-tree aide tool (end-to-end)", () => {
       const { teacherId, scholarId } = await seedTeacherAndScholar(t);
       await seedNode(t, WHOLE_NUMBER_ARITHMETIC_DOMAIN, "counting", "count_to_10");
       void scholarId;
-      // Lens that does NOT include Henry.
+      // Lens that does NOT include Makoa.
       const emptyLens = new Set<Id<"users">>();
       const tools = await toolsFor(t, teacherId, "teacher", emptyLens);
 
       expect(
         await tools.get_scholar_skill_tree.run({
-          scholarName: "Henry",
+          scholarName: "Makoa",
           domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
         }),
       ).toMatch(/No scholar found/);

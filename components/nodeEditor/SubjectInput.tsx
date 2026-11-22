@@ -1,7 +1,9 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Box, Input } from "@chakra-ui/react";
+import { Box, Input, Text } from "@chakra-ui/react";
+import { FieldSelect } from "@/components/ui/FieldSelect";
+import { subjectPickerState } from "@/lib/subjects";
 
 /**
  * Free-text Subject input with autocomplete. Stays a plain text field
@@ -117,6 +119,61 @@ export function SubjectInput({
             </Box>
           ))}
         </Box>
+      )}
+    </Box>
+  );
+}
+
+/** The quiet line under a subject that is not one of the school's classes. */
+export const OFF_LIST_SUBJECT_HINT =
+  "Not one of the school's classes. Pick the class this unit belongs to.";
+
+/**
+ * The Subject picker (TRA-723): a unit's subject is one of the school's
+ * classes, chosen here, never typed. A unit already filed under something
+ * else keeps showing it, as-is, with a quiet prompt; nothing changes until a
+ * teacher picks. "No subject" stays a choice.
+ */
+export function SubjectPicker({
+  subject,
+  options,
+  onPick,
+}: {
+  /** The unit's saved subject. */
+  subject: string | null | undefined;
+  /** The unit's school's class names (`useSchoolSubjectOptions`): non-empty,
+   *  or `undefined` while they load (disabled, current value shown). */
+  options: readonly string[] | undefined;
+  onPick: (next: string | null) => void;
+}) {
+  const loading = options === undefined;
+  const state = subjectPickerState(options ?? [], subject);
+  const selected = state.selected;
+  // While loading, the current value is shown without the off-list prompt.
+  const offList = loading ? null : state.offList;
+  return (
+    <Box>
+      <FieldSelect
+        value={selected}
+        disabled={loading}
+        onChange={(next) => {
+          if (next !== selected) onPick(next || null);
+        }}
+        fieldProps={{ "aria-label": "Subject" }}
+      >
+        {loading && selected && <option value={selected}>{selected}</option>}
+        <option value="">No subject</option>
+        {offList && <option value={offList}>{offList}</option>}
+        {(options ?? []).map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </FieldSelect>
+      {offList && (
+        <Text mt={1} fontSize="xs" color="charcoal.400" fontFamily="body">
+          {OFF_LIST_SUBJECT_HINT}
+        </Text>
       )}
     </Box>
   );

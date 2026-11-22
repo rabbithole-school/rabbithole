@@ -1,14 +1,16 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
+import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
   dayKeyForTimezone,
+  dayStartForDayKey,
   dayStartForTimezone,
   shiftDayKey,
-  weekdayForDayKey,
 } from "../../shared/institutionDay";
+import { DAY_KEY_CLOCK_SKEW_MS } from "../lib/institutionTime";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -80,14 +82,6 @@ async function seedUnitWithActivity(
   });
 }
 
-function nextWeekdayDayKey(dayKey: string): string {
-  let candidate = dayKey;
-  do {
-    candidate = shiftDayKey(candidate, 1);
-  } while (weekdayForDayKey(candidate) === 0 || weekdayForDayKey(candidate) === 6);
-  return candidate;
-}
-
 describe("assignments.todayScheduleForSelf", () => {
   test("requires authentication", async () => {
     const t = convexTest(schema, modules);
@@ -154,7 +148,7 @@ describe("assignments.todayScheduleForSelf", () => {
         systemPrompt: "...",
         order: 4,
       });
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId, otherScholarId],
@@ -185,7 +179,7 @@ describe("assignments.todayScheduleForSelf", () => {
           },
         ],
       });
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId],
@@ -212,9 +206,6 @@ describe("assignments.todayScheduleForSelf", () => {
 
     expect(result.timeZone).toBe(timeZone);
     expect(result.dayKey).toBe(dayKeyForTimezone(now, timeZone));
-    expect(result.nextOpenSchoolDayKey).toBe(
-      nextWeekdayDayKey(result.dayKey),
-    );
     expect(result.entries).toHaveLength(1);
     expect(result.entries[0]).toMatchObject({
       activityId,
@@ -247,6 +238,88 @@ describe("assignments.todayScheduleForSelf", () => {
     );
   });
 
+  test("honors the next day's key only within minutes of institution midnight", async () => {
+    // A client whose midnight lands a moment before the server's re-subscribes
+    // with tomorrow's key. Deriving the day from the server clock cached today's
+    // rail under tomorrow's key until some write re-ran it (T11). Away from
+    // midnight the same key is refused: planned work stays today-only.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const timeZone = "Pacific/Honolulu";
+      const today = "2026-11-17";
+      const tomorrow = shiftDayKey(today, 1);
+      const midnight = dayStartForDayKey(tomorrow, timeZone);
+      vi.setSystemTime(midnight - DAY_KEY_CLOCK_SKEW_MS / 3);
+
+      const t = convexTest(schema, modules);
+      const teacherId = await seedUser(t, "teacher");
+      const institutionId = await t.run((ctx) =>
+        ctx.db.insert("institutions", {
+          name: "Moli School",
+          slug: "moli",
+          kind: "school",
+          timeZone,
+        }),
+      );
+      const scholarId = await seedUser(t, "scholar", { institutionId });
+      const { unitId, lessonId, activityId } = await seedUnitWithActivity(
+        t,
+        teacherId,
+      );
+      const noon = 12 * 60 * 60 * 1000;
+      const tomorrowActivity = await t.run(async (ctx) => {
+        const id = await ctx.db.insert("activities", {
+          lessonId,
+          title: "Tomorrow",
+          kind: "online",
+          systemPrompt: "...",
+          order: 1,
+        });
+        await insertAssignmentWithSchedule(ctx, {
+          teacherId,
+          unitId,
+          scholarIds: [scholarId],
+          startedAt: Date.now(),
+          activitySchedule: [
+            {
+              activityId,
+              mode: "homework",
+              startsAt: dayStartForDayKey(today, timeZone) + noon,
+            },
+            {
+              activityId: id,
+              mode: "classFocus",
+              startsAt: midnight + noon,
+            },
+          ],
+        });
+        return id;
+      });
+      const asScholar = await withUser(t, scholarId);
+
+      const nearMidnight = await asScholar.query(
+        api.assignments.todayScheduleForSelf,
+        { dayKey: tomorrow },
+      );
+      expect(nearMidnight.dayKey).toBe(tomorrow);
+      expect(nearMidnight.entries.map((entry) => entry.activityId)).toEqual([
+        tomorrowActivity,
+      ]);
+
+      vi.setSystemTime(dayStartForDayKey(today, timeZone) + 10 * 60 * 60 * 1000);
+      const midMorning = await asScholar.query(
+        api.assignments.todayScheduleForSelf,
+        { dayKey: tomorrow },
+      );
+      expect(midMorning.dayKey).toBe(today);
+      expect(midMorning.entries.map((entry) => entry.activityId)).toEqual([
+        activityId,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("returns the same day context for non-scholars", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
@@ -257,10 +330,9 @@ describe("assignments.todayScheduleForSelf", () => {
     });
 
     expect(result.entries).toEqual([]);
-    expect(result.nextOpenSchoolDayKey).toBeNull();
   });
 
-  test("returns no next open day instead of failing during a long closure", async () => {
+  test("answers instead of failing during a long closure", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await t.run(async (ctx) => {
       const id = await ctx.db.insert("institutions", {
@@ -286,7 +358,6 @@ describe("assignments.todayScheduleForSelf", () => {
       dayKey: "1999-01-01",
     });
 
-    expect(result.nextOpenSchoolDayKey).toBeNull();
     expect(result.entries).toEqual([]);
   });
 });

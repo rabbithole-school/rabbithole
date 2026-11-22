@@ -1,0 +1,16 @@
+{
+  "name": "Kai (fictional)",
+  "age": 8,
+  "grade": 3,
+  "whatIKnow": "Maple seeds spin like helicopters when they fall. I think the spinning is just because it looks cool. I don't really know why trees want their seeds to go far.",
+  "whatIWantToBuild": "A game where a maple seed flies around a park and does tricks.",
+  "howIReactToQuestions": "My first message is just \"hi\". After that I ask for what I want. If a question feels like school I usually ask for my feature again instead, like \"just start\" or \"can you do it now?\". If the builder keeps answering me, sometimes I give a short guess.",
+  "howIReactToSilence": "If the builder does not reply, I think it is broken. My next message checks if it is there: \"hello???\", then \"are you there\", then \"why arent you responding\", then \"WHAT IS THE PROBLEM\". I only go back to my request once it talks to me again.",
+  "howIUseTheApp": "I press the biggest button to see what happens, then go back to asking for tricks. I don't read long text in the app.",
+  "driftTendencies": [
+    "I want the seed to do flips and loops",
+    "I want a rainbow trail behind the seed",
+    "I want to pick a different color seed"
+  ],
+  "style": "very short messages, lowercase, lots of question marks when worried, sometimes ALL CAPS"
+}

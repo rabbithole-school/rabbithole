@@ -807,7 +807,12 @@ class MTTypesetter {
         let spaceArray = getInterElementSpaces()[Int(leftIndex)]
         let spaceTypeObj = spaceArray[Int(rightIndex)]
         let spaceType = spaceTypeObj
-        assert(spaceType != .invalid, "Invalid space between \(left) and \(right)")
+        // Rabbithole patch: upstream asserts here, which is a no-op in a Release
+        // build but TRAPS a Debug build on input such as a binary operator that
+        // TeX would have demoted to an ordinary atom. A typeset question must
+        // never take the app down, so an undefined pair gets no extra space in
+        // every build configuration.
+        if spaceType == .invalid { return 0 }
         
         let spaceMultipler = self.getSpacingInMu(spaceType)
         if spaceMultipler > 0 {

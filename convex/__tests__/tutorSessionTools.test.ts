@@ -6,6 +6,7 @@ import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import {
+  appendPendingCompletionNote,
   makeTutorSessionTools,
   numberDocumentLines,
   VIEW_LINE_NUMBER_NOTE,
@@ -33,6 +34,8 @@ import {
   isWatermarkedStockHost,
 } from "../lib/imageSearch";
 import { MAX_MODEL_IMAGE_BYTES } from "../lib/imageBytes";
+import { SCHOLAR_WRITING_REFUSAL } from "../lib/tutorCodeEditor";
+import { SLIDES_WRITING_REFUSAL } from "../lib/tutorWriteBoundary";
 import type { AideEmit } from "../lib/aideStream";
 import { emptyDeck } from "../../shared/slidesScene";
 import { getFunctionName, type FunctionReturnType } from "convex/server";
@@ -77,6 +80,7 @@ function state(): TutorToolSessionState {
     rubricPreToolClosingIsValid: false,
     suppressCompletionFollowUp: false,
     activityCompletedThisStream: false,
+    pendingCompletionNote: null,
     createdCodeArtifact: false,
   };
 }
@@ -197,12 +201,54 @@ describe("automatic tutor completion closings", () => {
     } as never);
 
     expect(splitAfterTool).toHaveBeenCalledWith("", true, false);
-    expect(completionClosingPool("2")).toContain(toolState.fullContent);
-    expect(toolState.lastPersistLength).toBe(toolState.fullContent.length);
-    expect(toolState.suppressCompletionFollowUp).toBe(true);
+    // TRA-703: the note is queued, not written in place of a reply, and the
+    // tutor is told to answer whatever the scholar's last message left open.
+    expect(completionClosingPool("2")).toContain(toolState.pendingCompletionNote);
+    expect(toolState.fullContent).toBe("");
+    expect(toolState.suppressCompletionFollowUp).toBe(false);
     expect(toolState.activityCompletedThisStream).toBe(true);
-    expect(emit).toHaveBeenCalledWith({ text: toolState.fullContent });
-    expect(result).toContain("already written its closing sentence");
+    expect(emit).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.any(String) }),
+    );
+    expect(result).toContain("Usually write nothing");
+  });
+
+  test("the completion note lands after the tutor's reply, in its own bubble", async () => {
+    const note = "This activity is done. You can keep talking or move on.";
+    const toolState = state();
+    toolState.pendingCompletionNote = note;
+    toolState.fullContent = "You're right, 40 doubled is 80. I made a mistake.";
+    const splitAfterTool = vi.fn(async () => {
+      toolState.fullContent = "";
+      toolState.lastPersistLength = 0;
+    });
+    const emit = vi.fn();
+
+    await appendPendingCompletionNote(toolState, splitAfterTool, emit);
+
+    expect(splitAfterTool).toHaveBeenCalledWith("");
+    expect(toolState.fullContent).toBe(note);
+    expect(toolState.lastPersistLength).toBe(note.length);
+    expect(toolState.pendingCompletionNote).toBeNull();
+    expect(emit).toHaveBeenCalledWith({ text: note });
+  });
+
+  test("with no reply the completion note is the turn's only text", async () => {
+    const note = "This activity is done. You can keep talking or move on.";
+    const toolState = state();
+    toolState.pendingCompletionNote = note;
+    const splitAfterTool = vi.fn();
+    const emit = vi.fn();
+
+    await appendPendingCompletionNote(toolState, splitAfterTool, emit);
+
+    expect(splitAfterTool).not.toHaveBeenCalled();
+    expect(toolState.fullContent).toBe(note);
+    expect(emit).toHaveBeenCalledWith({ text: note });
+
+    emit.mockClear();
+    await appendPendingCompletionNote(toolState, splitAfterTool, emit);
+    expect(emit).not.toHaveBeenCalled();
   });
 
   test("mark_activity_complete skips mutation and splitting when completion predates the stream", async () => {
@@ -312,11 +358,15 @@ describe("automatic tutor completion closings", () => {
       ],
     } as never);
 
-    expect(completionClosingPool("pre-reader")).toContain(toolState.fullContent);
-    expect(toolState.suppressCompletionFollowUp).toBe(true);
+    expect(completionClosingPool("pre-reader")).toContain(
+      toolState.pendingCompletionNote,
+    );
+    expect(toolState.suppressCompletionFollowUp).toBe(false);
     expect(toolState.activityCompletedThisStream).toBe(true);
-    expect(emit).toHaveBeenCalledWith({ text: toolState.fullContent });
-    expect(result).toContain("already written its closing sentence");
+    expect(emit).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.any(String) }),
+    );
+    expect(result).toContain("Usually write nothing");
 
     const callsAfterCompletion = runMutation.mock.calls.length;
     const repeated = await tool.run({
@@ -327,7 +377,7 @@ describe("automatic tutor completion closings", () => {
     } as never);
     expect(runMutation).toHaveBeenCalledTimes(callsAfterCompletion);
     expect(repeated).toContain("already completed earlier in this turn");
-    expect(emit.mock.calls.filter(([event]) => "text" in event)).toHaveLength(1);
+    expect(emit.mock.calls.filter(([event]) => "text" in event)).toHaveLength(0);
   });
 
   test("a prior-stream conversation completion skips rubric mutation and splitting", async () => {
@@ -952,9 +1002,7 @@ describe("edit_document cross-session guard error contract", () => {
       insert_text: "Tutor words",
     } as never);
 
-    expect(result).toBe(
-      "This is the scholar's writing. You can't write in it — they type or dictate into the box themselves. Point them to the box once, then keep the conversation going.",
-    );
+    expect(result).toBe(SCHOLAR_WRITING_REFUSAL);
     expect(runMutation).not.toHaveBeenCalled();
     expect(splitAfterTool).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
@@ -1049,6 +1097,85 @@ describe("choosing between the two image tools", () => {
     expect(generate?.description).toContain("/app-assets/");
     expect(search?.description).toContain("/app-assets/");
     expect(await toolNames("conversation", OWNER)).not.toContain("charm_icon");
+  });
+
+  test("charm_model is offered only to clients whose app host inlines scripts", async () => {
+    const names = async (overrides: Parameters<typeof toolsFor>[4]) =>
+      ((await toolsFor("vibecode", OWNER, {} as ActionCtx, [], overrides)) as unknown as AuthoredTool[]).map(
+        (tool) => tool.name,
+      );
+    // An older iPad build sends no capability: it keeps charm_icon only.
+    expect(await names({})).toContain("charm_icon");
+    expect(await names({})).not.toContain("charm_model");
+    expect(await names({ supportsAppScripts: true })).toContain("charm_model");
+    // No app, no builder tools, whatever the client says.
+    const chat = (await toolsFor("conversation", OWNER, {} as ActionCtx, [], {
+      supportsAppScripts: true,
+    })) as unknown as AuthoredTool[];
+    expect(chat.map((tool) => tool.name)).not.toContain("charm_model");
+  });
+
+  test("charm_model rides with charm_icon and spends one budget across the turn", async () => {
+    const runAction = vi
+      .fn()
+      .mockResolvedValueOnce({
+        outcomes: [
+          {
+            name: "chimpanzee",
+            status: "ready",
+            key: "chimpanzee",
+            reference: "/app-assets/chimp-copy",
+            cached: false,
+            remixed: false,
+            parts: ["head", "leftArm"],
+            ms: 1,
+          },
+        ],
+        generationsUsed: 2,
+      })
+      .mockResolvedValueOnce({ outcomes: [], generationsUsed: 1 });
+    const tools = (await toolsFor(
+      "vibecode",
+      OWNER,
+      { runAction } as unknown as ActionCtx,
+      [],
+      { supportsAppScripts: true },
+    )) as unknown as AuthoredTool[];
+    const charmModel = tools.find(
+      (tool) => tool.name === "charm_model",
+    ) as unknown as { run: (input: never) => Promise<unknown> };
+
+    const first = (await charmModel.run({
+      models: [{ name: "chimpanzee" }, { name: "lab freezer" }],
+    } as never)) as string;
+    await charmModel.run({ models: [{ name: "crate" }] } as never);
+
+    expect(first).toContain('<script src="/app-assets/chimp-copy"></script>');
+    expect(first).toContain('charmModels["chimpanzee"](THREE)');
+    expect(first).toContain("leftArm");
+    expect(runAction.mock.calls.map(([, args]) => args.maxNewGenerations)).toEqual([3, 1]);
+  });
+
+  test("a charm_model action that throws closes the turn's generation budget", async () => {
+    const runAction = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("action died"))
+      .mockResolvedValueOnce({ outcomes: [], generationsUsed: 0 });
+    const tools = (await toolsFor(
+      "vibecode",
+      OWNER,
+      { runAction } as unknown as ActionCtx,
+      [],
+      { supportsAppScripts: true },
+    )) as unknown as AuthoredTool[];
+    const charmModel = tools.find(
+      (tool) => tool.name === "charm_model",
+    ) as unknown as { run: (input: never) => Promise<unknown> };
+
+    await charmModel.run({ models: [{ name: "chimpanzee" }] } as never);
+    await charmModel.run({ models: [{ name: "chimpanzee" }] } as never);
+
+    expect(runAction.mock.calls.map(([, args]) => args.maxNewGenerations)).toEqual([3, 0]);
   });
 
   test("a chat session with an app gets the builder features (TRA-519)", async () => {
@@ -1780,9 +1907,7 @@ describe("edit_slides tutor tool", () => {
       baseRevision: 0,
     });
 
-    expect(message).toBe(
-      "You can arrange the scholar's slides — move, resize, restyle, add an empty text box, or move their existing words — but you can't write the words. They type those themselves.",
-    );
+    expect(message).toBe(SLIDES_WRITING_REFUSAL);
     expect(events).toHaveLength(0);
     const read = await t.query(internal.artifacts.aiReadDeck, { sessionId });
     if ("error" in read) throw new Error(read.error);
@@ -2033,10 +2158,12 @@ describe("app editor (str_replace_based_edit_tool) on code artifacts", () => {
       seenRevision = 2,
       emit = vi.fn(),
       splitAfterTool = vi.fn(),
+      session = {},
     }: {
       seenRevision?: number | null;
       emit?: ReturnType<typeof vi.fn>;
       splitAfterTool?: ReturnType<typeof vi.fn>;
+      session?: Record<string, unknown>;
     } = {},
   ) {
     const tools = await toolsFor(
@@ -2048,6 +2175,7 @@ describe("app editor (str_replace_based_edit_tool) on code artifacts", () => {
       emit as never,
       null,
       {
+        ...session,
         // The snapshot the DOCUMENTS section was built from.
         ...(seenRevision === null
           ? {}
@@ -2162,6 +2290,33 @@ describe("app editor (str_replace_based_edit_tool) on code artifacts", () => {
     );
   });
 
+  test("where no new app may be built, it won't fill the empty app a session starts with", async () => {
+    const runQuery = vi.fn().mockResolvedValue(appRow({ content: "", revision: 0 }));
+    const runMutation = vi.fn();
+    const { call } = await editor(
+      { runQuery, runMutation },
+      { seenRevision: 0, session: { appCreationAllowed: false } },
+    );
+    for (const input of [
+      { command: "insert", path: APP_PATH, insert_line: 0, insert_text: "<html></html>" },
+      { command: "str_replace", path: APP_PATH, old_str: "Score", new_str: "<html></html>" },
+    ]) {
+      await expect(call(input)).rejects.toThrow("NEW_APP_UNAVAILABLE");
+    }
+    expect(runMutation).not.toHaveBeenCalled();
+  });
+
+  test("where no new app may be built, an app that has code keeps taking edits", async () => {
+    const runQuery = vi.fn().mockResolvedValue(appRow());
+    const runMutation = vi.fn().mockResolvedValue({ kind: "success", artifact: appRow({ revision: 3 }) });
+    const { call } = await editor(
+      { runQuery, runMutation },
+      { session: { appCreationAllowed: false } },
+    );
+    await call({ command: "str_replace", path: APP_PATH, old_str: "Score", new_str: "Carrots" });
+    expect(runMutation).toHaveBeenCalledTimes(1);
+  });
+
   test("never writes into a scholar's writing box, even by its id", async () => {
     const runQuery = vi.fn().mockResolvedValue(
       appRow({ type: "text", title: "My story", content: "Once upon a time" }),
@@ -2173,7 +2328,7 @@ describe("app editor (str_replace_based_edit_tool) on code artifacts", () => {
       { command: "str_replace", path: APP_PATH, old_str: "Once", new_str: "Twice" },
       { command: "insert", path: APP_PATH, insert_line: 1, insert_text: "The end." },
     ]) {
-      await expect(call(input)).rejects.toThrow("This is the scholar's writing.");
+      await expect(call(input)).rejects.toThrow(SCHOLAR_WRITING_REFUSAL);
     }
     await expect(call({ command: "view", path: APP_PATH })).rejects.toThrow(
       "NOT_AN_APP",

@@ -49,6 +49,7 @@ type InstitutionOption = {
   _id: Id<"institutions">;
   name: string;
   emoji: string | null;
+  isPrimary: boolean;
   disabled: boolean;
 };
 
@@ -961,6 +962,9 @@ function AddUserButton({
   // "passkey").
   const linkKind: "passkey" | "pin" =
     role === "staff" || isStaffRole(role as Role) ? "passkey" : "pin";
+  // Standing at one school, so the server refuses these without a school.
+  const needsSchool =
+    role === "teacher" || role === "staff" || role === "school_admin";
 
   const reset = () => {
     setUsername("");
@@ -985,6 +989,10 @@ function AddUserButton({
       setError(problem);
       return;
     }
+    if (needsSchool && !institutionId) {
+      setError("Pick a school");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -997,7 +1005,7 @@ function AddUserButton({
         username: u,
         name: name.trim() || undefined,
         role,
-        ...(role === "scholar" && institutionId
+        ...((role === "scholar" || needsSchool) && institutionId
           ? { institutionId: institutionId as Id<"institutions"> }
           : {}),
       });
@@ -1029,7 +1037,14 @@ function AddUserButton({
         color="white"
         _hover={{ bg: "violet.600" }}
         fontFamily="heading"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          // Start the School picker on the primary school. This is a UI
+          // convenience only: adminCreateUser still requires a school and
+          // never defaults one. Every viewer here is a platform admin (the
+          // page bounces anyone else), so the home school is a fair start.
+          setInstitutionId(institutions?.find((i) => i.isPrimary)?._id ?? "");
+          setOpen(true);
+        }}
       >
         <UserPlus style={{ marginRight: "6px" }} /> Add User
       </Button>
@@ -1123,20 +1138,22 @@ function AddUserButton({
                         one-time link to set a sign-in password.
                       </Text>
                     </Box>
-                    {role === "scholar" && (
+                    {(role === "scholar" || needsSchool) && (
                       <Box>
                         <Text fontSize="xs" color="charcoal.500" mb={1} fontFamily="heading">
-                          Institution
+                          School
                         </Text>
                         <FieldSelect
                           value={institutionId}
                           onChange={(v) => setInstitutionId(v)}
                           disabled={busy}
                           w="full"
-                          fieldProps={{ "aria-label": "Institution" }}
+                          fieldProps={{ "aria-label": "School" }}
                         >
                           <option value="">
-                            Default (primary institution)
+                            {needsSchool
+                              ? "Select a school"
+                              : "Default (primary institution)"}
                           </option>
                           {institutions?.map((inst) => (
                             // "(paused)" is informational only; a paused school

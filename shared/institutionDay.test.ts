@@ -6,6 +6,7 @@ import {
   dayStartForDayKey,
   dayStartForTimezone,
   dueStatus,
+  formatRelativeDayHeading,
   instantForLocalMinutes,
   minuteOfDayForTimezone,
   mondayDayKeyForTimezone,
@@ -85,61 +86,107 @@ describe("dueStatus — future phrases", () => {
     });
   });
 
-  test("2–6 days out names the weekday", () => {
-    // +3 days → Thursday, +4 days → Friday.
+  test("two or more days out names weekday, month and day", () => {
     expect(dueStatus(localNoon(2026, 6, 18), NOW, TZ)).toEqual({
       status: "upcoming",
-      phrase: "due Thursday",
+      phrase: "due Thu, Jun 18",
     });
-    expect(dueStatus(localNoon(2026, 6, 19), NOW, TZ)).toEqual({
-      status: "upcoming",
-      phrase: "due Friday",
-    });
-  });
-
-  test("further out, same year → 'due Mon D'", () => {
     expect(dueStatus(localNoon(2026, 9, 1), NOW, TZ)).toEqual({
       status: "upcoming",
-      phrase: "due Sep 1",
+      phrase: "due Tue, Sep 1",
     });
   });
 
-  test("further out, different year → 'due Mon D, YYYY'", () => {
+  test("a different year adds the year", () => {
     expect(dueStatus(localNoon(2027, 1, 5), NOW, TZ)).toEqual({
       status: "upcoming",
-      phrase: "due Jan 5, 2027",
+      phrase: "due Tue, Jan 5, 2027",
     });
   });
 });
 
-describe("dueStatus — past phrases", () => {
+describe("dueStatus — past phrases always carry the full date", () => {
   test("yesterday", () => {
     expect(dueStatus(localNoon(2026, 6, 14), NOW, TZ)).toEqual({
       status: "overdue",
-      phrase: "was due yesterday",
+      phrase: "was due Sun, Jun 14",
     });
   });
 
-  test("2–6 days ago names the weekday", () => {
-    // -5 days → Wednesday.
+  test("earlier this week and further back", () => {
     expect(dueStatus(localNoon(2026, 6, 10), NOW, TZ)).toEqual({
       status: "overdue",
-      phrase: "was due Wednesday",
+      phrase: "was due Wed, Jun 10",
     });
-  });
-
-  test("further back, same year → 'was due Mon D'", () => {
     expect(dueStatus(localNoon(2026, 3, 14), NOW, TZ)).toEqual({
       status: "overdue",
-      phrase: "was due Mar 14",
+      phrase: "was due Sat, Mar 14",
     });
   });
 
-  test("further back, different year → 'was due Mon D, YYYY'", () => {
+  test("a different year adds the year", () => {
     expect(dueStatus(localNoon(2025, 11, 20), NOW, TZ)).toEqual({
       status: "overdue",
-      phrase: "was due Nov 20, 2025",
+      phrase: "was due Thu, Nov 20, 2025",
     });
+  });
+});
+
+describe("formatRelativeDayHeading", () => {
+  // Wednesday, Nov 4 2026.
+  const TODAY = "2026-11-04";
+
+  test("today and tomorrow are words, with no date", () => {
+    expect(formatRelativeDayHeading(TODAY, TODAY, "due")).toBe("Due today");
+    expect(formatRelativeDayHeading("2026-11-05", TODAY, "starts")).toBe(
+      "Starts tomorrow",
+    );
+  });
+
+  test("days 2 through 6 name the weekday and count the days", () => {
+    expect(formatRelativeDayHeading("2026-11-06", TODAY, "due")).toBe(
+      "Due Friday · in 2 days",
+    );
+    expect(formatRelativeDayHeading("2026-11-10", TODAY, "starts")).toBe(
+      "Starts Tuesday · in 6 days",
+    );
+  });
+
+  test("day 7 is the same weekday as today, so it switches to the date", () => {
+    expect(formatRelativeDayHeading("2026-11-11", TODAY, "due")).toBe(
+      "Due Wed, Nov 11 · in 7 days",
+    );
+  });
+
+  test("counts across a month end and a year end", () => {
+    expect(formatRelativeDayHeading("2026-12-01", "2026-11-28", "due")).toBe(
+      "Due Tuesday · in 3 days",
+    );
+    expect(formatRelativeDayHeading("2026-12-07", "2026-11-28", "due")).toBe(
+      "Due Mon, Dec 7 · in 9 days",
+    );
+    expect(formatRelativeDayHeading("2027-01-05", "2026-12-20", "due")).toBe(
+      "Due Tue, Jan 5, 2027 · in 16 days",
+    );
+  });
+
+  test("an earlier day reads in the past tense", () => {
+    expect(formatRelativeDayHeading("2026-11-01", TODAY, "due")).toBe(
+      "Was due Sun, Nov 1",
+    );
+  });
+
+  test("institution midnight in Honolulu moves the count by one", () => {
+    // 23:59 and 00:01 Honolulu time on either side of Nov 5 (UTC-10, no DST).
+    const before = Date.UTC(2026, 10, 5, 9, 59);
+    const after = Date.UTC(2026, 10, 5, 10, 1);
+    const due = "2026-11-06";
+    expect(
+      formatRelativeDayHeading(due, dayKeyForTimezone(before, TZ), "due"),
+    ).toBe("Due Friday · in 2 days");
+    expect(
+      formatRelativeDayHeading(due, dayKeyForTimezone(after, TZ), "due"),
+    ).toBe("Due tomorrow");
   });
 });
 
@@ -156,10 +203,10 @@ describe("today ↔ overdue boundary at institution midnight", () => {
     });
   });
 
-  test("one second after midnight it flips to overdue (was due yesterday)", () => {
+  test("one second after midnight it flips to overdue", () => {
     expect(dueStatus(dueAt, justAfterMidnight, TZ)).toEqual({
       status: "overdue",
-      phrase: "was due yesterday",
+      phrase: "was due Mon, Jun 15",
     });
   });
 });

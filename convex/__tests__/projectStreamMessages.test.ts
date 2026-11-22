@@ -6,6 +6,7 @@ import {
   IMAGE_NOT_REPLAYED_LABEL,
   IMAGE_UNAVAILABLE_LABEL,
   MAX_REPLAYED_IMAGE_BASE64_CHARS,
+  SCHOLAR_PHOTO_NOT_APP_ASSET_LABEL,
   scholarPhotoAppAssetLabel,
 } from "../lib/projectStreamMessages";
 
@@ -206,12 +207,16 @@ describe("assembleProjectStreamApiMessages", () => {
     expect(magic).toContain("an Arctic food web with a polar bear");
   });
 
-  test("a builder session's scholar photo carries its app-asset path; generated images and chat-only sessions do not", async () => {
+  test("a builder session's scholar photo carries its app-usable copy's path; generated images and chat-only sessions do not", async () => {
     const imagePart = {
       type: "image" as const,
       source: { type: "base64" as const, media_type: "image/png" as const, data: "x" },
     };
-    const textsFor = async (appAssetPhotos: boolean, generatedImage: boolean) => {
+    const textsFor = async (
+      appAssetPhotos: boolean,
+      generatedImage: boolean,
+      appAssetId: string | null = "copy456",
+    ) => {
       const [message] = await assembleProjectStreamApiMessages({
         chatHistory: [
           {
@@ -220,6 +225,7 @@ describe("assembleProjectStreamApiMessages", () => {
             role: "user",
             content: "make the art look like this",
             imageId: "photo123",
+            ...(generatedImage ? {} : { appAssetId }),
             generatedImage,
           },
         ],
@@ -231,12 +237,19 @@ describe("assembleProjectStreamApiMessages", () => {
         .map((part) => part.text);
     };
 
-    expect(await textsFor(true, false)).toContain(
-      scholarPhotoAppAssetLabel("photo123"),
+    // The raw upload is sized for the model, not the app host: the builder
+    // is handed the prepared copy, never `imageId`.
+    const prepared = await textsFor(true, false);
+    expect(prepared).toContain(scholarPhotoAppAssetLabel("copy456"));
+    expect(prepared.join(" ")).not.toContain("photo123");
+    expect(scholarPhotoAppAssetLabel("copy456")).toContain(
+      "/app-assets/copy456",
     );
-    expect(scholarPhotoAppAssetLabel("photo123")).toContain(
-      "/app-assets/photo123",
-    );
+    // No copy yet (too large, or normalization failed): the builder is told
+    // the photo cannot go in the app rather than handed a path that fails.
+    const unprepared = await textsFor(true, false, null);
+    expect(unprepared).toContain(SCHOLAR_PHOTO_NOT_APP_ASSET_LABEL);
+    expect(unprepared.join(" ")).not.toContain("/app-assets/");
     expect((await textsFor(false, false)).join(" ")).not.toContain(
       "/app-assets/",
     );

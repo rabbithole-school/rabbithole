@@ -1,10 +1,11 @@
 import { createContext, useContext } from "react";
 
 import type { AsamController } from "@/hooks/useAsamController";
+import type { FrozenBy } from "@/lib/asam/freezeMode";
 
 type PresentationAsamController = Pick<
   AsamController,
-  "releaseForSystemUI" | "restoreAfterSystemUI"
+  "releaseForSystemUI" | "restoreAfterSystemUI" | "rearmLock" | "isLockSettled"
 > & {
   /**
    * Opens the SAME Rabbithole Lock modal the hidden 4-finger-hold gesture
@@ -26,14 +27,19 @@ type PresentationAsamController = Pick<
    * presents in its own window above the in-tree overlay.
    */
   frozenUntil: number | null;
+  /** Who set the freeze, for the overlay's wording. */
+  frozenBy: FrozenBy;
 };
 
 const NOOP_CONTROLLER: PresentationAsamController = {
   releaseForSystemUI: () => {},
   restoreAfterSystemUI: () => {},
+  rearmLock: () => {},
+  isLockSettled: () => true,
   openTeacherUnlock: () => {},
   isTeacherUnlockAvailable: false,
   frozenUntil: null,
+  frozenBy: null,
 };
 
 export const AsamControllerContext =

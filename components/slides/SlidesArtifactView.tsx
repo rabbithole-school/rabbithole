@@ -22,6 +22,7 @@ import { useAction, useMutation, useQuery } from "convex/react";
 import { Center, Dialog, Portal, Text } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { SLIDES_COPY, validateDeckLenient, type Deck, type SlideOp, type WebImageSearchResult } from "@/shared/slidesScene";
 import {
   EMPTY_IMAGE_SEARCH_SNAPSHOT,
@@ -60,7 +61,11 @@ export function SlidesArtifactView({
   const generateSlideImage = useAction(api.artifacts.scholarGenerateSlideImage);
   const searchWebImages = useAction(api.slidesImageSearch.searchWebImages);
   const pickWebImage = useAction(api.slidesImageSearch.pickWebImage);
-  const exportDeck = useAction(api.slidesExport.exportDeckFile);
+  const exportDeckFile = useAction(api.slidesExport.exportDeckFile);
+  // The slide clipboard belongs to whoever is signed in, so slides copied in
+  // one night's deck paste into another night's — and never into a sibling's
+  // deck on a shared computer.
+  const { user } = useCurrentUser();
   const [exportError, setExportError] = useState<string | null>(null);
   // The slide the editor opens on. `null` = the editor is closed; keeping the
   // index here (rather than a bare `open` flag) is what makes clicking slide 4
@@ -85,8 +90,8 @@ export function SlidesArtifactView({
 
   /**
    * Every media id the deck references, resolved in ONE query — React hooks
-   * cannot be called in a loop, so a per-image `files.getUrl` is not
-   * expressible in the renderer.
+   * cannot be called in a loop, so a per-image URL query is not expressible in
+   * the renderer.
    */
   const assetIds = useMemo(() => {
     if (!deck) return [];
@@ -172,13 +177,13 @@ export function SlidesArtifactView({
   const onExport = useCallback(
     async (format: "pptx" | "pdf") => {
       try {
-        const { url } = await exportDeck({ artifactId, format });
+        const { url } = await exportDeckFile({ artifactId, format });
         window.open(url, "_blank", "noopener");
       } catch (e) {
         setExportError(e instanceof Error ? e.message : String(e));
       }
     },
-    [exportDeck, artifactId],
+    [exportDeckFile, artifactId],
   );
 
   const onOps = useCallback(
@@ -262,6 +267,7 @@ export function SlidesArtifactView({
                     imageSearchSnapshot={imageSearchSnapshot}
                     onImageSearchSnapshot={setImageSearchSnapshot}
                     onExport={onExport}
+                    clipboardOwnerId={readOnly ? null : (user?._id ?? null)}
                   />
                 )}
               </SlidesEditorDialogFrame>

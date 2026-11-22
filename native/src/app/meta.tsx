@@ -19,6 +19,7 @@ import { RecordingBar } from "@/components/RecordingBar";
 import { ChatActivityRow } from "@/components/ChatActivityRow";
 import { useReflectionChat, type ReflectionBubble } from "@/hooks/useReflectionChat";
 import { useVoiceDictation } from "@/hooks/useVoiceDictation";
+import { useVoiceKeyTarget } from "@/lib/voiceKey";
 import { isWithinPrepTime, formatLocalTimeLabel } from "@/lib/prepTime";
 import type { FunctionReturnType } from "convex/server";
 import { api, type Id } from "@/lib/convex";
@@ -39,6 +40,7 @@ import {
   WORKSHOP_SPARK_CHIPS,
 } from "../../vendor/shared/workshopSparks";
 import { TEACHER_LINE } from "../../vendor/shared/admonishments";
+import { serverErrorMessage } from "../../vendor/shared/serverErrorMessage";
 import { AppTextInput } from "@/components/AppTextInput";
 
 // The Workshop (code name: `meta`) — this module now DEFINES the two reusable
@@ -52,14 +54,6 @@ import { AppTextInput } from "@/components/AppTextInput";
 // internals are unchanged from review/scholar-meta-prep-time-plan.html §§3,4,5,7,8.
 
 const MAXW = 720;
-
-/** Convex wraps a thrown Error's message ("… Uncaught Error: <message> at …");
- * pull the human sentence back out so the cap message can show inline. */
-function serverMessage(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  const m = raw.match(/Uncaught (?:Convex)?Error:\s*([\s\S]*?)(?:\n\s*at\s|\n\s*$|$)/);
-  return (m?.[1] ?? raw).trim();
-}
 
 /** Short relative date for a What's-new entry (mirrors StarDrawer's helper —
  * native has no date-fns). */
@@ -355,15 +349,29 @@ function ChatComposer({
   const onMicStop = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     const text = await voice.stop();
-    if (text) {
-      setInput((prev) => (prev.trim() ? prev.trim() + " " : "") + text);
-    }
+    // Replaces whatever was typed, so typed text never has to hold the mic
+    // back (Andy, 2026-11-14).
+    if (text) setInput(text);
   }, [voice]);
 
   const onMicCancel = useCallback(() => {
     Haptics.selectionAsync();
     voice.cancel();
   }, [voice]);
+
+  // The voice key and ⌘/ (src/lib/voiceKey.ts): this composer's mic button,
+  // under its own gates, and the field itself.
+  useVoiceKeyTarget({
+    state: voice.isRecording
+      ? "recording"
+      : voice.isTranscribing || streaming || disabled
+        ? "busy"
+        : "idle",
+    start: () => void onMicStart(),
+    confirm: () => void onMicStop(),
+    cancel: onMicCancel,
+    compose: () => inputRef.current?.focus(),
+  });
 
   if (voice.isRecording || voice.isTranscribing) {
     return (
@@ -409,27 +417,38 @@ function ChatComposer({
               tintColor={colors.violet}
             />
           </Pressable>
-        ) : !canSend ? (
-          <Pressable
-            onPress={onMicStart}
-            hitSlop={8}
-            style={styles.micBtn}
-            disabled={disabled}
-          >
-            <SymbolView
-              name="mic.fill"
-              size={24}
-              tintColor={disabled ? colors.gray300 : colors.violet}
-            />
-          </Pressable>
         ) : (
-          <Pressable onPress={handleSend} disabled={!canSend} hitSlop={8} style={styles.sendBtn}>
-            <SymbolView
-              name="arrow.up.circle.fill"
-              size={38}
-              tintColor={canSend ? colors.violet : colors.gray300}
-            />
-          </Pressable>
+          <>
+            {/* The mic is always there, typed text or not; Send joins it once
+                there is something to send. A take replaces what was typed. */}
+            <Pressable
+              onPress={onMicStart}
+              hitSlop={8}
+              style={styles.micBtn}
+              disabled={disabled}
+              accessibilityRole="button"
+              accessibilityLabel={
+                canSend ? "Start recording — replaces what you typed" : "Start recording"
+              }
+            >
+              <SymbolView
+                name="mic.fill"
+                size={24}
+                tintColor={disabled ? colors.gray300 : colors.violet}
+              />
+            </Pressable>
+            {canSend && (
+              <Pressable
+                onPress={handleSend}
+                hitSlop={8}
+                style={styles.sendBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Send"
+              >
+                <SymbolView name="arrow.up.circle.fill" size={38} tintColor={colors.violet} />
+              </Pressable>
+            )}
+          </>
         )}
       </View>
     </View>
@@ -546,8 +565,8 @@ function IdeaCard({
         body
       )}
 
-      {/* The scholar's own lever: the five-open limit is a prioritization
-          lesson pointed at THEM, so they decide when a slot frees. Quiet, and
+      {/* The scholar's own lever: their board, so they decide what is still
+          on their plate. Quiet, and
           LAST in the card — it never competes with the conversation.
           Archive/Restore is the house pair for a scholar; parity with
           components/WorkshopView.tsx. */}
@@ -632,7 +651,7 @@ export function IdeasBoard({
   // Workshop conversations the team started with this scholar — their own
   // zone above My ideas, hidden when there are none.
   const workshopThreads = useQuery(api.scholarMessages.listThreads, {
-    kind: "workshop",
+    flavor: "workshop",
   });
   const teamThreads = teamStartedWorkshopThreads(workshopThreads?.threads);
   const whatsNew = useQuery(api.changelog.listRecent, {});
@@ -668,9 +687,8 @@ export function IdeasBoard({
         archived,
       });
     } catch (e) {
-      // Restoring one can hit the five-open limit — the server's message names
-      // the number and what to do, so show it verbatim.
-      setArchiveError(serverMessage(e));
+      // Show the server's refusal verbatim (e.g. "Idea not found").
+      setArchiveError(serverErrorMessage(e));
     }
   };
 
@@ -688,7 +706,7 @@ export function IdeasBoard({
       setText("");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     } catch (e) {
-      setError(serverMessage(e));
+      setError(serverErrorMessage(e));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
     } finally {
       setSubmitting(false);

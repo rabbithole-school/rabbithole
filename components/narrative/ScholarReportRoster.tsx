@@ -5,9 +5,9 @@
  *
  * The reporting surface is organized by SCHOLAR, not by report type: every
  * scholar in the reporting period is a row, and clicking one opens their
- * reporting detail where you add 0+ course narratives (one per subject) and
- * 0–1 Whole Child report. This roster just shows each scholar's status at a
- * glance and routes into their detail.
+ * reporting detail: one parent report per class plus SEL, and the interim
+ * check-in. This roster just shows each scholar's status at a glance and
+ * routes into their detail.
  */
 import { useState } from "react";
 import Link from "next/link";
@@ -34,13 +34,14 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { Avatar } from "@/components/Avatar";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { CreatePeriodDialog } from "@/components/narrative/NarrativeQueue";
+import { CreatePeriodDialog } from "@/components/narrative/CreatePeriodDialog";
 import { ReportShell } from "@/components/narrative/ReportShell";
 import { SectionStatusIcon } from "@/components/narrative/SectionStatusIcon";
 import { reportSectionState, reportShared, SharedCountTag } from "@/components/narrative/reportStatus";
 import { useScholarRoster, type RosterScholar } from "@/hooks/useScholarRoster";
 import { toaster } from "@/lib/toaster";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
+import { reportTitle } from "@/convex/lib/parentReport";
 
 export function ScholarReportRoster() {
   const searchParams = useSearchParams();
@@ -61,10 +62,6 @@ export function ScholarReportRoster() {
     api.courseNarratives.listForPeriod,
     activePeriodId ? { periodId: activePeriodId } : "skip",
   );
-  const wholeChild = useQuery(
-    api.wholeChildNarratives.listForPeriod,
-    activePeriodId ? { periodId: activePeriodId } : "skip",
-  );
   const checkins = useQuery(
     api.interimCheckins.listForPeriod,
     activePeriodId ? { periodId: activePeriodId } : "skip",
@@ -76,17 +73,13 @@ export function ScholarReportRoster() {
   const [shareOpen, setShareOpen] = useState(false);
 
   // Per-scholar rollup (client-side join) — one entry per report so the row can
-  // render a status dot each (course narratives + the whole-child report).
+  // render a status dot each (one per subject report, then the check-in).
   type ReportDot = { key: string; label: string; status: string; hasContent: boolean };
   const courseByScholar = new Map<string, ReportDot[]>();
   for (const n of narratives ?? []) {
     const arr = courseByScholar.get(String(n.scholarId)) ?? [];
-    arr.push({ key: String(n._id), label: n.subject, status: n.status, hasContent: n.hasContent });
+    arr.push({ key: String(n._id), label: reportTitle(n.subject), status: n.status, hasContent: n.hasContent });
     courseByScholar.set(String(n.scholarId), arr);
-  }
-  const wcByScholar = new Map<string, { status: string; hasContent: boolean }>();
-  for (const w of wholeChild ?? []) {
-    wcByScholar.set(String(w.scholarId), { status: w.status, hasContent: w.hasContent });
   }
   const checkinByScholar = new Map<string, { status: string; hasContent: boolean }>();
   for (const c of checkins ?? []) {
@@ -94,13 +87,16 @@ export function ScholarReportRoster() {
   }
 
   const doneCount = (narratives ?? []).filter((n) => n.status === "final" || n.status === "shared").length;
-  // The finalized (not-yet-shared) narratives "Share with parents" will publish.
-  const toShare = (narratives ?? []).filter((n) => n.status === "final");
+  // The finalized (not-yet-shared) reports "Share with parents" will publish;
+  // a finalized report with unfilled placeholders is held back (server rule).
+  // The same rows `sharePeriod` shares: never a second report of a class.
+  const toShare = (narratives ?? []).filter((n) => n.status === "final" && n.publishBlocker === null && !n.leftover);
+  const heldBack = (narratives ?? []).filter((n) => n.status === "final" && n.publishBlocker !== null).length;
 
   const sorted = [...scholars].sort((a, b) => a.name.localeCompare(b.name));
   const dataLoading =
     periods === undefined ||
-    (activePeriodId !== null && (narratives === undefined || wholeChild === undefined || checkins === undefined || rosterLoading));
+    (activePeriodId !== null && (narratives === undefined || checkins === undefined || rosterLoading));
 
   const setPeriod = (id: string) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -118,7 +114,10 @@ export function ScholarReportRoster() {
     setSharing(true);
     try {
       const res = await sharePeriod({ periodId: activePeriodId });
-      toaster.success({ title: `Published ${res.shared} narrative${res.shared === 1 ? "" : "s"} to parents` });
+      toaster.success({
+        title: `Published ${res.shared} report${res.shared === 1 ? "" : "s"} to parents`,
+        description: res.held > 0 ? `${res.held} still have placeholders to fill.` : undefined,
+      });
       setShareOpen(false);
     } catch (e) {
       toaster.error({ title: "Couldn't publish to parents", description: e instanceof Error ? e.message : String(e) });
@@ -158,7 +157,7 @@ export function ScholarReportRoster() {
             size="lg"
             icon={<CalendarBlank weight="duotone" />}
             title="No reporting period yet"
-            hint="Set up a term window to start writing course narratives and Whole Child reports for your scholars."
+            hint="Set up a term window to start writing parent reports for your scholars."
             cta={{
               label: "Set up a reporting period",
               icon: <Plus size={14} />,
@@ -180,7 +179,6 @@ export function ScholarReportRoster() {
                 scholar={s}
                 href={scholarHref(s.id)}
                 courseReports={courseByScholar.get(s.id) ?? []}
-                wc={wcByScholar.get(s.id)}
                 checkin={checkinByScholar.get(s.id)}
               />
             ))}
@@ -201,6 +199,7 @@ export function ScholarReportRoster() {
         open={shareOpen}
         onClose={() => setShareOpen(false)}
         toShare={toShare}
+        heldBack={heldBack}
         periodLabel={activePeriod?.label ?? ""}
         sharing={sharing}
         onConfirm={handleSharePeriod}
@@ -213,27 +212,22 @@ function ScholarRow({
   scholar,
   href,
   courseReports,
-  wc,
   checkin,
 }: {
   scholar: RosterScholar;
   href: string;
   courseReports: { key: string; label: string; status: string; hasContent: boolean }[];
-  wc: { status: string; hasContent: boolean } | undefined;
   checkin: { status: string; hasContent: boolean } | undefined;
 }) {
-  // A status dot per report. Course narratives float left; the interim check-in
-  // and whole-child dots are pinned far right (just before the caret) so every
-  // row's dots line up.
+  // A status dot per report. Subject reports float left; the interim check-in
+  // dot is pinned far right (just before the caret) so every row's dots line up.
   const courseDots = courseReports.map((r) => ({
     key: r.key,
     label: r.label,
     state: reportSectionState(r.status, r.hasContent),
   }));
-  const wcState = wc ? reportSectionState(wc.status, wc.hasContent) : ("empty" as const);
   const checkinState = checkin ? reportSectionState(checkin.status, checkin.hasContent) : ("empty" as const);
-  const sharedCount =
-    courseReports.filter((r) => reportShared(r.status)).length + (wc && reportShared(wc.status) ? 1 : 0);
+  const sharedCount = courseReports.filter((r) => reportShared(r.status)).length;
 
   return (
     <Link href={href} style={{ textDecoration: "none" }}>
@@ -242,8 +236,8 @@ function ScholarRow({
         <Text fontFamily="heading" fontWeight="700" fontSize="sm" color="navy.600" truncate flex={1} minW={0}>
           {scholar.name}
         </Text>
-        {/* Right group, in order: [shared tag] | [course dots] | [interim check-in dot] | [whole-child dot].
-            The check-in + WC dots are pinned rightmost so they align down the column. */}
+        {/* Right group, in order: [shared tag] | [report dots] | [interim check-in dot].
+            The check-in dot is pinned rightmost so it aligns down the column. */}
         <HStack gap={2} flexShrink={0}>
           <SharedCountTag count={sharedCount} />
           {sharedCount > 0 && <RowDivider />}
@@ -259,9 +253,6 @@ function ScholarRow({
           {courseDots.length > 0 && <RowDivider />}
           <Box as="span" display="inline-flex" alignItems="center" title="Interim check-in">
             <SectionStatusIcon state={checkinState} size={13} />
-          </Box>
-          <Box as="span" display="inline-flex" alignItems="center" title="Whole Child">
-            <SectionStatusIcon state={wcState} size={13} />
           </Box>
         </HStack>
         <CaretRight color="var(--chakra-colors-charcoal-300)" />
@@ -336,6 +327,7 @@ function ShareWithParentsDialog({
   open,
   onClose,
   toShare,
+  heldBack,
   periodLabel,
   sharing,
   onConfirm,
@@ -343,6 +335,7 @@ function ShareWithParentsDialog({
   open: boolean;
   onClose: () => void;
   toShare: { _id: Id<"courseNarratives">; scholarName: string; subject: string }[];
+  heldBack: number;
   periodLabel: string;
   sharing: boolean;
   onConfirm: () => void;
@@ -377,10 +370,16 @@ function ShareWithParentsDialog({
             <Dialog.Body px={6} pb={6}>
               <Stack gap={4}>
                 <Text fontSize="sm" color="charcoal.500" fontFamily="body">
-                  These finalized course narratives for {periodLabel} will be published to the
+                  These finished reports for {periodLabel} will be published to the
                   parent portal and become visible to families. Drafts are not published, and this
                   can&apos;t be unpublished from here.
                 </Text>
+                {heldBack > 0 && (
+                  <Text fontSize="sm" color="charcoal.600" fontFamily="body">
+                    {heldBack} finished report{heldBack === 1 ? " still has" : "s still have"} highlighted placeholders and
+                    won&apos;t be published until they&apos;re filled.
+                  </Text>
+                )}
                 {n === 0 ? (
                   <Text fontSize="sm" color="charcoal.400" fontFamily="heading">
                     No finalized reports to publish yet.
@@ -393,7 +392,7 @@ function ShareWithParentsDialog({
                           {r.scholarName}
                         </Text>
                         <Text fontSize="xs" color="charcoal.400" fontFamily="body">
-                          {r.subject}
+                          {reportTitle(r.subject)}
                         </Text>
                       </HStack>
                     ))}

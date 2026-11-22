@@ -293,7 +293,6 @@ export function UnitDesigner({
       lessonId,
       title: preset === "handout" ? "New handout" : "New activity",
       kind: "offline",
-      defaultMode: preset === "handout" ? "homework" : undefined,
     });
     router.push(buildHref(unitId, { activityId, tab: "edit" }));
     return activityId;

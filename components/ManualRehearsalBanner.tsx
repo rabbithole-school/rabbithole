@@ -13,9 +13,9 @@
  * history. They never become scholar dossier, mastery, or signal records.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import {
   Box,
   Button,
@@ -41,7 +41,6 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isTeacherRole } from "@/convex/lib/roles";
 import { toaster } from "@/lib/toaster";
 import type { ManualRehearsalReplay } from "@/hooks/useManualRehearsalReplay";
-import { newestHtmlArtifact } from "@/lib/vibecode/helpers";
 import { FieldSelect } from "@/components/ui/FieldSelect";
 import {
   READ_LEVELS,
@@ -79,49 +78,10 @@ export function ManualRehearsalBanner({
   );
   const setViewAs = useMutation(api.sessions.setTestDriveViewAs);
   const resetRehearsal = useMutation(api.sessions.resetTestDrive);
-  const setVibecodeStarter = useAction(
-    api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-  );
-  const setScholarsStartFrom = useMutation(
-    api.activities.setScholarsStartFrom,
-  );
-  const starterActivityId =
-    session.isTestDrive &&
-    session.sessionMode === "vibecode" &&
-    session.activityId
-      ? session.activityId
-      : undefined;
-  const activity = useQuery(
-    api.activities.get,
-    starterActivityId ? { id: starterActivityId } : "skip",
-  );
-  const artifacts = useQuery(
-    api.artifacts.getBySession,
-    starterActivityId ? { sessionId: session._id } : "skip",
-  );
-  const htmlArtifact = useMemo(
-    () => newestHtmlArtifact(artifacts),
-    [artifacts],
-  );
-  const starterApp = activity?.starterAppId ? activity.starterApp : null;
 
   const [syntheticOpen, setSyntheticOpen] = useState(false);
   const [viewAsOpen, setViewAsOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const [savingStarter, setSavingStarter] = useState(false);
-  const [usingStarterForScholars, setUsingStarterForScholars] =
-    useState(false);
-  const [starterConfirmation, setStarterConfirmation] = useState<
-    string | null
-  >(null);
-  useEffect(() => {
-    if (!starterConfirmation) return;
-    const timeout = window.setTimeout(
-      () => setStarterConfirmation(null),
-      8000,
-    );
-    return () => window.clearTimeout(timeout);
-  }, [starterConfirmation]);
 
   // Resolve the current view-as label from the session itself.
   const currentScholarId = session.testDriveAsScholarId;
@@ -177,65 +137,6 @@ export function ManualRehearsalBanner({
     }
   };
 
-  const handleUseAsStarter = async () => {
-    if (!starterActivityId || !htmlArtifact || savingStarter) return;
-    const replacing = !!starterApp;
-    const needsScholarSwitch = activity?.scholarsStartFrom !== "starter";
-    setSavingStarter(true);
-    try {
-      await setVibecodeStarter({
-        activityId: starterActivityId,
-        artifactId: htmlArtifact._id,
-      });
-      if (needsScholarSwitch) {
-        setStarterConfirmation(
-          replacing ? "Starter replaced." : "Starter saved.",
-        );
-      } else {
-        toaster.success({
-          title: replacing
-            ? "Activity starter replaced"
-            : "Activity starter saved",
-        });
-      }
-    } catch (err) {
-      console.error(err);
-      toaster.error({ title: "Couldn't save activity starter" });
-    } finally {
-      setSavingStarter(false);
-    }
-  };
-
-  const handleUseStarterForScholars = async () => {
-    if (!starterActivityId || usingStarterForScholars) return;
-    setUsingStarterForScholars(true);
-    try {
-      await setScholarsStartFrom({
-        activityId: starterActivityId,
-        value: "starter",
-      });
-      setStarterConfirmation(null);
-      toaster.success({ title: "Scholars will start from the saved app" });
-    } catch (err) {
-      console.error(err);
-      toaster.error({ title: "Couldn't change how scholars start" });
-    } finally {
-      setUsingStarterForScholars(false);
-    }
-  };
-
-  const starterDisclosure = [
-    session.vibecodeStarterUsedAt
-      ? "Opened with the saved starter app"
-      : undefined,
-    starterApp &&
-    activity?.scholarsStartFrom !== "starter"
-      ? "Scholars start from a blank slate"
-      : undefined,
-  ]
-    .filter((value): value is string => value !== undefined)
-    .join(" · ");
-
   // The App-designer Workshop (all vibecode sessions) owns its own top-bar
   // chrome, so the shared rehearsal banner is simply NOT rendered on that route
   // (see app/scholar/[sessionId]/page.tsx). This component no longer
@@ -265,44 +166,6 @@ export function ManualRehearsalBanner({
         <Text fontSize="sm" fontFamily="heading" color="cyan.700" flex={1}>
           — nothing here is being saved to a scholar.
         </Text>
-
-        {starterDisclosure && (
-          <Text fontSize="xs" fontFamily="heading" color="cyan.700">
-            {starterDisclosure}
-          </Text>
-        )}
-
-        {starterConfirmation &&
-          activity?.scholarsStartFrom !== "starter" && (
-          <HStack gap={1}>
-            <Text fontSize="xs" fontFamily="heading" color="cyan.700">
-              {starterConfirmation}
-            </Text>
-            <Button
-              size="xs"
-              variant="ghost"
-              color="cyan.700"
-              _hover={{ bg: "white" }}
-              onClick={handleUseStarterForScholars}
-              loading={usingStarterForScholars}
-            >
-              Use it for scholars
-            </Button>
-          </HStack>
-        )}
-
-        {starterActivityId && activity && htmlArtifact && (
-          <Button
-            size="xs"
-            variant="ghost"
-            color="cyan.700"
-            _hover={{ bg: "white" }}
-            onClick={handleUseAsStarter}
-            loading={savingStarter}
-          >
-            {starterApp ? "Replace activity starter" : "Use as activity starter"}
-          </Button>
-        )}
 
         {/* View as picker */}
         <Popover.Root

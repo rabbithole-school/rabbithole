@@ -1,0 +1,10 @@
+BUILD BRIEF: My Racers (fictional, for the designer-steer bench)
+
+Context: The scholar has been learning how animals move: legs, wings, fins, and why some are fast over a short distance and others last longer. They direct the AI builder to make a racing game with characters of their own. The scholar is the designer and director; the builder writes the code. The scholar owns every design decision.
+
+(a) What the app should have
+- A few racers the scholar designs, each different, and a race they can start and watch.
+- A result at the end of each race.
+
+(b) Scholar choice
+- The scholar chooses the racers, the track, the look and the rules of the race. Start small: get one race on screen, then let them grow it.

@@ -9,12 +9,16 @@
  * phrase from `dueStatus()`. Urgency changes TONE only.
  *   loud  — overdue or due today.
  *   quiet — due later.
+ * `closures` applies the "this week" display rule (shared/homeworkWeek.ts).
  * `floor` lets a surface raise the minimum emphasis, never change the form.
  */
 
 import { type ReactNode, useMemo } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { dueStatus } from "../../../vendor/shared/institutionDay";
+import {
+  homeworkDueStatus,
+  type WeekClosure,
+} from "../../../vendor/shared/homeworkWeek";
 import { type Colors, fonts, useColors } from "@/theme";
 
 export type DueTone = "quiet" | "loud";
@@ -42,14 +46,18 @@ export function DueChip({
   nowMs,
   timeZone,
   floor,
+  closures,
 }: {
   dueAt: number | null | undefined;
   nowMs: number;
   timeZone: string | null;
   floor?: DueTone;
+  /** The school's closures. Given, a due date on its week's last school day
+   *  reads "due this week" / "due next week" (shared/homeworkWeek.ts). */
+  closures?: readonly WeekClosure[];
 }) {
   if (!timeZone) return null;
-  const due = dueStatus(dueAt, nowMs, timeZone);
+  const due = homeworkDueStatus(dueAt, nowMs, timeZone, closures);
   // No deadline is no chip, never an empty one.
   if (!due) return null;
   const urgent = due.status === "overdue" || due.status === "dueToday";

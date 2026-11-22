@@ -3,7 +3,9 @@
  * practice stem, lifting any embedded pipe table (vendor/shared/practiceStemBlocks)
  * out of the prose into a real hairline table. A drop-in for the
  * `<FractionText value={stem} …>` stem render; a stem with no table renders
- * byte-identically through FractionText. Must look indistinguishable from web.
+ * byte-identically through FractionText. A fenced code listing (shared
+ * `CODE_FENCE`) is drawn monospaced, with its indentation kept. Must look
+ * indistinguishable from web.
  *
  * Prose blocks (and every table CELL) render through FractionText, so fractions
  * and "?" keep their existing stacked visual language. The FULL stem's spoken
@@ -11,7 +13,7 @@
  * VoiceOver / the K tap-to-hear path hear one coherent question.
  */
 
-import { StyleSheet, View } from "react-native";
+import { Platform, StyleSheet, Text, View } from "react-native";
 
 import { FractionText } from "@/components/FractionText";
 import {
@@ -25,6 +27,8 @@ import {
 const RULE = "#ded8cb";
 const HEADER_TEXT = "#8a7f6d";
 const BODY_TEXT = "#3f3528";
+const CODE_BG = "#f7f3ea";
+const MONO = Platform.select({ ios: "Menlo", default: "monospace" });
 
 // Cell font 22 when the stem is 28; scale proportionally for other sizes.
 const CELL_SCALE = 22 / 28;
@@ -77,10 +81,27 @@ export function StemText({ value, fontSize = 28, align = "center", color, access
       {blocks.map((block, i) =>
         block.kind === "text" ? (
           <FractionText key={i} value={block.text} fontSize={fontSize} align={align} color={color} readAlong={readAlong} />
+        ) : block.kind === "code" ? (
+          <StemCode key={i} lines={block.lines} fontSize={cellFont} />
         ) : (
           <StemTable key={i} block={block} cellFont={cellFont} />
         ),
       )}
+    </View>
+  );
+}
+
+/** A code listing: monospaced and left-aligned inside a box that itself sits
+ *  where the stem is aligned, so indentation lines up. One Text per line keeps
+ *  a long line from wrapping into the next line's indentation unnoticed. */
+function StemCode({ lines, fontSize }: { lines: string[]; fontSize: number }) {
+  return (
+    <View style={styles.code}>
+      {lines.map((line, i) => (
+        <Text key={i} style={[styles.codeLine, { fontSize, lineHeight: Math.round(fontSize * 1.45) }]}>
+          {line === "" ? " " : line}
+        </Text>
+      ))}
     </View>
   );
 }
@@ -142,6 +163,17 @@ const styles = StyleSheet.create({
   wrap: { alignSelf: "stretch" },
   center: { alignItems: "center" },
   left: { alignItems: "flex-start" },
+  code: {
+    marginVertical: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    maxWidth: "100%",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: RULE,
+    backgroundColor: CODE_BG,
+  },
+  codeLine: { fontFamily: MONO, fontWeight: "500", color: BODY_TEXT, textAlign: "left" },
   // A column of rows. width:100% + maxWidth lets it fill the card up to its
   // ideal width and shrink below it, so it never overflows and clips.
   table: { marginVertical: 10, width: "100%" },

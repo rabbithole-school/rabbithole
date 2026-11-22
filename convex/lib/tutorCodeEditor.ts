@@ -89,8 +89,11 @@ export function requestedArtifactIdFromToolInput(input: unknown): string | null 
   return null;
 }
 
+// Relayed to a child almost verbatim, so it reads as a choice plus a remedy,
+// never as breakage. The remedies are ones the tutor really has: reading the
+// scholar's own chat words back, and edit_document's create-empty.
 export const SCHOLAR_WRITING_REFUSAL =
-  "This is the scholar's writing. You can't write in it — they type or dictate into the box themselves. Point them to the box once, then keep the conversation going.";
+  "Nothing was changed, on purpose: this is the scholar's writing, and the words are theirs to type or dictate into the box. That is how they do the thinking, and nothing is broken. Don't say you can't or that the tool won't let you; say that part is theirs and point them to the box once. Then offer what you can do: read back notes they gave you in this chat so they can write from them, help them pick what goes first, or make a new empty titled document if they want a fresh page. Keep the conversation going.";
 
 /**
  * How a document is shown to the model, everywhere it is viewed: every line is
@@ -319,6 +322,13 @@ export function staleFileMessage(path: string, revision: number): string {
 
 export function readRequiredMessage(path: string): string {
   return `READ_REQUIRED: view ${path} before changing it.`;
+}
+
+/** The empty app session setup seeds for an "artifact" deliverable is not an
+ * app that exists: where no new app may be built (lib/mission.ts
+ * mayCreateAppInSession), filling it would build one by another door. */
+export function emptyAppRefusalMessage(path: string): string {
+  return `NEW_APP_UNAVAILABLE: ${path} is empty, and filling it would build a new app. New apps are only built in activities a teacher assigns, not here. Tell the scholar that plainly, then help them do this activity's work.`;
 }
 
 export function createRefusalMessage(path: string): string {

@@ -4,6 +4,7 @@ import schema from "../schema";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import { readSchedule } from "../lib/scheduleStore";
 
 /**
  * Q1 — ad-hoc dispatch ("give ONE scholar something to do right now"). It is
@@ -48,6 +49,8 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 const getAssignment = (t: ReturnType<typeof convexTest>, id: Id<"assignments">) =>
   t.run(async (ctx) => ctx.db.get(id));
+const scheduleOf = (t: ReturnType<typeof convexTest>, id: Id<"assignments">) =>
+  t.run(async (ctx) => readSchedule(ctx, { _id: id }));
 const getActivity = (t: ReturnType<typeof convexTest>, id: Id<"activities">) =>
   t.run(async (ctx) => ctx.db.get(id));
 
@@ -62,16 +65,18 @@ describe("dispatchActivity (Q1 ad-hoc dispatch)", () => {
     const { assignmentId, activityId } = await asT.mutation(api.assignments.dispatchActivity, {
       scholarId: scholar,
       title: "Copenhagen taxation exploration",
+      mode: "classFocus",
       endsAt,
     });
 
     const a = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
+    const schedule = await scheduleOf(t, assignmentId);
     expect(a.kind).toBe("adHocDispatch");
     expect(a.unitId).toBeUndefined();
     expect(a.scholarIds).toEqual([scholar]);
     expect(a.teacherId).toBe(teacher);
-    expect(a.activitySchedule).toHaveLength(1);
-    const entry = a.activitySchedule![0];
+    expect(schedule).toHaveLength(1);
+    const entry = schedule[0];
     expect(entry.activityId).toBe(activityId);
     expect(entry.mode).toBe("classFocus");
     expect(entry.setAt).toBeGreaterThan(0); // LIVE now
@@ -96,10 +101,10 @@ describe("dispatchActivity (Q1 ad-hoc dispatch)", () => {
       title: "Read about tessellations",
       live: false,
       startsAt,
+      mode: "classFocus",
       endsAt,
     });
-    const a = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
-    const entry = a.activitySchedule![0];
+    const entry = (await scheduleOf(t, assignmentId))[0];
     expect(entry.setAt).toBeUndefined(); // planned, not live
     expect(entry.startsAt).toBe(startsAt);
     expect(entry.endsAt).toBe(endsAt);
@@ -118,8 +123,7 @@ describe("dispatchActivity (Q1 ad-hoc dispatch)", () => {
       mode: "homework",
       dueAt,
     });
-    const a = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
-    const entry = a.activitySchedule![0];
+    const entry = (await scheduleOf(t, assignmentId))[0];
     expect(entry.mode).toBe("homework");
     expect(entry.dueAt).toBe(dueAt);
     expect(entry.endsAt).toBeUndefined();
@@ -159,8 +163,7 @@ In your notebook:
     expect(activity.scholarDescription).toBe(handout.trim());
     expect(activity.systemPrompt).toBeUndefined();
 
-    const assignment = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
-    const entry = assignment.activitySchedule![0];
+    const entry = (await scheduleOf(t, assignmentId))[0];
     expect(entry.mode).toBe("homework");
     expect(entry.dueAt).toBe(dueAt);
     expect(entry.setAt).toBeGreaterThan(0);
@@ -198,8 +201,9 @@ In your notebook:
         title: "Invisible handout",
         activityKind: "offline",
         description: "Complete these instructions on paper.",
+        finish: { kind: "inClass" },
       }),
-    ).rejects.toThrow(/offline dispatch must use homework mode/i);
+    ).rejects.toThrow(/offline work needs a due date/i);
   });
 
   test("dispatches a specific reading or video through the existing web activity", async () => {
@@ -214,6 +218,7 @@ In your notebook:
       activityKind: "web",
       webUrl: "https://example.com/triangle-angles",
       description: "Read this, then be ready to explain why the angles sum to 180°.",
+      finish: { kind: "inClass" },
     });
 
     const activity = (await getActivity(t, activityId)) as Doc<"activities">;
@@ -233,6 +238,7 @@ In your notebook:
       title: "Watch: how tide pools work",
       activityKind: "web",
       webUrl: "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+      finish: { kind: "inClass" },
     });
     expect(res.activityKind).toBe("online");
     expect(res.attachedVideoResource).toBe(true);
@@ -269,6 +275,7 @@ In your notebook:
       title: "Read the field guide",
       activityKind: "web",
       webUrl: "https://example.com/reef-guide",
+      finish: { kind: "inClass" },
     });
     expect(res.activityKind).toBe("web");
     expect(res.attachedVideoResource).toBe(false);
@@ -301,6 +308,7 @@ In your notebook:
       activityKind: "problem_set",
       targetSkillKeys: ["angle_sum_triangle"],
       itemCount: 8,
+      finish: { kind: "inClass" },
     });
 
     const activity = (await getActivity(t, activityId)) as Doc<"activities">;
@@ -357,11 +365,12 @@ In your notebook:
         callerUserId: teacher,
         scholarId: target,
         title: "Explore prime gaps",
+        finish: { kind: "inClass" },
       }),
     );
     const a = (await getAssignment(t, res.assignmentId)) as Doc<"assignments">;
     expect(a.kind).toBe("adHocDispatch");
-    expect(a.activitySchedule![0].setAt).toBeGreaterThan(0);
+    expect((await scheduleOf(t, res.assignmentId))[0].setAt).toBeGreaterThan(0);
   });
 });
 
@@ -373,15 +382,21 @@ describe("queue release — teacher pushActivity on a queued ad-hoc dispatch", (
     const asT = await withUser(t, teacher);
     const asS = await withUser(t, scholar);
 
-    // 1) Teacher stages ad-hoc work with "Add to queue" (live:false).
+    // 1) Teacher stages ad-hoc work with "Add to queue" (live:false) for a
+    //    later start. (A queued give whose start is now goes live at once.)
     const { assignmentId, activityId } = await asT.mutation(
       api.assignments.dispatchActivity,
-      { scholarId: scholar, title: "Sketch a Voronoi diagram", live: false },
+      {
+        scholarId: scholar,
+        title: "Sketch a Voronoi diagram",
+        live: false,
+        startsAt: Date.now() + 24 * 3_600_000,
+        finish: { kind: "inClass" },
+      },
     );
 
     // 2a) The schedule entry is PLANNED — no setAt.
-    const queued = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
-    const queuedEntry = queued.activitySchedule![0];
+    const queuedEntry = (await scheduleOf(t, assignmentId))[0];
     expect(queuedEntry.activityId).toBe(activityId);
     expect(queuedEntry.setAt).toBeUndefined();
 
@@ -412,9 +427,9 @@ describe("queue release — teacher pushActivity on a queued ad-hoc dispatch", (
         .collect(),
     );
     expect(assignmentsAfter).toHaveLength(1); // no second assignment
-    const released = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
-    expect(released.activitySchedule).toHaveLength(1); // no second activity
-    expect(released.activitySchedule![0].setAt).toBeGreaterThan(0); // now LIVE
+    const releasedSchedule = await scheduleOf(t, assignmentId);
+    expect(releasedSchedule).toHaveLength(1); // no second activity
+    expect(releasedSchedule[0].setAt).toBeGreaterThan(0); // now LIVE
 
     // 4a) It now appears as a not-started Home row for the scholar.
     const afterRows = (

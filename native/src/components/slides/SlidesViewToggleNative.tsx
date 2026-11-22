@@ -1,8 +1,11 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
-
-import { fonts, useColors } from "@/theme";
+import { ViewToggle } from "@/components/ui/ViewToggle";
 
 export type SlidesViewMode = "grid" | "slide";
+
+const SLIDES_VIEWS = [
+  { value: "grid", label: "Grid" },
+  { value: "slide", label: "Slide" },
+] as const;
 
 export function SlidesViewToggleNative({
   value,
@@ -11,51 +14,5 @@ export function SlidesViewToggleNative({
   value: SlidesViewMode;
   onChange: (value: SlidesViewMode) => void;
 }) {
-  const colors = useColors();
-
-  return (
-    <View style={[styles.root, { backgroundColor: colors.bgSubtle }]}>
-      {(["grid", "slide"] as const).map((mode) => {
-        const selected = value === mode;
-        return (
-          <Pressable
-            key={mode}
-            accessibilityRole="button"
-            accessibilityState={{ selected }}
-            onPress={() => onChange(mode)}
-            style={[
-              styles.option,
-              selected && { backgroundColor: colors.bg },
-            ]}
-          >
-            <Text
-              style={{
-                color: selected ? colors.fg : colors.fgMuted,
-                fontFamily: fonts.medium,
-                fontSize: 15,
-              }}
-            >
-              {mode === "grid" ? "Grid" : "Slide"}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
+  return <ViewToggle options={SLIDES_VIEWS} value={value} onChange={onChange} />;
 }
-
-const styles = StyleSheet.create({
-  root: {
-    flexDirection: "row",
-    borderRadius: 12,
-    padding: 3,
-  },
-  option: {
-    minWidth: 68,
-    minHeight: 34,
-    borderRadius: 9,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 14,
-  },
-});

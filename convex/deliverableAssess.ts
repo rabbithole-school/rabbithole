@@ -148,6 +148,13 @@ async function runAssessment(
     );
   }
 
+  // The assessor reads pages and pictures. A video or a sound recording (a
+  // capture-station clip, a Decibel meter take) would go to Claude as a PDF.
+  const mime = fileInfo.mimeType?.toLowerCase() ?? "";
+  if (mime.startsWith("video/") || mime.startsWith("audio/")) {
+    throw new Error("AI assessment reads pages and pictures, not videos or recordings.");
+  }
+
   const blob = await ctx.storage.get(fileInfo.storageId);
   if (!blob) throw new Error("The deliverable's file is missing.");
   const bytes = new Uint8Array(await blob.arrayBuffer());

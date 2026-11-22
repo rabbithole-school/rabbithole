@@ -3,7 +3,8 @@
 import { Button, HStack, Menu, Portal, Text } from "@chakra-ui/react";
 import { CaretDown, Check } from "@phosphor-icons/react";
 import { Avatar } from "@/components/Avatar";
-import { subjectMatches } from "@/lib/subjects";
+import { unitFitsSubjectFilter } from "@/lib/subjects";
+import { gradeLabel } from "@/shared/gradeRange";
 
 interface FilterableUnit {
   teacherId?: string | null;
@@ -39,7 +40,7 @@ export function unitMatchesFilters(
 ): boolean {
   return (
     (authorId === "all" || String(unit.teacherId) === authorId) &&
-    (!subject || subjectMatches(unit.subject ?? undefined, subject))
+    (!subject || unitFitsSubjectFilter(unit.subject, subject))
   );
 }
 
@@ -63,9 +64,62 @@ export function SubjectFilterChips({
   onSelect: (subject: string | null) => void;
   size?: "sm" | "xs";
 }) {
-  if (subjects.length < 2) return null;
+  return (
+    <SingleSelectFilterMenu
+      category="Subject"
+      allLabel="All subjects"
+      options={subjects.map((subject) => ({ value: subject, label: subject }))}
+      selected={selected}
+      onSelect={onSelect}
+    />
+  );
+}
 
-  const label = filterTriggerLabel("Subject", selected ?? undefined);
+/**
+ * The Curriculum list's Grade filter: one grade ("K", "4"), and a unit shows
+ * when its span covers it (`unitFitsGradeFilter`). The trigger reads
+ * "Grade: 4"; the menu spells each grade out ("Kindergarten", "Grade 4").
+ * Hidden below two grades, like Subject.
+ */
+export function GradeFilterMenu({
+  grades,
+  selected,
+  onSelect,
+}: {
+  grades: string[];
+  selected: string | null;
+  onSelect: (grade: string | null) => void;
+}) {
+  return (
+    <SingleSelectFilterMenu
+      category="Grade"
+      allLabel="All grades"
+      options={grades.map((grade) => ({
+        value: grade,
+        label: gradeLabel(grade) ?? grade,
+      }))}
+      selected={selected}
+      onSelect={onSelect}
+    />
+  );
+}
+
+function SingleSelectFilterMenu({
+  category,
+  allLabel,
+  options,
+  selected,
+  onSelect,
+}: {
+  category: string;
+  allLabel: string;
+  options: { value: string; label: string }[];
+  selected: string | null;
+  onSelect: (value: string | null) => void;
+}) {
+  if (options.length < 2) return null;
+
+  const label = filterTriggerLabel(category, selected ?? undefined);
 
   return (
     <Menu.Root positioning={{ placement: "bottom-start" }}>
@@ -75,7 +129,7 @@ export function SubjectFilterChips({
           variant="ghost"
           color="charcoal.500"
           _hover={{ bg: "gray.100" }}
-          aria-label={`Filter units by ${label.toLowerCase()}`}
+          aria-label={`Filter units by ${filterTriggerLabel(category.toLowerCase(), selected ?? undefined)}`}
         >
           <HStack gap={1.5}>
             <Text fontFamily="heading" fontSize="xs" fontWeight="600">
@@ -87,14 +141,14 @@ export function SubjectFilterChips({
       </Menu.Trigger>
       <Portal>
         <Menu.Positioner>
-          <Menu.Content minW="200px">
+          <Menu.Content minW="200px" maxH="60vh" overflowY="auto">
             <Menu.Item
               value="__all__"
               cursor="pointer"
               onClick={() => onSelect(null)}
             >
               <HStack gap={2}>
-                <Text>All subjects</Text>
+                <Text>{allLabel}</Text>
                 {selected === null && (
                   <Text color="violet.600" fontSize="2xs">
                     ✓
@@ -102,16 +156,16 @@ export function SubjectFilterChips({
                 )}
               </HStack>
             </Menu.Item>
-            {subjects.map((s) => (
+            {options.map((option) => (
               <Menu.Item
-                key={s}
-                value={s}
+                key={option.value}
+                value={option.value}
                 cursor="pointer"
-                onClick={() => onSelect(s)}
+                onClick={() => onSelect(option.value)}
               >
                 <HStack gap={2}>
-                  <Text>{s}</Text>
-                  {selected === s && (
+                  <Text>{option.label}</Text>
+                  {selected === option.value && (
                     <Text color="violet.600" fontSize="2xs">
                       ✓
                     </Text>

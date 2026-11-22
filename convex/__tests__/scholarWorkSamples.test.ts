@@ -85,7 +85,7 @@ async function seedScanObservation(
 describe("getScholarWorkSamples", () => {
   test("returns a scholar's items with their non-superseded scan observations, newest first", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     const olderId = await seedItem(t, scholarId, {
       title: "older.jpg",
@@ -151,7 +151,7 @@ describe("getScholarWorkSamples", () => {
 
   test("query filter matches label, documentHeading, and title substrings (case-insensitive)", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     const labelId = await seedItem(t, scholarId, {
       title: "img000.jpg",
@@ -203,7 +203,7 @@ describe("getScholarWorkSamples", () => {
 
   test("excludes capture_station items", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     const uploadId = await seedItem(t, scholarId, { title: "upload.jpg" });
     await seedItem(t, scholarId, {
@@ -220,15 +220,15 @@ describe("getScholarWorkSamples", () => {
 
   test("cross-scholar isolation: scholar B's items never appear for scholar A", async () => {
     const t = convexTest(schema, modules);
-    const alinda = await seedScholar(t, "Alinda");
+    const leilani = await seedScholar(t, "Leilani");
     const bruno = await seedScholar(t, "Bruno");
 
-    const alindaItem = await seedItem(t, alinda, { title: "alinda.jpg" });
+    const alindaItem = await seedItem(t, leilani, { title: "leilani.jpg" });
     const brunoItem = await seedItem(t, bruno, { title: "bruno.jpg" });
 
     const forAlinda = await t.query(
       internal.lib.scholarReads.getScholarWorkSamples,
-      { scholarId: alinda },
+      { scholarId: leilani },
     );
     expect(forAlinda.items.map((s) => s.itemId)).toEqual([alindaItem]);
 
@@ -243,7 +243,7 @@ describe("getScholarWorkSamples", () => {
 describe("readScholarMastery — scan evidence labelling", () => {
   test("carries attemptContext + a source label on a portfolio_scan row and leaves a session row unchanged", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     const scanItem = await seedItem(t, scholarId, {
       title: "scan.jpg",
@@ -310,7 +310,7 @@ describe("readScholarMastery — scan evidence labelling", () => {
 
   test("a TIER-1 caller (parent/scholar) never gets the scan source label — a staff-only artifact's title cannot leak", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     // A staff-only capture-station artifact whose printed heading names it.
     const staffOnlyItem = await seedItem(t, scholarId, {
@@ -356,7 +356,7 @@ describe("readScholarMastery — scan evidence labelling", () => {
 describe("getScholarWorkSamples — assignment title resolution", () => {
   test("a standing assignment (no unit) resolves its own title; a unit assignment's custom title overrides the unit", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
     const teacherId = await t.run((ctx) =>
       ctx.db.insert("users", {
         name: "T",
@@ -419,7 +419,7 @@ describe("getScholarWorkSamples — assignment title resolution", () => {
 describe("getScholarWorkSamples — graceful degradation on a non-matching query", () => {
   test("a non-matching query on a scholar WITH work falls back to recent items and flags queryMatched false", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     // Real onboarding scans carry section headers, never the colloquial name a
     // teacher uses ("learning print").
@@ -446,7 +446,7 @@ describe("getScholarWorkSamples — graceful degradation on a non-matching query
 
   test("a matching query still reports queryMatched true (no false fallback)", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     const matchId = await seedItem(t, scholarId, {
       title: "strengths.jpg",
@@ -467,7 +467,7 @@ describe("getScholarWorkSamples — graceful degradation on a non-matching query
 
   test("a scholar with NO work returns an empty list — never a fabricated fallback", async () => {
     const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "Alinda");
+    const scholarId = await seedScholar(t, "Leilani");
 
     const result = await t.query(
       internal.lib.scholarReads.getScholarWorkSamples,

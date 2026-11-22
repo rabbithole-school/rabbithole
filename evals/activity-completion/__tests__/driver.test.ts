@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { scoreCompletion } from "../lib/completionScore";
 import { runCompletionSession } from "../lib/driver";
 import type { CompletionCase } from "../lib/types";
 
@@ -35,5 +36,36 @@ describe("runCompletionSession scripted scholar", () => {
     expect(result.observation.totalScholarTurns).toBe(scriptedCase.script?.length);
     expect(result.observation.completedAtScholarTurn).toBeNull();
     expect(result.observation.arcCompleteAtScholarTurn).toBeNull();
+  });
+});
+
+describe("runCompletionSession scripted scholar with goal evidence", () => {
+  const goalCase = (openQuestionTurns: number[]): CompletionCase => ({
+    ...scriptedCase,
+    id: "scripted-goal-offline",
+    expectation: "should-complete",
+    goalEvidencePatterns: ["\\bpressure\\b"],
+    openQuestionTurns,
+    script: ["hi", "the gas pressure pushes it out, but why?", "ok", "cool"],
+  });
+
+  it("reaches the goal from the fixture's evidence and stops at completion", async () => {
+    const result = await runCompletionSession(goalCase([]), { offline: true });
+
+    expect(result.observation.arcCompleteAtScholarTurn).toBe(2);
+    expect(result.observation.completedAtScholarTurn).toBe(2);
+    expect(result.observation.totalScholarTurns).toBe(2);
+    expect(scoreCompletion(result.observation, "should-complete").verdict).toBe(
+      "on-time",
+    );
+  });
+
+  it("scores completing on an open-question turn as too soon", async () => {
+    const result = await runCompletionSession(goalCase([2]), { offline: true });
+
+    expect(result.observation.completedOnOpenQuestion).toBe(true);
+    const score = scoreCompletion(result.observation, "should-complete");
+    expect(score.verdict).toBe("too-soon");
+    expect(score.reason).toContain("asked a real question");
   });
 });

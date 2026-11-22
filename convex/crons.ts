@@ -27,12 +27,22 @@ const reconcileActiveAppUnlocksRef = makeFunctionReference<
 // meeting mornings and writes every enrolled scholar's synthesis a few hours
 // ahead of the anchor, so the Thursday board reads fresh write-ups. Durable
 // per-(institution, week) markers make it fire once per SEL week, for EVERY
-// institution with an explicitly configured SEL cadence (multi-tenant). Offset
-// off the reminder minute so the two hourly Rounds jobs never tick together.
+// institution with an explicitly configured SEL cadence (multi-tenant). A
+// completed week's write-ups then post to each linked class channel.
 crons.hourly(
   "dispatch SEL syntheses",
   { minuteUTC: 30 },
   internal.selSynthesisCron.dispatchSelSyntheses,
+  {},
+);
+
+// School › Screen time's summary: each school's previous local day, once,
+// soon after its own midnight (convex/screenTimeDays.ts). A covered day is
+// skipped, so the hourly tick costs one coverage read per school.
+crons.hourly(
+  "summarize yesterday's screen time",
+  { minuteUTC: 17 },
+  internal.screenTimeDays.finalizeYesterday,
   {},
 );
 
@@ -146,6 +156,19 @@ crons.interval(
   internal.bugReports.sweepStuckReports,
   {},
 );
+
+/**
+ * Re-drive Claude handoffs of triaged bug reports left pending (a no-op
+ * unless BUG_REPORT_CLAUDE_HANDOFF_ENABLED=true). Its own transaction, so it
+ * can never roll back the stuck-report sweep above.
+ */
+crons.interval(
+  "sweep pending bug-report Claude handoffs",
+  { minutes: 15 },
+  internal.bugReportHandoff.sweepPendingHandoffs,
+  {},
+);
+
 
 
 /**
@@ -261,8 +284,8 @@ crons.interval(
 );
 
 // Reception review is deliberately bounded: unknown, visitor, and rejected
-// events expire after 14 days; an operations staffer-confirmed scholar attendance row
-// expires after 180 days. The attendance table contains metadata only.
+// events expire after 14 days; a scholar's attendance is kept 13 months from
+// August 1 of its school year. The attendance table contains metadata only.
 
 
 /**
@@ -278,12 +301,13 @@ crons.daily(
 );
 
 
-// The ONE scheduled read of SimpleMDM's fleet state (device inventory + claim
+// The scheduled read of SimpleMDM's fleet state (device inventory + claim
 // read-back) into `simpleMdmDeviceSnapshots`. The devices console renders
 // this dated copy ("checked 40 minutes ago") and offers "Check now"; it never
 // calls SimpleMDM because a page opened. Hourly: SimpleMDM's own inventory
 // refresh is on a similar cadence, and one roster walk an hour is a budget
-// the undocumented rate limit tolerates.
+// the undocumented rate limit tolerates. The 8 pm charge reminder also reads
+// the roster once a night (no per-device calls) for tonight's battery levels.
 crons.hourly(
   "refresh SimpleMDM device snapshots",
   { minuteUTC: 17 },
@@ -328,6 +352,8 @@ crons.daily(
   internal.guestTutor.purgeGuestRateLimits,
   {},
 );
+
+
 
 
 

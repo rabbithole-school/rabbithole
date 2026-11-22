@@ -40,6 +40,8 @@ export type RehearseVerdict = {
   correctAnswer?: string;
   /** "so close — needs the unit" signal, exactly as the drill reports it. */
   unitOutcome?: "missing" | "wrong";
+  /** "same value — now write it in lowest terms / as a decimal", likewise. */
+  formOutcome?: "notLowestTerms" | "notDecimal";
   isDontKnow: boolean;
 };
 
@@ -70,6 +72,7 @@ export function createRehearseGrader(runRehearseQuery: RunRehearseQuery): Rehear
       correct: grade.correct,
       correctAnswer: grade.revealedAnswer,
       unitOutcome: grade.unitOutcome,
+      formOutcome: grade.formOutcome,
       isDontKnow: grade.isDontKnow,
     };
   };

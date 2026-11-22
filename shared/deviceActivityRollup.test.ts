@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   EXTERNAL_RETURN_WINDOW_MS,
   FOREGROUND_PRESENCE_GAP_MS,
+  UNCONFIRMED_FOREGROUND_MAX_MS,
   UNRETURNED_EXTERNAL_LAUNCH_ESTIMATE_MS,
   msToMinutes,
   rollupDeviceActivityDay,
@@ -58,6 +59,7 @@ describe("rollupDeviceActivityDay", () => {
   test("backgrounded time is unattributed, never foreground", () => {
     const rollup = rollupDeviceActivityDay([
       event("app_foreground", 0),
+      ...heartbeats(1, 4),
       event("app_background", 5),
       event("app_foreground", 45),
       event("heartbeat", 46),
@@ -65,6 +67,55 @@ describe("rollupDeviceActivityDay", () => {
     // 5 min before the background + 1 min after the return.
     expect(msToMinutes(rollup.foregroundMs)).toBe(6);
     expect(msToMinutes(rollup.unattributedBackgroundMs)).toBe(40);
+  });
+
+  test("a foreground no heartbeat confirms books nothing (the relight loop)", () => {
+    // A locked BunnyPad in Rabbithole Lock: iOS undoes the lock every two
+    // minutes, so the app goes background → foreground in the same instant
+    // and sits untouched until the next attempt. No heartbeat ever fires.
+    const loop = Array.from({ length: 30 }, (_, i) => [
+      event("app_background", i * 2),
+      event("app_foreground", i * 2),
+    ]).flat();
+    const rollup = rollupDeviceActivityDay([...loop, event("app_background", 60)]);
+    expect(rollup.foregroundMs).toBe(0);
+    expect(rollup.measuredSpans).toEqual([]);
+    expect(msToMinutes(rollup.unattributedBackgroundMs)).toBe(60);
+  });
+
+  test("the 5 a.m. relaunch with nobody there books nothing", () => {
+    const rollup = rollupDeviceActivityDay([
+      event("app_foreground", 0),
+      event("app_background", 2),
+    ]);
+    expect(rollup.foregroundMs).toBe(0);
+  });
+
+  test("a quick look shorter than one heartbeat still counts", () => {
+    const rollup = rollupDeviceActivityDay([
+      event("app_foreground", 0),
+      event("app_background", 0.5),
+    ]);
+    expect(rollup.foregroundMs).toBe(0.5 * MINUTE);
+  });
+
+  test("the unconfirmed-foreground limit is one heartbeat plus slack", () => {
+    const at = (ms: number) =>
+      rollupDeviceActivityDay([
+        event("app_foreground", 0),
+        event("app_background", ms / MINUTE),
+      ]).foregroundMs;
+    expect(at(UNCONFIRMED_FOREGROUND_MAX_MS)).toBe(UNCONFIRMED_FOREGROUND_MAX_MS);
+    expect(at(UNCONFIRMED_FOREGROUND_MAX_MS + 1)).toBe(0);
+  });
+
+  test("a foreground a heartbeat confirms counts as before", () => {
+    const rollup = rollupDeviceActivityDay([
+      event("app_foreground", 0),
+      event("heartbeat", 1),
+      event("app_background", 2),
+    ]);
+    expect(msToMinutes(rollup.foregroundMs)).toBe(2);
   });
 
   test("a lost-heartbeat gap is capped, and the excess is unattributed", () => {
@@ -195,6 +246,7 @@ describe("rollupDeviceActivityDay", () => {
   test("time is split by the context tag of the interval that opened it", () => {
     const rollup = rollupDeviceActivityDay([
       event("app_foreground", 0, { context: "core_day" }),
+      ...heartbeats(1, 3, "core_day"),
       event("app_background", 4, { context: "core_day" }),
       event("app_foreground", 100, { context: "extended_ed" }),
       event("external_launch", 103, {

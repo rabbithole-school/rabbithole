@@ -7,7 +7,7 @@
  *
  * ONE GRID FOR EVERY ROW. Each row is a `RowShell`: the same four columns
  * (tile · name · reach · actions) from the same template, and the actions are
- * fixed-width slots (preview · primary · archive · chevron), so "Make focus"
+ * fixed-width slots (preview · primary · archive · chevron), so "Give"
  * and "Open" occupy the same box and Archive and the chevron line up down the
  * list whatever kind of row they sit on. A row that has nothing for a slot
  * leaves it empty rather than letting its neighbours shift.
@@ -495,7 +495,7 @@ export function CatalogRow({
           primary={
             <SlotButton onClick={onFocus}>
               <Timer style={{ marginRight: 4 }} size={14} />
-              Make focus
+              Give
             </SlotButton>
           }
           secondary={
@@ -571,18 +571,68 @@ export function ArchivedCatalogRow({
 
 // ── Scholar-built rows ─────────────────────────────────────────────────────
 
+/** Publish a scholar's app to other scholars (convex/publishedApps.ts). The
+ *  label is the published state: Publish → Published (opens who has it) →
+ *  Publish latest once the builder changes the app since the last publish. */
+export function PublishButton({
+  app,
+  busy,
+  onPublish,
+  w,
+}: {
+  app: ScholarBuiltApp;
+  busy: boolean;
+  onPublish: (action: PublishAction) => void;
+  w?: string;
+}) {
+  const action: PublishAction = !app.published
+    ? "publish"
+    : app.published.current
+      ? "manage"
+      : "publishLatest";
+  return (
+    <Button
+      size="xs"
+      w={w}
+      variant={action === "publishLatest" ? "solid" : "outline"}
+      colorPalette={action === "manage" ? "gray" : "violet"}
+      fontFamily="heading"
+      disabled={busy}
+      aria-label={
+        action === "manage"
+          ? `Choose who has ${app.published?.name ?? app.title}`
+          : undefined
+      }
+      onClick={(e) => {
+        e.stopPropagation();
+        onPublish(action);
+      }}
+    >
+      {action === "publish"
+        ? "Publish"
+        : action === "manage"
+          ? "Published"
+          : "Publish latest"}
+    </Button>
+  );
+}
+
+export type PublishAction = "publish" | "publishLatest" | "manage";
+
 export function ScholarAppRow({
   app,
   busy,
   onNavigate,
   onArchive,
   onRestore,
+  onPublish,
 }: {
   app: ScholarBuiltApp;
   busy: boolean;
   onNavigate: (href: string) => void;
   onArchive: () => void;
   onRestore: () => void;
+  onPublish: (action: PublishAction) => void;
 }) {
   const archived = app.archivedAt !== null;
   const href = scholarAppHref(app);
@@ -643,18 +693,15 @@ export function ScholarAppRow({
           />
         ) : (
           <RowActions
+            // The row and the chevron open the app; the button slot is the
+            // one action only this row can take.
             primary={
-              <Button
-                asChild
-                size="xs"
+              <PublishButton
+                app={app}
+                busy={busy}
+                onPublish={onPublish}
                 w="full"
-                variant="outline"
-                colorPalette="violet"
-                fontFamily="heading"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <NextLink href={href}>Open</NextLink>
-              </Button>
+              />
             }
             secondary={
               <SlotButton

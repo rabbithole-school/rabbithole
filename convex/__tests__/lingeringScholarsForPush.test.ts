@@ -70,7 +70,6 @@ async function seedUnitWithActivity(
       kind: "online",
       systemPrompt: "...",
       order: 0,
-      defaultMode: "classFocus",
     });
     return { unitId, activityId };
   });

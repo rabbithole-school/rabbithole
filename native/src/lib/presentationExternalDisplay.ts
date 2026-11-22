@@ -38,6 +38,22 @@ export function getPresentationDisplayState(
 export const CONNECT_TV_LABEL = "Connect TV";
 export const CONNECT_TV_GUIDANCE =
   "Open Control Center from the top-right of this iPad, choose Screen Mirroring, then select the classroom TV.";
+export const DISCONNECT_TV_LABEL = "Disconnect TV";
+export const DISCONNECT_TV_GUIDANCE =
+  "Open Control Center from the top-right of this BunnyPad, choose Screen Mirroring, then Stop Mirroring.";
+
+/**
+ * The one TV button a presenting surface shows. Screen Mirroring starts and
+ * stops only in Control Center, which the Rabbithole Lock keeps out of reach,
+ * so the button exists both ways: with no TV it connects one, and with a TV
+ * attached it is the only way off it. Hiding it once a TV arrived left a
+ * locked iPad mirroring to the TV with no way to stop.
+ */
+export function getTvButton(hasExternalScreen: boolean) {
+  return hasExternalScreen
+    ? { label: DISCONNECT_TV_LABEL, guidance: DISCONNECT_TV_GUIDANCE }
+    : { label: CONNECT_TV_LABEL, guidance: CONNECT_TV_GUIDANCE };
+}
 
 /**
  * Present mode for a live app. Unlike slides, nothing is rendered on a second

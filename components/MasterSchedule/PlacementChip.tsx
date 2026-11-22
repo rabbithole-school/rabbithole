@@ -32,17 +32,18 @@ export type PlacementChipData = {
   assignmentId?: string | null;
   activityId?: string | null;
   isProgramHandout?: boolean;
-  sequenceId?: string | null;
-  sequenceIndex?: number | null;
-  sequenceRank?: number | null;
-  sequenceLength?: number | null;
   mode?: "classFocus" | "homework" | null;
   linkState?: "live" | "planned" | "none";
+  /** "Closed Sat": an open-until window that has ended (closedWindows.ts). */
+  closedLabel?: string | null;
+  /** "Open until Thu": an open-until give still open. Shown on the chip's
+   *  secondary line, since open-until work has no Homework due card. */
+  openUntilLabel?: string | null;
   note?: string | null;
 };
 
 /** A placement is "awaiting an activity" when it carries no scheduled work of any
- *  kind — no linked assignment/activity, no unit-sequence step, no homework. It's
+ *  kind — no linked assignment/activity, no homework. It's
  *  a bare class slot (PE, Studio Time, Science) a teacher may later fill. These
  *  render in a lighter, dashed placeholder style so an empty slot doesn't read as
  *  a filled activity card. */
@@ -51,7 +52,6 @@ export function isAwaitingActivity(p: PlacementChipData): boolean {
     !p.assignmentId &&
     !p.activityId &&
     !p.activityTitle &&
-    !p.sequenceId &&
     p.mode !== "homework" &&
     p.linkState !== "live" &&
     p.linkState !== "planned"
@@ -65,6 +65,7 @@ export function chipStatus(p: PlacementChipData): {
   color: string;
   label: string;
 } {
+  if (p.closedLabel) return { color: "gray.400", label: p.closedLabel };
   if (p.linkState === "live") return { color: "green.400", label: "Live" };
   if (p.mode === "homework") return { color: "blue.400", label: "Homework" };
   if (p.linkState === "planned")
@@ -190,7 +191,6 @@ export function PlacementChip({
   groupEmoji,
   dragging,
   flagged,
-  outOfOrder,
   asBlockTitle,
   fill,
   flat,
@@ -201,7 +201,6 @@ export function PlacementChip({
   groupEmoji?: string | null;
   dragging?: boolean;
   flagged?: boolean;
-  outOfOrder?: boolean;
   asBlockTitle?: boolean;
   /** Stretch to fill the host cell (grid) so a full block reads as full, with
    *  its content vertically centered. */
@@ -228,17 +227,13 @@ export function PlacementChip({
   const hasActivity = Boolean(p.activityTitle);
   const eyebrow = hasActivity && !suppressSubjectEyebrow ? p.subject : null;
   const primary = hasActivity ? p.activityTitle! : p.subject;
+  // "Open until Wed, Nov 25" gets its own line so a long unit title takes the
+  // ellipsis and the closing day is never the part that is cut.
+  const closing =
+    hasActivity && p.openUntilLabel && !p.closedLabel ? p.openUntilLabel : null;
   let secondary: string | null;
   if (hasActivity) {
-    const parts: string[] = [];
-    if (p.unitTitle) parts.push(p.unitTitle);
-    const sequenceRank =
-      p.sequenceRank ??
-      (p.sequenceIndex != null ? p.sequenceIndex + 1 : null);
-    if (sequenceRank != null && p.sequenceLength) {
-      parts.push(`${sequenceRank} of ${p.sequenceLength}`);
-    }
-    secondary = parts.join(" · ") || p.note || null;
+    secondary = p.unitTitle || p.note || null;
   } else {
     secondary = p.note ?? null;
   }
@@ -252,9 +247,9 @@ export function PlacementChip({
       borderColor={
         flat || fill
           ? "transparent"
-          : flagged || outOfOrder
+          : flagged
             ? "amber.400"
-            : p.linkState === "live"
+            : p.linkState === "live" && !p.closedLabel
               ? "green.300"
               : "gray.200"
       }
@@ -280,7 +275,7 @@ export function PlacementChip({
           title={status.label}
         />
       )}
-      <HStack gap={1.5} align={outOfOrder ? "start" : "center"}>
+      <HStack gap={1.5} align="center">
         <ChipAvatar p={p} lens={lens} groupEmoji={groupEmoji} />
         <VStack align="start" gap={0.5} minW={0} flex={1}>
           {eyebrow && (
@@ -311,23 +306,10 @@ export function PlacementChip({
               {secondary}
             </Text>
           )}
-          {outOfOrder && (
-            <HStack
-              as="span"
-              gap={0.5}
-              px={1}
-              py={0.5}
-              borderRadius="sm"
-              bg="amber.50"
-              color="amber.700"
-              fontSize="2xs"
-              fontWeight="700"
-              lineHeight={1.1}
-              title="This activity is out of its unit's planned order"
-            >
-              <chakra.span aria-hidden="true">⇅</chakra.span>
-              <chakra.span>Out of order</chakra.span>
-            </HStack>
+          {closing && (
+            <Text fontSize="2xs" color="charcoal.300" lineClamp={1}>
+              {closing}
+            </Text>
           )}
         </VStack>
       </HStack>
@@ -375,7 +357,7 @@ export function PlacementChipExpanded({
       bg="white"
       borderWidth="1px"
       borderStyle="solid"
-      borderColor={p.linkState === "live" ? "green.300" : "gray.200"}
+      borderColor={p.linkState === "live" && !p.closedLabel ? "green.300" : "gray.200"}
       borderRadius="md"
       px={3}
       py={2.5}
@@ -425,7 +407,7 @@ export function PlacementChipExpanded({
           <HStack gap={1.5} flexWrap="wrap">
             {p.mode && (
               <ChipBadge>
-                {p.mode === "homework" ? "homework" : "class focus"}
+                {p.mode === "homework" ? "homework" : "in class"}
               </ChipBadge>
             )}
             {p.note && (

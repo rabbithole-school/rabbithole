@@ -45,6 +45,7 @@ import {
   type PracticeCoordinator,
 } from "@/lib/practiceCoordinator";
 import { nativePracticePersistenceAdapter } from "@/lib/practicePersistenceAdapter";
+import { FORM_NUDGE_CAP } from "../../vendor/practice/answers";
 import {
   clearResumeSnapshot,
   saveResumeSnapshot,
@@ -78,11 +79,13 @@ import {
 import {
   breakerFreshItemOnScreen,
   breakerEasyItemMatchesCommand,
+  gradeResultFromSubmitResponse,
   isDurableCommand,
   practiceReduce,
   type PracticeCommand,
   type PracticeEvent,
   type PracticeState,
+  type SubmitAnswerResponse,
 } from "../../vendor/shared/practiceMachine";
 
 /** What the host must supply that the machine cannot know: the served-item
@@ -319,6 +322,12 @@ async function executePracticeCommand(
       ...(args.servedLane !== undefined ? { servedLane: args.servedLane } : {}),
       ...(args.latencyMs !== undefined ? { firstKeyMs: args.latencyMs } : {}),
       ...(args.thinkTimeMs !== undefined ? { elapsedMs: args.thinkTimeMs } : {}),
+      // Form nudges already received on this item (lane A's submitAnswer arg).
+      // A drained (queued) answer has no one at the item to nudge, so it goes
+      // at the cap and is graded as it would be after the nudges are spent.
+      ...(args.formNudgesUsed !== undefined
+        ? { formNudgesUsed: args.fromOutbox ? FORM_NUDGE_CAP : args.formNudgesUsed }
+        : {}),
     };
     const result = await withPracticeSubmitTimeout(submit(submissionArgs));
     if (canOpenBreaker(args)) {
@@ -462,65 +471,17 @@ async function executePracticeCommand(
         submit: submitOutboxEntry,
       });
       if (outcome.status === "submitted") {
-        const res = outcome.result as {
-          correct: boolean;
-          backOff?: {
-            missStreak: number;
-          };
-          breakerRecovery?: {
-            triggerAttemptId: string;
-            triggerNodeKey: string;
-            domain: string;
-            initialRepair?: {
-              rung: null | {
-                kind: "completion" | "reveal";
-                stepIndex: number;
-              };
-              hasMore: boolean;
-            };
-          };
-          breakerRecoveryVerified?: boolean;
-          dispatchCompleted?: unknown;
-        };
+        const res = outcome.result as SubmitAnswerResponse;
         host.onGrade(res, command.entry);
         host.onDispatchCompleted(res.dispatchCompleted);
-        const recovery = res.breakerRecovery;
-        const initialRepair = recovery?.initialRepair;
+        const initialRepair = res.breakerRecovery?.initialRepair;
         if (initialRepair?.rung) {
           host.onHintRung(initialRepair, "breaker");
         }
         dispatch({
           type: "server:submitSucceeded",
           id: command.id,
-          result: {
-            correct: res.correct,
-            ...(res.backOff
-              ? {
-                  backOff: {
-                    triggerAttemptId:
-                      recovery?.triggerAttemptId ??
-                      `legacy:${command.entry.itemId}`,
-                    triggerNodeKey: recovery?.triggerNodeKey ?? "",
-                    domain: recovery?.domain ?? "",
-                    missStreak: res.backOff.missStreak,
-                    recoveryAvailable: recovery !== undefined,
-                    initialRepairStatus:
-                      initialRepair === undefined
-                        ? "opening"
-                        : initialRepair.rung === null
-                          ? "unavailable"
-                          : initialRepair.rung.kind === "reveal"
-                            ? "done"
-                            : "open",
-                    repairStepIndex:
-                      initialRepair?.rung?.stepIndex ?? null,
-                  },
-                }
-              : {}),
-            ...(res.breakerRecoveryVerified !== undefined
-              ? { breakerRecoveryVerified: res.breakerRecoveryVerified }
-              : {}),
-          },
+          result: gradeResultFromSubmitResponse(res, command.entry.itemId),
         });
       } else if (outcome.status === "queued") {
         host.onQueuedCount(outcome.count);

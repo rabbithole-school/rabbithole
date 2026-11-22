@@ -1,14 +1,13 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation } from "convex/react";
 import {
   Badge,
   Box,
   Button,
   Heading,
   HStack,
-  Spinner,
   Stack,
   Text,
   VStack,
@@ -233,16 +232,11 @@ function ClearanceRequestRow({
  * pipeline as the annual physician forms.
  */
 export function ParentMedicalClearanceCard({
-  scholarId,
+  requests,
 }: {
-  scholarId: Id<"users">;
+  /** The active requests, from the Records tab's `parents.recordsTab`. */
+  requests: readonly ClearanceRequestView[];
 }) {
-  const requests = useQuery(
-    api.scholarHealthRecords.listMedicalClearanceRequestsForGuardian,
-    { scholarId },
-  );
-
-  if (requests === undefined) return <Spinner size="sm" color="violet.400" />;
   if (requests.length === 0) return null;
 
   return (
@@ -286,7 +280,7 @@ export function ParentMedicalClearanceCard({
           {requests.map((request) => (
             <ClearanceRequestRow
               key={request.id}
-              request={request as ClearanceRequestView}
+              request={request}
             />
           ))}
         </VStack>

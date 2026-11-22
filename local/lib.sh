@@ -10,6 +10,12 @@ CLOUD_PORT="${CLOUD_PORT:-3210}"
 SITE_PORT="${SITE_PORT:-3211}"
 WEB_PORT="${WEB_PORT:-3000}"
 
+# The Convex local backend release the runner uses (a tag on
+# github.com/get-convex/convex-backend/releases). This line is the only place
+# it is set; bump it on purpose, then run pnpm local:setup once to check it.
+# A checkout that ran an older version moves its data across on the next start.
+CONVEX_BACKEND_VERSION="precompiled-2026-10-22-1447815"
+
 # Local only: the Convex CLI runs an anonymous local backend, with no account
 # and no cloud deployment. A CONVEX_DEPLOYMENT left over in the shell would
 # point the CLI somewhere else, so it never survives into the runner.

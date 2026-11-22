@@ -9,6 +9,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { writeSchedule } from "./lib/scheduleStore";
 
 type AnyDoc = Record<string, unknown>;
 
@@ -174,7 +175,7 @@ export const seedTestAssignment = internalMutation({
         a.scholarIds[0] === args.scholarId,
     );
     if (match) {
-      await ctx.db.patch(match._id, { activitySchedule: schedule });
+      await writeSchedule(ctx, match._id, schedule);
       return { id: match._id, mode: "updated" as const };
     }
     const id = await ctx.db.insert("assignments", {
@@ -182,8 +183,8 @@ export const seedTestAssignment = internalMutation({
       unitId: args.unitId,
       scholarIds: [args.scholarId],
       startedAt: now,
-      activitySchedule: schedule,
     });
+    await writeSchedule(ctx, id, schedule);
     return { id, mode: "created" as const };
   },
 });
@@ -281,7 +282,6 @@ export const seedWebAssignmentForTesting = internalMutation({
         kind: "web",
         webUrl: "https://www.example.com/learn",
         webAllowedHosts: ["example.com"],
-        defaultMode: "classFocus",
         order: 0,
       });
     }
@@ -302,17 +302,16 @@ export const seedWebAssignmentForTesting = internalMutation({
         a.scholarIds[0] === scholar._id,
     );
     let assignmentId = match?._id;
-    if (assignmentId) {
-      await ctx.db.patch(assignmentId, { activitySchedule: schedule });
-    } else {
+    if (!assignmentId) {
       assignmentId = await ctx.db.insert("assignments", {
         teacherId: teacher._id,
         unitId,
         scholarIds: [scholar._id],
         startedAt: now,
-        activitySchedule: schedule,
       });
     }
+    await writeSchedule(ctx, assignmentId, schedule);
+
     return { unitId, lessonId, activityId, assignmentId };
   },
 });

@@ -43,8 +43,8 @@ The failure modes it exists to catch:
 The ground-truth "the arc is genuinely finished" signal is the **scholar's**
 goal signal or explicit evidence in the scholar's own turn, never the tutor's
 opinion — that's what makes "too soon" measurable. A scripted scholar never
-emits `[[DONE]]`/`[[STUCK]]`, so the arc is definitionally unfinished and any
-completion is too-soon.
+emits `[[DONE]]`/`[[STUCK]]`, so unless its fixture sets `goalEvidencePatterns`
+the arc is unfinished and any completion is too-soon.
 
 ## Production fidelity
 
@@ -118,6 +118,7 @@ which makes a withhold scenario drift out from under the eval.
 | `engaged-reaches-goal` | `should-complete` | Emergent sim | An engaged scholar works the goal through; the tutor must close it out (catches **too-late**). |
 | `disengages-no-goal` | `should-withhold` | Scripted | Partial engagement, then disengagement and a final "done" claim without the gas-pressure goal; the tutor must NOT complete an unfinished arc (catches **too-soon**). |
 | `hello-and-bail` | `should-withhold` | Scripted | A quick hello / "ok I'm done" with no real engagement; a hello can never finish an activity (the pilot/onboarding failure; mirrors the ≥ 2-real-turns guard). |
+| `open-question-after-goal` | `should-complete` | Scripted | The scholar reaches the goal, then asks a real question. The tutor must answer it and complete on another turn; completing on the question turn (`openQuestionTurns`) scores **too-soon** (TRA-703). |
 
 ## Files
 

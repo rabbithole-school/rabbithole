@@ -7,10 +7,12 @@ import { ScholarAvatar } from "@/components/ScholarAvatar";
 import type { Id } from "@/lib/convex";
 import {
   type KindFilter,
-  MENTORS_EYEBROW,
+  PEOPLE_EYEBROW,
+  MESSAGE_ABOUT_COPY,
   WORKSHOP_EYEBROW,
   previewLine,
   splitThreadSections,
+  threadAboutLabel,
   threadHeadline,
   type ScholarThreadSummary,
 } from "@/lib/scholarMessages";
@@ -18,9 +20,10 @@ import { resolveUserImageUri } from "@/lib/webEmbedConfig";
 import { fonts, useColors, type Colors } from "@/theme";
 
 /**
- * The scholar's conversation list (S2): mentor threads first — they're about
- * the kid's own work — then Workshop threads. No "+ New message": an adult
- * opens every mentor thread, and new ideas are still filed from the Workshop.
+ * The scholar's conversation list (S2): conversations with people first — they're about
+ * the kid's own work — then Workshop threads. "New message" lives in the
+ * Messages header (WriteToTeacherSheet); new ideas are still filed from the
+ * Workshop.
  * Web twin: the scholar MessageWorkspace list.
  */
 export function ThreadList({
@@ -38,11 +41,11 @@ export function ThreadList({
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const { mentors, workshop } = splitThreadSections(threads);
+  const { people, workshop, about } = splitThreadSections(threads);
   // The filter only earns its place when there are two kinds to tell apart.
-  const showFilter = mentors.length > 0 && workshop.length > 0;
-  const showMentors = kindFilter !== "workshop" || !showFilter;
-  const showWorkshop = kindFilter !== "mentor" || !showFilter;
+  const showFilter = people.length > 0 && workshop.length > 0;
+  const showPeople = kindFilter !== "workshop" || !showFilter;
+  const showWorkshop = kindFilter !== "people" || !showFilter;
 
   const section = (label: string, rows: ScholarThreadSummary[]) =>
     rows.length === 0 ? null : (
@@ -87,15 +90,18 @@ export function ThreadList({
           })}
         </View>
       ) : null}
-      {showMentors ? section(MENTORS_EYEBROW, mentors) : null}
+      {showPeople ? section(PEOPLE_EYEBROW, people) : null}
       {showWorkshop ? section(WORKSHOP_EYEBROW, workshop) : null}
+      {kindFilter === "all" || !showFilter
+        ? section(MESSAGE_ABOUT_COPY.listHeading, about)
+        : null}
     </ScrollView>
   );
 }
 
 const FILTERS: { value: KindFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "mentor", label: MENTORS_EYEBROW },
+  { value: "people", label: PEOPLE_EYEBROW },
   { value: "workshop", label: WORKSHOP_EYEBROW },
 ];
 
@@ -113,12 +119,13 @@ function ThreadRow({
   styles: ReturnType<typeof makeStyles>;
 }) {
   const headline = threadHeadline(thread);
+  const aboutText = threadAboutLabel(thread);
   // Web parity (MessageWorkspace threadPreview).
   const preview =
     previewLine(thread.lastMessageAuthorName, thread.lastMessagePreview) ||
     "No messages yet";
-  const mentor = thread.kind === "mentor";
-  const avatarPerson = mentor ? thread.staffParticipants[0] : undefined;
+  const withPeople = thread.flavor === "general";
+  const avatarPerson = withPeople ? thread.staffParticipants[0] : undefined;
 
   return (
     <Pressable
@@ -132,7 +139,7 @@ function ThreadRow({
         pressed && !selected && styles.rowPressed,
       ]}
     >
-      {mentor ? (
+      {withPeople ? (
         <ScholarAvatar
           name={avatarPerson?.name ?? thread.title}
           image={resolveUserImageUri(avatarPerson?.image)}
@@ -142,12 +149,12 @@ function ThreadRow({
         <View
           style={styles.workshopTile}
           accessible
-          accessibilityLabel="Workshop"
+          accessibilityLabel={aboutText ?? "Workshop"}
         >
           <SymbolView
-            name="wrench.and.screwdriver.fill"
+            name={aboutText ? "bubble.left.fill" : "wrench.and.screwdriver.fill"}
             size={18}
-            tintColor={colors.orange}
+            tintColor={aboutText ? colors.violet : colors.orange}
           />
         </View>
       )}
@@ -158,6 +165,11 @@ function ThreadRow({
         >
           {headline}
         </Text>
+        {aboutText ? (
+          <Text style={styles.preview} numberOfLines={1}>
+            {aboutText}
+          </Text>
+        ) : null}
         <Text style={styles.preview} numberOfLines={1}>
           {preview}
         </Text>

@@ -656,7 +656,7 @@ export const PLACEMENT_ANCHORS: { grade: string; skillKey: string }[] = [
   { grade: "5", skillKey: "mult_2digit_by_2digit" },
 ];
 
-const GRADE_ORDER = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+const GRADE_ORDER = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
 
 export function gradeRank(grade: string): number {
   // Normalize the string SHAPE first ("Grade 2" ≡ "2") so a legacy/seed long-form

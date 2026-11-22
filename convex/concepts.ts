@@ -30,12 +30,13 @@ import { requireActiveScholarAccess } from "./lib/access";
 import { strandForStandard } from "./lib/standardStrand";
 import { classifyDomain } from "./lib/domainTaxonomy";
 import { hopTiers } from "./lib/skyField";
-import { buildScholarSky, SKY_FULL_LIVE_POOL } from "./lib/seeds";
+import { buildScholarSky, SKY_FULL_LIVE_POOL, withoutWonders } from "./lib/seeds";
 import { buildMasteryStars, buildStarterLayer, placeMuseumFloats } from "./lib/skyMuseum";
 import { cleanSeedLabel } from "./lib/seedLabel";
 import { DEPENDENCY_KINDS } from "../shared/edgeOntology";
 import { selectSkySeedCandidates } from "./lib/skySeedSelection";
 import {
+  SKY_SOURCES,
   isAtlasSource,
   isSkySource,
   isTreeSource,
@@ -44,11 +45,14 @@ import {
 import { deleteCacheOwnedEdge } from "./lib/knowledgeNodeEdges";
 import { resolveInstitutionLens, scholarIdsInLens } from "./lib/institutionLens";
 import { ROLES, isPlatformAdminRole } from "./lib/roles";
-import { isEnrolledScholar } from "./lib/enrollmentStanding";
+import { isEnrolledScholar, isWithdrawn } from "./lib/enrollmentStanding";
 import {
   accessibleScholarIds,
+  canUserAccessScholar,
   resolveActiveMembership,
 } from "./lib/access";
+import { schoolOperationsInstitutionIds } from "./lib/staffCapabilities";
+import { scholarIdsForInstitution } from "./lib/scholarEnrollment";
 import { SEED_CONSIDERATION_CAP, SKY_FIELD_SEED_CAP, SKY_COLD_START_MIN_STARS } from "../shared/skyTiers";
 import type { Doc, Id } from "./_generated/dataModel";
 
@@ -126,7 +130,8 @@ export const _masterySources = internalQuery({
 export const _seedSources = internalQuery({
   args: {},
   handler: async (ctx) => {
-    const seeds = await ctx.db.query("seeds").collect();
+    // A scholar's own wonder is their words, not a concept for the shared graph.
+    const seeds = withoutWonders(await ctx.db.query("seeds").collect());
     const byTopic = new Map<string, { label: string; domain: string; evidence: string }>();
     for (const s of seeds) {
       const key = normalizeLabel(s.topic);
@@ -434,7 +439,8 @@ async function buildScholarAtlas(ctx: Pick<QueryCtx, "db">, scholarId: Id<"users
   }
 
   // Pulled-next seeds (pending/active), curated: keep threaded ones first, then most-recent, capped.
-  const seedRows = (await ctx.db.query("seeds").withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId)).collect())
+  // A scholar's own wonders are not pulled-next suggestions (isWonderSeed).
+  const seedRows = withoutWonders(await ctx.db.query("seeds").withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId)).collect())
     .filter((s) => s.status === "pending" || s.status === "active");
   const seedCands: { cid: string; mid?: string; threaded: boolean; t: number }[] = [];
   for (const s of seedRows) {
@@ -500,7 +506,7 @@ export const skyFieldForScholar = authedQuery({
     // The engine needs, per seed star: the seedId (to launch "Begin Quest" via
     // createFromSeed) + the scholar-facing blurb + pinned/visited/completed/
     // structured flags. Reuse buildScholarSky so the redaction (blurb =
-    // scholarInvitation ?? rationale; teacher rationale/origin nulled at the
+    // seedScholarText, else empty; teacher rationale/origin nulled at the
     // wire), the visit tally and the flags match the home Sky EXACTLY — no drift.
     // Ask for the FULL live pool (not the default consideration slice) so we can
     // build metadata for every live invitation, including zoom-revealed overflow.
@@ -911,8 +917,8 @@ export const classGalaxy = teacherQuery({
       }
 
       // Pulled-next seeds (pending/active): threaded-first then recency, capped —
-      // same selection buildScholarAtlas uses for a single Sky.
-      const seedRows = (await ctx.db.query("seeds").withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId)).collect())
+      // same selection buildScholarAtlas uses for a single Sky (wonders left out).
+      const seedRows = withoutWonders(await ctx.db.query("seeds").withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId)).collect())
         .filter((s) => s.status === "pending" || s.status === "active")
         .sort((a, b) => b._creationTime - a._creationTime);
       let taken = 0;
@@ -1055,29 +1061,113 @@ export const _embeddingsByConceptIds = internalQuery({
   },
 });
 
-/** Scholars who have lit concepts on the atlas — the per-scholar Sky picker. */
+/**
+ * Every learner whose Sky `user` might open, for `litScholars` to check one by
+ * one with `canUserAccessScholar` (the gate `skyFieldForScholar` applies). It
+ * mirrors that gate's reach: the caller themself; the scholars enrolled at a
+ * school where the caller has standing (Extended Education included, every
+ * school for a multi-school teacher); lifelong learners, who all belong to the
+ * `albatross-society` school (`scholarInstitutionId`), when the caller has
+ * standing there; and for a platform admin every learner account, at a
+ * suspended or deleted school or none. Learner accounts and memberships are
+ * read by role, so a membership whose school no longer exists is still found.
+ * The raw `schoolOperationsInstitutionIds` (not the live-only helper) is
+ * deliberate: the per-learner gate uses it too, and nothing is listed that the
+ * gate refuses.
+ */
+async function skyPickerCandidates(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+): Promise<Set<Id<"users">>> {
+  const candidates = new Set<Id<"users">>([user._id]);
+  const add = (ids: Iterable<Id<"users">>) => {
+    for (const id of ids) candidates.add(id);
+  };
+  type LearnerRole = typeof ROLES.SCHOLAR | typeof ROLES.LIFELONG_LEARNER;
+  const learnersWithRole = async (role: LearnerRole) => {
+    const users = await ctx.db
+      .query("users")
+      .withIndex("by_role", (q) => q.eq("role", role))
+      .collect();
+    const memberships = await ctx.db
+      .query("memberships")
+      .withIndex("by_role", (q) => q.eq("role", role))
+      .collect();
+    return [...users.map((u) => u._id), ...memberships.map((m) => m.userId)];
+  };
+
+  const granted = await schoolOperationsInstitutionIds(ctx, user);
+  if (granted === "all") {
+    // A platform admin may open any learner account.
+    add(await learnersWithRole(ROLES.SCHOLAR));
+    add(await learnersWithRole(ROLES.LIFELONG_LEARNER));
+    return candidates;
+  }
+  for (const institutionId of granted) {
+    add(await scholarIdsForInstitution(ctx, institutionId));
+  }
+  const albatross = await ctx.db
+    .query("institutions")
+    .withIndex("by_slug", (q) => q.eq("slug", "albatross-society"))
+    .unique();
+  if (albatross && granted.has(albatross._id)) {
+    // A lifelong-learner account or membership anywhere resolves to that school.
+    add(await learnersWithRole(ROLES.LIFELONG_LEARNER));
+  }
+  return candidates;
+}
+
+/**
+ * Scholars who have lit concepts on the atlas — the per-scholar Sky picker.
+ *
+ * Lists exactly the learners the picker can open: each candidate from
+ * `skyPickerCandidates` with a lit concept is kept only when
+ * `canUserAccessScholar` admits them. Only each candidate's current
+ * observations are read (`by_scholar_current`), and placed sky concepts
+ * through `by_source`, so practice and curated nodes are not (TRA-652).
+ */
 export const litScholars = teacherQuery({
   args: {},
   handler: async (ctx) => {
-    const sky = (await ctx.db.query("knowledgeNodes").collect()).filter((n) => isSkySource(n.source));
-    const placedNorms = new Set(sky.filter(isPlaced).map((c) => c.normalizedLabel));
-    const obs = await ctx.db.query("masteryObservations").collect();
-    const byScholar = new Map<string, Set<string>>();
-    for (const o of obs) {
-      if (o.isSuperseded || o.evidenceType === "misconception_signal") continue;
-      const key = normalizeLabel(o.conceptLabel);
-      if (!placedNorms.has(key)) continue;
-      const set = byScholar.get(o.scholarId as unknown as string) ?? new Set();
-      set.add(key);
-      byScholar.set(o.scholarId as unknown as string, set);
+    const candidates = await skyPickerCandidates(ctx, ctx.user);
+
+    const placedNorms = new Set<string>();
+    for (const source of SKY_SOURCES) {
+      const nodes = await ctx.db
+        .query("knowledgeNodes")
+        .withIndex("by_source", (q) => q.eq("source", source))
+        .collect();
+      for (const node of nodes) {
+        if (isPlaced(node) && node.normalizedLabel !== undefined) {
+          placedNorms.add(node.normalizedLabel);
+        }
+      }
     }
+
     const out: { id: Id<"users">; name: string; litCount: number }[] = [];
-    for (const [sid, set] of byScholar) {
-      const u = await ctx.db.get(sid as Id<"users">);
+    for (const scholarId of candidates) {
+      const obs = await ctx.db
+        .query("masteryObservations")
+        .withIndex("by_scholar_current", (q) =>
+          q.eq("scholarId", scholarId).eq("isSuperseded", false),
+        )
+        .collect();
+      const lit = new Set<string>();
+      for (const o of obs) {
+        if (o.evidenceType === "misconception_signal") continue;
+        const key = normalizeLabel(o.conceptLabel);
+        if (placedNorms.has(key)) lit.add(key);
+      }
+      if (lit.size === 0) continue;
+      if (!(await canUserAccessScholar(ctx, ctx.user, scholarId))) continue;
+      const u = await ctx.db.get(scholarId);
       if (!u) continue;
-      out.push({ id: sid as Id<"users">, name: u.name ?? u.username ?? "Scholar", litCount: set.size });
+      out.push({ id: scholarId, name: u.name ?? u.username ?? "Scholar", litCount: lit.size });
     }
-    return out.sort((a, b) => b.litCount - a.litCount);
+    // Most-lit first; ties by name, so the default pick is stable.
+    return out.sort(
+      (a, b) => b.litCount - a.litCount || a.name.localeCompare(b.name),
+    );
   },
 });
 
@@ -1161,6 +1251,8 @@ export const conceptDetail = teacherQuery({
         : await scholarIdsInLens(
             ctx,
             await resolveInstitutionLens(ctx, ctx.user, "all"),
+            // Keep a withdrawn scholar's own state when their drawer is open.
+            { includeWithdrawn: args.scholarId !== undefined },
           );
     // Light (no vectors) sky nodes only, placed — the atlas the drawer draws over.
     const all = (await ctx.db.query("knowledgeNodes").collect()).filter((o) => isSkySource(o.source) && isPlaced(o));
@@ -1239,9 +1331,8 @@ export const conceptDetail = teacherQuery({
     const seededByScholar = new Map<string, { id: string; name: string; image: string | null; intent: "seed" | "destination"; structured: boolean }>();
     for (const scholarId of scholarIds) {
       // Match the live-status filter at the index level (two indexed range
-      // reads on by_scholar_status, one per live status, as in
-      // convex/mapGates.ts) rather than reading every seed the scholar has
-      // ever had and filtering in JS.
+      // reads on by_scholar_status, one per live status) rather than reading
+      // every seed the scholar has ever had and filtering in JS.
       const [pendingRows, activeRows] = await Promise.all([
         ctx.db
           .query("seeds")
@@ -1256,7 +1347,8 @@ export const conceptDetail = teacherQuery({
           )
           .collect(),
       ]);
-      for (const s of [...pendingRows, ...activeRows]) {
+      // A scholar's own wonder is not a seed for this concept (isWonderSeed).
+      for (const s of withoutWonders([...pendingRows, ...activeRows])) {
         if (normalizeLabel(s.topic) !== c.normalizedLabel) continue;
         const sid = s.scholarId as string;
         const intent: "seed" | "destination" =
@@ -1327,6 +1419,7 @@ export const allScholars = teacherQuery({
         (u) =>
           allowedIds.has(u._id) &&
           u.username !== "guest" &&
+          !isWithdrawn(u) &&
           (args.includeProgramGuests === true || isEnrolledScholar(u)),
       )
       .map((u) => ({ id: u._id as Id<"users">, name: u.name ?? u.username ?? "Scholar" }))

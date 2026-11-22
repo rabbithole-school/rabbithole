@@ -9,7 +9,7 @@
  *
  *  1. A suppressed delta is never reconstructed. `mathGrade.delta` comes back
  *     null with `deltaSuppressedReason: "no_prior_value"` when the scholar had
- *     no gradeable demonstrated-fluent skill at the window start. Rendering
+ *     no credited graded skill at the window start. Rendering
  *     `value - 0` there would draw a multi-grade leap that is really
  *     instrumentation starting. We render the standing value and say why there
  *     is no movement to show.
@@ -153,15 +153,15 @@ function turnedFluentSlot(row: RoundsPracticeSignals): RoundsFigureSlot {
 function mathGradeSlot(row: RoundsPracticeSignals): RoundsFigureSlot {
   const grade = row.mathGrade;
   const label = grade
-    ? `Demonstrated ${grade.domainLabel.toLowerCase()} grade`
-    : "Demonstrated math grade";
+    ? `Level in ${grade.domainLabel.toLowerCase()}`
+    : "Math level";
 
   if (!grade || grade.value === null) {
     return {
       key: "mathGrade",
       value: "Not yet",
       label,
-      caption: "No demonstrated-fluent skill carries a grade yet",
+      caption: "No credited skill carries a grade yet",
       present: false,
     };
   }
@@ -175,7 +175,7 @@ function mathGradeSlot(row: RoundsPracticeSignals): RoundsFigureSlot {
   if (grade.delta === null) {
     const why =
       grade.deltaSuppressedReason === "no_prior_value"
-        ? "First gradeable skill this week — nothing earlier to compare"
+        ? "First credited skill this week, nothing earlier to compare"
         : "No movement to state this week";
     return {
       key: "mathGrade",

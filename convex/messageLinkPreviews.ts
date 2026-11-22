@@ -37,6 +37,13 @@ export const previewForMessage = action({
       : await ctx.runQuery(api.parentMessages.getMessageLinkPreviewRequest, args);
     if (!request) return null;
 
+    // A read-only identity (users.readOnly) gets what is already cached and
+    // nothing more: claiming writes cache and rate-limit rows, and a miss
+    // would fetch and store.
+    if (await ctx.runQuery(internal.users.isSessionOwnerReadOnly, {})) {
+      return await ctx.runQuery(internal.messageLinkPreviewCache.cached, { url: request.url });
+    }
+
     const claimId = crypto.randomUUID();
     const claim = await ctx.runMutation(internal.messageLinkPreviewCache.claim, {
       url: request.url,

@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, setSchedule, withDefaultSchools } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -65,7 +66,7 @@ async function seedTwoActivityUnit(t: ReturnType<typeof convexTest>) {
 
 describe("multi-activity unit progression", () => {
   test("startUnit lands on the first incomplete online activity", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, lesson, first, second } = await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
       await ctx.db.insert("activityCompletions", {
@@ -86,7 +87,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("startUnit initializes an auto-rubric canvas and criteria generation", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, first } = await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
       await ctx.db.patch(first, {
@@ -125,7 +126,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("unit-only session creation initializes the unit process", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit } = await seedTwoActivityUnit(t);
     const processId = await t.run(async (ctx) => {
       const processId = await ctx.db.insert("processes", {
@@ -158,7 +159,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("startUnit initializes the unit process when every activity is complete", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     const processId = await t.run(async (ctx) => {
@@ -202,7 +203,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("submitting a deliberate no-rubric deliverable completes the activity", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, first } = await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
       await ctx.db.patch(first, {
@@ -258,11 +259,11 @@ describe("multi-activity unit progression", () => {
   });
 
   test("unassigned starts ignore assignment-scoped and legacy assignment completions", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -312,7 +313,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("home plate continues a completed session to the next incomplete activity", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, lesson, first, second } = await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
       const sessionId = await ctx.db.insert("sessions", {
@@ -345,7 +346,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("home plate emits one continuation when multiple completed sessions share the same next activity", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, lesson, first, second } = await seedTwoActivityUnit(t);
     const third = await t.run(async (ctx) =>
       ctx.db.insert("activities", {
@@ -403,7 +404,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("home plate reuses an active next-activity session instead of also emitting a continuation", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, lesson, first, second } = await seedTwoActivityUnit(t);
     const secondSession = await t.run(async (ctx) => {
       const firstSession = await ctx.db.insert("sessions", {
@@ -458,7 +459,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("independent-study unit cards are suppressed when the plate has a continuation", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, lesson, first } = await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
       const sessionId = await ctx.db.insert("sessions", {
@@ -488,7 +489,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment sessions can inherit pre-branch bare completions when an assigned session exists", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     const sessionId = await t.run(async (ctx) => {
@@ -499,7 +500,7 @@ describe("multi-activity unit progression", () => {
         unitId: unit,
         completedAt: Date.now() - 60_000,
       });
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -532,7 +533,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("unmarkComplete can undo a legacy bare completion from a session", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, lesson, first } = await seedTwoActivityUnit(t);
     const { sessionId, completionId } = await t.run(async (ctx) => {
       const sessionId = await ctx.db.insert("sessions", {
@@ -580,7 +581,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("markComplete rejects a session owned by a different scholar", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { scholar, unit, lesson, first } = await seedTwoActivityUnit(t);
     const otherSession = await t.run(async (ctx) => {
       const otherScholar = await ctx.db.insert("users", {
@@ -608,7 +609,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("session creation rejects forged assignment scope", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, first } = await seedTwoActivityUnit(t);
     const outsiderAssignment = await t.run(async (ctx) => {
       const outsider = await ctx.db.insert("users", {
@@ -616,7 +617,7 @@ describe("multi-activity unit progression", () => {
         username: "other",
         role: "scholar",
       });
-      return await ctx.db.insert("assignments", {
+      return await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [outsider],
@@ -636,7 +637,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment continuations ignore completions from other runs of the same unit", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
@@ -646,7 +647,7 @@ describe("multi-activity unit progression", () => {
         scholarIds: [scholar],
         startedAt: Date.now() - 86_400_000,
       });
-      const activeAssignment = await ctx.db.insert("assignments", {
+      const activeAssignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -704,11 +705,11 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment continuation rows use the next activity's live mode", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -750,11 +751,11 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment continuations wait for the next activity to be live", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     const assignment = await t.run(async (ctx) => {
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -807,10 +808,10 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment scoped reads and starts require a live scheduled activity", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, first } = await seedTwoActivityUnit(t);
     const assignment = await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -836,10 +837,10 @@ describe("multi-activity unit progression", () => {
   });
 
   test("session creation validates assignment scope before reusing an existing session", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first } = await seedTwoActivityUnit(t);
     const assignment = await t.run(async (ctx) => {
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -857,7 +858,7 @@ describe("multi-activity unit progression", () => {
         title: "Launch question",
         isArchived: false,
       });
-      await ctx.db.patch(assignment, { activitySchedule: [] });
+      await setSchedule(ctx, assignment, []);
       return assignment;
     });
 
@@ -872,10 +873,10 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment scoped reads and starts reject archived assignments", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, first } = await seedTwoActivityUnit(t);
     const assignment = await t.run(async (ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -902,10 +903,10 @@ describe("multi-activity unit progression", () => {
   });
 
   test("home plate suppresses stale assigned sessions instead of showing them as independent work", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first } = await seedTwoActivityUnit(t);
     await t.run(async (ctx) => {
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -932,11 +933,11 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment continuations count legacy session-scoped completions", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     const assignment = await t.run(async (ctx) => {
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -982,11 +983,11 @@ describe("multi-activity unit progression", () => {
   });
 
   test("assignment continuations count pre-branch bare rubric completions when an assigned session exists", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first, second } =
       await seedTwoActivityUnit(t);
     const assignment = await t.run(async (ctx) => {
-      const assignment = await ctx.db.insert("assignments", {
+      const assignment = await insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId: unit,
         scholarIds: [scholar],
@@ -1039,7 +1040,7 @@ describe("multi-activity unit progression", () => {
   });
 
   test("unmarkComplete can undo inferred bare assignment completions", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const { teacher, scholar, unit, lesson, first } = await seedTwoActivityUnit(t);
     const { sessionId, completionId } = await t.run(async (ctx) => {
       const assignment = await ctx.db.insert("assignments", {

@@ -44,6 +44,7 @@ import { WorkbenchSurface } from "@/components/workbench/WorkbenchSurface";
 import { VibecodeWorkshop } from "@/components/vibecode/VibecodeWorkshop";
 import { ScholarArchivedAppPane } from "@/components/TeacherArchivedApp";
 import { isTeacherArchived } from "@/shared/teacherArchive";
+import { QuestSessionProvider } from "@/components/QuestShowing";
 import { ManualRehearsalBanner } from "@/components/ManualRehearsalBanner";
 import { flushAllArtifactSaves } from "@/components/ArtifactPanel";
 import { AppLogo } from "@/components/AppLogo";
@@ -154,6 +155,10 @@ function ScholarSessionInner() {
   // surface — otherwise a vibecode/workbench session would transiently mount
   // the chat SessionInterface, whose kickoff effect fires an unwanted opener.
   const sessions = sessionsResult ?? [];
+  // A started tile session is in the scholar's list (for teachers), but its
+  // home is the tile's switcher in the Workshop, never this sidebar
+  // (convex/lib/tileSessions.ts).
+  const sidebarSessions = sessions.filter((s) => s.sourceCustomAppId == null);
 
   // Fetch unit list for resolving URL param slug to ID
   const units =
@@ -315,7 +320,7 @@ function ScholarSessionInner() {
   // Open unit picker dialog for new project
   const handleNewSession = useCallback(() => {
     setDialogOpen(true);
-  }, []);
+  }, [setDialogOpen]);
 
   // One app surface (TRA-519): a chat session's app opens full screen in the
   // builder as a VIEW of the same session (`?view=builder`), and the builder's
@@ -389,7 +394,7 @@ function ScholarSessionInner() {
       await archiveSession({ id: id as Id<"sessions"> });
       if (sessionId === id) {
         // Navigate to another project or welcome
-        const remaining = sessions.filter((c) => c._id !== id);
+        const remaining = sidebarSessions.filter((c) => c._id !== id);
         if (remaining.length > 0) {
           router.replace(stamp(`/scholar/${remaining[0]._id}`));
         } else {
@@ -543,7 +548,7 @@ function ScholarSessionInner() {
                 gap={1}
                 align="stretch"
               >
-                {sessions.map((conv) => (
+                {sidebarSessions.map((conv) => (
                   <RemoteLink
                     key={conv._id}
                     href={`/scholar/${conv._id}`}
@@ -597,7 +602,7 @@ function ScholarSessionInner() {
                     </HStack>
                   </RemoteLink>
                 ))}
-                {sessions.length === 0 && (
+                {sidebarSessions.length === 0 && (
                   <Text
                     color="charcoal.300"
                     fontSize="sm"
@@ -659,128 +664,137 @@ function ScholarSessionInner() {
       </Drawer.Root>
 
       {/* Main Project Area */}
-      <Flex flex={1} flexDir="column" overflow="hidden">
-        {currentSession?.isTestDrive && isWorkbench && (
-          <ManualRehearsalBanner session={currentSession} />
-        )}
-        {showSession ? (
-          sessionsResult === undefined || currentSession === undefined ? (
-            <Flex flex={1} align="center" justify="center">
-              <Spinner size="xl" color="violet.500" />
-            </Flex>
-          ) : showScholarArchived && currentSession ? (
-            <ScholarArchivedAppPane
-              title={currentSession.title}
-              onBackHome={() => router.push(stamp("/scholar"))}
-            />
-          ) : isWorkbench ? (
-            <ErrorBoundary fallbackMessage="Something went wrong in the Workbench">
-              <WorkbenchSurface
-                sessionId={sessionId as Id<"sessions">}
-                onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
+      {/* Whether this session is an approved Quest's, read once for its
+          header pill and its hand-in (TRA-720). Never in remote or test mode. */}
+      <QuestSessionProvider
+        unitId={showSession && !isRemoteMode && !isTestMode ? currentSession?.unitId : null}
+        activityId={currentSession?.activityId}
+      >
+        <Flex flex={1} flexDir="column" overflow="hidden">
+          {currentSession?.isTestDrive && isWorkbench && (
+            <ManualRehearsalBanner session={currentSession} />
+          )}
+          {showSession ? (
+            sessionsResult === undefined || currentSession === undefined ? (
+              <Flex flex={1} align="center" justify="center">
+                <Spinner size="xl" color="violet.500" />
+              </Flex>
+            ) : showScholarArchived && currentSession ? (
+              <ScholarArchivedAppPane
+                title={currentSession.title}
+                onBackHome={() => router.push(stamp("/scholar"))}
               />
-            </ErrorBoundary>
-          ) : showBuilder ? (
-            <ErrorBoundary fallbackMessage="Something went wrong in the workshop">
-              <VibecodeWorkshop
-                sessionId={sessionId as Id<"sessions">}
-                appId={searchParams.get("app")}
-                onShowApp={(appId) => setBuilderView(true, appId)}
-                onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
-                onBackToChat={
-                  isBuilderPrimary ? undefined : () => setBuilderView(false)
-                }
-              />
-            </ErrorBoundary>
+            ) : isWorkbench ? (
+              <ErrorBoundary fallbackMessage="Something went wrong in the Workbench">
+                <WorkbenchSurface
+                  sessionId={sessionId as Id<"sessions">}
+                  onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
+                />
+              </ErrorBoundary>
+            ) : showBuilder ? (
+              <ErrorBoundary fallbackMessage="Something went wrong in the workshop">
+                <VibecodeWorkshop
+                  sessionId={sessionId as Id<"sessions">}
+                  appId={searchParams.get("app")}
+                  onShowApp={(appId) => setBuilderView(true, appId)}
+                  onOpenSession={(id) => router.push(stamp(`/scholar/${id}`))}
+                  onHome={() => router.push(stamp("/scholar?tab=apps"))}
+                  onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
+                  onBackToChat={
+                    isBuilderPrimary ? undefined : () => setBuilderView(false)
+                  }
+                />
+              </ErrorBoundary>
+            ) : (
+              <ErrorBoundary fallbackMessage="Something went wrong in the project view">
+                <SessionInterface
+                  sessionId={sessionId}
+                  onSessionUpdate={() => {}}
+                  onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
+                  onSignOut={signOut}
+                  onNewSession={isRemoteMode ? undefined : handleNewSession}
+                  isTestMode={isTestMode}
+                  isRemoteMode={isRemoteMode}
+                  scholarName={isRemoteMode ? remoteUser?.name ?? null : null}
+                  scholarImage={isRemoteMode ? remoteUser?.image ?? null : null}
+                  remoteUserId={remoteUserId}
+                  onBack={() => {
+                    if (window.history.length > 1) router.back();
+                    else router.push(stamp("/scholar"));
+                  }}
+                  onOpenBuilder={(appId) => setBuilderView(true, appId)}
+                />
+              </ErrorBoundary>
+            )
           ) : (
-            <ErrorBoundary fallbackMessage="Something went wrong in the project view">
-              <SessionInterface
-                sessionId={sessionId}
-                onSessionUpdate={() => {}}
-                onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
-                onSignOut={signOut}
-                onNewSession={isRemoteMode ? undefined : handleNewSession}
-                isTestMode={isTestMode}
-                isRemoteMode={isRemoteMode}
-                scholarName={isRemoteMode ? remoteUser?.name ?? null : null}
-                scholarImage={isRemoteMode ? remoteUser?.image ?? null : null}
-                remoteUserId={remoteUserId}
-                onBack={() => {
-                  if (window.history.length > 1) router.back();
-                  else router.push(stamp("/scholar"));
-                }}
-                onOpenBuilder={(appId) => setBuilderView(true, appId)}
-              />
-            </ErrorBoundary>
-          )
-        ) : (
-          <Flex
-            flex={1}
-            align="center"
-            justify="center"
-            flexDir="column"
-            gap={4}
-            p={8}
-          >
-            <Box
-              w={24}
-              h={24}
-              borderRadius="full"
-              bg="linear-gradient(135deg, #AD60BF 0%, #222656 100%)"
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
+            <Flex
+              flex={1}
+              align="center"
+              justify="center"
+              flexDir="column"
+              gap={4}
+              p={8}
             >
-              <Text
-                fontSize="4xl"
-                fontWeight="bold"
-                color="white"
-                fontFamily="heading"
+              <Box
+                w={24}
+                h={24}
+                borderRadius="full"
+                bg="linear-gradient(135deg, #AD60BF 0%, #222656 100%)"
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
               >
-                M
-              </Text>
-            </Box>
-            <VStack gap={2}>
-              <Text
-                fontSize="2xl"
-                fontWeight="600"
-                fontFamily="heading"
-                color="navy.500"
-              >
-                {isNewSession ? "Creating session..." : "Welcome"}
-              </Text>
-              {isNewSession ? (
-                <Spinner size="lg" color="violet.500" mt={4} />
-              ) : (
-                <>
-                  <Text
-                    color="charcoal.400"
-                    fontFamily="body"
-                    textAlign="center"
-                    maxW="md"
-                  >
-                    Your AI learning companion. Start a new session to explore
-                    ideas, ask questions, and dive deep into any topic that sparks
-                    your curiosity.
-                  </Text>
-                  <Button
-                    size="lg"
-                    bg="violet.500"
-                    color="white"
-                    _hover={{ bg: "violet.700" }}
-                    fontFamily="heading"
-                    onClick={handleNewSession}
-                    mt={2}
-                  >
-                    <Plus style={{ marginRight: "8px" }} />
-                    Start a Session
-                  </Button>
-                </>
-              )}
-            </VStack>
-          </Flex>
-        )}
-      </Flex>
+                <Text
+                  fontSize="4xl"
+                  fontWeight="bold"
+                  color="white"
+                  fontFamily="heading"
+                >
+                  M
+                </Text>
+              </Box>
+              <VStack gap={2}>
+                <Text
+                  fontSize="2xl"
+                  fontWeight="600"
+                  fontFamily="heading"
+                  color="navy.500"
+                >
+                  {isNewSession ? "Creating session..." : "Welcome"}
+                </Text>
+                {isNewSession ? (
+                  <Spinner size="lg" color="violet.500" mt={4} />
+                ) : (
+                  <>
+                    <Text
+                      color="charcoal.400"
+                      fontFamily="body"
+                      textAlign="center"
+                      maxW="md"
+                    >
+                      Your AI learning companion. Start a new session to explore
+                      ideas, ask questions, and dive deep into any topic that sparks
+                      your curiosity.
+                    </Text>
+                    <Button
+                      size="lg"
+                      bg="violet.500"
+                      color="white"
+                      _hover={{ bg: "violet.700" }}
+                      fontFamily="heading"
+                      onClick={handleNewSession}
+                      mt={2}
+                    >
+                      <Plus style={{ marginRight: "8px" }} />
+                      Start a Session
+                    </Button>
+                  </>
+                )}
+              </VStack>
+            </Flex>
+          )}
+        </Flex>
+      </QuestSessionProvider>
 
       {/* Unit Picker Dialog */}
       <UnitPickerDialog

@@ -37,7 +37,6 @@ import {
   Text,
 } from "@chakra-ui/react";
 import {
-  ArrowsOut,
   MagnifyingGlass,
   ShootingStar,
 } from "@phosphor-icons/react";
@@ -518,23 +517,6 @@ export function QuestsTab() {
           >
             <NextLink href="/teacher/galaxy?lens=galaxy" target="_blank" rel="noopener">
               🌌 Class Galaxy
-            </NextLink>
-          </Button>
-          {/* The kiosk "Wall" cast — preserved from the old GalaxyEntry as a
-              small subordinate affordance beside its parent lens (the big
-              entryway display; new tab, like the other display surfaces). */}
-          <Button
-            asChild
-            size="xs"
-            variant="ghost"
-            fontFamily="heading"
-            fontWeight="600"
-            color="charcoal.400"
-            _hover={{ bg: "gray.100" }}
-          >
-            <NextLink href="/teacher/galaxy-wall" target="_blank" rel="noopener">
-              <ArrowsOut size={12} weight="bold" style={{ marginRight: 4 }} />
-              Wall
             </NextLink>
           </Button>
           <Button

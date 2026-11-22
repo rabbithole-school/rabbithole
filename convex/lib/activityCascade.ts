@@ -1,7 +1,12 @@
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import { deleteResourcesForActivity } from "../activityResources";
 import { removeSchedulePlacementsForActivity } from "../masterSchedule";
+import {
+  assignmentsSchedulingActivity,
+  readSchedule,
+  writeSchedule,
+} from "./scheduleStore";
 
 /**
  * True if scholars have done REAL work on this activity — any non-test-drive
@@ -56,31 +61,34 @@ export async function activityHasScholarWork(
  * pending activation job cancelled. Used by both hard delete and archive:
  * schedule state must never point at an activity scholars can't reach.
  *
- * `activitySchedule` is a nested array and cannot be indexed by activityId, so
- * this infrequent design-side operation intentionally scans assignments.
+ * The assignments come from one indexed read of the activity's schedule rows.
  */
 export async function removeScheduleStateForActivity(
   ctx: MutationCtx,
   activityId: Id<"activities">,
+  removedPlacements?: Doc<"schedulePlacements">[],
 ): Promise<void> {
-  await removeSchedulePlacementsForActivity(ctx, activityId);
+  await removeSchedulePlacementsForActivity(ctx, activityId, removedPlacements);
 
-  const assignments = await ctx.db.query("assignments").collect();
-  for (const assignment of assignments) {
-    const entries = (assignment.activitySchedule ?? []).filter(
-      (entry) => entry.activityId === activityId,
-    );
+  for (const assignmentId of await assignmentsSchedulingActivity(ctx, activityId)) {
+    const assignment = await ctx.db.get(assignmentId);
+    if (!assignment) continue;
+    const schedule = await readSchedule(ctx, assignment);
+
+    const entries = schedule.filter((entry) => entry.activityId === activityId);
     if (entries.length === 0) continue;
     for (const entry of entries) {
       if (entry.scheduledFnId) {
         await ctx.scheduler.cancel(entry.scheduledFnId);
       }
     }
-    await ctx.db.patch(assignment._id, {
-      activitySchedule: (assignment.activitySchedule ?? []).filter(
-        (entry) => entry.activityId !== activityId,
-      ),
-    });
+    await writeSchedule(
+      ctx,
+      assignment,
+      schedule.filter((entry) => entry.activityId !== activityId),
+      { activityId },
+    );
+
   }
 }
 
@@ -98,7 +106,11 @@ export async function removeScheduleStateForActivity(
 export async function deleteActivityCascade(
   ctx: MutationCtx,
   activityId: Id<"activities">,
-  options: { skipWorkGuard?: boolean } = {},
+  options: {
+    skipWorkGuard?: boolean;
+    /** Enclosing deletions flush once, after all their children are removed. */
+    removedPlacements?: Doc<"schedulePlacements">[];
+  } = {},
 ): Promise<void> {
   if (!options.skipWorkGuard && (await activityHasScholarWork(ctx, activityId))) {
     throw new Error(
@@ -106,7 +118,7 @@ export async function deleteActivityCascade(
     );
   }
 
-  await removeScheduleStateForActivity(ctx, activityId);
+  await removeScheduleStateForActivity(ctx, activityId, options.removedPlacements);
   await deleteResourcesForActivity(ctx, activityId);
   await ctx.db.delete(activityId);
 }

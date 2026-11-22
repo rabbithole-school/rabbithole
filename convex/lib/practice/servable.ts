@@ -32,7 +32,15 @@ import {
   parseAnswer,
   parseAnswerWithUnit,
   parseUnitKey,
+  formatAnswer,
   formatAnswerForDisplay,
+  formNudgeMessage,
+  decimalAsFraction,
+  isNudgeForm,
+  meetsRequiredForm,
+  FORM_NUDGE_CAP,
+  type AnswerForm,
+  type AnswerPalette,
 } from "./answers";
 import { generateItem, hasTemplate, type ItemVariant } from "./templates";
 import { parseItemId } from "./session";
@@ -88,6 +96,12 @@ export type ServablePrompt = {
   promptVisual?: PracticePromptVisual;
   workedSteps?: { text: string; blankText?: string; hintText?: string }[];
   manipulativeSpec?: string;
+  /** The algebra-pad key set the template declared (template items only). */
+  answerPalette?: AnswerPalette;
+  /** The representation the answer must use, so a client can show a one-line
+   *  hint ("Answer in factored form"). Not an answer leak — it names a shape,
+   *  never a value. Template items only. */
+  answerForm?: AnswerForm;
 };
 
 /**
@@ -110,6 +124,9 @@ export type ServableVerifier =
       answer: TypedAnswer;
       choices?: string[];
       requiredUnit?: UnitKey;
+      /** A representation the answer must use beyond its value (lowest terms,
+       *  decimal notation) — see `AnswerForm`. */
+      requiredForm?: AnswerForm;
     }
   | {
       kind: "storedAnswer";
@@ -388,6 +405,8 @@ export function buildTemplateServable(
       // The unit the answer must carry, in display form. The stem already says
       // it in words; this is what lets the pad show it and gate the submit.
       ...(item.answerUnit ? { answerUnit: formatUnit(item.answerUnit) } : {}),
+      ...(item.answerPalette ? { answerPalette: item.answerPalette } : {}),
+      ...(item.answerForm ? { answerForm: item.answerForm } : {}),
     },
     verifier: {
       kind: "template",
@@ -395,6 +414,7 @@ export function buildTemplateServable(
       answer: item.answer,
       ...(item.choices ? { choices: item.choices } : {}),
       ...(item.answerUnit ? { requiredUnit: item.answerUnit } : {}),
+      ...(item.answerForm ? { requiredForm: item.answerForm } : {}),
     },
     tutorContext: { type: "text", stem: item.stem },
   };
@@ -579,6 +599,24 @@ export type GradeResult = {
    * surface which sentence to say.
    */
   unitOutcome?: "missing" | "wrong";
+  /**
+   * The same "so close" signal for a required representation: set ONLY when the
+   * value was right but the item's `requiredForm` was not met — `"notLowestTerms"`
+   * ("Simplify 8/32" answered 8/32) or `"notDecimal"` ("Write 82/100 as a
+   * decimal" answered 82/100). Still a miss in every other respect, exactly
+   * like `unitOutcome`; it only tells a surface which sentence to say.
+   */
+  formOutcome?: FormOutcome;
+  /**
+   * "Right value, not yet in the form asked" — the third outcome (Algebra 2
+   * contract §3). Set when the value matched, the item requires an ALGEBRAIC
+   * form the answer doesn't meet, and the item still has nudges left. It is not
+   * a miss: `correct` is false only because nothing may be credited, every
+   * `should*` flag is false, and the calling surface must return the nudge
+   * WITHOUT recording an attempt, moving mastery, or writing an error event.
+   * The scholar edits and resubmits.
+   */
+  formNudge?: { form: AnswerForm; message: string };
   stem: string;
   skillKey: string;
   variant?: ItemVariant;
@@ -621,9 +659,45 @@ function manipulativeStateFrom(submission: Submission): string | null {
   }
 }
 
-/** Correctness plus, when the value was right but the unit wasn't, which way it
- *  was wrong. */
-type Correctness = { correct: boolean; unitOutcome?: "missing" | "wrong" };
+/** Which required representation a right-value answer missed (see
+ *  `GradeResult.formOutcome`). */
+export type FormOutcome = "notLowestTerms" | "notDecimal";
+
+/** The "so close" outcome a LEGACY form miss reports. An algebraic form never
+ *  reports one: it nudges instead, and once its nudges are spent the miss is
+ *  an ordinary miss (the scholar has already been told twice that the value
+ *  was right, and the served `answerForm` hint names the form). */
+function formOutcomeFor(form: "lowestTerms" | "decimalNotation"): FormOutcome {
+  return form === "lowestTerms" ? "notLowestTerms" : "notDecimal";
+}
+
+/** Options a surface passes alongside its policy. */
+export type GradeOptions = {
+  /**
+   * How many form nudges this item has already returned in this run. Carried
+   * by the CLIENT (there is no server row for a nudge — it records nothing).
+   * That is safe to trust: a nudge only fires on an answer whose VALUE is
+   * already right, so an inflated count just grades the scholar sooner and a
+   * deflated one buys unlimited no-penalty retries at writing the same right
+   * value in the asked-for form — never mastery, never a credited attempt, and
+   * no oracle for an unknown value (a wrong value is still a recorded miss).
+   * ABSENT = the caller predates nudges and gets the legacy path: no nudge and
+   * no after-nudge credit, the form miss graded exactly as before (an
+   * installed build would show a nudge as a miss and move on while nothing was
+   * recorded). New clients send 0 on an item's first submit.
+   */
+  formNudgesUsed?: number;
+};
+
+/** Correctness plus, when the value was right but the unit or form wasn't,
+ *  which way it was wrong. */
+type Correctness = {
+  correct: boolean;
+  unitOutcome?: "missing" | "wrong";
+  formOutcome?: FormOutcome;
+  /** Value right, algebraic form not met — the surface decides nudge vs. miss. */
+  formMissed?: AnswerForm;
+};
 
 /**
  * Judge the UNIT half of a typed submission whose value already matched. Only a
@@ -644,6 +718,23 @@ function gradeUnit(
   return { correct: false, unitOutcome: unitRaw === null ? "missing" : "wrong" };
 }
 
+/**
+ * The implicit `fraction` form: on a `fraction`-typed item, a typed
+ * terminating decimal whose exact value IS the answer ("0.25" for 1/4) is
+ * "right value, not yet in the form asked" rather than a wrong answer. Every
+ * fraction item carries this — no template declares it, and it is never served
+ * as `answerForm`, so no hint line appears; only the nudge, when it fires.
+ */
+function decimalForFraction(
+  submission: Submission,
+  type: AnswerType,
+  truth: TypedAnswer,
+): boolean {
+  if (type !== "fraction" || submission.kind !== "typed") return false;
+  const decimal = decimalAsFraction(submission.raw);
+  return decimal !== null && answersEqual(decimal, truth);
+}
+
 /** Base correctness of a submission against an item's verifier, before any
  *  policy `finalCredit` override or dontKnow miss. */
 function gradeCorrectness(item: ServableItem, submission: Submission): Correctness {
@@ -651,11 +742,21 @@ function gradeCorrectness(item: ServableItem, submission: Submission): Correctne
     case "template": {
       const type = item.verifier.answerType;
       const learner = learnerTypedAnswer(submission, type);
-      const valueMatches =
-        learner !== null &&
-        answersEqual(learner, item.verifier.answer, {
-          requireSimplifiedRadical: item.skillKey === "roots_simplify_radicals",
-        });
+      const form = item.verifier.requiredForm;
+      const valueMatches = learner !== null && answersEqual(learner, item.verifier.answer);
+      if (!valueMatches && decimalForFraction(submission, type, item.verifier.answer)) {
+        return { correct: false, formMissed: "fraction" };
+      }
+      if (
+        valueMatches &&
+        form &&
+        submission.kind === "typed" &&
+        !meetsRequiredForm(submission.raw, formatAnswer(item.verifier.answer), form, type)
+      ) {
+        return isNudgeForm(form)
+          ? { correct: false, formMissed: form }
+          : { correct: false, formOutcome: formOutcomeFor(form) };
+      }
       if (!valueMatches || !item.verifier.requiredUnit) return { correct: valueMatches };
       return gradeUnit(submission, type, item.verifier.requiredUnit);
     }
@@ -665,6 +766,9 @@ function gradeCorrectness(item: ServableItem, submission: Submission): Correctne
       const learner = learnerTypedAnswer(submission, type);
       const valueMatches =
         truth !== null && learner !== null && answersEqual(learner, truth);
+      if (!valueMatches && truth !== null && decimalForFraction(submission, type, truth)) {
+        return { correct: false, formMissed: "fraction" };
+      }
       if (!valueMatches || !item.verifier.requiredUnit) return { correct: valueMatches };
       return gradeUnit(submission, type, item.verifier.requiredUnit);
     }
@@ -771,27 +875,75 @@ export function manipulativeQuestionOf(
  *
  * When the verifier carries a `requiredUnit`, a right value with the wrong (or
  * no) unit is INCORRECT and reports `unitOutcome` so the surface can say "so
- * close — it needs the unit" instead of a flat miss.
+ * close — it needs the unit" instead of a flat miss. A `requiredForm` miss with
+ * the right value reports `formOutcome` on the same terms.
  */
 export function gradeSubmission(
   item: ServableItem,
   submission: Submission,
   policy: GradePolicy,
+  options: GradeOptions = {},
 ): GradeResult {
   const isDontKnow = submission.kind === "dontKnow";
   const graded = gradeCorrectness(item, submission);
   let correct = graded.correct;
+  let formNudge: GradeResult["formNudge"];
+  // Three states for a right value in the wrong algebraic form:
+  //   • no count — a caller that predates nudges (installed iPad builds, the
+  //     web Rehearse grader, the re-probe batch): the LEGACY path, graded
+  //     exactly as before nudges existed — a plain miss, no nudge, no credit,
+  //     on every surface and policy;
+  //   • count < FORM_NUDGE_CAP — the nudge;
+  //   • count ≥ FORM_NUDGE_CAP — graded normally: a miss, on EVERY policy.
+  //     Placement too: where the form is the assessed skill ("Simplify √18"),
+  //     crediting the value would award the skill to an answer that skipped
+  //     it. The two free nudges are the accommodation. A client-carried count
+  //     can therefore only turn a nudge into an ordinary grade, never a miss
+  //     into a credit.
+  if (
+    graded.formMissed &&
+    isNudgeForm(graded.formMissed) &&
+    options.formNudgesUsed !== undefined
+  ) {
+    const used = Math.max(0, Math.floor(options.formNudgesUsed));
+    if (used < FORM_NUDGE_CAP) {
+      formNudge = { form: graded.formMissed, message: formNudgeMessage(graded.formMissed) };
+    }
+  }
   if (policy.finalCredit !== undefined) correct = policy.finalCredit;
   if (isDontKnow) correct = false;
+  // A forced credit (or a dontKnow, which never reaches here with a form miss)
+  // decides the attempt outright — there is nothing left to nudge.
+  if (policy.finalCredit !== undefined || isDontKnow) formNudge = undefined;
 
   const isManipulative = item.kind === "manipulative";
   const correctAnswer = serverTruth(item);
+  if (formNudge) {
+    return {
+      correct: false,
+      correctAnswer,
+      revealedAnswer: undefined,
+      formNudge,
+      stem: item.prompt.stem,
+      skillKey: item.skillKey,
+      ...(item.kind === "template" && item.variant ? { variant: item.variant } : {}),
+      isManipulative,
+      isDontKnow,
+      shouldClassifyError: false,
+      shouldRecordMastery: false,
+      shouldRecordPracticeAttempt: false,
+      shouldRecordLatency: false,
+      explanationReason: undefined,
+      lane: policy.lane,
+    };
+  }
   return {
     correct,
     correctAnswer,
     // A forced `finalCredit` win retires the unit note — there is no "so close"
     // to report on an attempt the policy has decided to credit.
     ...(!correct && graded.unitOutcome ? { unitOutcome: graded.unitOutcome } : {}),
+    ...(!correct && graded.formOutcome ? { formOutcome: graded.formOutcome } : {}),
     revealedAnswer: revealForClient(
       correct,
       isManipulative,

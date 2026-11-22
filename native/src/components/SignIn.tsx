@@ -101,9 +101,12 @@ export function SignIn({ notice }: { notice?: string }) {
     }
   };
 
+  // A username typed above signs in as that seeded user instead, so two
+  // devices on one Metro can be two different people (audience mode testing).
+  const devUsername = username.trim() || DEV_SCHOLAR;
   const devLogin = () => {
     setError("");
-    signIn("devLogin", { username: DEV_SCHOLAR, secret: DEV_LOGIN_SECRET }).catch(
+    signIn("devLogin", { username: devUsername, secret: DEV_LOGIN_SECRET }).catch(
       (e) => {
         console.warn("[devLogin] failed", e);
         setError("Dev login failed");
@@ -206,7 +209,7 @@ export function SignIn({ notice }: { notice?: string }) {
                 disabled={isSubmitting}
                 style={({ pressed }) => [styles.devButton, pressed && { opacity: 0.7 }]}
               >
-                <Text style={styles.devButtonText}>🔧 Dev login as {DEV_SCHOLAR}</Text>
+                <Text style={styles.devButtonText}>🔧 Dev login as {devUsername}</Text>
               </Pressable>
             )}
           </View>

@@ -1,4 +1,5 @@
 import type { MutationCtx } from "../../_generated/server";
+import { readSchedule } from "../scheduleStore";
 import type { Id } from "../../_generated/dataModel";
 import {
   entryTargetsScholar,
@@ -35,7 +36,7 @@ export async function reconcileProblemSetDispatchCompletions(
       continue;
     }
 
-    for (const entry of assignment.activitySchedule ?? []) {
+    for (const entry of await readSchedule(ctx, assignment)) {
       if (
         !isLiveEntry(entry, args.now) ||
         !entryTargetsScholar(entry, args.scholarId)

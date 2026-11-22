@@ -159,6 +159,21 @@ export function handoffMessage(appName: string): string {
   return `Swipe up from the bottom of the screen, then tap ${appName}. If it isn't there yet, give it a few seconds.`;
 }
 
+/**
+ * Title when the server says a scheme-less managed app is NOT installed on
+ * this iPad. The handoff above would send the scholar looking for an icon
+ * that isn't there (Carnets, 2026-11-18), so the tile stops before releasing
+ * the lock. "Yet" because the inventory behind it can be up to an hour old.
+ */
+export function notOnThisIpadTitle(appName: string): string {
+  return `${appName} isn't on this BunnyPad yet`;
+}
+
+/** Body for `notOnThisIpadTitle`: what the scholar can do about it. */
+export function notOnThisIpadMessage(appName: string): string {
+  return `Ask a teacher to have it installed. Once it's there, tap ${appName} again.`;
+}
+
 /** Body when the Single App Mode exit itself failed, so no switch was tried. */
 export function stillLockedMessage(): string {
   return "This iPad's lock didn't release. Try again, or ask a teacher.";

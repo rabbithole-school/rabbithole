@@ -1,0 +1,4 @@
+i want to make a 3D island game called Gullport where i walk around in first person, with a town, a harbor bay and a train
+yes build it
+add a lighthouse on the point
+make the water a darker blue

@@ -106,7 +106,6 @@ describe("physical environment lands in the cached stable prefix", () => {
   // everything between is null/default.
   function parts(physical: PhysicalEnvironmentContext | null) {
     return buildSystemPromptParts(
-      null, // teacherWhisper
       null, // readingLevel
       "Kai", // scholarName
       null, // unitContext

@@ -1,6 +1,7 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { requireProgramPublishAccess } from "./programGroupAccess";
+import { readSchedule } from "./scheduleStore";
 
 type ProgramHandoutCtx = (QueryCtx | MutationCtx) & { user: Doc<"users"> };
 
@@ -26,7 +27,7 @@ export async function requireProgramHandoutAccess(
     assignment.archivedAt ||
     assignment.kind !== "adHocDispatch" ||
     !assignment.scholarGroupId ||
-    !(assignment.activitySchedule ?? []).some(
+    !(await readSchedule(ctx, assignment)).some(
       (entry) => entry.activityId === args.activityId,
     )
   ) {

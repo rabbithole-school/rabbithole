@@ -27,6 +27,7 @@ import {
   type MutationCtx,
 } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule } from "./lib/scheduleStore";
 import {
   deliverableValidator,
   advanceRubricValidator,
@@ -55,6 +56,13 @@ import {
 } from "./lib/activityCascade";
 import { GAME_CATALOG, getGame } from "../lib/games/catalog";
 import { isTextArtifact } from "../shared/textArtifacts";
+import { SCHOLAR_LED_APP_BUILDING } from "../shared/missionCopy";
+import {
+  QUEST_HAS_NO_APP_STEPS,
+  assertMakerActivityUnchanged,
+  assertNotOwnQuestAppStep,
+  assertProposalTakesNoStructure,
+} from "./lib/questStructure";
 import { looksLikeHtml } from "../lib/vibecode/helpers";
 import { portfolioFamilySharingEligibility } from "./lib/schoolMediaConsent";
 import { normalizeStoredTutorModel } from "./lib/tutorModel";
@@ -62,7 +70,7 @@ import {
   buildContractPatch,
   buildContractValidator,
 } from "./lib/buildContract";
-import { markUnitBuiltInSession } from "./lib/independentStudy";
+import { markUnitBuiltInSession, sameQuestTitle } from "./lib/independentStudy";
 import { isLearningStep } from "./lib/mission";
 import { generateAppToken } from "./customApps";
 import { isUsableVibecodeStarterApp } from "./lib/vibecodeStarter";
@@ -72,6 +80,8 @@ import {
   assertAppHasNoAdvanceRubric,
   defaultAppDeliverable,
   isUntouchedDefaultAppDeliverable,
+  isUntouchedDefaultAutoAppDeliverable,
+  isMissionAppActivity,
   resolveActivityWriteTarget,
   storedShapeFields,
 } from "./lib/appActivity";
@@ -245,7 +255,7 @@ export const listByUnitPublic = authedQuery({
       } else {
         const now = Date.now();
         const liveActivityIds = new Set(
-          (assignment.activitySchedule ?? [])
+          (await readSchedule(ctx, assignment))
             .filter(
               (entry) =>
                 entry.setAt != null &&
@@ -376,6 +386,11 @@ export const getPublic = authedQuery({
       hasGoogleSlidesDeck: !!presentations.google,
       hasScholarAngles: a.hasScholarAngles ?? false,
       deliverable: a.deliverable ?? null,
+      // A mission app (TRA-612): its app keeps "Finish and send" and its
+      // session's mission criteria read as "Your mission". The contract's
+      // lines themselves stay server-side: they are the rules the scholar
+      // is meant to discover.
+      missionApp: isMissionAppActivity(a),
       advanceRubric: a.advanceRubric ?? null,
       webUrl: web ? web.webUrl : (a.webUrl ?? null),
       webAllowedHosts: web ? web.webAllowedHosts : (a.webAllowedHosts ?? null),
@@ -422,6 +437,11 @@ export const getDetailForTeacher = teacherQuery({
       hasGoogleSlidesDeck: !!presentations.google,
       hasScholarAngles: a.hasScholarAngles ?? false,
       deliverable: a.deliverable ?? null,
+      // A mission app (TRA-612): its app keeps "Finish and send" and its
+      // session's mission criteria read as "Your mission". The contract's
+      // lines themselves stay server-side: they are the rules the scholar
+      // is meant to discover.
+      missionApp: isMissionAppActivity(a),
       advanceRubric: a.advanceRubric ?? null,
       webUrl: web ? web.webUrl : (a.webUrl ?? null),
       webAllowedHosts: web ? web.webAllowedHosts : (a.webAllowedHosts ?? null),
@@ -433,6 +453,34 @@ export const getDetailForTeacher = teacherQuery({
     };
   },
 });
+
+// While SCHOLAR_LED_APP_BUILDING is off a scholar adds no app step to their
+// own Quest, through any writer: lib/questStructure.ts assertNotOwnQuestAppStep
+// (a new step, a copy, a lesson moved in). A Quest proposal takes no structure
+// at all until it is approved (assertProposalTakesNoStructure).
+
+/** While SCHOLAR_LED_APP_BUILDING is off, a Quest's non-app step takes no
+ * "artifact" (app) deliverable: session setup seeds an empty app for one
+ * (lib/sessionActivitySetup.ts) and the tutor may fill any app that exists,
+ * so it would be a new app by another door. Its work goes in a writing box. */
+async function questStepDeliverable(
+  ctx: MutationCtx,
+  lessonId: Id<"lessons"> | undefined,
+  isApp: boolean,
+  deliverable: DeliverableSpec | undefined,
+): Promise<DeliverableSpec | undefined> {
+  if (
+    SCHOLAR_LED_APP_BUILDING ||
+    isApp ||
+    !lessonId ||
+    deliverable?.kind !== "artifact"
+  ) {
+    return deliverable;
+  }
+  const lesson = await ctx.db.get(lessonId);
+  const unit = lesson ? await ctx.db.get(lesson.unitId) : null;
+  return unit?.authorScholarId ? { ...deliverable, kind: "text" } : deliverable;
+}
 
 export const create = authedMutation({
   args: {
@@ -448,6 +496,8 @@ export const create = authedMutation({
     tutorModel: v.optional(tutorModelLiteral),
     processId: v.optional(v.id("processes")),
     durationMinutes: v.optional(v.number()),
+    // Retired (TRA-571); the field is gone. Accepted and ignored.
+    // Compatibility for long-lived tabs; remove after 2026-12-01.
     defaultMode: v.optional(
       v.union(
         v.literal("classFocus"),
@@ -466,11 +516,15 @@ export const create = authedMutation({
     assessesWritingMechanics: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { lessonId: args.lessonId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      lessonId: args.lessonId,
+    });
+    assertProposalTakesNoStructure(unit);
     const target = resolveActivityWriteTarget(null, {
       kind: args.kind,
       appActivity: args.appActivity,
     });
+    if (target.isApp) assertNotOwnQuestAppStep(unit, user._id);
     const contract = buildContractPatch(storedShapeFields(target), {
       buildContract: args.buildContract,
       allowSilence: args.allowSilence,
@@ -492,11 +546,15 @@ export const create = authedMutation({
         : undefined,
       // An app activity's evaluation bar is the app (lib/appActivity.ts).
       deliverable: target.isApp
-        ? defaultAppDeliverable({ scholarDescription: args.scholarDescription })
+        ? defaultAppDeliverable({
+            scholarDescription: args.scholarDescription,
+            buildContract: contract.buildContract,
+          })
         : undefined,
       processId: args.processId,
       durationMinutes: args.durationMinutes,
-      defaultMode: args.defaultMode,
+      // `defaultMode` is gone: when work is given, the teacher answers when
+      // it's finished (TRA-571). The arg is still accepted (see above).
       webUrl: args.kind === "web" ? args.webUrl?.trim() || undefined : undefined,
       webAllowedHosts:
         args.kind === "web" && args.webAllowedHosts
@@ -660,7 +718,12 @@ export const duplicate = authedMutation({
     if (!source.lessonId) {
       throw new Error("Activity is not attached to a lesson");
     }
-    await requireUnitEditAccess(ctx, { activityId: args.activityId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      activityId: args.activityId,
+    });
+    assertProposalTakesNoStructure(unit);
+    // A copy of an app activity is a new app in the scholar's own Quest.
+    assertNotOwnQuestAppStep(unit, user._id, [source]);
 
     const siblings = await ctx.db
       .query("activities")
@@ -1077,7 +1140,8 @@ export const update = authedMutation({
     // This activity is explicitly about spelling/typing (schema.ts). false
     // clears it back to the default (unset).
     assessesWritingMechanics: v.optional(v.boolean()),
-    // Design-time intent for how this activity is meant to be done.
+    // Retired (TRA-571); the field is gone. Accepted and ignored.
+    // Compatibility for long-lived tabs; remove after 2026-12-01.
     defaultMode: v.optional(
       v.union(
         v.literal("classFocus"),
@@ -1114,9 +1178,11 @@ export const update = authedMutation({
     ),
   },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { activityId: args.id });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      activityId: args.id,
+    });
     const { id, ...fields } = args;
-    const updates: Record<string, unknown> = {};
+    const updates: Partial<Doc<"activities">> = {};
     const currentActivity = await ctx.db.get(id);
     if (!currentActivity) throw new Error("Activity not found");
     // The shape this write leaves the row in (TRA-519 A4): kind "vibecode"
@@ -1125,6 +1191,20 @@ export const update = authedMutation({
       kind: fields.kind,
       appActivity: fields.appActivity,
     });
+    if (target.isApp && !isAppActivity(currentActivity)) {
+      assertNotOwnQuestAppStep(unit, user._id);
+    }
+    // An approved Quest's maker activity was built from the proposal the
+    // advisor approved: its scholar can't rewrite what it is or the brief it
+    // was approved with (TRA-685).
+    if (
+      fields.systemPrompt !== undefined ||
+      fields.buildContract !== undefined ||
+      fields.appActivity !== undefined ||
+      fields.kind !== undefined
+    ) {
+      assertMakerActivityUnchanged(unit, id, user._id);
+    }
     let flairCriteria:
       | Array<{ id: string; label: string; description?: string }>
       | undefined;
@@ -1153,9 +1233,12 @@ export const update = authedMutation({
     if (fields.durationMinutes !== undefined)
       updates.durationMinutes = fields.durationMinutes ?? undefined;
     if (fields.deliverable !== undefined) {
-      const normalized = fields.deliverable
-        ? normalizeDeliverable(fields.deliverable)
-        : undefined;
+      const normalized = await questStepDeliverable(
+        ctx,
+        currentActivity.lessonId,
+        target.isApp,
+        fields.deliverable ? normalizeDeliverable(fields.deliverable) : undefined,
+      );
       if (normalized) {
         assertOneEvaluationBar(currentActivity, { deliverable: normalized });
       }
@@ -1168,8 +1251,7 @@ export const update = authedMutation({
       updates.assessesWritingMechanics = fields.assessesWritingMechanics
         ? true
         : undefined;
-    if (fields.defaultMode !== undefined)
-      updates.defaultMode = fields.defaultMode;
+    // `defaultMode` is accepted and ignored (TRA-571); see create above.
     if (fields.shareBackRecipe !== undefined) {
       updates.shareBackRecipe = fields.shareBackRecipe;
       // Switching to a named recipe clears any lingering custom
@@ -1290,37 +1372,50 @@ export const update = authedMutation({
  * write that turns a row with a conversation advance gate into an app is
  * refused. A row that stops being an app drops the default deliverable it was
  * given if nobody edited it, so a plain online activity doesn't inherit an
- * "artifact" deliverable it never asked for.
+ * "artifact" deliverable it never asked for. Untouched defaults track the
+ * resulting contract; explicit deliverable edits always win.
  */
 function appDeliverablePatch(
   current: Doc<"activities">,
   target: ReturnType<typeof resolveActivityWriteTarget>,
-  updates: Record<string, unknown>,
+  updates: Partial<Doc<"activities">>,
 ): { deliverable?: DeliverableSpec | undefined } {
-  const resultingDeliverable = (
-    "deliverable" in updates ? updates.deliverable : current.deliverable
-  ) as DeliverableSpec | undefined;
+  const resultingDeliverable =
+    "deliverable" in updates ? updates.deliverable : current.deliverable;
+  const untouched =
+    isUntouchedDefaultAppDeliverable(
+      current.deliverable, current.scholarDescription,
+    ) ||
+    isUntouchedDefaultAutoAppDeliverable(
+      current.deliverable, current.scholarDescription, current.buildContract,
+    );
   if (target.isApp) {
     if (target.becomesApp) {
       assertAppHasNoAdvanceRubric(true, current.advanceRubric);
     }
-    if (!resultingDeliverable && !current.advanceRubric) {
-      const scholarDescription = (
+    // An untouched default follows the mission only when THIS write changes
+    // the mission: a later unrelated write (a title) never re-derives it, so
+    // a deliverable a teacher set to look like a default keeps its mode.
+    if (
+      (!resultingDeliverable && !current.advanceRubric) ||
+      (!("deliverable" in updates) && "buildContract" in updates && untouched)
+    ) {
+      const scholarDescription =
         "scholarDescription" in updates
           ? updates.scholarDescription
-          : current.scholarDescription
-      ) as string | undefined;
-      return { deliverable: defaultAppDeliverable({ scholarDescription }) };
+          : current.scholarDescription;
+      const buildContract =
+        "buildContract" in updates ? updates.buildContract : current.buildContract;
+      return {
+        deliverable: defaultAppDeliverable({ scholarDescription, buildContract }),
+      };
     }
     return {};
   }
   if (
     target.leavesApp &&
     !("deliverable" in updates) &&
-    isUntouchedDefaultAppDeliverable(
-      current.deliverable,
-      current.scholarDescription,
-    )
+    untouched
   ) {
     return { deliverable: undefined };
   }
@@ -1697,10 +1792,13 @@ export const reorder = authedMutation({
   args: { activityIds: v.array(v.id("activities")) },
   handler: async (ctx, args) => {
     if (args.activityIds.length === 0) return;
-    // Gate on the first activity's unit; reorder is always within a
-    // single lesson (the UI never crosses lessons), so checking one is
-    // sufficient.
-    await requireUnitEditAccess(ctx, { activityId: args.activityIds[0] });
+    // Every id must exist and share one lesson, which the caller may edit.
+    const rows = await Promise.all(args.activityIds.map((id) => ctx.db.get(id)));
+    const lessonId = rows[0]?.lessonId;
+    if (!lessonId || rows.some((a) => !a || a.lessonId !== lessonId)) {
+      throw new Error("Activities must all exist and belong to one lesson");
+    }
+    await requireUnitEditAccess(ctx, { lessonId });
     for (let i = 0; i < args.activityIds.length; i++) {
       await ctx.db.patch(args.activityIds[i], { order: i });
     }
@@ -1884,7 +1982,12 @@ export const upsertInternal = internalMutation({
     });
     const kind = target.kind;
     const tutorModel = normalizeStoredTutorModel(args.tutorModel);
-    const suppliedDeliverable = normalizeDeliverable(args.deliverable);
+    const suppliedDeliverable = await questStepDeliverable(
+      ctx,
+      parent.lessonId,
+      target.isApp,
+      normalizeDeliverable(args.deliverable),
+    );
     const advanceRubric = normalizeAdvanceRubric(args.advanceRubric);
     if (suppliedDeliverable && advanceRubric) {
       throw new Error(
@@ -1893,12 +1996,6 @@ export const upsertInternal = internalMutation({
       );
     }
     assertAppHasNoAdvanceRubric(target.isApp, advanceRubric);
-    // An app activity's evaluation bar is the app itself.
-    const deliverable =
-      suppliedDeliverable ??
-      (target.isApp
-        ? defaultAppDeliverable({ scholarDescription: args.scholarDescription })
-        : undefined);
     if (
       args.position !== undefined &&
       (!Number.isInteger(args.position) || args.position < 0)
@@ -1910,8 +2007,6 @@ export const upsertInternal = internalMutation({
       target.effectiveKind === "online" || target.effectiveKind === "offline"
         ? args.recipe
         : undefined;
-
-    requireDeliverableForOnline(kind, deliverable, advanceRubric);
 
     // ── Idempotency lookup ─────────────────────────────────────────
     let existing: Doc<"activities"> | null = null;
@@ -1930,17 +2025,26 @@ export const upsertInternal = internalMutation({
         ) ?? null;
     }
 
+    const contract = existing
+      ? {}
+      : buildContractPatch(storedShapeFields(target), {
+          buildContract: args.buildContract,
+          allowSilence: args.allowSilence,
+        });
+    const deliverable =
+      suppliedDeliverable ??
+      (target.isApp
+        ? defaultAppDeliverable({
+            scholarDescription: args.scholarDescription,
+            buildContract: contract.buildContract,
+          })
+        : undefined);
+    requireDeliverableForOnline(kind, deliverable, advanceRubric);
+
     // ── Patch-existing branch ──────────────────────────────────────
     if (existing) {
       const existingIsApp = isAppActivity(existing);
       assertAppHasNoAdvanceRubric(existingIsApp, advanceRubric);
-      // The deliverable this retry may attach: what the caller supplied, or
-      // the default app deliverable when the row it found is an app activity.
-      const retryDeliverable =
-        suppliedDeliverable ??
-        (existingIsApp && !existing.advanceRubric
-          ? defaultAppDeliverable(existing)
-          : undefined);
       // Preserve the one-bar invariant across idempotent retries: the
       // current-call check above only compares the two supplied args, so a
       // row that already carries one evaluation shape must be stopped from gaining
@@ -1950,12 +2054,12 @@ export const upsertInternal = internalMutation({
         deliverable: suppliedDeliverable,
         advanceRubric,
       });
-      const patch: Record<string, unknown> = {};
+      const patch: Partial<Doc<"activities">> = {};
       // Patch deliverable if the caller supplied one AND it differs
       // (or the existing row had none). This is the path that fixes
       // the bot's "I forgot the deliverable" recovery.
-      if (retryDeliverable && !existing.deliverable) {
-        patch.deliverable = retryDeliverable;
+      if (suppliedDeliverable && !existing.deliverable) {
+        patch.deliverable = suppliedDeliverable;
       }
       // Attach an advance (conversation) rubric on recovery too — the
       // path that fixes "I created a bare interactive activity, now add
@@ -2061,6 +2165,10 @@ export const upsertInternal = internalMutation({
           ? true
           : undefined;
       }
+      Object.assign(
+        patch,
+        appDeliverablePatch(existing, resolveActivityWriteTarget(existing, {}), patch),
+      );
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(existing._id, patch);
       }
@@ -2081,7 +2189,7 @@ export const upsertInternal = internalMutation({
         // Effective kind: an app activity reports "vibecode" in either shape.
         kind: effectiveActivityKind(existing),
         deliverableAttached:
-          existing.deliverable !== undefined || retryDeliverable !== undefined,
+          existing.deliverable !== undefined || patch.deliverable !== undefined,
         advanceRubricAttached:
           existing.advanceRubric !== undefined || advanceRubric !== undefined,
       };
@@ -2089,10 +2197,6 @@ export const upsertInternal = internalMutation({
 
     // ── Insert branch ──────────────────────────────────────────────
     if (args.editAccess !== undefined) assertEditAccessKind(target.isApp);
-    const contract = buildContractPatch(storedShapeFields(target), {
-      buildContract: args.buildContract,
-      allowSilence: args.allowSilence,
-    });
     const lessonId = parent.lessonId;
     const peers = await ctx.db
       .query("activities")
@@ -2177,14 +2281,18 @@ export async function createActivityCore(
     kind: args.kind,
     appActivity: args.appActivity,
   });
-  const deliverable =
-    normalizeDeliverable(args.deliverable) ??
-    (target.isApp ? defaultAppDeliverable({}) : undefined);
-  requireDeliverableForOnline(target.kind, deliverable);
   const contract = buildContractPatch(storedShapeFields(target), {
     buildContract: args.buildContract,
     allowSilence: args.allowSilence,
   });
+  const deliverable =
+    (await questStepDeliverable(
+      ctx,
+      args.lessonId,
+      target.isApp,
+      normalizeDeliverable(args.deliverable),
+    )) ?? (target.isApp ? defaultAppDeliverable(contract) : undefined);
+  requireDeliverableForOnline(target.kind, deliverable);
   const peers = await ctx.db
     .query("activities")
     .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
@@ -2240,6 +2348,8 @@ export const updateInternal = internalMutation({
     hasScholarAngles: v.optional(v.boolean()),
     // Explicitly about spelling/typing (schema.ts); false clears.
     assessesWritingMechanics: v.optional(v.boolean()),
+    // Retired (TRA-571); the field is gone. Accepted and ignored.
+    // Compatibility for long-lived tabs; remove after 2026-12-01.
     defaultMode: v.optional(
       v.union(
         v.literal("classFocus"),
@@ -2253,7 +2363,7 @@ export const updateInternal = internalMutation({
   },
   handler: async (ctx, args) => {
     const { id, ...fields } = args;
-    const updates: Record<string, unknown> = {};
+    const updates: Partial<Doc<"activities">> = {};
     const currentActivity = await ctx.db.get(id);
     if (!currentActivity) throw new Error("Activity not found");
     const target = resolveActivityWriteTarget(currentActivity, {
@@ -2288,9 +2398,12 @@ export const updateInternal = internalMutation({
     if (fields.durationMinutes !== undefined)
       updates.durationMinutes = fields.durationMinutes ?? undefined;
     if (fields.deliverable !== undefined) {
-      const normalized = fields.deliverable
-        ? normalizeDeliverable(fields.deliverable)
-        : undefined;
+      const normalized = await questStepDeliverable(
+        ctx,
+        currentActivity.lessonId,
+        target.isApp,
+        fields.deliverable ? normalizeDeliverable(fields.deliverable) : undefined,
+      );
       if (normalized) {
         assertOneEvaluationBar(currentActivity, { deliverable: normalized });
       }
@@ -2303,8 +2416,7 @@ export const updateInternal = internalMutation({
       updates.assessesWritingMechanics = fields.assessesWritingMechanics
         ? true
         : undefined;
-    if (fields.defaultMode !== undefined)
-      updates.defaultMode = fields.defaultMode;
+    // `defaultMode` is accepted and ignored (TRA-571); see create above.
     if (fields.recipe !== undefined)
       updates.recipe = fields.recipe ?? undefined;
     // Recipes apply to (non-app) online + offline only — clear when flipping
@@ -2404,15 +2516,31 @@ export const aiCreateForIsUnit = internalMutation({
     if (unit.authorScholarId !== args.scholarId) {
       throw new Error("Forbidden: not your IS unit");
     }
+    assertProposalTakesNoStructure(unit);
     const lesson = await ctx.db.get(args.lessonId);
     if (!lesson || lesson.unitId !== args.unitId) {
       throw new Error("Lesson not in this unit");
     }
+    // Idempotent on title within the lesson (see lessons.aiCreateForIsUnit):
+    // a re-issued plan returns the activity already there, never a copy.
+    const peers = await ctx.db
+      .query("activities")
+      .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
+      .collect();
+    const sameTitle = peers.find(
+      (a) => !a.archivedAt && sameQuestTitle(a.title, args.title.trim() || "New activity"),
+    );
+    if (sameTitle) return sameTitle._id;
 
     const target = resolveActivityWriteTarget(null, {
       kind: args.kind,
       appActivity: args.appActivity,
     });
+    // A Quest gets no new app step while SCHOLAR_LED_APP_BUILDING is off:
+    // new apps come from a teacher's activity (shared/missionCopy.ts).
+    if (target.isApp && !SCHOLAR_LED_APP_BUILDING) {
+      throw new Error(QUEST_HAS_NO_APP_STEPS);
+    }
     // B6 learn before you build: in a Quest, a build step comes after at
     // least one learning step. The new activity lands at the end of this
     // lesson, so this lesson and every earlier lesson precede it.
@@ -2473,10 +2601,6 @@ export const aiCreateForIsUnit = internalMutation({
     }
     requireDeliverableForOnline(target.kind, deliverable);
 
-    const peers = await ctx.db
-      .query("activities")
-      .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
-      .collect();
     const maxOrder = peers.reduce((m, a) => Math.max(m, a.order), -1);
     const activityId = await ctx.db.insert("activities", {
       lessonId: args.lessonId,

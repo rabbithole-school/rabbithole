@@ -1,3 +1,6 @@
+import { HOMEWORK_DONE_LABEL } from "./homeworkFraming";
+import { dueStatus } from "./institutionDay";
+
 export type OfflineHomeworkContext = {
   unitTitle: string | null;
   unitEmoji: string | null;
@@ -20,32 +23,31 @@ export function offlineHomeworkContext({
   return teacherName ? `From ${teacherName}` : null;
 }
 
-/** Match the homework surface's institution-local absolute due-date wording. */
+/**
+ * The due line on an offline homework page, in the one due-date wording
+ * (`dueStatus`): "Due tomorrow", "Due Thu, Nov 5", "Was due Fri, Oct 16".
+ */
 export function offlineHomeworkDueText(
   dueAt: number | null,
+  nowMs: number,
   timeZone: string,
 ): string {
-  if (dueAt == null) return "No due date";
-  const date = new Intl.DateTimeFormat("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    timeZone,
-  }).format(new Date(dueAt));
-  const time = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone,
-  }).format(new Date(dueAt));
-  return `Due ${date} at ${time}`;
+  const phrase = dueStatus(dueAt, nowMs, timeZone)?.phrase;
+  if (!phrase) return "No due date";
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
 /**
  * The finish block (TRA-458) — one wording for web and native. The scholar's
  * own mark is visible to their teacher, so the copy says so up front rather
- * than implying the work was checked.
+ * than implying the work was checked. Offline work given "Open until a date"
+ * (`isHomework` false) gets the same block, worded for the class list it
+ * sits on rather than for home.
  */
-export function offlineHomeworkFinishCopy(teacherName: string | null): {
+export function offlineHomeworkFinishCopy(
+  teacherName: string | null,
+  { isHomework = true }: { isHomework?: boolean } = {},
+): {
   prompt: string;
   detail: string;
   paperLine: string;
@@ -53,17 +55,19 @@ export function offlineHomeworkFinishCopy(teacherName: string | null): {
   const teacher = teacherName ?? "Your teacher";
   const giveTo = teacherName ?? "your teacher";
   return {
-    prompt: "Finished this at home?",
-    detail: `Mark it done and it leaves your Home. ${teacher} will see you marked it.`,
+    prompt: isHomework ? "Finished this at home?" : "Finished this?",
+    detail: `Tap “${HOMEWORK_DONE_LABEL}” and it leaves your ${isHomework ? "homework" : "list"}. ${teacher} will see it.`,
     paperLine: `Paper to hand in? Give it to ${giveTo}. It shows up here once it's scanned.`,
   };
 }
 
-/** "Tue, Sep 29 · Ms. Rivera can see it" under "You marked this done". */
+/**
+ * "Marked Tue, Sep 29" under the shared receipt (`HOMEWORK_DONE_CONFIRMED`,
+ * "Done — your teacher can see it."), which already names who sees it.
+ */
 export function offlineHomeworkMarkedText(
   completedAt: number,
   timeZone: string,
-  teacherName: string | null,
 ): string {
   const date = new Intl.DateTimeFormat("en-US", {
     weekday: "short",
@@ -71,5 +75,5 @@ export function offlineHomeworkMarkedText(
     day: "numeric",
     timeZone,
   }).format(new Date(completedAt));
-  return `${date} · ${teacherName ?? "Your teacher"} can see it`;
+  return `Marked ${date}`;
 }

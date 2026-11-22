@@ -354,6 +354,7 @@ async function runArm(repo: string, run: number, label: string) {
       rubricPreToolClosingIsValid: false,
       suppressCompletionFollowUp: false,
       activityCompletedThisStream: false,
+      pendingCompletionNote: null,
       createdCodeArtifact: false,
     };
     const tools: Array<Record<string, unknown> & { name: string; run: (i: unknown, c?: unknown) => Promise<unknown> }> =
@@ -480,7 +481,6 @@ function promptContext(
   isFirstTurn: boolean,
 ) {
   return {
-    teacherWhisper: null,
     readingLevel: "grade4",
     scholarName: "Eval Scholar",
     sessionMode: "vibecode",

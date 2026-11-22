@@ -1,4 +1,5 @@
 import { convexTest, type TestConvex } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import type { FunctionReference } from "convex/server";
 import { describe, expect, test } from "vitest";
 import { internal } from "../_generated/api";
@@ -649,11 +650,11 @@ describe("adminTermTools.addScholarToAssignment", () => {
         username: "old_kid", name: "Old Kid", role: "scholar",
       });
       const unitId = await ctx.db.insert("units", { title: "U", teacherId, isActive: true });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId, unitId, scholarIds: [otherId], startedAt: 1,
         activitySchedule: [],
       });
-      const untouchedId = await ctx.db.insert("assignments", {
+      const untouchedId = await insertAssignmentWithSchedule(ctx, {
         teacherId, unitId, scholarIds: [otherId], startedAt: 1,
         activitySchedule: [],
       });

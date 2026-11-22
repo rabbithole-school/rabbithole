@@ -26,6 +26,7 @@ import type { Id } from "../_generated/dataModel";
 import type { AideEmit } from "./aideStream";
 import type { AgentTransport } from "./deviceOpsTools";
 import { isStaffRole, type Role } from "./roles";
+import { makeSheetsTools } from "./sheetsTools";
 import {
   extractDriveFileIds,
   fetchDriveFileMeta,
@@ -38,6 +39,12 @@ import {
 /** Google Drive links resolved per turn. Same ceiling as Slack permalinks —
  *  enough for "compare these two", not enough to blow the context budget. */
 export const MAX_DRIVE_LINKS = 3;
+
+/** The Drive tools makeDriveTools builds. It also builds the Google Sheets
+ *  tools (SHEETS_TOOL_NAMES), so every assistant that can read the asker's
+ *  Drive can work in their sheets too. The Slack lanes (admissions, finance,
+ *  marketing) assemble them too, so their isolation tests list both. */
+export const DRIVE_TOOL_NAMES = ["read_drive_link", "search_drive"] as const;
 
 /** Slack renders mrkdwn links; the in-app aide and MCP clients render Markdown. */
 export function driveLinkFormatFor(transport: AgentTransport): DriveLinkFormat {
@@ -107,6 +114,10 @@ export async function makeDriveTools(
     role: Role | null | undefined;
     callerUserId: Id<"users">;
     transport: AgentTransport | undefined;
+    /** Drive file ids a PERSON linked in this conversation (never the bot or a
+     *  quoted message): the Sheets tools may write to these. Absent (MCP), they
+     *  write only to sheets the asker owns. */
+    linkedSheetIds?: readonly string[];
   },
 ) {
   const { role, callerUserId, transport } = opts;
@@ -151,7 +162,7 @@ export async function makeDriveTools(
         emit({
           toolComplete: {
             name: "read_drive_link",
-            result: text.startsWith("[Resolved") ? "read" : "not read",
+            result: text.startsWith("[Resolved") ? "Read the Drive file" : "Drive file not read",
           },
         });
         return (
@@ -242,5 +253,12 @@ export async function makeDriveTools(
         );
       },
     }),
+    // Google Sheets: read, make and fill, as the asker (lib/sheetsTools.ts).
+    ...(await makeSheetsTools(ctx, emit, {
+      callerUserId,
+      links,
+      linkedSheetIds: opts.linkedSheetIds ?? [],
+      canLinkHere: transport !== "mcp",
+    })),
   ];
 }

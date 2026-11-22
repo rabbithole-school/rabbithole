@@ -3,8 +3,10 @@
 /**
  * "Saved for later" on the done screen (TRA-519 B2): the session's parked
  * ideas come back once the activity is finished, each with two ways forward —
- *   • Build it now  → sessions.startFreePlay({ sessionId, idea }) and open the
- *     new free-play session (the idea goes first);
+ *   • Build it now  → sessions.startFreePlay({ sessionId, idea }), which says
+ *     which session to build in: this one (the caller's `onBuildHere` opens
+ *     Edit with the idea ready to send), or an older free-play copy, which
+ *     opens instead;
  *   • Make it a Quest → sessions.questFromParkedIdea plants (or reuses) a seed,
  *     then the existing seed flow (useExploreSeed: path picker → bake) runs.
  * The per-idea actions are one hook (`useSavedForLaterActions`), shared by the
@@ -29,34 +31,46 @@ import { ParkedIdeaList, type ParkedIdea } from "./ParkedIdeaList";
 
 /**
  * Build it now + Make it a Quest for each parked idea. `renderActions` goes to
- * ParkedIdeaList; `dialog` (the seed flow's path picker) must be rendered by
- * the caller.
+ * ParkedIdeaList.
  */
 export function useSavedForLaterActions({
   sessionId,
   canBuildNow,
+  onBuildHere,
 }: {
   sessionId: Id<"sessions">;
   /** `freePlayEligible` from getWithMessages — whether Build it now works. */
   canBuildNow: boolean;
-}): { renderActions: (idea: ParkedIdea) => ReactNode; dialog: ReactNode } {
+  /** The builder's done state: carry on in this session with `idea`. Absent
+   *  (the chat done screen), the session is opened instead. */
+  onBuildHere?: (idea: ParkedIdea) => void;
+}): { renderActions: (idea: ParkedIdea) => ReactNode } {
   const router = useRouter();
   const { stamp } = useRemote();
   const startFreePlay = useMutation(startFreePlayRef);
   const questFromParkedIdea = useMutation(questFromParkedIdeaRef);
-  const { exploreSeed, exploringSeedId, exploreSeedDialog } = useExploreSeed();
+  const { exploreSeed, exploringSeedId } = useExploreSeed();
   // The idea whose button is working, so only that row shows a spinner.
   const [busy, setBusy] = useState<{ text: string; action: "build" | "quest" } | null>(null);
 
   const buildNow = async (idea: ParkedIdea) => {
     setBusy({ text: idea.text, action: "build" });
+    let next: Id<"sessions"> | null = null;
     try {
-      const result = await startFreePlay({ sessionId, idea: idea.text });
-      router.push(stamp(`/scholar/${result.sessionId}`));
+      next = (await startFreePlay({ sessionId, idea: idea.text })).sessionId;
     } catch (error) {
       toaster.error({ title: serverErrorMessage(error, "Couldn't start building that") });
-      setBusy(null);
     }
+    setBusy(null);
+    if (next === null) return;
+    if (next === sessionId && onBuildHere) {
+      // One app, one session: carry on here.
+      onBuildHere(idea);
+      return;
+    }
+    // A scholar with an older free-play copy is taken there (and the chat
+    // done screen, which has no Edit of its own, opens the session).
+    router.push(stamp(`/scholar/${next}`));
   };
 
   const makeQuest = async (idea: ParkedIdea) => {
@@ -104,7 +118,7 @@ export function useSavedForLaterActions({
     </>
   );
 
-  return { renderActions, dialog: exploreSeedDialog };
+  return { renderActions };
 }
 
 export function SavedForLaterBlock({
@@ -117,7 +131,7 @@ export function SavedForLaterBlock({
   /** `freePlayEligible` from getWithMessages — whether Build it now works. */
   canBuildNow: boolean;
 }) {
-  const { renderActions, dialog } = useSavedForLaterActions({
+  const { renderActions } = useSavedForLaterActions({
     sessionId,
     canBuildNow,
   });
@@ -140,7 +154,6 @@ export function SavedForLaterBlock({
         {MISSION_COPY.savedForLater}
       </Text>
       <ParkedIdeaList ideas={ideas} renderActions={renderActions} />
-      {dialog}
     </Box>
   );
 }

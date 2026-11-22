@@ -2,10 +2,11 @@
 // `parentThreads` (the family-messaging engine; the table name is legacy).
 // Design: the "Scholar ↔ staff messaging" proposal (2026-09-25).
 //
-//   mentor   — ONE scholar ↔ the staff side. Only an ADULT opens one (a mentor
+//   mentor   — ONE scholar ↔ the staff side. An adult opens one (a mentor
 //              holding a `scholars:mentor` grant that covers the scholar, or a
-//              teacher at the scholar's institution); the scholar can then
-//              reply freely. A multi-scholar send fans out into one thread per
+//              teacher at the scholar's institution), or the scholar writes to
+//              ONE teacher at their school (`startConversationWithTeacher` —
+//              never a mentor); the scholar can then reply freely. A multi-scholar send fans out into one thread per
 //              scholar — never a group chat.
 //   workshop — one scholar ↔ the Rabbithole team (teachers at the scholar's
 //              institution + platform admins), shown in the scholar's Workshop.
@@ -15,6 +16,14 @@
 //              report the scholar filed (routes into that card's thread), or
 //              a fresh topic with no idea behind it (`suggestionId` absent —
 //              never a scholarSuggestions row, never counts toward the cap).
+//   about    — one scholar ↔ the teachers at their school, about ONE of the
+//              scholar's Quests or wonders (`thread.about`). One thread per
+//              pair (`ensureAboutThread`). Same reach as workshop: never a
+//              mentor, never a guardian. A teacher's plain reply under a Slack
+//              root mapped to the pair (`recordAboutSlackThread`) lands here
+//              (`recordAboutSlackReply`). Kept out of `listThreads` unless a
+//              caller asks for kind "about", so older clients' lists are
+//              unchanged.
 //
 // OPEN DOOR: there is no thread only one adult can read. Every teacher at the
 // scholar's institution can read + reply to that scholar's mentor threads.
@@ -41,7 +50,9 @@
 // Response shapes deliberately MIRROR parentMessages.getThread /
 // getThreadAttachments so components/messaging/MessageRow.tsx renders both.
 
+import { isProgramGuest, isWithdrawn } from "./lib/enrollmentStanding";
 import { v } from "convex/values";
+import { evaluateInstitutionSuspension } from "./lib/access";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { getActiveOverlay } from "./lib/auth";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -65,8 +76,11 @@ import {
   previewOf,
   retractMessageAndAttachments,
   retractOneAttachment,
+  stageServerStoredAttachments,
+  threadStaffWriterIds,
   userDisplayName,
   type PreparedAttachment,
+  type ServerStoredAttachment,
 } from "./parentMessages";
 import {
   isPlatformAdminUser,
@@ -75,11 +89,17 @@ import {
   markStaffRead,
   scholarThreadAccess,
   type ScholarThreadAccess,
+  aboutThreadInstitutionId,
   scholarThreadInstitutionId,
   staffCanReachScholar,
   teachesAtInstitution,
   teachingInstitutionIds,
+  flavorFromLegacyKind,
+  legacyKindForFlavor,
+  threadFlavor,
   threadKind,
+  type LegacyScholarThreadKind,
+  type ScholarThreadFlavor,
 } from "./lib/scholarThreadAccess";
 import {
   hasActiveStaffMembershipAtInstitution,
@@ -90,7 +110,17 @@ import {
   staffCapabilityInstitutionIds,
 } from "./lib/staffCapabilities";
 import { resolveInstitutionLens } from "./lib/institutionLens";
-import { scholarIdsForInstitution } from "./lib/scholarEnrollment";
+import {
+  requireUnitInLearnerInstitution,
+  scholarIdsForInstitution,
+} from "./lib/scholarEnrollment";
+import { isQuestUnitForScholar } from "./lib/questLifecycle";
+import {
+  sameAbout,
+  threadAboutValidator,
+  type ThreadAbout,
+} from "./lib/threadAbout";
+import { seedScholarText } from "./lib/seedLabel";
 import { ROLES, isScholarAdminRole } from "./lib/roles";
 import { messageEditableUntil } from "../shared/messageEditWindow";
 import { previewableMessageLink } from "../lib/messageLinks";
@@ -104,17 +134,20 @@ import {
 import { appBaseUrlOrNull } from "./lib/deploymentConfig";
 import { isScholarWithinAideLens } from "./scholarSuggestions";
 
-export type ScholarThreadKind = "mentor" | "workshop";
+export type { ScholarThreadFlavor } from "./lib/scholarThreadAccess";
 export type ScholarThreadViewer = "scholar" | "staff";
 
 /** One row in a thread list (scholar Messages or the staff inbox). */
 export type ScholarThreadSummary = {
   _id: Id<"parentThreads">;
-  kind: ScholarThreadKind;
+  flavor: ScholarThreadFlavor;
+  /** DEPRECATED: the flavor under its old name ("mentor" = general), for
+   *  iPad builds that predate `flavor`. Removed with the narrow. */
+  kind: LegacyScholarThreadKind;
   /** Scholar viewer: the counterpart (the mentor's name / "The Rabbithole team").
    *  Staff viewer: the scholar's name. */
   title: string;
-  /** Workshop: the idea title. Mentor: null. */
+  /** Workshop: the idea title. General: null. */
   suggestionTitle: string | null;
   suggestionId: Id<"scholarSuggestions"> | null;
   scholarId: Id<"users">;
@@ -131,6 +164,13 @@ export type ScholarThreadSummary = {
   startedByName: string | null;
   /** Workshop threads with no idea: the first line of the opening message. */
   topic: string | null;
+  /** About threads only: the Quest or wonder. Absent on every other flavor,
+   *  so general and workshop rows keep exactly the shape they had. */
+  about?: ThreadAbout;
+  /** About threads only: the subject in words, a wonder's question or a
+   *  Quest's title (`aboutSubjectTitle`). Absent on every other flavor, and
+   *  when the subject can no longer be read. */
+  aboutTitle?: string;
   unread: boolean;
 };
 
@@ -149,9 +189,6 @@ export type ScholarThreadMessage = {
    *  A timestamp, not a flag: this query doesn't re-run as time passes, so
    *  clients run the clock against it (shared/messageEditWindow.ts). */
   editableUntil: number | null;
-  /** DEPRECATED (TRA-418) — `editableUntil !== null`, no clock. iPad builds
-   *  released before `editableUntil` AND it with their own window check. */
-  canEdit: boolean;
   /** Staff viewer: the transport it was written through ("via Slack"). Null
    *  for the scholar viewer — a kid doesn't need to know. */
   source: "slack" | null;
@@ -167,7 +204,9 @@ export type ScholarThreadMessage = {
 
 export type ScholarThreadDetail = {
   _id: Id<"parentThreads">;
-  kind: ScholarThreadKind;
+  flavor: ScholarThreadFlavor;
+  /** DEPRECATED: see ScholarThreadSummary.kind. */
+  kind: LegacyScholarThreadKind;
   viewer: ScholarThreadViewer;
   title: string;
   scholarId: Id<"users">;
@@ -178,6 +217,10 @@ export type ScholarThreadDetail = {
     scholarWords: string;
     archived: boolean;
   } | null;
+  /** About threads only: the Quest or wonder (absent on every other flavor). */
+  about?: ThreadAbout;
+  /** About threads only: see ScholarThreadSummary.aboutTitle. */
+  aboutTitle?: string;
   staffParticipants: { _id: Id<"users">; name: string; image: string | null }[];
   /** The open-door line: the scholar always sees it; a staffer outside the
    *  teaching team (a mentor) sees the adult-side version; teachers — who ARE
@@ -219,10 +262,21 @@ function openDoorCaptionFor(
   return `${firstName}'s teachers can read this conversation.`;
 }
 
-/** At most one "a scholar wrote" email per mentor thread per window. */
+/** At most one "a scholar wrote" email per general thread per window. */
 export const MENTOR_EMAIL_BATCH_MS = 15 * 60 * 1000;
 
-const kindArg = v.optional(v.union(v.literal("mentor"), v.literal("workshop")));
+const flavorArg = v.optional(v.union(v.literal("general"), v.literal("workshop")));
+/** `listThreads` alone also takes "about"; with no flavor it lists only
+ *  general and workshop threads, as it always has. */
+const listFlavorArg = v.optional(
+  v.union(v.literal("general"), v.literal("workshop"), v.literal("about")),
+);
+/** DEPRECATED: the same filters under their old names, still sent by iPad
+ *  builds that predate `flavor`. Removed with the narrow. */
+const legacyKindArg = v.optional(v.union(v.literal("mentor"), v.literal("workshop")));
+const legacyListKindArg = v.optional(
+  v.union(v.literal("mentor"), v.literal("workshop"), v.literal("about")),
+);
 
 type Ctx = QueryCtx | MutationCtx;
 type AuthedCtx = Ctx & { user: Doc<"users"> };
@@ -287,7 +341,7 @@ async function staffParticipantsOf(
     const standing = historicalInstitutionId
       ? (await isTeamForInstitution(ctx, user, historicalInstitutionId)) ||
         (await mentorInstitutionIds(ctx, user._id)).has(historicalInstitutionId)
-      : (await staffCanReachScholar(ctx, user, scholar, "mentor")).ok;
+      : (await staffCanReachScholar(ctx, user, scholar, "general")).ok;
     if (standing) reachable.push(user);
   }
   return reachable
@@ -375,7 +429,7 @@ export async function ensureWorkshopThreadForSuggestion(
 
   const backfill = suggestion.createdAt < now;
   const threadId = await createThread(ctx, {
-    kind: "workshop",
+    flavor: "workshop",
     suggestionId: suggestion._id,
     parentUserIds: [scholar._id],
     scholarId: scholar._id,
@@ -565,9 +619,14 @@ export async function postScholarThreadMessage(
     attachments?: PreparedAttachment[];
     claimOriginalAttachments?: boolean;
     source?: "slack";
+    /** The transport's own id for the message (a Slack event), for dedupe. */
+    providerMessageId?: string;
     now: number;
     /** A scholar reply that should also reach the idea's Slack thread. */
     notifyStaff?: boolean;
+    /** False for a line a staff action writes on its own (a Quest's answer
+     *  line): it advances no staff read marker. */
+    marksStaffRead?: boolean;
   },
 ): Promise<Id<"parentMessages">> {
   const rows = await participantRows(ctx, args.thread._id);
@@ -581,24 +640,46 @@ export async function postScholarThreadMessage(
     attachments: args.attachments,
     claimOriginalAttachments: args.claimOriginalAttachments,
     source: args.source,
+    providerMessageId: args.providerMessageId,
   });
-  if (args.authorType === "scholar") {
+  const flavor = threadFlavor(args.thread);
+  const fromScholar = args.authorType === "scholar";
+  if (fromScholar) {
     await markScholarRead(ctx, args.thread._id, args.authorUserId, args.now);
-    if (args.notifyStaff !== false) {
-      const kind = threadKind(args.thread);
-      if (kind === "mentor") {
-        await queueMentorEmails(ctx, args.thread, args.scholar, messageId, args.now);
-      } else if (kind === "workshop" && args.thread.suggestionId) {
-        await ctx.scheduler.runAfter(
-          0,
-          internal.scholarSuggestions.forwardScholarReplyToSlack,
-          { messageId },
-        );
-      }
+    if (args.notifyStaff !== false && flavor === "general") {
+      await queueMentorEmails(ctx, args.thread, args.scholar, messageId, args.now);
     }
-  } else {
+  } else if (args.marksStaffRead !== false) {
     const author = await ctx.db.get(args.authorUserId);
     if (author) await markStaffRead(ctx, args.thread, author, args.now);
+  }
+  // Either side's words also go to the conversation's Slack thread, tagging
+  // the scholar's teachers on a scholar message. Not a line the caller keeps
+  // in the app (a staff action's own line has its own post), and not a reply
+  // typed in Slack, which is there already.
+  const toSlack =
+    args.source !== "slack" &&
+    (fromScholar ? args.notifyStaff !== false : args.marksStaffRead !== false);
+  if (toSlack) {
+    if (flavor === "general") {
+      // The scholar-messages channel (scholarMessageSlack.ts).
+      await ctx.scheduler.runAfter(0, internal.scholarMessageSlack.copyToSlack, {
+        messageId,
+      });
+    } else if (flavor === "workshop" && args.thread.suggestionId) {
+      // The idea's #workshop thread.
+      await ctx.scheduler.runAfter(
+        0,
+        internal.scholarSuggestions.forwardScholarReplyToSlack,
+        { messageId },
+      );
+    } else if (flavor === "about") {
+      // The Slack thread the teachers answer in (aboutSlackCopy.ts), when the
+      // conversation has one.
+      await ctx.scheduler.runAfter(0, internal.aboutSlackCopy.copyToSlack, {
+        messageId,
+      });
+    }
   }
   return messageId;
 }
@@ -648,7 +729,7 @@ async function emailableMentor(
     .withIndex("by_user", (q) => q.eq("userId", userId))
     .unique();
   if (prefs?.emailEnabled === false) return null;
-  if (!(await staffCanReachScholar(ctx, user, scholar, "mentor")).ok) return null;
+  if (!(await staffCanReachScholar(ctx, user, scholar, "general")).ok) return null;
   return user;
 }
 
@@ -804,7 +885,7 @@ export const claimMentorEmailBatch = internalMutation({
   args: { threadId: v.id("parentThreads") },
   handler: async (ctx, { threadId }): Promise<MentorBatch> => {
     const thread = await ctx.db.get(threadId);
-    if (!thread || threadKind(thread) !== "mentor") return null;
+    if (!thread || threadFlavor(thread) !== "general") return null;
     // The window is enforced HERE, not just by the schedule: two batch jobs
     // can overlap (a reply's schedule + a finish's reschedule), and claimed
     // rows stay `queued` until the send marks them, so a second claim inside
@@ -849,7 +930,7 @@ export const claimMentorEmailBatch = internalMutation({
         // Only a mentor whose access has since ended is dropped outright.
         if (
           !recipient ||
-          !(await staffCanReachScholar(ctx, recipient, scholar, "mentor")).ok
+          !(await staffCanReachScholar(ctx, recipient, scholar, "general")).ok
         ) {
           await skip(delivery._id, "Mentor access ended");
           continue;
@@ -1149,11 +1230,11 @@ async function requireThreadAccess(
   return { thread, access };
 }
 
-/** May this STAFF caller open (or post in) a thread of `kind` with `scholarId`? */
+/** May this STAFF caller open (or post in) a thread of `flavor` with `scholarId`? */
 async function requireStaffReach(
   ctx: AuthedCtx,
   scholarId: Id<"users">,
-  kind: ScholarThreadKind,
+  flavor: ScholarThreadFlavor,
 ): Promise<{
   scholar: Doc<"users">;
   institutionId: Id<"institutions">;
@@ -1166,7 +1247,7 @@ async function requireStaffReach(
   const institutionId =
     scholar && (await scholarThreadInstitutionId(ctx, scholar));
   if (!scholar || !institutionId) throw new Error("Scholar not found");
-  const reach = await staffCanReachScholar(ctx, ctx.user, scholar, kind);
+  const reach = await staffCanReachScholar(ctx, ctx.user, scholar, flavor);
   if (!reach.ok) throw new Error("Scholar not found");
   return { scholar, institutionId, asTeam: reach.asTeam };
 }
@@ -1180,6 +1261,32 @@ function validatedBody(raw: string, attachments: PreparedAttachment[]): string {
 
 // ── Summaries ───────────────────────────────────────────────────────────
 
+/**
+ * An about thread's subject in words: the wonder's question (the seed's
+ * topic, only while the seed is still the thread's own scholar's) or the
+ * Quest's title. Undefined when it can't be read. The thread was made by
+ * `ensureAboutThread`, which checked the subject is the scholar's; this
+ * re-checks the wonder's owner and reads nothing but the one title, so a
+ * hand-built thread names no one else's wonder.
+ */
+async function aboutSubjectTitle(
+  ctx: Ctx,
+  thread: Doc<"parentThreads">,
+): Promise<string | undefined> {
+  const about = thread.about;
+  if (threadFlavor(thread) !== "about" || !about) return undefined;
+  if (about.type === "wonder") {
+    const seed = await ctx.db.get(about.seedId);
+    if (!seed || seed.scholarId !== thread.scholarId) return undefined;
+    // A wonder's topic is the kid's own question. For any other seed it is a
+    // staff-side label, so a scholar reads only `scholarInvitation`.
+    const words = seed.origin === "wonder" ? seed.topic : seedScholarText(seed);
+    return words?.trim() || undefined;
+  }
+  const unit = await ctx.db.get(about.unitId);
+  return unit?.title.trim() || undefined;
+}
+
 async function summarize(
   ctx: AuthedCtx,
   thread: Doc<"parentThreads">,
@@ -1187,7 +1294,7 @@ async function summarize(
 ): Promise<ScholarThreadSummary> {
   const { viewer, scholar } = access;
   const facts = await scholarThreadFacts(ctx, thread);
-  const kind = threadKind(thread) as ScholarThreadKind;
+  const flavor = access.flavor;
   const staffParticipants = await staffParticipantsOf(
     ctx,
     facts.rows,
@@ -1228,34 +1335,38 @@ async function summarize(
         ) ?? null
       : null;
   const startedByStaff =
-    kind === "workshop" && !thread.suggestionId && opening?.authorType === "teacher";
+    flavor === "workshop" && !thread.suggestionId && opening?.authorType === "teacher";
   // Title fallback for a thread with no (reachable) named mentor: the first
   // staff author who can STILL answer — never a lapsed mentor's name.
   let firstStaff: ScholarMessage | undefined;
-  if (viewer === "scholar" && kind === "mentor" && staffParticipants.length === 0) {
+  if (viewer === "scholar" && flavor === "general" && staffParticipants.length === 0) {
     for (const message of facts.messages) {
       if (message.authorType !== "teacher" || !message.authorUserId) continue;
       const author = await ctx.db.get(message.authorUserId);
-      if (author && (await staffCanReachScholar(ctx, author, scholar, "mentor")).ok) {
+      if (author && (await staffCanReachScholar(ctx, author, scholar, "general")).ok) {
         firstStaff = message;
         break;
       }
     }
   }
   const scholarName = userDisplayName(scholar, "Scholar");
+  const aboutTitle = await aboutSubjectTitle(ctx, thread);
   const title =
     viewer === "staff"
       ? scholarName
-      : kind === "workshop"
+      : flavor === "workshop"
         ? "The Rabbithole team"
-        : staffParticipants.length > 0
-          ? staffParticipants.map((participant) => participant.name).join(", ")
-          : firstStaff
-            ? await authorName(firstStaff)
-            : "Your teachers";
+        : flavor === "about"
+          ? "Your teachers"
+          : staffParticipants.length > 0
+            ? staffParticipants.map((participant) => participant.name).join(", ")
+            : firstStaff
+              ? await authorName(firstStaff)
+              : "Your teachers";
   return {
     _id: thread._id,
-    kind,
+    flavor,
+    kind: legacyKindForFlavor(flavor),
     title,
     suggestionTitle: suggestion?.title ?? null,
     suggestionId: thread.suggestionId ?? null,
@@ -1278,10 +1389,12 @@ async function summarize(
     // Never from a withdrawn message: the first line of the first message
     // still standing, else a neutral label.
     topic:
-      kind === "workshop" && !thread.suggestionId && opening
+      flavor === "workshop" && !thread.suggestionId && opening
         ? (facts.visible[0] && firstLine(facts.visible[0].body)) ||
           "A message from the team"
         : null,
+    ...(thread.about ? { about: thread.about } : {}),
+    ...(aboutTitle ? { aboutTitle } : {}),
     unread:
       viewer === "scholar"
         ? facts.scholarUnread
@@ -1355,14 +1468,15 @@ async function messagingScope(
 /**
  * The caller's scholar↔staff threads, newest first.
  * Scholar: own mentor + workshop threads (ignores filter/institutionScope).
- * Staff: threads they can reach, narrowed by `kind` / `filter`
+ * Staff: threads they can reach, narrowed by `flavor` / `filter`
  *   ("mine" = threads where the caller is a named staff participant or has
  *   written a message, plus Workshop ideas no one on staff has picked up yet)
  *   and the `?inst=` lens.
  */
 export const listThreads = authedQuery({
   args: {
-    kind: kindArg,
+    flavor: listFlavorArg,
+    kind: legacyListKindArg,
     filter: v.optional(
       v.union(v.literal("all"), v.literal("unread"), v.literal("mine")),
     ),
@@ -1372,7 +1486,11 @@ export const listThreads = authedQuery({
     ctx,
     args,
   ): Promise<{ threads: ScholarThreadSummary[]; unreadCount: number }> => {
-    const kinds: ScholarThreadKind[] = args.kind ? [args.kind] : ["mentor", "workshop"];
+    const requested =
+      args.flavor ?? (args.kind ? flavorFromLegacyKind(args.kind) : undefined);
+    const flavors: ScholarThreadFlavor[] = requested
+      ? [requested]
+      : ["general", "workshop"];
     let candidates: Doc<"parentThreads">[] = [];
     if (ctx.user.role === ROLES.SCHOLAR) {
       candidates = (
@@ -1380,28 +1498,38 @@ export const listThreads = authedQuery({
           .query("parentThreads")
           .withIndex("by_scholar", (q) => q.eq("scholarId", ctx.user._id))
           .collect()
-      ).filter((thread) => kinds.includes(threadKind(thread) as ScholarThreadKind));
+      ).filter((thread) => {
+        const flavor = threadFlavor(thread);
+        return flavor !== null && flavors.includes(flavor);
+      });
     } else {
-      const byKindInstitution = async (
-        kind: ScholarThreadKind,
-        institutionId?: Id<"institutions">,
-      ) =>
-        await ctx.db
+      // Migrated rows (kind "scholar" + flavor) and, until the narrow, rows
+      // still storing the flavor's old name in `kind`.
+      const byFlavorInstitution = async (
+        flavor: ScholarThreadFlavor,
+        institutionId: Id<"institutions">,
+      ) => [
+        ...(await ctx.db
+          .query("parentThreads")
+          .withIndex("by_kind_flavor_institution", (q) =>
+            q.eq("kind", "scholar").eq("flavor", flavor).eq("institutionId", institutionId),
+          )
+          .collect()),
+        ...(await ctx.db
           .query("parentThreads")
           .withIndex("by_kind_institution", (q) =>
-            institutionId
-              ? q.eq("kind", kind).eq("institutionId", institutionId)
-              : q.eq("kind", kind),
+            q.eq("kind", legacyKindForFlavor(flavor)).eq("institutionId", institutionId),
           )
-          .collect();
+          .collect()),
+      ];
       const scope = await messagingScope(ctx, ctx.user, args.institutionScope);
       for (const institutionId of scope.ids) {
-        // The teaching team reaches both kinds; a mentor-grant school only
-        // mentor threads (and within them, only the ones they're named on).
+        // The teaching team reaches every flavor; a mentor-grant school only
+        // general threads (and within them, only the ones they're named on).
         const teamThere = scope.admin || scope.teaching.has(institutionId);
-        for (const kind of kinds) {
-          if (kind === "workshop" && !teamThere) continue;
-          candidates.push(...(await byKindInstitution(kind, institutionId)));
+        for (const flavor of flavors) {
+          if (flavor !== "general" && !teamThere) continue;
+          candidates.push(...(await byFlavorInstitution(flavor, institutionId)));
         }
       }
     }
@@ -1434,7 +1562,7 @@ export const listThreads = authedQuery({
           // the scholar archived, or history from a school they left
           // (replies closed), waits on no one.
           const idea =
-            access.kind === "workshop" && !access.readOnly && thread.suggestionId
+            access.flavor === "workshop" && !access.readOnly && thread.suggestionId
               ? await ctx.db.get(thread.suggestionId)
               : null;
           let unclaimed = !!idea && idea.archivedAt === undefined;
@@ -1459,6 +1587,18 @@ export const listThreads = authedQuery({
                 break;
               }
             }
+          }
+          // The same for a wonder or Quest thread: until someone on staff
+          // has written in it or been named on it, it is the whole team's, so
+          // a fresh Quest proposal shows in Mine.
+          if (
+            !unclaimed &&
+            access.flavor === "about" &&
+            !access.readOnly &&
+            !facts.rows.some((row) => row.side === "staff") &&
+            !facts.messages.some((message) => message.authorType === "teacher")
+          ) {
+            unclaimed = true;
           }
           if (!named && !wrote && !unclaimed) continue;
         }
@@ -1534,7 +1674,7 @@ export const staffAccess = authedQuery({
 type IncludableRole = "teacher" | "mentor" | "staff";
 
 /**
- * May `user` be NAMED on a mentor thread with this scholar? The teaching team
+ * May `user` be NAMED on a general thread with this scholar? The teaching team
  * at the scholar's school (a teacher → "teacher", a school admin → "staff";
  * never a system/service account), or a mentor whose live grant covers the
  * scholar ("mentor"). Never a scholar, a guardian, or staff from elsewhere.
@@ -1564,10 +1704,10 @@ async function includableRole(
 }
 
 /**
- * Staff who may be EXPLICITLY named on mentor threads with EVERY one of these
+ * Staff who may be EXPLICITLY named on general threads with EVERY one of these
  * scholars — the "Include staff" choices at compose and in "Add people".
  * Candidates pass `includableRole` for each scholar; the caller is excluded.
- * Callable by anyone who may post in mentor threads with all of them
+ * Callable by anyone who may post in general threads with all of them
  * (mentors included); otherwise empty. `institutionScope` narrows through the
  * messaging lens, like the rest of the inbox.
  */
@@ -1597,7 +1737,7 @@ export const listIncludableStaff = authedQuery({
         !scholar ||
         !institutionId ||
         !inScope.has(institutionId) ||
-        !(await staffCanReachScholar(ctx, ctx.user, scholar, "mentor")).ok
+        !(await staffCanReachScholar(ctx, ctx.user, scholar, "general")).ok
       ) {
         return [];
       }
@@ -1659,7 +1799,7 @@ export const listIncludableStaff = authedQuery({
 });
 
 /**
- * Name more adults on an existing mentor thread ("Add people"). The caller
+ * Name more adults on an existing general thread ("Add people"). The caller
  * must be able to post here (not read-only history); each person must pass
  * the same rule as compose's "Include staff" for the thread's scholar.
  * Idempotent (someone already named is left alone). Newly named adults get
@@ -1673,8 +1813,8 @@ export const addParticipants = authedMutation({
     args,
   ): Promise<{ _id: Id<"users">; name: string; image: string | null }[]> => {
     const { thread, access } = await requireThreadAccess(ctx, args.threadId);
-    if (access.viewer !== "staff" || access.kind !== "mentor") {
-      throw new Error("Only staff can add people to a mentor conversation");
+    if (access.viewer !== "staff" || access.flavor !== "general") {
+      throw new Error("Only staff can add people to this conversation");
     }
     const existing = new Set(
       (await participantRows(ctx, thread._id))
@@ -1711,15 +1851,16 @@ export const addParticipants = authedMutation({
   },
 });
 
-/** Scholars the caller may open a mentor thread with (staff only). */
+/** Scholars the caller may open a general thread with (staff only). */
 export const listMessageableScholars = authedQuery({
   args: {
     institutionScope: v.optional(v.string()),
-    // "mentor" (default): scholars the caller may open a mentor thread with.
+    // "general" (default): scholars the caller may open a general thread with.
     // "workshop": scholars at schools where the caller is on the TEACHING team
     // (every live school for a platform admin) — who the team may start a
     // Workshop conversation with. A mentor grant never counts here.
-    kind: kindArg,
+    flavor: flavorArg,
+    kind: legacyKindArg,
   },
   handler: async (
     ctx,
@@ -1728,7 +1869,7 @@ export const listMessageableScholars = authedQuery({
     { _id: Id<"users">; name: string; image: string | null; institutionName?: string }[]
   > => {
     if (ctx.user.role === ROLES.SCHOLAR) return [];
-    const workshop = args.kind === "workshop";
+    const workshop = (args.flavor ?? args.kind) === "workshop";
     const scope = await messagingScope(ctx, ctx.user, args.institutionScope, {
       teachingOnly: workshop,
     });
@@ -1758,7 +1899,8 @@ export const listMessageableScholars = authedQuery({
         if (
           !scholar ||
           scholar.role !== ROLES.SCHOLAR ||
-          scholar.institutionId !== institutionId
+          scholar.institutionId !== institutionId ||
+          isWithdrawn(scholar)
         ) {
           continue;
         }
@@ -1830,7 +1972,8 @@ export const getThread = authedQuery({
     }
     return {
       _id: thread._id,
-      kind: access.kind,
+      flavor: access.flavor,
+      kind: legacyKindForFlavor(access.flavor),
       viewer: access.viewer,
       title: summary.title,
       scholarId: access.scholar._id,
@@ -1843,6 +1986,8 @@ export const getThread = authedQuery({
             archived: suggestion.archivedAt !== undefined,
           }
         : null,
+      ...(thread.about ? { about: thread.about } : {}),
+      ...(summary.aboutTitle ? { aboutTitle: summary.aboutTitle } : {}),
       staffParticipants: summary.staffParticipants,
       openDoorCaption: openDoorCaptionFor(access, summary.scholarName),
       // False only for read-only history from a school the scholar left.
@@ -1874,7 +2019,6 @@ export const getThread = authedQuery({
           editedAt: message.editedAt ?? null,
           retracted,
           editableUntil,
-          canEdit: editableUntil !== null,
           source: access.viewer === "staff" ? message.source ?? null : null,
           // The open door: adults can always see what was said; the scholar
           // sees only the tombstone.
@@ -1944,126 +2088,503 @@ export const startMentorThreads = authedMutation({
     attachmentIds: v.optional(v.array(v.id("parentMessageAttachments"))),
     staffIds: v.optional(v.array(v.id("users"))),
   },
-  handler: async (ctx, args): Promise<{ threadIds: Id<"parentThreads">[] }> => {
-    const scholarIds = [...new Set(args.scholarIds)];
-    if (scholarIds.length === 0) throw new Error("Choose at least one scholar");
-    // Validate EVERY target before the first write: a bulk send must never
-    // turn into a partial delivery staff can't see or correct.
-    const targets: {
-      scholar: Doc<"users">;
-      institutionId: Id<"institutions">;
-      asTeam: boolean;
-    }[] = [];
-    for (const scholarId of scholarIds) {
-      targets.push(await requireStaffReach(ctx, scholarId, "mentor"));
-    }
-    const staffIds = [...new Set(args.staffIds ?? [])].filter(
-      (userId) => userId !== ctx.user._id,
-    );
-    const mentors: Doc<"users">[] = [];
-    for (const staffId of staffIds) {
-      const person = await ctx.db.get(staffId);
-      for (const { scholar } of targets) {
-        // Same rule as the "Include staff" picker, for EVERY selected scholar.
-        if (!(await includableRole(ctx, person, scholar))) {
-          throw new Error(
-            `${userDisplayName(person, "That person")} can't be included for every selected scholar`,
-          );
-        }
-      }
-      mentors.push(person!);
-    }
-    const attachments = await prepareAttachments(
-      ctx,
-      args.attachmentIds,
-      ctx.user._id,
-      targets.length === 1 ? targets[0].scholar._id : undefined,
-    );
-    const body = validatedBody(args.body, attachments);
+  handler: async (ctx, args): Promise<{ threadIds: Id<"parentThreads">[] }> =>
+    await startMentorThreadsAs(ctx, args),
+});
 
-    const now = Date.now();
-    const threadIds: Id<"parentThreads">[] = [];
-    // A mentor conversation is the scholar PLUS the named adults in it, and
-    // the adult who opens it is always named (a teacher included), so the kid
-    // sees who they're talking to. Reuse a thread only when that set matches
-    // exactly — otherwise a teacher's note would land inside a mentor's
-    // conversation with the scholar (or vice versa). Teachers still reach
-    // every thread by rule; being named is about who the conversation is WITH.
-    const named = [...new Set([ctx.user._id, ...mentors.map((mentor) => mentor._id)])];
-    const namedKey = [...named].sort().join(",");
-    for (const [index, { scholar, institutionId }] of targets.entries()) {
-      const candidates = (
+/**
+ * The operator transport of `startMentorThreads`: `npx convex run` carries no
+ * identity, so a staffer who asks an operator to open mentor threads for them
+ * had no path. `callerUserId` becomes `ctx.user`, so the SAME reach gate,
+ * "Include staff" rule, thread reuse, and mentor emails run as from the
+ * Messages screen. Validates every target before the first write, like the
+ * public mutation; with `dryRun` it stops there and writes nothing.
+ */
+export const startMentorThreadsForCaller = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    scholarIds: v.array(v.id("users")),
+    body: v.string(),
+    staffIds: v.optional(v.array(v.id("users"))),
+    dryRun: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<{ threadIds: Id<"parentThreads">[] }> => {
+    const user = await ctx.db.get(args.callerUserId);
+    if (!user) throw new Error("Not authenticated");
+    const { callerUserId: _caller, ...rest } = args;
+    return await startMentorThreadsAs({ ...ctx, user }, rest);
+  },
+});
+
+async function startMentorThreadsAs(
+  ctx: MutationCtx & { user: Doc<"users"> },
+  args: {
+    scholarIds: Id<"users">[];
+    body: string;
+    attachmentIds?: Id<"parentMessageAttachments">[];
+    staffIds?: Id<"users">[];
+    dryRun?: boolean;
+  },
+): Promise<{ threadIds: Id<"parentThreads">[] }> {
+  const scholarIds = [...new Set(args.scholarIds)];
+  if (scholarIds.length === 0) throw new Error("Choose at least one scholar");
+  // Validate EVERY target before the first write: a bulk send must never
+  // turn into a partial delivery staff can't see or correct.
+  const targets: {
+    scholar: Doc<"users">;
+    institutionId: Id<"institutions">;
+    asTeam: boolean;
+  }[] = [];
+  for (const scholarId of scholarIds) {
+    targets.push(await requireStaffReach(ctx, scholarId, "general"));
+  }
+  const staffIds = [...new Set(args.staffIds ?? [])].filter(
+    (userId) => userId !== ctx.user._id,
+  );
+  const mentors: Doc<"users">[] = [];
+  for (const staffId of staffIds) {
+    const person = await ctx.db.get(staffId);
+    for (const { scholar } of targets) {
+      // Same rule as the "Include staff" picker, for EVERY selected scholar.
+      if (!(await includableRole(ctx, person, scholar))) {
+        throw new Error(
+          `${userDisplayName(person, "That person")} can't be included for every selected scholar`,
+        );
+      }
+    }
+    mentors.push(person!);
+  }
+  const attachments = await prepareAttachments(
+    ctx,
+    args.attachmentIds,
+    ctx.user._id,
+    targets.length === 1 ? targets[0].scholar._id : undefined,
+  );
+  const body = validatedBody(args.body, attachments);
+  if (args.dryRun) return { threadIds: [] };
+
+  const now = Date.now();
+  const threadIds: Id<"parentThreads">[] = [];
+  // A mentor conversation is the scholar PLUS the named adults in it, and
+  // the adult who opens it is always named (a teacher included), so the kid
+  // sees who they're talking to. Reuse a thread only when that set matches
+  // exactly — otherwise a teacher's note would land inside a mentor's
+  // conversation with the scholar (or vice versa). Teachers still reach
+  // every thread by rule; being named is about who the conversation is WITH.
+  const named = [...new Set([ctx.user._id, ...mentors.map((mentor) => mentor._id)])];
+  const namedKey = [...named].sort().join(",");
+  for (const [index, { scholar, institutionId }] of targets.entries()) {
+    const candidates = (
+      await ctx.db
+        .query("parentThreads")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+        .collect()
+    )
+      .filter(
+        (thread) =>
+          threadFlavor(thread) === "general" &&
+          thread.institutionId === institutionId,
+      )
+      .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+    let existing: Doc<"parentThreads"> | undefined;
+    for (const thread of candidates) {
+      const staffKey = (
         await ctx.db
-          .query("parentThreads")
-          .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+          .query("parentThreadParticipants")
+          .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
           .collect()
       )
-        .filter(
-          (thread) =>
-            threadKind(thread) === "mentor" &&
-            thread.institutionId === institutionId,
-        )
-        .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
-      let existing: Doc<"parentThreads"> | undefined;
-      for (const thread of candidates) {
-        const staffKey = (
-          await ctx.db
-            .query("parentThreadParticipants")
-            .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
-            .collect()
-        )
-          .filter((row) => row.side === "staff")
-          .map((row) => row.parentUserId)
-          .sort()
-          .join(",");
-        if (staffKey === namedKey) {
-          existing = thread;
-          break;
-        }
+        .filter((row) => row.side === "staff")
+        .map((row) => row.parentUserId)
+        .sort()
+        .join(",");
+      if (staffKey === namedKey) {
+        existing = thread;
+        break;
       }
-      const threadId =
-        existing?._id ??
-        (await createThread(ctx, {
-          kind: "mentor",
-          parentUserIds: [scholar._id],
-          scholarId: scholar._id,
-          institutionId,
-          teacherId: ctx.user._id,
+    }
+    const threadId =
+      existing?._id ??
+      (await createThread(ctx, {
+        flavor: "general",
+        parentUserIds: [scholar._id],
+        scholarId: scholar._id,
+        institutionId,
+        teacherId: ctx.user._id,
+        now,
+      }));
+    await ensureThreadParticipants(ctx, threadId, named, "staff");
+    const thread = (await ctx.db.get(threadId))!;
+    const messageId = await postScholarThreadMessage(ctx, {
+      thread,
+      scholar,
+      authorType: "teacher",
+      authorUserId: ctx.user._id,
+      body,
+      attachments,
+      claimOriginalAttachments: index === 0,
+      now,
+    });
+    // Adults this message newly NAMES (a teacher introducing a mentor) hear
+    // about it the way they hear about a scholar's message — the batched
+    // email — or a part-time mentor would never know until the kid replies.
+    // A reused thread has exactly this named set already, so only a fresh
+    // thread names anyone new; the sender never emails themselves.
+    if (!existing) {
+      const newlyNamed = named.filter((userId) => userId !== ctx.user._id);
+      if (newlyNamed.length > 0) {
+        await queueMentorEmails(
+          ctx,
+          (await ctx.db.get(threadId))!,
+          scholar,
+          messageId,
           now,
-        }));
-      await ensureThreadParticipants(ctx, threadId, named, "staff");
-      const thread = (await ctx.db.get(threadId))!;
-      const messageId = await postScholarThreadMessage(ctx, {
-        thread,
-        scholar,
-        authorType: "teacher",
-        authorUserId: ctx.user._id,
-        body,
-        attachments,
-        claimOriginalAttachments: index === 0,
+          newlyNamed,
+        );
+      }
+    }
+    threadIds.push(threadId);
+  }
+  return { threadIds };
+}
+
+// ── A scholar writes to a teacher ───────────────────────────────────────
+// The one way a SCHOLAR opens a conversation: a general thread with ONE
+// teacher (or school admin) at their own live school, named on it so the
+// header says who it's with and they get the batched email. Never a mentor,
+// another school's staff, a system account, or a guardian. A program guest
+// writes only to their program teachers (owners of a group they're in), the
+// same people a guest's family may message (parentMessages.ts). Open door as
+// always: every teacher at the school can read it. Text only to start; the
+// thread's reply composer takes photos. A scholar with no enrollment rides
+// the primary school, as their other threads do (scholarThreadInstitutionId).
+
+/** The school a scholar may write to teachers at, or null (not a scholar,
+ *  withdrawn, no school, or a suspended one). */
+async function scholarComposeSchool(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+): Promise<Id<"institutions"> | null> {
+  if (scholar.role !== ROLES.SCHOLAR || isWithdrawn(scholar)) return null;
+  const institutionId = await scholarThreadInstitutionId(ctx, scholar);
+  if (!institutionId) return null;
+  const institution = await ctx.db.get(institutionId);
+  return institution && institution.disabledAt === undefined ? institutionId : null;
+}
+
+/** A program guest's program teachers: owners of a group they're in. */
+async function programTeacherIds(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+  institutionId: Id<"institutions">,
+): Promise<Set<Id<"users">>> {
+  const ids = new Set<Id<"users">>();
+  for (const group of await ctx.db
+    .query("scholarGroups")
+    .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
+    .collect()) {
+    if (group.ownerId && group.scholarIds.includes(scholar._id)) ids.add(group.ownerId);
+  }
+  return ids;
+}
+
+async function scholarMayWriteTo(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+  person: Doc<"users"> | null,
+  institutionId: Id<"institutions">,
+  programTeachers: Set<Id<"users">> | null,
+): Promise<boolean> {
+  if (!person || person.isSystem === true) return false;
+  if (person.role === ROLES.SCHOLAR || person.role === ROLES.PARENT) return false;
+  if (programTeachers && !programTeachers.has(person._id)) return false;
+  return await teachesAtInstitution(ctx, person._id, institutionId);
+}
+
+/** The program-teacher filter for this scholar: null = everyone qualifies. */
+async function programFilterFor(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+  institutionId: Id<"institutions">,
+): Promise<Set<Id<"users">> | null> {
+  return isProgramGuest(scholar)
+    ? await programTeacherIds(ctx, scholar, institutionId)
+    : null;
+}
+
+/** Teachers the signed-in scholar may write to (scholars only; else empty). */
+export const listTeachersForScholar = authedQuery({
+  args: {},
+  handler: async (
+    ctx,
+  ): Promise<{ _id: Id<"users">; name: string; image: string | null }[]> => {
+    const institutionId = await scholarComposeSchool(ctx, ctx.user);
+    if (!institutionId) return [];
+    const programTeachers = await programFilterFor(ctx, ctx.user, institutionId);
+    const seen = new Set<Id<"users">>();
+    const result: { _id: Id<"users">; name: string; image: string | null }[] = [];
+    // Only the teaching-team rows (not every scholar's membership): the
+    // account menu subscribes to this on every scholar screen.
+    const memberships = [];
+    for (const role of [ROLES.TEACHER, ROLES.SCHOOL_ADMIN]) {
+      memberships.push(
+        ...(await ctx.db
+          .query("memberships")
+          .withIndex("by_institution_role", (q) =>
+            q.eq("institutionId", institutionId).eq("role", role),
+          )
+          .collect()),
+      );
+    }
+    for (const membership of memberships) {
+      if (seen.has(membership.userId)) continue;
+      seen.add(membership.userId);
+      const person = await ctx.db.get(membership.userId);
+      if (
+        person &&
+        (await scholarMayWriteTo(ctx, ctx.user, person, institutionId, programTeachers))
+      ) {
+        result.push({
+          _id: person._id,
+          name: userDisplayName(person, "Teacher"),
+          image: person.image ?? null,
+        });
+      }
+    }
+    return result.sort((a, b) => a.name.localeCompare(b.name));
+  },
+});
+
+/**
+ * A scholar writes to one teacher at their school. Lands in the existing
+ * conversation the scholar already has with exactly that teacher (whoever
+ * opened it), else opens one. The message notifies like any scholar message:
+ * the batched email to the named teacher, and the staff Slack copy.
+ */
+export const startConversationWithTeacher = authedMutation({
+  args: { teacherId: v.id("users"), body: v.string() },
+  handler: async (ctx, args): Promise<{ threadId: Id<"parentThreads"> }> => {
+    const scholar = ctx.user;
+    if (scholar.role !== ROLES.SCHOLAR) {
+      throw new Error("Forbidden: only a scholar can write to a teacher here");
+    }
+    const institutionId = await scholarComposeSchool(ctx, scholar);
+    if (!institutionId) throw new Error("Messages aren't available right now");
+    const teacher = await ctx.db.get(args.teacherId);
+    const programTeachers = await programFilterFor(ctx, scholar, institutionId);
+    if (!(await scholarMayWriteTo(ctx, scholar, teacher, institutionId, programTeachers))) {
+      throw new Error("You can't message that person");
+    }
+    const body = validatedBody(args.body, []);
+    const now = Date.now();
+
+    let threadId: Id<"parentThreads"> | null = null;
+    const candidates = (
+      await ctx.db
+        .query("parentThreads")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+        .collect()
+    )
+      .filter(
+        (thread) =>
+          threadFlavor(thread) === "general" && thread.institutionId === institutionId,
+      )
+      .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+    for (const thread of candidates) {
+      const named = (await participantRows(ctx, thread._id)).filter(
+        (row) => row.side === "staff",
+      );
+      if (named.length === 1 && named[0].parentUserId === teacher!._id) {
+        threadId = thread._id;
+        break;
+      }
+    }
+    if (!threadId) {
+      threadId = await createThread(ctx, {
+        flavor: "general",
+        parentUserIds: [scholar._id],
+        scholarId: scholar._id,
+        institutionId,
+        teacherId: teacher!._id,
         now,
       });
-      // Adults this message newly NAMES (a teacher introducing a mentor) hear
-      // about it the way they hear about a scholar's message — the batched
-      // email — or a part-time mentor would never know until the kid replies.
-      // A reused thread has exactly this named set already, so only a fresh
-      // thread names anyone new; the sender never emails themselves.
-      if (!existing) {
-        const newlyNamed = named.filter((userId) => userId !== ctx.user._id);
-        if (newlyNamed.length > 0) {
-          await queueMentorEmails(
-            ctx,
-            (await ctx.db.get(threadId))!,
-            scholar,
-            messageId,
-            now,
-            newlyNamed,
-          );
+      await ensureThreadParticipants(ctx, threadId, [teacher!._id], "staff");
+    }
+    await postScholarThreadMessage(ctx, {
+      thread: (await ctx.db.get(threadId))!,
+      scholar,
+      authorType: "scholar",
+      authorUserId: scholar._id,
+      body,
+      now,
+    });
+    return { threadId };
+  },
+});
+
+/**
+ * Operator undo for `startMentorThreadsForCaller`: take an adult OFF mentor
+ * threads they were named on by accident. The Messages screen can add people
+ * to a mentor thread but never remove them.
+ *
+ * Why it exists (Nov 2026): an operator opened the Seals' threads with an
+ * outside mentor as the admin who asked. The caller is always named, so the
+ * admin was on every thread and got an email for every scholar message meant
+ * for the mentor.
+ *
+ * Touches only mentor threads that name BOTH `userId` and `alongsideUserId`
+ * on the staff side, so the alongside adult always remains. Per thread:
+ *   - deletes `userId`'s staff participant row. Staff still reach the thread
+ *     by rule (teachers at the school, platform admins), so nobody loses
+ *     access; the scholar's header stops naming them, and scholar messages
+ *     stop emailing them.
+ *   - marks their unclaimed queued mentor emails `skipped` (the batch claim
+ *     does not re-check who is named). A claimed batch may already be out,
+ *     so it is reported, never touched.
+ *   - with `deleteOpeningMessageIfBody`, deletes the thread's FIRST message
+ *     and its delivery rows, only when `userId` wrote it as staff, its body
+ *     is exactly that text, it has no attachments, and a later staff message
+ *     stands. That last rule keeps `lastMessageAt` and the scholar's unread
+ *     stamp (`lastToParentAt`) on a message that still exists. A delete, not
+ *     a withdraw: withdrawing leaves a "Message withdrawn" tombstone under
+ *     the same name, which is the thing being removed.
+ *
+ * Idempotent (a second run matches nothing); dry run by default.
+ */
+export const unnameStaffFromMentorThreads = internalMutation({
+  args: {
+    userId: v.id("users"),
+    alongsideUserId: v.id("users"),
+    deleteOpeningMessageIfBody: v.optional(v.string()),
+    dryRun: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const dryRun = args.dryRun ?? true;
+    if (args.userId === args.alongsideUserId) {
+      throw new Error("userId and alongsideUserId are the same person");
+    }
+    const user = await ctx.db.get(args.userId);
+    const alongside = await ctx.db.get(args.alongsideUserId);
+    if (!user || !alongside) throw new Error("User not found");
+    const who = userDisplayName(user, "Staff");
+    const plan: string[] = [];
+    const threads: {
+      threadId: Id<"parentThreads">;
+      scholar: string;
+      openingMessage: "deleted" | "kept" | "not requested";
+      skippedQueuedEmails: number;
+      inFlightEmails: number;
+    }[] = [];
+
+    const ownRows = (
+      await ctx.db
+        .query("parentThreadParticipants")
+        .withIndex("by_parent", (q) => q.eq("parentUserId", user._id))
+        .collect()
+    ).filter((row) => row.side === "staff");
+    for (const threadId of [...new Set(ownRows.map((row) => row.threadId))]) {
+      const thread = await ctx.db.get(threadId);
+      if (!thread || threadFlavor(thread) !== "general") continue;
+      const staffIds = (await participantRows(ctx, threadId))
+        .filter((row) => row.side === "staff")
+        .map((row) => row.parentUserId);
+      if (!staffIds.includes(alongside._id)) continue;
+
+      const scholar = await scholarForThread(ctx, thread);
+      const label = `${userDisplayName(scholar, "Scholar")} (${threadId})`;
+      const messages = await threadMessages(ctx, threadId);
+
+      let openingMessage: "deleted" | "kept" | "not requested" = "not requested";
+      let opener: ScholarMessage | null = null;
+      if (args.deleteOpeningMessageIfBody !== undefined) {
+        const first = messages[0];
+        const attachments = first
+          ? await ctx.db
+              .query("parentMessageAttachments")
+              .withIndex("by_message", (q) => q.eq("messageId", first._id))
+              .collect()
+          : [];
+        const laterStaffMessage = messages
+          .slice(1)
+          .some((m) => m.authorType === "teacher" && !isRetractedMessage(m));
+        const reason = !first
+          ? "thread has no messages"
+          : first.authorUserId !== user._id || first.authorType !== "teacher"
+            ? "first message is someone else's"
+            : first.body !== args.deleteOpeningMessageIfBody
+              ? "first message's text differs"
+              : attachments.length > 0
+                ? "first message has attachments"
+                : !laterStaffMessage
+                  ? "no later staff message"
+                  : null;
+        if (reason) {
+          openingMessage = "kept";
+          plan.push(`${label}: keep the opening message (${reason})`);
+        } else {
+          openingMessage = "deleted";
+          opener = first;
+          plan.push(`${label}: delete the opening message ${first._id}`);
         }
       }
-      threadIds.push(threadId);
+
+      // Their email rows that have not gone out yet.
+      const toSkip: Id<"messageDeliveries">[] = [];
+      let inFlightEmails = 0;
+      for (const message of messages) {
+        if (message._id === opener?._id) continue; // deleted with its rows below
+        for (const delivery of await ctx.db
+          .query("messageDeliveries")
+          .withIndex("by_message", (q) => q.eq("messageId", message._id))
+          .collect()) {
+          if (
+            delivery.parentUserId !== user._id ||
+            delivery.channel !== "email" ||
+            delivery.status !== "queued"
+          ) {
+            continue;
+          }
+          if (delivery.providerId?.startsWith(BATCH_TAG)) inFlightEmails++;
+          else toSkip.push(delivery._id);
+        }
+      }
+      if (toSkip.length > 0) {
+        plan.push(`${label}: skip ${toSkip.length} unsent email(s) to ${who}`);
+      }
+      if (inFlightEmails > 0) {
+        plan.push(`${label}: ${inFlightEmails} email(s) to ${who} already claimed, left alone`);
+      }
+      plan.push(`${label}: take ${who} off (${userDisplayName(alongside, "Staff")} stays)`);
+
+      if (!dryRun) {
+        for (const deliveryId of toSkip) {
+          await ctx.db.patch(deliveryId, {
+            status: "skipped",
+            error: "Removed from this conversation",
+          });
+        }
+        if (opener) {
+          for (const delivery of await ctx.db
+            .query("messageDeliveries")
+            .withIndex("by_message", (q) => q.eq("messageId", opener._id))
+            .collect()) {
+            await ctx.db.delete(delivery._id);
+          }
+          await ctx.db.delete(opener._id);
+        }
+        for (const row of ownRows) {
+          if (row.threadId === threadId) await ctx.db.delete(row._id);
+        }
+      }
+      threads.push({
+        threadId,
+        scholar: label,
+        openingMessage,
+        skippedQueuedEmails: toSkip.length,
+        inFlightEmails,
+      });
     }
-    return { threadIds };
+    return { dryRun, threadCount: threads.length, threads, plan };
   },
 });
 
@@ -2203,7 +2724,7 @@ async function startWorkshopThreadAs(
     threadId = await ensureWorkshopThreadForSuggestion(ctx, card, now);
   } else {
     threadId = await createThread(ctx, {
-      kind: "workshop",
+      flavor: "workshop",
       parentUserIds: [scholar._id],
       scholarId: scholar._id,
       institutionId,
@@ -2226,6 +2747,663 @@ async function startWorkshopThreadAs(
     now,
   });
   return { threadId: thread._id, messageId, scholar, institutionId, body, sentAt: now };
+}
+
+// ── About threads (one per Quest, one per wonder) ───────────────────────
+
+/**
+ * Is `about` this scholar's OWN Quest or wonder, at their school? A wonder is
+ * one of the scholar's seeds. A Quest is a unit `isQuestUnitForScholar` says is
+ * theirs (they wrote it, a seed offered it to them, or they started it outside
+ * an assignment), and, unless they wrote it, a unit of their own school.
+ */
+async function aboutBelongsToScholar(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+  institutionId: Id<"institutions">,
+  about: ThreadAbout,
+): Promise<boolean> {
+  if (about.type === "wonder") {
+    const seed = await ctx.db.get(about.seedId);
+    return !!seed && seed.scholarId === scholar._id;
+  }
+  const unit = await ctx.db.get(about.unitId);
+  if (!unit || !(await isQuestUnitForScholar(ctx, scholar._id, unit._id))) {
+    return false;
+  }
+  // A unit stamped with another school stays there, even one the scholar
+  // wrote before moving: checked here because the helper below waves a
+  // scholar's own unit through before it looks at the stamp.
+  if (unit.institutionId !== undefined && unit.institutionId !== institutionId) {
+    return false;
+  }
+  try {
+    await requireUnitInLearnerInstitution(ctx, scholar._id, institutionId, unit);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The school the scholar is actually enrolled at, when it is live, else null.
+ * Never the primary-school fallback the other kinds use
+ * (`aboutThreadInstitutionId`), so nothing opens for an unenrolled scholar.
+ */
+async function liveAboutInstitutionId(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+): Promise<Id<"institutions"> | null> {
+  const institutionId = await aboutThreadInstitutionId(ctx, scholar);
+  if (!institutionId) return null;
+  const institution = await ctx.db.get(institutionId);
+  return institution && institution.disabledAt === undefined ? institutionId : null;
+}
+
+/**
+ * The scholar's ONE thread about this Quest or wonder at their current
+ * school, created when missing. Returns null, writing nothing, when the
+ * scholar has no live school or `about` isn't theirs. A thread left at a
+ * school the scholar has moved from stays there as history, and a fresh one
+ * opens here (the workshop rule). Callers authorize the CALLER first; this
+ * only guarantees the thread is the scholar's own and about their own thing.
+ */
+export async function ensureAboutThread(
+  ctx: MutationCtx,
+  scholar: Doc<"users">,
+  about: ThreadAbout,
+  now: number,
+): Promise<Doc<"parentThreads"> | null> {
+  if (scholar.role !== ROLES.SCHOLAR) return null;
+  const institutionId = await liveAboutInstitutionId(ctx, scholar);
+  if (!institutionId) return null;
+  if (!(await aboutBelongsToScholar(ctx, scholar, institutionId, about))) {
+    return null;
+  }
+  const existing = (
+    await ctx.db
+      .query("parentThreads")
+      .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+      .collect()
+  )
+    .filter(
+      (thread) =>
+        threadFlavor(thread) === "about" &&
+        thread.institutionId === institutionId &&
+        sameAbout(thread.about, about),
+    )
+    .sort((a, b) => a._creationTime - b._creationTime)[0];
+  if (existing) return existing;
+  const threadId = await createThread(ctx, {
+    flavor: "about",
+    about,
+    parentUserIds: [scholar._id],
+    scholarId: scholar._id,
+    institutionId,
+    now,
+  });
+  return await ctx.db.get(threadId);
+}
+
+/**
+ * Open (or create) the thread about one of a scholar's Quests or wonders, for
+ * the scholar themselves or a teacher at their school. Anyone else, and a
+ * Quest or wonder that isn't the scholar's, gets the same "not found".
+ */
+export const openAboutThreadForScholar = authedMutation({
+  args: { scholarId: v.id("users"), about: threadAboutValidator },
+  handler: async (ctx, args): Promise<{ threadId: Id<"parentThreads"> }> => {
+    const notFound = () => new Error("Conversation not found");
+    const scholar = await ctx.db.get(args.scholarId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR) throw notFound();
+    if (ctx.user.role === ROLES.SCHOLAR) {
+      if (ctx.user._id !== scholar._id) throw notFound();
+    } else if (!(await staffCanReachScholar(ctx, ctx.user, scholar, "about")).ok) {
+      throw notFound();
+    }
+    const thread = await ensureAboutThread(ctx, scholar, args.about, Date.now());
+    // The one access rule decides, as for every other thread.
+    const access = thread ? await scholarThreadAccess(ctx, ctx.user, thread) : null;
+    if (!thread || !access || access.readOnly) throw notFound();
+    return { threadId: thread._id };
+  },
+});
+
+/** How many of an about thread's newest messages `wonderReplyForScholar`
+ *  reads looking for the latest staff one: a bound on the read, well past a
+ *  real exchange under one wonder. */
+const WONDER_REPLY_MESSAGES_READ = 25;
+
+/** A teacher has written to the scholar about one of their wonders. */
+export type WonderReply = {
+  /** The latest staff author's display name (`users.name`, never a login
+   *  username or email); null when they have none, so the client words it. */
+  teacherName: string | null;
+  /** The scholar's `about` thread for this wonder, one they can open here
+   *  (`listThreads` with kind "about", `getThread`). */
+  threadId: Id<"parentThreads">;
+};
+
+/**
+ * The latest staff message in `thread` (by when it was sent, among the newest
+ * WONDER_REPLY_MESSAGES_READ) that isn't retracted and whose author is on the
+ * Rabbithole team of `institutionId`, as the reply a scholar's row links to.
+ * The scholar's own messages never count. Callers check first that the
+ * scholar may open the thread.
+ */
+async function latestTeamReply(
+  ctx: Ctx,
+  thread: Doc<"parentThreads">,
+  institutionId: Id<"institutions">,
+  /** Staff messages that aren't replies (a Quest's answer line, its badge
+   *  line), unless their teacher has since edited one into a reply. */
+  notReply?: Id<"parentMessages"> | readonly (Id<"parentMessages"> | undefined)[],
+): Promise<WonderReply | null> {
+  const notReplyIds = new Set<Id<"parentMessages">>(
+    (Array.isArray(notReply) ? notReply : [notReply]).flatMap((id) =>
+      id ? [id] : [],
+    ),
+  );
+  const recent = await ctx.db
+    .query("parentMessages")
+    .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
+    .order("desc")
+    .take(WONDER_REPLY_MESSAGES_READ);
+  const staff = recent
+    .filter(
+      (message) =>
+        message.authorType === "teacher" &&
+        !isRetractedMessage(message) &&
+        (!notReplyIds.has(message._id) || message.editedAt !== undefined),
+    )
+    .sort((a, b) => messageSentAt(b) - messageSentAt(a));
+  for (const message of staff) {
+    const authorId = message.authorUserId;
+    if (!authorId) continue;
+    const author = await ctx.db.get(authorId);
+    if (!author || !(await isTeamForInstitution(ctx, author, institutionId))) {
+      continue;
+    }
+    return { teacherName: author.name?.trim() || null, threadId: thread._id };
+  }
+  return null;
+}
+
+/**
+ * Has a teacher written to the scholar about this wonder (TRA-683, the
+ * "replied" link on a wonder row; wonders.ts)? Reads the scholar's `about`
+ * threads for this one seed through one index (`by_scholar_about_seed`),
+ * never all of their threads. A thread counts only when the scholar can open
+ * it now (scholarThreadAccess: their own thread at their current, live
+ * school; one left at a school they moved from is the teachers' history, not
+ * theirs). In it, the latest staff message (by when it was sent, among the
+ * newest WONDER_REPLY_MESSAGES_READ) that isn't retracted and whose author is
+ * on the Rabbithole team of the thread's school (isTeamForInstitution). The
+ * scholar's own messages never count. Null when there is no such message.
+ */
+export async function wonderReplyForScholar(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+  seedId: Id<"seeds">,
+): Promise<WonderReply | null> {
+  const threads = await ctx.db
+    .query("parentThreads")
+    .withIndex("by_scholar_about_seed", (q) =>
+      q.eq("scholarId", scholar._id).eq("about.seedId", seedId),
+    )
+    .take(5);
+  for (const thread of threads) {
+    if (threadFlavor(thread) !== "about" || thread.about?.type !== "wonder") continue;
+    const access = await scholarThreadAccess(ctx, scholar, thread);
+    if (!access || access.viewer !== "scholar" || access.readOnly) continue;
+    const reply = await latestTeamReply(ctx, thread, access.institutionId);
+    if (reply) return reply;
+  }
+  return null;
+}
+
+/**
+ * What the Slack copy of a message in an `about` thread (aboutSlackCopy.ts)
+ * needs to know, read here because only this module reads the message tables.
+ * Not ok unless the message is live and is the thread's own scholar's, or one
+ * staff wrote in the app (not typed in Slack, which is there already), and not
+ * a Quest proposal's opening message (the proposal's own Slack post already
+ * carries those words).
+ */
+export async function scholarMessageForSlackCopy(
+  ctx: Ctx,
+  messageId: Id<"parentMessages">,
+): Promise<
+  | {
+      ok: true;
+      scholarId: Id<"users">;
+      institutionId: Id<"institutions"> | undefined;
+      about: ThreadAbout;
+      body: string;
+      attachment: "picture" | "file" | null;
+      /** The staff author, or null when the scholar wrote it. */
+      staffAuthorId: Id<"users"> | null;
+      staffWriterIds: Id<"users">[];
+    }
+  | { ok: false; reason: string }
+> {
+  const message = await ctx.db.get(messageId);
+  if (!message) return { ok: false, reason: "no such message" };
+  if (!message.authorUserId) return { ok: false, reason: "no author" };
+  const fromScholar = message.authorType === "scholar";
+  if (!fromScholar && message.authorType !== "teacher") {
+    return { ok: false, reason: "not a scholar's or staff message" };
+  }
+  if (!fromScholar && message.source === "slack") {
+    return { ok: false, reason: "typed in Slack" };
+  }
+  if (message.retractedAt !== undefined) return { ok: false, reason: "retracted" };
+  const thread = await ctx.db.get(message.threadId);
+  if (!thread || threadFlavor(thread) !== "about" || !thread.about || !thread.scholarId) {
+    return { ok: false, reason: "not a Quest or wonder conversation" };
+  }
+  if (fromScholar && thread.scholarId !== message.authorUserId) {
+    return { ok: false, reason: "not the thread's own scholar" };
+  }
+  if (fromScholar && thread.about.type === "quest") {
+    const unit = await ctx.db.get(thread.about.unitId);
+    if (unit?.questApproval?.proposalMessageId === message._id) {
+      return { ok: false, reason: "the proposal itself" };
+    }
+  }
+  const files = (
+    await ctx.db
+      .query("parentMessageAttachments")
+      .withIndex("by_message", (q) => q.eq("messageId", messageId))
+      .collect()
+  ).filter((file) => file.retractedAt === undefined);
+  return {
+    ok: true,
+    scholarId: thread.scholarId,
+    institutionId: thread.institutionId,
+    about: thread.about,
+    body: message.body,
+    attachment:
+      files.length === 0
+        ? null
+        : files.some((file) => file.mimeType.startsWith("image/"))
+          ? "picture"
+          : "file",
+    staffAuthorId: fromScholar ? null : message.authorUserId,
+    staffWriterIds: await threadStaffWriterIds(ctx, thread),
+  };
+}
+
+/**
+ * What the staff-channel copy of a scholar ↔ teacher message
+ * (scholarMessageSlack.ts) needs, read here because only this module reads the
+ * message tables. Null unless it is a live message from either side of a
+ * `mentor` thread whose scholar still belongs to it, not one typed in Slack.
+ * `opensSlackThread` says whether the conversation has no root in
+ * `channelId` yet; `staffWriterIds` are the opener and every staff author.
+ */
+export async function mentorMessageForSlackCopy(
+  ctx: Ctx,
+  messageId: Id<"parentMessages">,
+  channelId: string,
+): Promise<{
+  thread: Doc<"parentThreads">;
+  scholar: Doc<"users">;
+  authorType: "scholar" | "teacher";
+  authorUserId: Id<"users"> | undefined;
+  body: string;
+  attachmentCount: number;
+  staffWriterIds: Id<"users">[];
+  opensSlackThread: boolean;
+} | null> {
+  const message = await ctx.db.get(messageId);
+  if (
+    !message ||
+    isRetractedMessage(message) ||
+    message.source === "slack" ||
+    (message.authorType !== "scholar" && message.authorType !== "teacher")
+  ) {
+    return null;
+  }
+  const thread = await ctx.db.get(message.threadId);
+  if (!thread || threadFlavor(thread) !== "general") return null;
+  const scholar = await scholarForThread(ctx, thread);
+  if (!scholar) return null;
+  const roots = await ctx.db
+    .query("parentSlackThreads")
+    .withIndex("by_parent_thread", (q) => q.eq("parentThreadId", thread._id))
+    .collect();
+  const attachments = await ctx.db
+    .query("parentMessageAttachments")
+    .withIndex("by_message", (q) => q.eq("messageId", messageId))
+    .collect();
+  return {
+    thread,
+    scholar,
+    authorType: message.authorType,
+    authorUserId: message.authorUserId,
+    body: message.body,
+    attachmentCount: attachments.filter((file) => file.retractedAt === undefined).length,
+    staffWriterIds: await threadStaffWriterIds(ctx, thread),
+    opensSlackThread: !roots.some((root) => root.channelId === channelId),
+  };
+}
+
+/**
+ * A scholar's Quest thread for the proposal screens (questProposals.ts
+ * `forSelf`): the thread id the row's "View" opens, and a teacher's latest
+ * reply in it, worded the way a wonder row's is (the same `latestTeamReply`).
+ * `threadId` is the one stored on the proposal; it counts only while it is
+ * this scholar's own `about` thread for this Quest and they can open it now
+ * (their current, live school). Otherwise both are null. The line a
+ * teacher's answer put in the thread (`answerMessageId`) is not a reply
+ * unless they edited it.
+ */
+export async function questThreadForScholar(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+  unitId: Id<"units">,
+  threadId: Id<"parentThreads"> | undefined,
+  answerMessageId?: Id<"parentMessages"> | readonly (Id<"parentMessages"> | undefined)[],
+): Promise<{ threadId: Id<"parentThreads"> | null; reply: WonderReply | null }> {
+  const none = { threadId: null, reply: null };
+  const thread = threadId ? await ctx.db.get(threadId) : null;
+  if (
+    !thread ||
+    threadFlavor(thread) !== "about" ||
+    thread.scholarId !== scholar._id ||
+    thread.about?.type !== "quest" ||
+    thread.about.unitId !== unitId
+  ) {
+    return none;
+  }
+  const access = await scholarThreadAccess(ctx, scholar, thread);
+  if (!access || access.viewer !== "scholar" || access.readOnly) return none;
+  return {
+    threadId: thread._id,
+    reply: await latestTeamReply(ctx, thread, access.institutionId, answerMessageId),
+  };
+}
+
+/**
+ * Map a Slack root to one scholar's Quest or wonder, so a teacher's plain
+ * reply under it lands in that thread (`recordAboutSlackReply`). The poster
+ * of the root (the day's note, a proposal) calls this once per line it
+ * carries. Idempotent. Refuses, writing nothing, a root that already belongs
+ * to a family or Workshop conversation or to an aide chat (its replies have
+ * their own route, and a thread is never both a chat with the bot and a line
+ * to a child), a scholar without a live school they are enrolled at, and a
+ * Quest or wonder that isn't the scholar's. The thread itself is created only
+ * when a teacher replies.
+ */
+export const recordAboutSlackThread = internalMutation({
+  args: {
+    channelId: v.string(),
+    threadTs: v.string(),
+    scholarId: v.id("users"),
+    about: threadAboutValidator,
+  },
+  handler: async (ctx, args): Promise<Id<"aboutSlackThreads"> | null> => {
+    const channelId = args.channelId.trim();
+    const threadTs = args.threadTs.trim();
+    if (!channelId || !threadTs) return null;
+    const scholar = await ctx.db.get(args.scholarId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR) return null;
+    const institutionId = await liveAboutInstitutionId(ctx, scholar);
+    if (
+      !institutionId ||
+      !(await aboutBelongsToScholar(ctx, scholar, institutionId, args.about))
+    ) {
+      return null;
+    }
+    const otherRoute = await ctx.db
+      .query("parentSlackThreads")
+      .withIndex("by_channel_thread", (q) =>
+        q.eq("channelId", channelId).eq("threadTs", threadTs),
+      )
+      .first();
+    if (otherRoute) return null;
+    const aideChat = await ctx.db
+      .query("slackThreads")
+      .withIndex("by_channel_thread", (q) =>
+        q.eq("channelId", channelId).eq("threadTs", threadTs),
+      )
+      .first();
+    if (aideChat) return null;
+    const rows = await ctx.db
+      .query("aboutSlackThreads")
+      .withIndex("by_channel_thread", (q) =>
+        q.eq("channelId", channelId).eq("threadTs", threadTs),
+      )
+      .collect();
+    const same = rows.find(
+      (row) => row.scholarId === scholar._id && sameAbout(row.about, args.about),
+    );
+    if (same) return same._id;
+    return await ctx.db.insert("aboutSlackThreads", {
+      channelId,
+      threadTs,
+      scholarId: scholar._id,
+      about: args.about,
+      postedAt: Date.now(),
+    });
+  },
+});
+
+/**
+ * The Slack roots mapped to one scholar's Quest or wonder, oldest first: where
+ * a post about it sits, so the poster can find its own message again (a Quest
+ * proposal's post is updated when it is edited or answered).
+ */
+export async function aboutSlackRootsFor(
+  ctx: Ctx,
+  scholarId: Id<"users">,
+  about: ThreadAbout,
+): Promise<{ channelId: string; threadTs: string }[]> {
+  const rows = await ctx.db
+    .query("aboutSlackThreads")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .collect();
+  return rows
+    .filter((row) => sameAbout(row.about, about))
+    .sort((a, b) => a.postedAt - b.postedAt)
+    .map((row) => ({ channelId: row.channelId, threadTs: row.threadTs }));
+}
+
+/**
+ * The conversations a Slack root maps to, with each scholar's name, plus the
+ * names of every scholar at those scholars' schools: the relay delivers a
+ * reply only when the one scholar it addresses (if it addresses any) is
+ * mapped here, so "Remy, …" under Quinn's line never reaches Quinn. Empty `targets` = not
+ * an about root. Names stay in the relay (they pick a target and are never
+ * posted anywhere).
+ */
+export const aboutSlackTargets = internalQuery({
+  args: { channelId: v.string(), threadTs: v.string() },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    targets: {
+      mappingId: Id<"aboutSlackThreads">;
+      scholarId: Id<"users">;
+      scholarName: string;
+    }[];
+    roster: { scholarId: Id<"users">; scholarName: string }[];
+  }> => {
+    const rows = await ctx.db
+      .query("aboutSlackThreads")
+      .withIndex("by_channel_thread", (q) =>
+        q.eq("channelId", args.channelId).eq("threadTs", args.threadTs),
+      )
+      .collect();
+    const targets: {
+      mappingId: Id<"aboutSlackThreads">;
+      scholarId: Id<"users">;
+      scholarName: string;
+    }[] = [];
+    const schools = new Set<Id<"institutions">>();
+    for (const row of rows) {
+      const scholar = await ctx.db.get(row.scholarId);
+      targets.push({
+        mappingId: row._id,
+        scholarId: row.scholarId,
+        scholarName: scholar?.name?.trim() ?? "",
+      });
+      const school = scholar ? await aboutThreadInstitutionId(ctx, scholar) : null;
+      if (school) schools.add(school);
+    }
+    const roster = new Map<Id<"users">, string>();
+    for (const school of schools) {
+      for (const scholarId of await scholarIdsForInstitution(ctx, school)) {
+        const scholar = await ctx.db.get(scholarId);
+        if (scholar?.role === ROLES.SCHOLAR && scholar.name?.trim()) {
+          roster.set(scholar._id, scholar.name.trim());
+        }
+      }
+    }
+    return {
+      targets,
+      roster: [...roster].map(([scholarId, scholarName]) => ({ scholarId, scholarName })),
+    };
+  },
+});
+
+/** How a teacher's Slack reply under an about root came out (slackBot ACKs it). */
+export type AboutSlackReplyResult =
+  | { status: "recorded"; scholarFirstName: string }
+  | { status: "empty" }
+  | { status: "too_long" }
+  /** Not on the teaching team at the scholar's school. */
+  | { status: "forbidden" }
+  /** The mapping, the scholar, or their Quest/wonder is gone or not theirs. */
+  | { status: "not_found" };
+
+/**
+ * Record a teacher's plain Slack reply, under a root `recordAboutSlackThread`
+ * mapped, as a staff message in the scholar's thread about that Quest or
+ * wonder, creating the thread on the first reply. The author must be on the
+ * teaching team at the scholar's school (or a platform admin): the same rule
+ * as reading the thread. Every refusal writes nothing. Slack retries are
+ * deduped by event id upstream (slackBot.claimEvent), as for Workshop replies.
+ */
+export const recordAboutSlackReply = internalMutation({
+  args: {
+    mappingId: v.id("aboutSlackThreads"),
+    // The root the reply came from. Must match the mapping's.
+    channelId: v.string(),
+    threadTs: v.string(),
+    authorId: v.id("users"),
+    body: v.string(),
+    // The reply's Slack uploads, already downloaded into storage by the
+    // handler. Internal-only, so these ids never came from a client.
+    attachments: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id("_storage"),
+          fileName: v.string(),
+          mimeType: v.string(),
+        }),
+      ),
+    ),
+  },
+  handler: async (ctx, args): Promise<AboutSlackReplyResult> => {
+    const body = args.body.trim();
+    const files: ServerStoredAttachment[] = args.attachments ?? [];
+    if (!body && files.length === 0) return { status: "empty" };
+    if (body.length > MAX_BODY) return { status: "too_long" };
+
+    const author = await ctx.db.get(args.authorId);
+    if (!author || author.role === ROLES.SCHOLAR) return { status: "forbidden" };
+
+    const mapping = await ctx.db.get(args.mappingId);
+    if (
+      !mapping ||
+      mapping.channelId !== args.channelId ||
+      mapping.threadTs !== args.threadTs
+    ) {
+      return { status: "not_found" };
+    }
+    const scholar = await ctx.db.get(mapping.scholarId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR) return { status: "not_found" };
+    // Checked BEFORE the thread is created, so a stranger's reply never even
+    // opens one.
+    if (!(await staffCanReachScholar(ctx, author, scholar, "about")).ok) {
+      return { status: "forbidden" };
+    }
+    const now = Date.now();
+    const thread = await ensureAboutThread(ctx, scholar, mapping.about, now);
+    if (!thread) return { status: "not_found" };
+    const access = await scholarThreadAccess(ctx, author, thread);
+    if (!access || access.viewer !== "staff" || access.readOnly) {
+      return { status: "forbidden" };
+    }
+    const attachments = await stageServerStoredAttachments(ctx, author._id, files);
+    await postScholarThreadMessage(ctx, {
+      thread,
+      scholar: access.scholar,
+      authorType: "teacher",
+      authorUserId: author._id,
+      body,
+      attachments,
+      source: "slack",
+      now,
+    });
+    return {
+      status: "recorded",
+      scholarFirstName: scholar.name?.trim().split(/\s+/)[0] || "the scholar",
+    };
+  },
+});
+
+/**
+ * A staff member's plain reply under a scholar ↔ teacher conversation's root in
+ * the scholar-messages channel (scholarMessageSlack.ts), posted as their
+ * message to the scholar. Reached through parentMessages.ingestInboundSlackReply,
+ * which owns the Slack side for every Messages conversation (mapping, dedupe,
+ * speaker lookup, body limits); this owns the scholar side, under the same rule
+ * as an in-app `reply`: the replier must be able to write in the thread.
+ */
+export async function recordScholarSlackReply(
+  ctx: MutationCtx,
+  args: {
+    thread: Doc<"parentThreads">;
+    author: Doc<"users">;
+    body: string;
+    providerMessageId?: string;
+    now: number;
+  },
+): Promise<
+  | { ok: true; messageId: Id<"parentMessages"> }
+  | { ok: false; reason: "unlinked" | "read-only" }
+> {
+  if (args.author.role === ROLES.SCHOLAR) return { ok: false, reason: "unlinked" };
+  // What the authed wrappers check for an in-app reply (assertCanWrite,
+  // requireUser → assertInstitutionActive), which an internal path skips.
+  if (args.author.readOnly) return { ok: false, reason: "unlinked" };
+  if ((await evaluateInstitutionSuspension(ctx, args.author)).blocked) {
+    return { ok: false, reason: "unlinked" };
+  }
+  const access = await scholarThreadAccess(ctx, args.author, args.thread);
+  if (
+    !access ||
+    access.viewer !== "staff" ||
+    access.institutionId !== args.thread.institutionId
+  ) {
+    return { ok: false, reason: "unlinked" };
+  }
+  if (access.readOnly) return { ok: false, reason: "read-only" };
+  const messageId = await postScholarThreadMessage(ctx, {
+    thread: args.thread,
+    scholar: access.scholar,
+    authorType: "teacher",
+    authorUserId: args.author._id,
+    body: args.body,
+    source: "slack",
+    providerMessageId: args.providerMessageId,
+    now: args.now,
+  });
+  return { ok: true, messageId };
 }
 
 /** Post in an existing thread (scholar in own thread, or permitted staff). */
@@ -2281,6 +3459,25 @@ async function ownMessageInScholarThread(
     throw new Error("Message not found");
   }
   const { thread } = await requireThreadAccess(ctx, message.threadId);
+  if (thread.about?.type === "quest") {
+    // A Quest proposal's opening message is the proposal itself: it changes
+    // only with the proposal (questProposals.editProposal), so what a teacher
+    // reads is always what they approve.
+    const unit = await ctx.db.get(thread.about.unitId);
+    if (unit?.questApproval?.proposalMessageId === message._id) {
+      throw new Error(
+        "This message is your Quest proposal: change the proposal itself instead",
+      );
+    }
+    // The same for the words they gave when they said it was ready to show
+    // (questShowing.markReadyToShow): the badge reads them from the Quest,
+    // so this line changes only through that call.
+    if (unit?.questApproval?.inMyWordsMessageId === message._id) {
+      throw new Error(
+        "This message is your ready-to-show note: send it again from the Quest instead",
+      );
+    }
+  }
   if (thread.suggestionId) {
     // Pin the legacy opening's identity now, before this edit could change
     // the text the fallback matches on.

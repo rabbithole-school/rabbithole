@@ -44,6 +44,7 @@ import { QRCodeSVG } from "qrcode.react";
 import Link from "next/link";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { FieldSelect } from "@/components/ui/FieldSelect";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -263,19 +264,15 @@ export function SchoolSpaceAdmin() {
           <Spinner color="violet.500" />
         </Flex>
       ) : visibleSpaces.length === 0 && unassigned.length === 0 ? (
-        <Box
-          border="1px dashed"
-          borderColor="gray.300"
-          borderRadius="lg"
-          p={8}
-          textAlign="center"
-          color="charcoal.400"
-        >
-          <Text mb={3}>No rooms yet.</Text>
-          <Button size="sm" onClick={() => setRoomDialog({ mode: "create" })}>
-            <Plus /> Add the first room
-          </Button>
-        </Box>
+        <EmptyState
+          outline
+          title="No rooms yet"
+          cta={{
+            label: "Add the first room",
+            icon: <Plus size={14} />,
+            onClick: () => setRoomDialog({ mode: "create" }),
+          }}
+        />
       ) : (
         <VStack align="stretch" gap={4}>
           {visibleSpaces.map((room) => (

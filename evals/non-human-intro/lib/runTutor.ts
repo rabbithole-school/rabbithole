@@ -49,7 +49,6 @@ export const tutorEffort: AideEffort | undefined =
 /** Assemble the real system prompt with only the params this eval varies. */
 export function assemblePrompt(c: TutorCase): string {
   return buildSystemPrompt(
-    null, // teacherWhisper
     c.readingLevel, // readingLevel
     c.scholarName, // scholarName
     null, null, null, // unit / persona / perspective

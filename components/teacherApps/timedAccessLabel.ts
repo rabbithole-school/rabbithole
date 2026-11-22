@@ -57,7 +57,7 @@ export function fullWindow(w: AppTimedWindow): string {
 }
 
 export const SOURCE_LINE: Record<AppTimedWindow["source"], string> = {
-  push: "Pushed with Make focus",
+  push: "Given from the Apps page",
   schedule: "From a scheduled block",
   grant: "Open until a set time",
 };

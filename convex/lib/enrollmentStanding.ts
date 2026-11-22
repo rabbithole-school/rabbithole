@@ -22,3 +22,22 @@ export function isProgramGuest(
 export function isEnrolledScholar(scholar: ScholarStanding): boolean {
   return !isProgramGuest(scholar);
 }
+
+/**
+ * A withdrawn scholar has left the school (`users.withdrawnOn` is set). Their
+ * history stays; they just stop counting as a current scholar. Separate from
+ * enrollment standing on purpose: an enrolled scholar or a program guest can
+ * each withdraw, and undoing a withdrawal restores whichever they were.
+ */
+export function isWithdrawn(
+  scholar: { withdrawnOn?: string } | null | undefined,
+): boolean {
+  return scholar?.withdrawnOn !== undefined;
+}
+
+/** The plain "is this child at the school now" test for current-scholar lists. */
+export function isCurrentScholar(
+  scholar: { withdrawnOn?: string } | null | undefined,
+): boolean {
+  return !!scholar && !isWithdrawn(scholar);
+}

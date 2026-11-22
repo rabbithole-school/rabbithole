@@ -1,7 +1,7 @@
 // The "channel" abstraction: everything about an aide reply that differs
-// by WHERE it's delivered. Today two channels — the in-app Rabbithole UI
-// ("web") and Slack ("slack") — built to grow (parent SMS / WhatsApp /
-// email are on the roadmap). Two things vary by channel:
+// by WHERE it's delivered: the in-app Rabbithole UI ("web"), Slack
+// ("slack"), and a parent's text messages ("sms", plain text from the
+// school's number via Twilio). Two things vary by channel:
 //
 //   1. Link form. The web UI resolves a bare path against its own origin,
 //      so its links stay RELATIVE ("/teacher/…"). Slack — and any external
@@ -14,7 +14,9 @@
 //   2. Markdown support. The web UI renders GitHub-flavored markdown
 //      (react-markdown + remark-gfm), TABLES included. Slack's
 //      markdown_text renders bold / italics / links / lists but NOT
-//      tables — a `| col | col |` table comes out as raw pipes.
+//      tables — a `| col | col |` table comes out as raw pipes. SMS renders
+//      NO markdown at all: a phone shows `**`, `[label](url)` and pipes
+//      literally, and only autolinks a bare absolute URL.
 //      `formattingGuidance(channel)` tells the model what its channel can
 //      actually render.
 //
@@ -27,7 +29,7 @@ import {
   instantForLocalMinutes,
 } from "../../shared/institutionDay";
 
-export type AideChannel = "web" | "slack";
+export type AideChannel = "web" | "slack" | "sms";
 
 /** Absolute app origin for this deployment (per-deployment via SITE_URL). */
 export const siteUrl = appBaseUrl;
@@ -101,7 +103,7 @@ export function wallClockUtcIdentity(nowMs: number, timeZone: string): string {
 /**
  * Prefix for deep links on a channel. "" = relative (the web UI, which
  * resolves a bare path against its own origin); siteUrl() = absolute
- * (Slack + future external channels). Pass the result to the aide tools as
+ * (Slack, SMS, and any other external channel). Pass the result to the aide tools as
  * `linkBase`.
  */
 export function linkBaseFor(channel: AideChannel): string {
@@ -161,6 +163,12 @@ export function sessionPath(sessionId: string, scholarId?: string): string {
     : `/scholar/${sessionId}`;
 }
 
+/** The parent portal as a scholar's family sees it, previewed by staff
+ *  (app/parent/[[...tab]]/page.tsx reads `remote`). */
+export function parentViewPath(scholarId: string): string {
+  return `/parent?remote=${scholarId}`;
+}
+
 /** The Curriculum column-view, optionally focused on a lesson / activity. */
 export function unitPath(
   unitId: string,
@@ -201,6 +209,15 @@ export function assignmentPath(assignmentId: string): string {
 // Static per channel (byte-stable), so it lives in the prompt-cache prefix.
 
 export function formattingGuidance(channel: AideChannel): string {
+  if (channel === "sms") {
+    return [
+      "## Links & formatting (SMS)",
+      "",
+      "Your reply goes out as a plain text message to a phone. Nothing is rendered: no markdown, no bold or italics, no bullets with `-` or `*`, no headers, and never a `| col | col |` table. Write plain sentences.",
+      "Keep the whole reply to about 300 characters — two or three short sentences. A long reply is split into several texts and is cut off at the end, so answer the question first and leave detail for the portal.",
+      "Links: a `url` field from a tool is already absolute (https://…). Paste it as a bare URL on its own, with a space or line break after it and no punctuation touching it; the phone makes it tappable. Never wrap a URL in `[text](url)` — the brackets arrive literally. Include at most one link per reply.",
+    ].join("\n");
+  }
   if (channel === "slack") {
     return [
       "## Links & formatting (Slack)",
@@ -213,6 +230,8 @@ export function formattingGuidance(channel: AideChannel): string {
       "- Assignment: `list_assignments` / `get_assignment` → `url`.",
       "",
       "Slack CANNOT render markdown tables — never use a `| col | col |` table; the pipes come out as raw text. Give tabular data as short labeled lines or a bullet list instead (e.g. \"Scholar A — 3 days ago\"). Bold (`**bold**`), italics, bullets, and `[text](url)` links all render; keep formatting light, no big section headers.",
+      "",
+      "To @-mention a person in this thread, write @ followed by their full name exactly as the thread shows it (e.g. @Lehua Torres), outside backticks. It becomes a real Slack mention that notifies them, so use it when you need that person to see or answer something, not for everyone you name. Only people in the thread can be mentioned this way.",
     ].join("\n");
   }
   // web: the in-app UI renders relative links and GFM tables.

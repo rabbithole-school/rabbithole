@@ -186,10 +186,25 @@ describe("numeric answer tolerance table", () => {
 describe("numeric tolerance boundaries", () => {
   test.each([
     ["decimal comma", "0,33", "decimal"],
-    ["bare thousands separator", "1,000", "integer"],
+    ["decimal comma with three digits", "0,330", "decimal"],
+    ["misgrouped thousands separator", "1,39", "integer"],
+    ["misgrouped thousands separator", "13,95", "integer"],
+    // A decimal does not demonstrate the fraction representation. The graders
+    // read it separately and answer it with the "write it as a fraction"
+    // nudge (see algebraAnswerForms2.test.ts), never as fully correct.
     ["decimal submitted for a fraction", "0.5", "fraction"],
   ] as const)("rejects %s", (_label, input, type) => {
     expect(parseAnswer(input, type)).toBeNull();
+  });
+
+  // Flipped (Algebra 2 grader pass): a well-formed thousands separator is the
+  // same number.
+  test.each([
+    ["1,000", "integer", { type: "integer", value: 1000 }],
+    ["1,395", "integer", { type: "integer", value: 1395 }],
+    ["-12,000.5", "decimal", { type: "decimal", value: -12000.5 }],
+  ] as const)("accepts %s as %s", (input, type, expected) => {
+    expect(parseAnswer(input, type)).toEqual(expected);
   });
 
   test("numeric tolerance does not loosen expression grammar", () => {

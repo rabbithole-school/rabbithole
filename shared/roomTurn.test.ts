@@ -164,7 +164,7 @@ describe("copy builders (the ONE source of scholar-facing strings)", () => {
   });
 
   test("focusMismatchBannerText never tells the scholar to stop or wait", () => {
-    // The hard focus gate is gone (shared/focusLock.ts): a scholar reading
+    // The hard focus gate is gone (shared/classFocus.ts): a scholar reading
     // this banner can still send in the session they're in, so the copy must
     // not imply a read-only wall in any phase.
     for (const phase of ["withClass", "windingDown", "turned"] as const) {

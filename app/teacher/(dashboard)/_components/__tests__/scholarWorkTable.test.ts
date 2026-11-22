@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // we drive it as a plain function and walk the element tree it returns. Hooks
 // are mocked to stay deterministic; child components (Avatar, RoundsRowContent,
 // HomeworkContent, NextLink) are never invoked, only inspected as element nodes
-// — so the grade math (real `gradeForAgeFromDob`) and the row structure are
+// — so the grade math (real `gradeEquivalentFromTag`) and the row structure are
 // what we assert.
 
 const state: unknown[] = [];
@@ -84,15 +84,15 @@ function textOf(node: unknown): string {
   return "";
 }
 
-function scholar(id: string, name: string, dateOfBirth: string | null): Scholar {
+function scholar(id: string, name: string, gradeLevel: string | null): Scholar {
   return {
     id,
     name,
-    dateOfBirth,
+    dateOfBirth: null,
+    gradeLevel,
     enrollmentStanding: "enrolled",
     readingLevel: null,
     sessionCount: 0,
-    messageCount: 0,
     lastActive: 0,
     statusSummary: null,
     pulseScore: null,
@@ -104,9 +104,9 @@ function scholar(id: string, name: string, dateOfBirth: string | null): Scholar 
   };
 }
 
-const OLDER = scholar("s1", "Older", "2015-01-01"); // higher grade
-const YOUNGER = scholar("s2", "Younger", "2019-01-01"); // lower grade
-const NODOB = scholar("s3", "No DOB", null);
+const HIGHER = scholar("s1", "Higher", "4"); // higher grade
+const LOWER = scholar("s2", "Lower", "K"); // lower grade
+const NOGRADE = scholar("s3", "No grade", null);
 
 const href = (id: string) => `/x/${id}`;
 const onToggleSort = vi.fn();
@@ -115,7 +115,7 @@ function render(props: Partial<Parameters<typeof ScholarWorkTable>[0]> = {}) {
   stateIndex = 0;
   return ScholarWorkTable({
     tab: "homework",
-    scholars: [OLDER, YOUNGER, NODOB],
+    scholars: [HIGHER, LOWER, NOGRADE],
     sortDir: "asc",
     onToggleSort,
     hrefForScholar: href,
@@ -126,18 +126,18 @@ function render(props: Partial<Parameters<typeof ScholarWorkTable>[0]> = {}) {
 }
 
 /** Row anchors (ScholarWorkRow elements), in document (render) order. Each
- *  carries `href`, `gradeForAge`, `isRounds`, and its content `children`. */
+ *  carries `href`, `gradeEquivalent`, `isRounds`, and its content `children`. */
 function rowEls(tree: unknown): El[] {
   return findAll(
     tree,
-    (el) => "gradeForAge" in el.props && "href" in el.props && "isRounds" in el.props,
+    (el) => "gradeEquivalent" in el.props && "href" in el.props && "isRounds" in el.props,
   );
 }
 function rowHrefs(tree: unknown): string[] {
   return rowEls(tree).map((el) => el.props.href as string);
 }
 function rowGrades(tree: unknown): (number | null)[] {
-  return rowEls(tree).map((el) => el.props.gradeForAge as number | null);
+  return rowEls(tree).map((el) => el.props.gradeEquivalent as number | null);
 }
 
 beforeEach(() => {
@@ -147,14 +147,14 @@ beforeEach(() => {
 });
 
 describe("ScholarWorkTable grade column + sort", () => {
-  it("sorts ascending grade-for-age (youngest first), null DOB last", () => {
+  it("sorts ascending grade equivalent (lowest grade first), no grade last", () => {
     const tree = render({ sortDir: "asc" });
     expect(rowHrefs(tree)).toEqual(["/x/s2", "/x/s1", "/x/s3"]);
-    // The null-DOB row's grade is null (renders the em-dash cell).
+    // The no-grade row's grade is null (renders the em-dash cell).
     expect(rowGrades(tree).at(-1)).toBeNull();
   });
 
-  it("sorts descending (oldest first), null DOB still last", () => {
+  it("sorts descending (highest grade first), no grade still last", () => {
     const tree = render({ sortDir: "desc" });
     expect(rowHrefs(tree)).toEqual(["/x/s1", "/x/s2", "/x/s3"]);
     expect(rowGrades(tree).at(-1)).toBeNull();
@@ -232,7 +232,7 @@ describe("ScholarWorkTable — Rounds tab", () => {
     expect(rows).toHaveLength(3);
     expect(rows.every((r) => r.props.isRounds === true)).toBe(true);
     // The two in-period scholars get RoundsRowContent as their content cell; the
-    // DOB-less s3 (absent from the week payload) gets the muted "not in this
+    // Grade-less s3 (absent from the week payload) gets the muted "not in this
     // reporting period" cell.
     const contentTypes = rows.map((r) => (r.props.children as El | null)?.type);
     expect(contentTypes.filter((t) => t === RoundsRowContent)).toHaveLength(2);
@@ -256,7 +256,7 @@ describe("ScholarWorkRow — column structure (long names don't wander the conte
       scholarId: "s1",
       name,
       image: null,
-      gradeForAge: 2.4,
+      gradeEquivalent: 2.4,
       href: "/x/s1",
       isRounds: true,
       ariaLabel: `${name} — open`,

@@ -179,7 +179,27 @@ or Apache-2.0 (math.js 15.2.0).
 
 
 --------------------------------------------------------------------------
-6. Everything else
+6. Native math typesetting — SwiftMath (MIT) and Fira Math (OFL-1.1)
+--------------------------------------------------------------------------
+
+The iPad app typesets math with SwiftMath, whose Swift source is vendored in
+`native/modules/expo-math-view/ios/vendor/SwiftMath/` with its MIT licence
+(`LICENSE`, Copyright (c) 2013 MathChat).
+
+That module bundles one font, Fira Math 0.3.4, in `mathFonts.bundle/`:
+
+  Copyright (C) 2018--2020 by Xiangdong Zeng.
+  Licensed under the SIL Open Font License, Version 1.1 —
+  https://openfontlicense.org
+  Source: https://github.com/firamath/firamath
+  The full licence text ships beside the font as `FiraMath-OFL.txt`.
+
+The font may be bundled and redistributed with software but may not be sold
+on its own, and any copy must carry the copyright line and licence above.
+
+
+--------------------------------------------------------------------------
+7. Everything else
 --------------------------------------------------------------------------
 
 The remaining dependencies are permissively licensed (MIT, ISC, BSD-2-Clause,

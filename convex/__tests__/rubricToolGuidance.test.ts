@@ -18,19 +18,19 @@ const NO_FORCED_WAIT_MARKER =
   'Do NOT say "next time," "when you come back," or otherwise imply they must wait';
 
 function build(opts: {
-  standaloneDeliverableContext?: Parameters<typeof buildSystemPrompt>[19];
-  advanceRubricContext?: Parameters<typeof buildSystemPrompt>[30];
+  standaloneDeliverableContext?: Parameters<typeof buildSystemPrompt>[18];
+  advanceRubricContext?: Parameters<typeof buildSystemPrompt>[29];
 }) {
   return buildSystemPrompt(
-    null, null, "Kai", // 1-3
-    null, null, null, null, null, null, null, null, // 4-11
-    null, null, null, // 12-14
-    null, null, null, null, null, // 15-19
-    opts.standaloneDeliverableContext ?? null, // 20
-    null, // 21 currentVerdictsContext
-    false, false, null, // 22-24
-    null, null, null, null, null, null, // 25-30
-    opts.advanceRubricContext ?? null, // 31
+    null, "Kai", // 1-2
+    null, null, null, null, null, null, null, null, // 3-10
+    null, null, null, // 11-13
+    null, null, null, null, null, // 14-18
+    opts.standaloneDeliverableContext ?? null, // 19
+    null, // 20 currentVerdictsContext
+    false, false, null, // 21-23
+    null, null, null, null, null, null, // 24-29
+    opts.advanceRubricContext ?? null, // 30
   );
 }
 
@@ -93,10 +93,10 @@ describe("rubric-tool guidance — unanswered probes (Moment F)", () => {
     );
     expect(prompt).toContain(NO_FORCED_WAIT_MARKER);
     expect(prompt).toContain(
-      "The app writes the scholar-facing completion close",
+      "The app adds a short note after your reply saying the activity is done",
     );
     expect(prompt).toContain(
-      "must not add a preface, assessment, recap, praise, question, task, or second closing",
+      "Do not write your own closing, completion announcement, recap, praise, assessment, question, or new task",
     );
   });
 

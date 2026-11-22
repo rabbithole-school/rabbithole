@@ -135,7 +135,7 @@ describe("domain retention (matrix freshness tiers, spec §9-10.2)", () => {
     );
     expect(source).toContain("domainRetentionByScholar");
     expect(source).toMatch(
-      /joinReadout\(\s*`\$\{scholar\.name\} · \$\{visual\.readout\}`,\s*retentionHoverClause\(retention, retentionNow\),\s*\)/,
+      /joinReadout\(\s*`\$\{scholar\.name\} · \$\{visual\.readout\}`,\s*highestClause,\s*retentionHoverClause\(retention, retentionNow\),\s*\)/,
     );
     // Still exactly the pre-existing 5 cellReadoutWithMarks call sites — the
     // retention clause rides INSIDE the existing base string, not a 6th call.

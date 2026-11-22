@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { chromium } from "playwright";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import * as appStateBridgeRuntime from "../appStateBridge.mjs";
 
 // The end-to-end bridge test drives a real headless Chromium (launch → navigate
@@ -26,6 +26,12 @@ const runBrowserE2e =
 // Generous ceiling for a cold headless launch when it does run.
 const BROWSER_E2E_TIMEOUT_MS = 60_000;
 import {
+  APP_ACTIVITY_PING_MS,
+  APP_ACTIVITY_TYPE,
+  RABBITHOLE_APP_ACTIVITY_SDK,
+  RABBITHOLE_APP_ACTIVITY_SDK_BYTES,
+  APP_SNAPSHOT_NODE_FILTER_SOURCE,
+  APP_SNAPSHOT_PAINT_SOURCE,
   APP_STATE_PROTOCOL,
   APP_STATE_PROTOCOL_VERSION,
   APP_STATE_MAX_WRITE_LATENCY_MS,
@@ -35,7 +41,9 @@ import {
   injectAppStateSdk,
   appStateFlushDelay,
   matchesAppStateBridgeNonce,
+  APP_STATE_DEFAULTS_KEY,
   createAppStateHostMessage,
+  withoutAppStateDefaults,
   mergeAppStateDoc,
   parseAppStateBridgeMessage,
   appStateHostInjectionScript,
@@ -87,13 +95,10 @@ declare global {
       stored: Record<string, unknown>;
       logs: Array<{ message: string }>;
       writes: number;
-      sharedStored: Record<string, unknown>;
-      sharedWrites: number;
       ignored: number;
       nonceDrops: number;
       lastOrigin: string | null;
       activeNonce: string | null;
-      pushShared: (patch: Record<string, unknown>) => void;
       actions: Array<{ name: string; description: string }>;
       actionResult: {
         requestId: string;
@@ -119,6 +124,10 @@ declare global {
       hash?: string;
       error?: string;
     } | null;
+    __hudSnapshotResult: {
+      dataUrl?: string;
+      error?: string;
+    } | null;
   }
 }
 
@@ -130,8 +139,273 @@ describe("app-state bridge protocol", () => {
     expect(() => new Function(RABBITHOLE_APP_SNAPSHOT_SDK)).not.toThrow();
   });
 
+  test("iframe forwards only unmodified ⌘/ and consumes repeat without typing slash", () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const listeners = new Map<string, (event: Record<string, unknown>) => void>();
+    const window: Record<string, unknown> = {};
+    new Function(
+      "window", "crypto", "navigator", "addEventListener", "console", "parent",
+      RABBITHOLE_APP_STATE_SDK,
+    )(
+      window,
+      { getRandomValues: (a: Uint32Array) => a.fill(7) },
+      {},
+      (type: string, handler: (event: Record<string, unknown>) => void) =>
+        listeners.set(type, handler),
+      { log() {}, warn() {}, error() {} },
+      { postMessage: (message: Record<string, unknown>) => sent.push(message) },
+    );
+    const keydown = listeners.get("keydown")!;
+    const press = (overrides: Record<string, unknown> = {}) => {
+      const event = {
+        key: "/", metaKey: true, ctrlKey: false, altKey: false,
+        shiftKey: false, repeat: false, preventDefault: vi.fn(),
+        ...overrides,
+      };
+      keydown(event);
+      return event;
+    };
+
+    expect(press().preventDefault).toHaveBeenCalledOnce();
+    expect(sent.filter((m) => m.type === "composeKey")).toEqual([
+      expect.objectContaining({
+        protocol: APP_STATE_PROTOCOL,
+        version: APP_STATE_PROTOCOL_VERSION,
+        nonce: sent.find((m) => m.type === "ready")?.nonce,
+      }),
+    ]);
+    expect(press({ repeat: true }).preventDefault).toHaveBeenCalledOnce();
+    for (const modifiers of [
+      { metaKey: false }, { ctrlKey: true }, { altKey: true },
+      { shiftKey: true }, { key: "?" },
+    ]) {
+      expect(press(modifiers).preventDefault).not.toHaveBeenCalled();
+    }
+    expect(sent.filter((m) => m.type === "composeKey")).toHaveLength(1);
+  });
+
+  test("native SDK leaves the hardware shortcut to the native host", () => {
+    const listeners: string[] = [];
+    new Function(
+      "window", "crypto", "navigator", "addEventListener", "console",
+      RABBITHOLE_APP_STATE_SDK,
+    )(
+      { ReactNativeWebView: { postMessage() {} } },
+      { getRandomValues: (a: Uint32Array) => a.fill(7) },
+      {},
+      (type: string) => listeners.push(type),
+      { log() {}, warn() {}, error() {} },
+    );
+    expect(listeners).not.toContain("keydown");
+  });
+
+  // Runs the real SDK on its native (ReactNativeWebView) path, the way a
+  // rebuilt app starts: its code publishes defaults at boot, before the host
+  // can answer `ready` with the scholar's saved doc.
+  function bootSdk() {
+    const sent: Array<Record<string, unknown>> = [];
+    const window: Record<string, unknown> = {
+      ReactNativeWebView: {
+        postMessage: (raw: string) => sent.push(JSON.parse(raw)),
+      },
+    };
+    new Function(
+      "window",
+      "crypto",
+      "navigator",
+      "addEventListener",
+      "console",
+      RABBITHOLE_APP_STATE_SDK,
+    )(
+      window,
+      { getRandomValues: (a: Uint32Array) => a.fill(7) },
+      {},
+      () => {},
+      { log() {}, warn() {}, error() {} },
+    );
+    const rabbithole = window.rabbithole as {
+      getState(): Record<string, unknown>;
+      setState(patch: Record<string, unknown>): void;
+      subscribe(cb: (s: Record<string, unknown>) => void): void;
+    };
+    const receive = window.__rabbitholeReceive as (m: unknown) => void;
+    const nonce = sent.find((m) => m.type === "ready")?.nonce as string;
+    const seen: Array<Record<string, unknown>> = [];
+    rabbithole.subscribe((state) => seen.push(state));
+    return {
+      rabbithole,
+      seen,
+      init: (doc: Record<string, unknown>) =>
+        receive(createAppStateHostMessage("init", doc, nonce)),
+      update: (doc: Record<string, unknown>) =>
+        receive(createAppStateHostMessage("update", doc, nonce)),
+      changes: () => sent.filter((m) => m.type === "change"),
+    };
+  }
+
+  test("init keeps a value the scholar set when the default did not change", () => {
+    const app = bootSdk();
+    app.rabbithole.setState({ coalPerTrip: 5, newDial: 3 });
+    app.init({
+      coalPerTrip: 20,
+      [APP_STATE_DEFAULTS_KEY]: { coalPerTrip: 5 },
+    });
+
+    expect(app.rabbithole.getState()).toEqual({ coalPerTrip: 20, newDial: 3 });
+    expect(app.seen).toEqual([{ coalPerTrip: 20, newDial: 3 }]);
+    // Only the new key and this version's defaults are written back.
+    expect(app.changes()).toEqual([
+      expect.objectContaining({
+        patch: {
+          newDial: 3,
+          [APP_STATE_DEFAULTS_KEY]: { coalPerTrip: 5, newDial: 3 },
+        },
+      }),
+    ]);
+
+    // After init, the scholar's change applies and the recorded default stays.
+    app.rabbithole.setState({ coalPerTrip: 7 });
+    expect(app.rabbithole.getState().coalPerTrip).toBe(7);
+    expect(app.changes().at(-1)).toEqual(
+      expect.objectContaining({ patch: { coalPerTrip: 7 } }),
+    );
+  });
+
+  test("init takes a default the designer changed over the saved value", () => {
+    const app = bootSdk();
+    app.rabbithole.setState({ elevSpeed: 5, elevWait: 3 });
+    app.init({
+      elevSpeed: 2,
+      elevWait: 3,
+      [APP_STATE_DEFAULTS_KEY]: { elevSpeed: 2, elevWait: 3 },
+    });
+
+    expect(app.rabbithole.getState()).toEqual({ elevSpeed: 5, elevWait: 3 });
+    expect(app.changes()).toEqual([
+      expect.objectContaining({
+        patch: {
+          elevSpeed: 5,
+          [APP_STATE_DEFAULTS_KEY]: { elevSpeed: 5, elevWait: 3 },
+        },
+      }),
+    ]);
+  });
+
+  test("a changed default wins even when the scholar changed the saved value", () => {
+    const app = bootSdk();
+    app.rabbithole.setState({ coalPerTrip: 10 });
+    app.init({
+      coalPerTrip: 12,
+      [APP_STATE_DEFAULTS_KEY]: { coalPerTrip: 5 },
+    });
+
+    expect(app.rabbithole.getState()).toEqual({ coalPerTrip: 10 });
+    expect(app.changes()).toEqual([
+      expect.objectContaining({
+        patch: {
+          coalPerTrip: 10,
+          [APP_STATE_DEFAULTS_KEY]: { coalPerTrip: 10 },
+        },
+      }),
+    ]);
+  });
+
+  test("init ignores object key order when comparing recorded defaults", () => {
+    const app = bootSdk();
+    const defaults = { z: 0, a: { y: 1, b: null } };
+    const saved = { a: { b: null, y: 12 }, z: 3 };
+    app.rabbithole.setState({ controls: defaults });
+    app.init({
+      controls: saved,
+      [APP_STATE_DEFAULTS_KEY]: {
+        controls: { a: { b: null, y: 1 }, z: 0 },
+      },
+    });
+
+    expect(app.rabbithole.getState()).toEqual({ controls: saved });
+    expect(app.changes()).toEqual([
+      expect.objectContaining({
+        patch: { [APP_STATE_DEFAULTS_KEY]: { controls: defaults } },
+      }),
+    ]);
+  });
+
+  test("init keeps saved arrays when object defaults only differ in key order", () => {
+    const app = bootSdk();
+    const defaults = [{ z: 0, a: 1 }, { z: 2, a: 3 }];
+    const saved = [{ a: 12, z: 0 }, { a: 3, z: 20 }];
+    app.rabbithole.setState({ points: defaults });
+    app.init({
+      points: saved,
+      [APP_STATE_DEFAULTS_KEY]: {
+        points: [{ a: 1, z: 0 }, { a: 3, z: 2 }],
+      },
+    });
+
+    expect(app.rabbithole.getState()).toEqual({ points: saved });
+    expect(app.changes()).toEqual([
+      expect.objectContaining({
+        patch: { [APP_STATE_DEFAULTS_KEY]: { points: defaults } },
+      }),
+    ]);
+  });
+
+  test("init treats reordered array defaults as a designer change", () => {
+    const app = bootSdk();
+    const defaults = [{ z: 2, a: 3 }, { z: 0, a: 1 }];
+    app.rabbithole.setState({ points: defaults });
+    app.init({
+      points: [{ a: 12, z: 0 }, { a: 3, z: 20 }],
+      [APP_STATE_DEFAULTS_KEY]: {
+        points: [{ a: 1, z: 0 }, { a: 3, z: 2 }],
+      },
+    });
+
+    expect(app.rabbithole.getState()).toEqual({ points: defaults });
+    expect(app.changes()).toEqual([
+      expect.objectContaining({
+        patch: {
+          points: defaults,
+          [APP_STATE_DEFAULTS_KEY]: { points: defaults },
+        },
+      }),
+    ]);
+  });
+
+  test("init keeps saved values in a doc saved before defaults were recorded", () => {
+    const app = bootSdk();
+    app.rabbithole.setState({ coalPerTrip: 5, phase: "paused" });
+    app.init({ coalPerTrip: 20, phase: "running" });
+
+    expect(app.rabbithole.getState()).toEqual({
+      coalPerTrip: 20,
+      phase: "running",
+    });
+    expect(app.changes()).toEqual([
+      expect.objectContaining({
+        patch: {
+          [APP_STATE_DEFAULTS_KEY]: { coalPerTrip: 5, phase: "paused" },
+        },
+      }),
+    ]);
+  });
+
+  test("the app never sees the recorded defaults", () => {
+    const app = bootSdk();
+    app.init({ score: 1, [APP_STATE_DEFAULTS_KEY]: { score: 0 } });
+    app.update({ score: 2, [APP_STATE_DEFAULTS_KEY]: { score: 0 } });
+    expect(app.seen).toEqual([{ score: 1 }, { score: 2 }]);
+    expect(app.rabbithole.getState()).toEqual({ score: 2 });
+    // Nothing was written at boot, so nothing is written back.
+    expect(app.changes()).toEqual([]);
+    expect(
+      withoutAppStateDefaults({ score: 2, [APP_STATE_DEFAULTS_KEY]: {} }),
+    ).toEqual({ score: 2 });
+  });
+
   test("is versioned, bounded, and injected before app scripts", () => {
-    expect(RABBITHOLE_APP_STATE_SDK_BYTES).toBeLessThanOrEqual(6_144);
+    // Include the in-frame ⌘/ forwarding while keeping the SDK compact.
+    expect(RABBITHOLE_APP_STATE_SDK_BYTES).toBeLessThanOrEqual(6_800);
     expect(RABBITHOLE_APP_SNAPSHOT_SDK_BYTES).toBeLessThanOrEqual(4_096);
     expect(Buffer.byteLength(DOM_TO_IMAGE_SOURCE)).toBe(9_278);
     expect(
@@ -150,8 +424,9 @@ describe("app-state bridge protocol", () => {
       "c.width*c.height>=w*h*.6",
     );
     expect(RABBITHOLE_APP_SNAPSHOT_SDK).toContain(
-      'n.tagName!=="CANVAS"&&n.tagName!=="SCRIPT"',
+      `filter:${APP_SNAPSHOT_NODE_FILTER_SOURCE}`,
     );
+    expect(RABBITHOLE_APP_SNAPSHOT_SDK).toContain(APP_SNAPSHOT_PAINT_SOURCE);
     expect(RABBITHOLE_APP_SNAPSHOT_SDK).toContain("||800");
     expect(RABBITHOLE_APP_SNAPSHOT_SDK).toContain("||600");
     expect(
@@ -184,6 +459,14 @@ describe("app-state bridge protocol", () => {
       context: { selectedPlanet: "Mars" },
     });
     expect(RABBITHOLE_APP_STATE_SDK).toContain("askTutor:T");
+    expect(
+      parseAppStateBridgeMessage({
+        protocol: APP_STATE_PROTOCOL,
+        version: APP_STATE_PROTOCOL_VERSION,
+        nonce: "test-nonce",
+        type: "composeKey",
+      }),
+    ).toEqual({ type: "composeKey", nonce: "test-nonce" });
     expect(
       parseAppStateBridgeMessage({
         protocol: APP_STATE_PROTOCOL,
@@ -250,34 +533,6 @@ describe("app-state bridge protocol", () => {
       parseAppStateBridgeMessage({
         protocol: APP_STATE_PROTOCOL,
         version: APP_STATE_PROTOCOL_VERSION,
-        nonce: "test-nonce",
-        type: "sharedSelect",
-        roomId: "room-1",
-      }),
-    ).toEqual({
-      type: "sharedSelect",
-      nonce: "test-nonce",
-      roomId: "room-1",
-    });
-    expect(
-      parseAppStateBridgeMessage({
-        protocol: APP_STATE_PROTOCOL,
-        version: APP_STATE_PROTOCOL_VERSION,
-        nonce: "test-nonce",
-        type: "sharedChange",
-        roomId: "room-1",
-        patch: { turn: 2 },
-      }),
-    ).toEqual({
-      type: "sharedChange",
-      nonce: "test-nonce",
-      roomId: "room-1",
-      patch: { turn: 2 },
-    });
-    expect(
-      parseAppStateBridgeMessage({
-        protocol: APP_STATE_PROTOCOL,
-        version: APP_STATE_PROTOCOL_VERSION,
         nonce: "snapshot-nonce",
         type: APP_SNAPSHOT_READY_TYPE,
       }),
@@ -337,21 +592,12 @@ describe("app-state bridge protocol", () => {
     });
     expect(
       createAppStateHostMessage("init", { local: true }, "test-nonce", {
-        roomId: "room-1",
-        doc: { turn: 1 },
-        presence: [{ name: "A" }],
-      }, {
         id: "request-1",
         name: "reset",
         requestedAt: 1,
       }),
     ).toMatchObject({
       doc: { local: true },
-      shared: {
-        roomId: "room-1",
-        doc: { turn: 1 },
-        presence: [{ name: "A" }],
-      },
       actionRequest: {
         id: "request-1",
         name: "reset",
@@ -623,19 +869,19 @@ describe("app-state bridge protocol", () => {
 
     const line = { id: "line-1", line: "Hello!", mood: "happy" };
     expect(
-      createAppStateHostMessage("update", {}, "test-nonce", undefined, undefined, {
+      createAppStateHostMessage("update", {}, "test-nonce", undefined, {
         ...line,
         requestedAt: 5,
       } as never),
     ).toMatchObject({ characterLine: line });
     expect(
-      createAppStateHostMessage("update", {}, "test-nonce", undefined, undefined, {
+      createAppStateHostMessage("update", {}, "test-nonce", undefined, {
         ...line,
         requestedAt: 5,
       } as never).characterLine,
     ).not.toHaveProperty("requestedAt");
     expect(
-      createAppStateHostMessage("init", {}, "test-nonce", undefined, undefined, {
+      createAppStateHostMessage("init", {}, "test-nonce", undefined, {
         id: "",
         line: "x",
       }),
@@ -644,7 +890,7 @@ describe("app-state bridge protocol", () => {
       createAppStateHostMessage("init", {}, "test-nonce"),
     ).not.toHaveProperty("characterLine");
     expect(
-      appStateHostInjectionScript("update", {}, "test-nonce", undefined, undefined, line),
+      appStateHostInjectionScript("update", {}, "test-nonce", undefined, line),
     ).toContain('"characterLine":{"id":"line-1"');
     expect(RABBITHOLE_APP_STATE_SDK).toContain("character:{say:");
     expect(RABBITHOLE_APP_STATE_SDK).toContain(`},${APP_REQUEST_TIMEOUT_MS})`);
@@ -665,6 +911,9 @@ describe("app-state bridge protocol", () => {
   </head>
   <body>
     <div id="target">Snapshot ready</div>
+    <!-- Filled in later by the app. With no src it has nothing to download,
+         which used to fail the whole snapshot. -->
+    <img id="later" alt="A picture the app adds later">
     <script>fetch("/should-not-load").catch(() => {});</script>
   </body>
 </html>`,
@@ -769,19 +1018,146 @@ describe("app-state bridge protocol", () => {
   );
 
   test.runIf(runBrowserE2e)(
+    "keeps what the app layers over a full-screen canvas on top in the snapshot",
+    async () => {
+      // TRA-592: canvases used to be drawn over the rendered page, which hid a
+      // HUD above a full-screen canvas. The blue box must show over the green
+      // scene; a 0x0 canvas must not fail the render.
+      const appHtml = await createAppStateIframeSrcDoc(
+        `<!doctype html>
+<html>
+  <head>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; }
+      #scene { position: absolute; inset: 0; width: 240px; height: 120px; }
+      #hud { position: absolute; left: 20px; top: 20px; width: 80px; height: 40px; background: #1565c0; }
+    </style>
+  </head>
+  <body>
+    <canvas id="scene" width="240" height="120"></canvas>
+    <canvas width="0" height="0"></canvas>
+    <div id="hud"></div>
+    <script>
+      const g = document.getElementById("scene").getContext("2d");
+      g.fillStyle = "#2e9e40";
+      g.fillRect(0, 0, 240, 120);
+    </script>
+  </body>
+</html>`,
+        null,
+      );
+      if (appHtml === null) {
+        throw new Error("Workshop srcdoc was not created");
+      }
+      const serializedAppHtml = JSON.stringify(appHtml).replaceAll(
+        "</script",
+        "<\\/script",
+      );
+      const hostHtml = `<!doctype html>
+<html>
+  <body>
+    <script>
+      const frame = document.createElement("iframe");
+      window.__hudSnapshotResult = null;
+      addEventListener("message", (event) => {
+        if (event.source !== frame.contentWindow) return;
+        const message = event.data;
+        if (
+          message?.protocol !== ${JSON.stringify(APP_STATE_PROTOCOL)} ||
+          message?.version !== ${APP_STATE_PROTOCOL_VERSION}
+        ) {
+          return;
+        }
+        if (message.type === ${JSON.stringify(APP_SNAPSHOT_READY_TYPE)}) {
+          frame.contentWindow.postMessage({
+            protocol: ${JSON.stringify(APP_STATE_PROTOCOL)},
+            version: ${APP_STATE_PROTOCOL_VERSION},
+            nonce: message.nonce,
+            type: ${JSON.stringify(APP_SNAPSHOT_REQUEST_TYPE)},
+            requestId: "hud",
+            maxWidth: 240,
+            width: 240,
+            height: 120
+          }, "*");
+        } else if (message.type === ${JSON.stringify(APP_SNAPSHOT_RESULT_TYPE)}) {
+          window.__hudSnapshotResult = message;
+        }
+      });
+      frame.sandbox = "allow-scripts";
+      frame.style.cssText = "width:240px;height:120px;border:0";
+      frame.srcdoc = ${serializedAppHtml};
+      document.body.append(frame);
+    </script>
+  </body>
+</html>`;
+
+      const server = createServer((_request, response) => {
+        response.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+        });
+        response.end(hostHtml);
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, "127.0.0.1", resolve),
+      );
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Test server did not bind to a TCP port");
+      }
+
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.goto(`http://127.0.0.1:${address.port}`);
+        await page.waitForFunction(() => window.__hudSnapshotResult !== null);
+        const result = await page.evaluate(() => window.__hudSnapshotResult);
+        expect(result?.error).toBeUndefined();
+        const pixels = await page.evaluate(async (dataUrl) => {
+          const image = new Image();
+          await new Promise((resolve) => {
+            image.onload = resolve;
+            image.src = dataUrl;
+          });
+          const canvas = document.createElement("canvas");
+          canvas.width = image.width;
+          canvas.height = image.height;
+          const context = canvas.getContext("2d")!;
+          context.drawImage(image, 0, 0);
+          const at = (x: number, y: number) =>
+            Array.from(context.getImageData(x, y, 1, 1).data.slice(0, 3));
+          return { hud: at(60, 40), scene: at(200, 100) };
+        }, result?.dataUrl ?? "");
+        const near = (actual: number[], expected: number[]) =>
+          actual.every((value, index) => Math.abs(value - expected[index]) <= 30);
+        expect(pixels.hud, "HUD box over the canvas").toSatisfy((rgb: number[]) =>
+          near(rgb, [0x15, 0x65, 0xc0]),
+        );
+        expect(pixels.scene, "canvas scene").toSatisfy((rgb: number[]) =>
+          near(rgb, [0x2e, 0x9e, 0x40]),
+        );
+      } finally {
+        await browser.close();
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    },
+    BROWSER_E2E_TIMEOUT_MS,
+  );
+
+  test.runIf(runBrowserE2e)(
     "buffers init, captures console, nonce-checks, debounces, and rehydrates",
     async () => {
       const appHtml = injectAppStateSdk(`<!doctype html>
 <html>
   <body>
     <button id="counter" data-count="0">0</button>
-    <button id="shared-counter" data-count="0">0</button>
-    <div id="presence"></div>
     <script>
       let count = 0;
       const button = document.querySelector("#counter");
+      // A stand-in renderer: any loadable image works for the paint step.
       window.domtoimage = {
-        toPng(_node, options) {
+        toSvg(_node, options) {
           document.body.dataset.snapshotWidth = String(options.width);
           document.body.dataset.snapshotHeight = String(options.height);
           document.body.dataset.snapshotTransform = options.style.transform;
@@ -808,15 +1184,6 @@ describe("app-state bridge protocol", () => {
         button.textContent = String(count);
         button.dataset.count = String(count);
       });
-      const sharedButton = document.querySelector("#shared-counter");
-      rabbithole.shared.subscribe((state) => {
-        sharedButton.textContent = String(state.count || 0);
-        sharedButton.dataset.count = String(state.count || 0);
-      });
-      rabbithole.shared.subscribePresence((people) => {
-        document.querySelector("#presence").textContent =
-          people.map((person) => person.name).join(",");
-      });
       rabbithole.registerAction(
         "seedScenario",
         "Load a stage with a chosen number of clues.",
@@ -828,11 +1195,6 @@ describe("app-state bridge protocol", () => {
       );
       button.addEventListener("click", () => {
         rabbithole.setState({ count: count + 1 });
-      });
-      sharedButton.addEventListener("click", () => {
-        rabbithole.shared.setState({
-          count: Number(sharedButton.dataset.count || 0) + 1
-        });
       });
     </script>
   </body>
@@ -856,8 +1218,6 @@ describe("app-state bridge protocol", () => {
         stored: { restoredByHost: true },
         logs: [],
         writes: 0,
-        sharedStored: { count: 4 },
-        sharedWrites: 0,
         ignored: 0,
         nonceDrops: 0,
         lastOrigin: null,
@@ -877,10 +1237,6 @@ describe("app-state bridge protocol", () => {
             }
           }, "*");
         },
-        pushShared(patch) {
-          this.sharedStored = { ...this.sharedStored, ...patch };
-          frame.contentWindow.postMessage(hostMessage("update"), "*");
-        },
       };
       let bridgeNonce = null;
       const hostMessage = (type) => ({
@@ -889,11 +1245,6 @@ describe("app-state bridge protocol", () => {
         nonce: bridgeNonce,
         type,
         doc: window.__bridge.stored,
-        shared: {
-          roomId: "room-1",
-          doc: window.__bridge.sharedStored,
-          presence: [{ name: "First" }, { name: "Second" }],
-        },
       });
       const postInit = () => frame.contentWindow.postMessage(hostMessage("init"), "*");
       addEventListener("message", (event) => {
@@ -921,16 +1272,11 @@ describe("app-state bridge protocol", () => {
           postInit();
           return;
         }
+        // Like the real host (useAppStateIframeBridge): the activity script
+        // has its own nonce, so a touch ping is not a forged message.
+        if (message.type === ${JSON.stringify(APP_ACTIVITY_TYPE)}) return;
         if (message.nonce !== bridgeNonce) {
           window.__bridge.nonceDrops += 1;
-          return;
-        }
-        if (message.type === "sharedChange") {
-          window.__bridge.sharedStored = {
-            ...window.__bridge.sharedStored,
-            ...(message.patch || {})
-          };
-          window.__bridge.sharedWrites += 1;
           return;
         }
         if (message.type === "actions") {
@@ -994,10 +1340,7 @@ describe("app-state bridge protocol", () => {
         const page = await browser.newPage();
         await page.goto(`http://127.0.0.1:${address.port}`);
         const counter = () => page.frameLocator("#app").locator("#counter");
-        const sharedCounter = () =>
-          page.frameLocator("#app").locator("#shared-counter");
         await counter().waitFor();
-        await sharedCounter().waitFor();
         await page.waitForFunction(
           () => {
             const bridge = window.__bridge;
@@ -1009,7 +1352,6 @@ describe("app-state bridge protocol", () => {
               bridge.lastOrigin === "null" &&
               bridge.snapshotNonce !== null &&
               bridge.actions.some((action) => action.name === "seedScenario") &&
-              bridge.sharedStored.count === 4 &&
               bridge.ignored > 0
             );
           },
@@ -1095,10 +1437,6 @@ describe("app-state bridge protocol", () => {
         await page.waitForFunction(
           () => window.__bridge.nonceDrops === 2,
         );
-        await page
-          .frameLocator("#app")
-          .locator('#shared-counter[data-count="4"]')
-          .waitFor();
         await page.evaluate(() =>
           window.__bridge.invokeAction("seedScenario", { clues: 5 }),
         );
@@ -1116,21 +1454,6 @@ describe("app-state bridge protocol", () => {
         await page
           .frameLocator("#app")
           .locator('#counter[data-seeded="5"]')
-          .waitFor();
-        await page
-          .frameLocator("#app")
-          .locator("#presence")
-          .filter({ hasText: "First,Second" })
-          .waitFor();
-        await sharedCounter().click();
-        await page.waitForFunction(() => {
-          const bridge = window.__bridge;
-          return bridge.sharedStored.count === 5 && bridge.sharedWrites === 1;
-        });
-        await page.evaluate(() => window.__bridge.pushShared({ count: 8 }));
-        await page
-          .frameLocator("#app")
-          .locator('#shared-counter[data-count="8"]')
           .waitFor();
 
         await counter().click();
@@ -1386,13 +1709,13 @@ describe("app-state bridge protocol", () => {
         // (e) onLine fires once per distinct characterLine id.
         const lineOne = { id: "line-1", line: "Psst, try again", mood: "sly" };
         await postToFrame(
-          createAppStateHostMessage("update", {}, bridgeNonce, undefined, undefined, lineOne),
+          createAppStateHostMessage("update", {}, bridgeNonce, undefined, lineOne),
         );
         await postToFrame(
-          createAppStateHostMessage("update", {}, bridgeNonce, undefined, undefined, lineOne),
+          createAppStateHostMessage("update", {}, bridgeNonce, undefined, lineOne),
         );
         await postToFrame(
-          createAppStateHostMessage("update", {}, bridgeNonce, undefined, undefined, {
+          createAppStateHostMessage("update", {}, bridgeNonce, undefined, {
             id: "line-2",
             line: "Nice!",
           }),
@@ -1400,18 +1723,18 @@ describe("app-state bridge protocol", () => {
         await app.locator("#lines li").nth(1).waitFor();
         // A forged-nonce line is dropped like any other host message.
         await postToFrame(
-          createAppStateHostMessage("update", {}, "forged", undefined, undefined, {
+          createAppStateHostMessage("update", {}, "forged", undefined, {
             id: "line-3",
             line: "Forged",
           }),
         );
         await postToFrame(
-          createAppStateHostMessage("update", {}, bridgeNonce, undefined, undefined, lineOne),
+          createAppStateHostMessage("update", {}, bridgeNonce, undefined, lineOne),
         );
         // Messages deliver in order, so once line-4 renders the two above
         // have already been processed (and dropped).
         await postToFrame(
-          createAppStateHostMessage("update", {}, bridgeNonce, undefined, undefined, {
+          createAppStateHostMessage("update", {}, bridgeNonce, undefined, {
             id: "line-4",
             line: "Last",
             mood: "calm",
@@ -1432,4 +1755,73 @@ describe("app-state bridge protocol", () => {
     },
     BROWSER_E2E_TIMEOUT_MS,
   );
+});
+
+describe("app activity pings", () => {
+  /** Run the activity script against a fake window; returns its listeners
+   *  and what it posted. */
+  function runActivitySdk(native: boolean) {
+    const listeners = new Map<string, (event: { isTrusted: boolean }) => void>();
+    const posted: unknown[] = [];
+    let now = 1_000_000;
+    const fakeWindow = {
+      ReactNativeWebView: native
+        ? { postMessage: (data: string) => posted.push(JSON.parse(data)) }
+        : undefined,
+    };
+    const run = new Function(
+      "window",
+      "parent",
+      "addEventListener",
+      "crypto",
+      "Date",
+      RABBITHOLE_APP_ACTIVITY_SDK,
+    );
+    run(
+      fakeWindow,
+      { postMessage: (message: unknown) => posted.push(message) },
+      (type: string, listener: (event: { isTrusted: boolean }) => void, options: unknown) => {
+        expect(options).toEqual({ capture: true, passive: true });
+        listeners.set(type, listener);
+      },
+      { getRandomValues: (array: Uint32Array) => array.fill(7) },
+      { now: () => now },
+    );
+    return {
+      listeners,
+      posted,
+      advance: (ms: number) => {
+        now += ms;
+      },
+    };
+  }
+
+  test("posts one throttled, trusted-only ping the host parser accepts", () => {
+    for (const native of [false, true]) {
+      const sdk = runActivitySdk(native);
+      expect([...sdk.listeners.keys()].sort()).toEqual(
+        ["keydown", "pointerdown", "touchstart", "wheel"].sort(),
+      );
+      sdk.listeners.get("touchstart")!({ isTrusted: true });
+      sdk.listeners.get("pointerdown")!({ isTrusted: true });
+      // An app's own synthetic event is not a person.
+      sdk.advance(APP_ACTIVITY_PING_MS);
+      sdk.listeners.get("keydown")!({ isTrusted: false });
+      sdk.listeners.get("keydown")!({ isTrusted: true });
+      expect(sdk.posted).toHaveLength(2);
+      expect(parseAppStateBridgeMessage(sdk.posted[0])).toEqual({
+        type: APP_ACTIVITY_TYPE,
+        nonce: "7-7",
+      });
+    }
+  });
+
+  test("is small and injected before app scripts", () => {
+    expect(RABBITHOLE_APP_ACTIVITY_SDK_BYTES).toBeLessThanOrEqual(600);
+    const html = injectAppStateSdk("<!doctype html><script>app()</script>");
+    expect(html.indexOf(RABBITHOLE_APP_ACTIVITY_SDK)).toBeGreaterThan(0);
+    expect(html.indexOf(RABBITHOLE_APP_ACTIVITY_SDK)).toBeLessThan(
+      html.indexOf("app()"),
+    );
+  });
 });

@@ -131,7 +131,7 @@ export interface LinkTopicOpts {
   // For "alerts": the channel's effective role decides what actually posts
   // there — platform-ops never receives safety alerts, so its topic must not
   // claim them (and gets a calm 📊, not the safety siren).
-  alertsRole?: "scoped" | "catchall" | "platform-ops" | "improvement-loops";
+  alertsRole?: "scoped" | "catchall" | "platform-ops" | "improvement-loops" | "claude-dispatch";
   institutionName?: string;
 }
 
@@ -145,6 +145,9 @@ export function linkTopicFor(kind: SlackLinkKind, opts?: LinkTopicOpts): string 
       }
       if (opts?.alertsRole === "improvement-loops") {
         return "🔄 Rabbithole improvement loops · Rounds, Coherence & proposals";
+      }
+      if (opts?.alertsRole === "claude-dispatch") {
+        return "🤖 Rabbithole → Claude · automatic work handed to Claude";
       }
       const inst = (opts?.institutionName ?? "").trim();
       return inst
@@ -168,6 +171,8 @@ export async function makeSlackTools(
     surface: SlackSurface;
     /** The Slack channel the conversation lives in (for channel↔group linking). */
     slackChannelId: string;
+    /** The thread being answered: where a whisper's delivery receipt posts. */
+    slackThreadTs?: string;
     /** Bot token — used to stamp a self-documenting topic on link (best-effort). */
     token: string;
     /** Established from an active institution-scoped school:operations grant. */
@@ -179,6 +184,7 @@ export async function makeSlackTools(
     callerUserId,
     surface,
     slackChannelId,
+    slackThreadTs,
     token,
     hasSchoolOperationsAccess = false,
   } = opts;
@@ -312,6 +318,7 @@ export async function makeSlackTools(
   //   platform-ops — dedicated channel for firm-wide cost/usage reports and
   //                  generic system/error alerts; never receives scholar alerts.
   //   improvement-loops — private channel for generic pointers and redacted proposals.
+  //   claude-dispatch — private channel where automatic work is handed to Claude Tag.
   // Omitting role with an institution_slug → "scoped" (backward compat).
   // Omitting role without an institution_slug → "catchall" (backward compat).
   if (isPlatformAdminRole(role) && surface === "channel") {
@@ -319,11 +326,12 @@ export async function makeSlackTools(
       betaTool({
         name: "link_alerts_channel",
         description:
-          "Link THIS Slack channel as a Rabbithole alert destination. Four roles:\n" +
+          "Link THIS Slack channel as a Rabbithole alert destination. Five roles:\n" +
           "• \"scoped\" (default when institution_slug is given) — receives welfare/safety alerts, Quality Pulse, and Practice Portrait for one institution. Pass institution_slug.\n" +
           "• \"catchall\" (default when no institution_slug) — fallback for institutions without a dedicated scoped channel.\n" +
           "• \"platform-ops\" — receives the firm-wide AI cost/usage report and generic system/error alerts; does NOT receive scholar or institution reports. Only one platform-ops channel at a time.\n" +
           "• \"improvement-loops\" — PRIVATE channel for generic Rounds and Coherence pointers plus human-reviewed proposal threads. Never receives learner records. Only one at a time.\n" +
+          "• \"claude-dispatch\" — PRIVATE channel where Rabbithole hands automatic work (no person in the conversation) to Claude with one top-level @Claude message. Claude must be a member. Never receives learner records. Only one at a time.\n" +
           "PLATFORM ADMIN ONLY. Pass unlink=true to remove the link. Confirm with the requester before linking.",
         inputSchema: {
           type: "object" as const,
@@ -335,20 +343,24 @@ export async function makeSlackTools(
             institution_slug: {
               type: "string" as const,
               description:
-                `Institution slug (e.g. ${institutionSlugExamples}) — required for the "scoped" role. Omit for "catchall", "platform-ops", or "improvement-loops".`,
+                `Institution slug (e.g. ${institutionSlugExamples}) — required for the "scoped" role. Omit for "catchall", "platform-ops", "improvement-loops", or "claude-dispatch".`,
             },
             role: {
               type: "string" as const,
-              enum: ["scoped", "catchall", "platform-ops", "improvement-loops"],
+              enum: ["scoped", "catchall", "platform-ops", "improvement-loops", "claude-dispatch"],
               description:
-                "Channel role. \"improvement-loops\" is the private platform-wide destination for generic Rounds/Coherence pointers and redacted proposal threads (never learner data). Defaults to \"scoped\" when institution_slug is provided, \"catchall\" otherwise.",
+                "Channel role. \"improvement-loops\" is the private platform-wide destination for generic Rounds/Coherence pointers and redacted proposal threads (never learner data). \"claude-dispatch\" is the private channel where automatic work is handed to Claude. Defaults to \"scoped\" when institution_slug is provided, \"catchall\" otherwise.",
             },
           },
           required: [] as const,
         },
         run: async (input) => {
           const isLink = !(input.unlink ?? false);
-          if (isLink && input.role === "improvement-loops") {
+          if (
+            isLink &&
+            (input.role === "improvement-loops" ||
+              input.role === "claude-dispatch")
+          ) {
             const privacy = await privateChannelCheck(token, slackChannelId);
             if (!privacy.ok) {
               return (
@@ -358,7 +370,7 @@ export async function makeSlackTools(
             }
             if (!privacy.isPrivate) {
               return (
-                "I can't link a public channel for improvement loops. Create or " +
+                `I can't link a public channel as ${input.role}. Create or ` +
                 "use a PRIVATE channel, then run this link again."
               );
             }
@@ -370,7 +382,7 @@ export async function makeSlackTools(
               slackChannelId,
               unlink: input.unlink ?? false,
               institutionSlug: input.institution_slug ?? undefined,
-              role: (input.role as "scoped" | "catchall" | "platform-ops" | "improvement-loops" | undefined) ?? undefined,
+              role: (input.role as "scoped" | "catchall" | "platform-ops" | "improvement-loops" | "claude-dispatch" | undefined) ?? undefined,
             },
           );
           if (result.ok) {
@@ -860,5 +872,119 @@ export async function makeSlackTools(
     );
   }
 
+  // The delivered post quotes the AI's reply only where the room is the
+  // alert's own audience or one person: an alert channel or a 1:1 DM.
+  const quoteReplyHere = async (): Promise<boolean> =>
+    surface === "dm" ||
+    (surface === "channel" &&
+      (await ctx.runQuery(internal.alerts.isLinkedAlertChannel, {
+        channelId: slackChannelId,
+      })));
+
+  // ── whisper_to_session — teacher/admins, any surface ──────────────────
+  // A teacher's one-turn note to a scholar's tutor or app builder, the Slack
+  // twin of the remote-mode whisper box. Sent without a confirm turn, like
+  // send_slack_dm: the "queued" reply is the receipt, and an unconfirmed
+  // whisper would look exactly like a sent one.
+  if (isTeacherRole(role)) {
+    tools.push(
+      betaTool({
+        name: "whisper_to_session",
+        description: WHISPER_TO_SESSION_DESCRIPTION,
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            sessionId: {
+              type: "string" as const,
+              description:
+                "The session's id: the one this thread's alert names, or an `id` from get_scholar_sessions.",
+            },
+            text: {
+              type: "string" as const,
+              description:
+                "The whisper, as a short instruction to the AI in the teacher's own words, e.g. \"Encourage him: he has plenty of time to sketch a new background and upload a photo.\"",
+            },
+          },
+          required: ["sessionId", "text"] as const,
+        },
+        run: async (input) => {
+          const result = await ctx.runMutation(
+            internal.sessionHelpers.queueTeacherWhisper,
+            {
+              callerUserId,
+              sessionId: String(input.sessionId),
+              text: String(input.text),
+              ...(slackThreadTs
+                ? {
+                    slack: {
+                      channelId: slackChannelId,
+                      threadTs: slackThreadTs,
+                      quoteReply: await quoteReplyHere(),
+                    },
+                  }
+                : {}),
+            },
+          );
+          if (!result.ok) {
+            return `Not sent: ${result.reason} Tell the requester that, in those words.`;
+          }
+          emit({
+            toolComplete: {
+              name: "whisper_to_session",
+              result: `Whispered to ${result.scholarName}'s session`,
+            },
+          });
+          return whisperQueuedResult(result, Date.now(), result.receiptQueued);
+        },
+      }),
+    );
+  }
+
   return tools;
+}
+
+export const WHISPER_TO_SESSION_DESCRIPTION =
+  "Whisper to a scholar's AI tutor or app builder: a private, one-turn note the AI reads with the scholar's NEXT message in that session. The scholar never sees it. Use it when a teacher asks you to tell, remind, nudge or steer the scholar's tutor or builder now (\"tell the builder to…\", \"have the tutor encourage him…\"). Write the teacher's ask as a short instruction to the AI in their words, adding nothing they didn't say. A one-time ask (\"tonight\", \"right now\", \"for the rest of this session\") is a whisper, never a teacher directive. Questions for you and talk between staff are not whispers. Needs the session id: in a thread under a Rabbithole alert the id is given to you; anywhere else take it from get_scholar_sessions, and ask which session when more than one is plausible. Send it without a confirm turn when the teacher's words are clear. Afterwards, tell the requester exactly what you whispered and that it arrives with the scholar's next message there.";
+
+/** The tool result for a queued whisper: what to tell the teacher. */
+export function whisperQueuedResult(
+  result: {
+    scholarName: string;
+    sessionTitle: string;
+    queuedAfterAnother: boolean;
+    lastMessageAt: number | null;
+  },
+  now: number,
+  receiptInThread: boolean,
+): string {
+  const lines = [
+    // The title is scholar-set text in a turn that can send whispers and
+    // DMs: quote it, and keep it short.
+    `Queued for ${result.scholarName}'s session ${JSON.stringify(result.sessionTitle.slice(0, 80))} (a title the scholar may have written). The AI reads it with ${result.scholarName}'s next message there.`,
+  ];
+  if (result.queuedAfterAnother) {
+    lines.push(
+      "Another whisper was already waiting; both arrive together, that one first.",
+    );
+  }
+  if (result.lastMessageAt !== null) {
+    lines.push(
+      `Last message in that session: ${agoLabel(now - result.lastMessageAt)}. If that was a while ago, tell the requester the whisper waits until ${result.scholarName} comes back to that session.`,
+    );
+  }
+  if (receiptInThread) {
+    lines.push(
+      "Rabbithole posts in this thread when the AI reads it; tell the requester they'll see that here.",
+    );
+  }
+  return lines.join(" ");
+}
+
+export function agoLabel(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 2) return "just now";
+  if (minutes < 90) return `${minutes} minutes ago`;
+  const hours = Math.round(ms / 3_600_000);
+  if (hours < 36) return `${hours} hours ago`;
+  return `${Math.round(ms / 86_400_000)} days ago`;
 }

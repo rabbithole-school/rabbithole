@@ -525,7 +525,7 @@ export type BlankReason =
   // manufacture reflection out of activity-supplied filler alone. This gate is
   // per-section: the tomorrow-clue can legitimately stand on a today-named
   // interest (a seed invitation) with no self-generated look-back material, so
-  // it does NOT apply this floor (F2 — the Ryder case).
+  // it does NOT apply this floor (F2).
   //
   // SPEC-RECONSTRUCTED: §3.6's two conditions were not readable; these are the
   // two the founder rules imply (no candidate, and no genuine signal).
@@ -812,7 +812,7 @@ export type ScholarNameResult = { ok: boolean; name: string | null };
 
 /** Fail any line that contains the scholar's own first name (finding #1). The
  * letter is TO the child and must address them as "you"; a name anywhere in it
- * is an address slip ("…takes a super long time, Lily said."). An empty name
+ * is an address slip ("…takes a really long time, Kawika said."). An empty name
  * (no scholar in context, e.g. a pure output-rail unit test) skips the check. */
 export function checkScholarName(
   line: string,

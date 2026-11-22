@@ -42,6 +42,8 @@ export interface ScholarRowLike<IdT extends string = string> {
   image?: string | null;
   username?: string | null;
   enrollmentStanding?: EnrollmentStanding;
+  /** ISO date the scholar withdrew; null/absent = a current scholar. */
+  withdrawnOn?: string | null;
   /** Whether the scholar already has a stored password → "Reset password" vs
    *  "Create password". Only the authoritative roster
    *  (users.listDirectoryScholars)
@@ -161,6 +163,7 @@ export function mergeScholarRows<IdT extends string>(
     image?: string | null;
     username?: string | null;
     enrollmentStanding: EnrollmentStanding;
+    withdrawnOn?: string | null;
     hasCredential?: boolean;
   }[],
   guardianDerived: readonly ScholarRowLike<IdT>[],
@@ -174,6 +177,7 @@ export function mergeScholarRows<IdT extends string>(
       image: s.image ?? null,
       username: s.username ?? null,
       enrollmentStanding: s.enrollmentStanding,
+      withdrawnOn: s.withdrawnOn ?? null,
       hasCredential: s.hasCredential,
       parents: guardiansById.get(s._id) ?? [],
     }))

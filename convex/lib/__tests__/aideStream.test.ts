@@ -278,3 +278,157 @@ describe("createToolReportTracker", () => {
   });
 });
 
+
+// ── A person's stop, recorded elsewhere (Slack's Stop button) ─────────────
+
+describe("runAideLoop isStopRequested", () => {
+  type Event = Record<string, unknown>;
+  const start: Event = {
+    type: "message_start",
+    message: { model: "claude-test", usage: { input_tokens: 1, output_tokens: 0 } },
+  };
+  const say = (text: string): Event => ({
+    type: "content_block_delta",
+    delta: { type: "text_delta", text },
+  });
+  const toolUse: Event = {
+    type: "content_block_start",
+    content_block: { type: "tool_use", name: "list_units" },
+  };
+
+  // A tool runner that yields one message per entry and records what the
+  // loop let happen: whether the tool after the first message ever ran, and
+  // which messages were aborted.
+  function fakeAnthropic(
+    messages: Array<Array<Event | (() => void)>>,
+  ) {
+    const seen = { toolRan: false, aborted: [] as number[] };
+    const toolRunner = () => ({
+      async *[Symbol.asyncIterator]() {
+        for (let i = 0; i < messages.length; i++) {
+          if (i > 0) seen.toolRan = true; // the SDK runs tools between messages
+          const events = messages[i];
+          yield {
+            abort: () => {
+              seen.aborted.push(i);
+            },
+            async *[Symbol.asyncIterator]() {
+              for (const e of events) {
+                if (typeof e === "function") e();
+                else yield e;
+              }
+            },
+          };
+        }
+      },
+    });
+    return { anthropic: { beta: { messages: { toolRunner } } }, seen };
+  }
+
+  async function run(
+    messages: Array<Array<Event | (() => void)>>,
+    isStopRequested: () => Promise<boolean>,
+  ) {
+    const { runAideLoop } = await import("../aideStream");
+    const { anthropic, seen } = fakeAnthropic(messages);
+    const texts: string[] = [];
+    const tools: string[] = [];
+    let stops = 0;
+    const result = await runAideLoop({
+      anthropic: anthropic as never,
+      model: MODELS.SONNET_5_5,
+      maxTokens: 100,
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      onText: (t) => texts.push(t),
+      onToolUse: (name) => tools.push(name),
+      isStopRequested,
+      onStop: () => stops++,
+      label: "test",
+    });
+    return { result, seen, texts, tools, stops };
+  }
+
+  const usage = (output: number): Event => ({
+    type: "message_delta",
+    delta: {},
+    usage: { output_tokens: output },
+  });
+
+  test("a stop mid-message reads the rest unseen, never aborts, and ends before the tool runs", async () => {
+    let stamped = false;
+    const { result, seen, texts, tools, stops } = await run(
+      [
+        [start, say("Let me look."), () => (stamped = true), toolUse, say("never"), usage(7)],
+        [start, say("Found none.")],
+      ],
+      async () => stamped,
+    );
+    expect(result.stopped).toBe(true);
+    expect(result.content).toBe("Let me look.");
+    expect(texts).toEqual(["Let me look."]);
+    // The tool call never surfaced as work, and the SDK never got to run it.
+    expect(tools).toEqual([]);
+    expect(seen.toolRan).toBe(false);
+    // Aborting a reply still arriving kills a Convex action, so nothing is.
+    expect(seen.aborted).toEqual([]);
+    // The read-out still counts what it cost, and the caller heard once.
+    expect(result.tokensUsed).toBe(7);
+    expect(stops).toBe(1);
+  });
+
+  test("a stop before a message starts reads that message unseen", async () => {
+    const { result, texts, seen } = await run(
+      [[start, say("Hello"), toolUse]],
+      async () => true,
+    );
+    expect(result).toMatchObject({ stopped: true, content: "" });
+    expect(texts).toEqual([]);
+    expect(seen.aborted).toEqual([]);
+  });
+
+  test("an error after the stop doesn't fail the run", async () => {
+    let stamped = false;
+    const toolRunner = () => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          abort: () => {},
+          async *[Symbol.asyncIterator]() {
+            yield start;
+            stamped = true;
+            yield toolUse;
+            throw new Error("connection reset");
+          },
+        };
+      },
+    });
+    const anthropic = { beta: { messages: { toolRunner } } };
+    const { runAideLoop } = await import("../aideStream");
+    const result = await runAideLoop({
+      anthropic: anthropic as never,
+      model: MODELS.SONNET_5_5,
+      maxTokens: 100,
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      isStopRequested: async () => stamped,
+      label: "test",
+    });
+    expect(result.stopped).toBe(true);
+  });
+
+  test("with no stop, every message runs and the result says so", async () => {
+    const { result, seen, tools } = await run(
+      [
+        [start, say("Let me look."), toolUse],
+        [start, say(" Found none.")],
+      ],
+      async () => false,
+    );
+    expect(result.stopped).toBe(false);
+    expect(seen.toolRan).toBe(true);
+    expect(tools).toEqual(["list_units"]);
+    expect(result.content).toBe("Let me look.\n\nFound none.");
+  });
+});

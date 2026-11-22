@@ -9,6 +9,24 @@
  * mathematical thinking (parity arguments, pigeonhole, systematic counting,
  * graph reasoning) rather than notation-heavy formalism.
  *
+ * A fifth strand, algorithms (2026-11-21), is a small first look at
+ * computer-science theory: count the steps a short Python loop takes, see how
+ * that count grows with the input, and name the growth with big-O. Its stems
+ * show code as fenced listings (shared/practiceStemBlocks.ts) in which a call
+ * to step() marks the thing being counted. It enters at grade 6 and needs
+ * arithmetic only, through grade 8. Deliberately OUT: sorting algorithms,
+ * recursion beyond one doubling example, data structures, formal definitions
+ * of O, Ω and Θ, and anything that needs Algebra 2 (step counts written with
+ * logarithms, solving an exponential equation for n).
+ *
+ * Why no Algebra 2 prerequisites: a cross-domain edge gates the whole domain,
+ * since a domain is offered only once every domain it draws a prerequisite
+ * from has a converged placement (`DOMAIN_REACHABILITY_STATIC` in
+ * convex/knowledgeNodes.ts). One algebra-2 edge would hide counting, logic
+ * and graph theory from every scholar who has not finished Algebra 2's
+ * placement. This strand's only foreign prerequisite is in
+ * whole-number-arithmetic, which the domain already waits on.
+ *
  * This domain ships ELECTIVE: it is never force-probed, only offered as a
  * deliberate pick once its prerequisites converge. It may therefore be
  * adventurous — but every node is still drillable by a deterministic item
@@ -26,7 +44,7 @@
  * band (the density invariant locked by convex/lib/__tests__/graphGrades.test.ts
  * for the shipped domains).
  *
- * 48 skills · 4 strands. The QB wires this domain into PRACTICE_GRAPHS /
+ * 61 skills · 5 strands. The QB wires this domain into PRACTICE_GRAPHS /
  * domains.ts / labels and authors the T() templates; this file is data only.
  */
 
@@ -90,6 +108,20 @@ export const DISCRETE_MATH_SKILLS: SeedSkill[] = [
   { skillKey: "lg_counterexample", label: "Find a counterexample that disproves a universal claim", grade: "6", ccCodes: [], strand: "logic", rationale: "A single instance where a universal claim fails settles it as false, the most economical form of disproof and the payoff of correct negation." },
   { skillKey: "lg_knights_knaves", label: "Deduce who tells the truth and who lies from a set of statements", grade: "7", ccCodes: [], strand: "logic", rationale: "Testing each truth-teller/liar assignment for consistency is deduction under constraints, the puzzle form that makes case-checking a joy rather than a chore." },
   { skillKey: "lg_deduce_clues", label: "Deduce the unique conclusion forced by a small set of logical clues", grade: "7", ccCodes: [], strand: "logic", rationale: "Combining several constraints to pin down the one possibility left standing is the deductive core of proof, practiced here on a finite, checkable domain." },
+  // ── algorithms (counting steps and big-O growth) ───────────────────────────
+  { skillKey: "algo_count_loop", label: "Count the steps a single loop takes for a given input size", grade: "6", ccCodes: [], strand: "algorithms", rationale: "Counting how many times a loop body runs, including where the range starts, stops, and jumps, is the measurement every later statement about an algorithm's speed is built from." },
+  { skillKey: "algo_linear_search_steps", label: "Count the checks a linear search makes in the best, worst, and a given case", grade: "6", ccCodes: [], strand: "algorithms", rationale: "Searching a list one item at a time is the simplest real algorithm, and its count depends on where the target sits, which introduces best case and worst case." },
+  { skillKey: "algo_count_nested", label: "Count the steps of nested and back-to-back loops for a given input size", grade: "6", ccCodes: [], strand: "algorithms", rationale: "A loop inside a loop multiplies its counts while one loop after another adds them, the distinction that separates quadratic work from linear work." },
+  { skillKey: "algo_count_expression", label: "Write the step count of a loop as an expression in n", grade: "7", ccCodes: [], strand: "algorithms", rationale: "Replacing a particular input size with the variable n turns one measurement into a rule for every size, the form in which growth can be compared." },
+  { skillKey: "algo_double_input", label: "Predict how the step count changes when the input size doubles", grade: "7", ccCodes: [], strand: "algorithms", rationale: "Doubling the input doubles a linear count but quadruples a quadratic one, the cheapest experiment for telling growth rates apart without a formula." },
+  { skillKey: "algo_halving_loop", label: "Count how many times a loop can halve n before reaching 1", grade: "7", ccCodes: [], strand: "algorithms", rationale: "A loop that cuts its input in half each pass finishes in very few passes, the idea behind every logarithmic algorithm, met here by counting before the word logarithm appears." },
+  { skillKey: "algo_growth_from_table", label: "Classify how a step count grows from a table of input sizes and counts", grade: "7", ccCodes: [], strand: "algorithms", rationale: "Reading whether a count stays put, creeps up, doubles, or quadruples as n grows is how growth is recognized from measurements when the code is not available." },
+  { skillKey: "algo_binary_search_steps", label: "Count the checks a binary search makes on a sorted list", grade: "8", ccCodes: [], strand: "algorithms", rationale: "Discarding half of a sorted list with every check finds a target among a million items in about twenty checks, the first algorithm whose advantage over the obvious method is dramatic." },
+  { skillKey: "algo_big_o_name", label: "Name the big-O class of a step count by keeping its fastest-growing term", grade: "8", ccCodes: [], strand: "algorithms", rationale: "For large inputs the fastest-growing term swamps the others and its coefficient stops mattering, so a whole expression is summarized by one growth class." },
+  { skillKey: "algo_rank_growth", label: "Rank step counts by how fast they grow for large n", grade: "8", ccCodes: [], strand: "algorithms", rationale: "Ordering constant, logarithmic, linear, n log n, quadratic, and exponential growth, whatever constants are attached, is the comparison that decides which algorithm to use at scale." },
+  { skillKey: "algo_big_o_from_code", label: "Name the big-O class of a short piece of code", grade: "8", ccCodes: [], strand: "algorithms", rationale: "Reading loops for how their counts depend on n, including the traps of back-to-back loops and fixed-size inner loops, applies big-O directly to code." },
+  { skillKey: "algo_exponential_blowup", label: "Find the input size an exponential-time search can handle", grade: "8", ccCodes: [], strand: "algorithms", rationale: "When each added item doubles the work, the largest input a computer can finish is found by doubling until the budget runs out, and it is startlingly small." },
+  { skillKey: "algo_growth_crossover", label: "Find the input size where one algorithm overtakes another", grade: "8", ccCodes: [], strand: "algorithms", rationale: "A faster-growing count can still be the smaller one for small inputs, and finding the size where the two cross shows when the choice of algorithm starts to matter." },
 ];
 
 export const DISCRETE_MATH_EDGES: SeedEdge[] = [
@@ -153,6 +185,28 @@ export const DISCRETE_MATH_EDGES: SeedEdge[] = [
   { fromKey: "lg_if_then", toKey: "lg_knights_knaves" },
   { fromKey: "lg_knights_knaves", toKey: "lg_deduce_clues" },
 
+  // algorithms
+  { fromKey: "algo_count_loop", toKey: "algo_linear_search_steps" },
+  { fromKey: "algo_count_loop", toKey: "algo_count_nested" },
+  { fromKey: "algo_count_nested", toKey: "algo_count_expression" },
+  { fromKey: "algo_count_expression", toKey: "algo_double_input" },
+  { fromKey: "algo_count_loop", toKey: "algo_halving_loop" },
+  { fromKey: "algo_double_input", toKey: "algo_growth_from_table" },
+  { fromKey: "algo_halving_loop", toKey: "algo_growth_from_table" },
+  { fromKey: "algo_linear_search_steps", toKey: "algo_binary_search_steps" },
+  { fromKey: "algo_halving_loop", toKey: "algo_binary_search_steps" },
+  { fromKey: "algo_count_expression", toKey: "algo_big_o_name" },
+  { fromKey: "algo_growth_from_table", toKey: "algo_big_o_name" },
+  { fromKey: "algo_big_o_name", toKey: "algo_rank_growth" },
+  { fromKey: "algo_big_o_name", toKey: "algo_big_o_from_code" },
+  { fromKey: "algo_halving_loop", toKey: "algo_big_o_from_code" },
+  { fromKey: "algo_rank_growth", toKey: "algo_exponential_blowup" },
+  { fromKey: "algo_halving_loop", toKey: "algo_exponential_blowup" },
+  { fromKey: "algo_rank_growth", toKey: "algo_growth_crossover" },
+  // Cross-strand (counting g4 → algorithms g6): a loop inside a loop is a
+  // two-stage choice, so its passes multiply.
+  { fromKey: "multiplication_principle", toKey: "algo_count_nested" },
+
   // ── Cross-domain prerequisites (foreign fromKey — declared here, target side).
   // Cross-domain (g4 whole-number-arithmetic → g4 discrete-math): counting a multi-stage choice is multiplication read as equal groups of options.
   { fromKey: "equal_groups_concept", toKey: "multiplication_principle" },
@@ -170,6 +224,8 @@ export const DISCRETE_MATH_EDGES: SeedEdge[] = [
   { fromKey: "divisibility_rules_3_9", toKey: "nt_divisibility_proof" },
   // Cross-domain (g6 whole-number-arithmetic → g8 discrete-math): the Euclidean algorithm is the fast route to the greatest common factor first met by listing.
   { fromKey: "gcf", toKey: "nt_gcd_euclid" },
+  // Cross-domain (g6 whole-number-arithmetic → g7 discrete-math): halving 64 down to 1 six times is 2⁶ = 64 read backwards.
+  { fromKey: "exponents_repeated_mult", toKey: "algo_halving_loop" },
 ];
 
 /**

@@ -69,6 +69,10 @@ import {
   UNIT_MISSING_NUDGE,
   UNIT_WRONG_NUDGE,
   unitOutcomeNudge,
+  FORM_DECIMAL_NUDGE,
+  FORM_LOWEST_TERMS_NUDGE,
+  formOutcomeNudge,
+  nearMissNudge,
   type SessionLogEntry,
 } from "./practiceLoop";
 import { RECOVERY_CLOSURE_ENABLED } from "./closureLines";
@@ -270,6 +274,15 @@ describe("answer normalization", () => {
     expect(unitOutcomeNudge("missing")).toBe(UNIT_MISSING_NUDGE);
     expect(unitOutcomeNudge("wrong")).toBe(UNIT_WRONG_NUDGE);
     expect(unitOutcomeNudge(undefined)).toBeNull();
+  });
+
+  it("names the missing representation for a right value in the wrong form", () => {
+    expect(formOutcomeNudge("notLowestTerms")).toBe(FORM_LOWEST_TERMS_NUDGE);
+    expect(formOutcomeNudge("notDecimal")).toBe(FORM_DECIMAL_NUDGE);
+    expect(formOutcomeNudge(undefined)).toBeNull();
+    expect(nearMissNudge({ formOutcome: "notDecimal" })).toBe(FORM_DECIMAL_NUDGE);
+    expect(nearMissNudge({ unitOutcome: "wrong" })).toBe(UNIT_WRONG_NUDGE);
+    expect(nearMissNudge({})).toBeNull();
   });
 
   it("a hardware-typed caret exponent normalizes to the SAME unicode form the unit-key tap produces", () => {

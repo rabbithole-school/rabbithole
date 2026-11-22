@@ -44,9 +44,20 @@ export async function makeGoogleDocsTools(
     role: Role | null | undefined;
     callerUserId: Id<"users">;
     institutionScope?: string;
+    /** A school the transport has already authorized this caller for. Its
+     *  Docs bot is used and the caller's institution lens is not consulted.
+     *  The admissions lane passes its channel's school: an admissions grant
+     *  gives no lens, so the lens would find no school for an admissions-only
+     *  staffer, or the wrong one for someone who also works at another. */
+    institutionId?: Id<"institutions">;
     // The transport owns this allowlist. Accepting arbitrary storage ids here
     // would let a model copy an unrelated private file into a shareable Doc.
     availableImages?: () => readonly GoogleDocsEmbeddableImage[];
+    /** Swap an approved image for a copy to embed, when what is stored isn't
+     *  fit to embed as it stands. A returned copy is this tool's to delete. */
+    prepareImage?: (
+      image: GoogleDocsEmbeddableImage,
+    ) => Promise<GoogleDocsEmbeddableImage>;
   },
 ): Promise<AideTool[]> {
   if (!isStaffRole(opts.role)) return [];
@@ -59,6 +70,7 @@ export async function makeGoogleDocsTools(
   const resolveImageUris = async (
     requestedStorageIds: unknown,
     institutionId: Id<"institutions">,
+    preparedCopies: Id<"_storage">[],
   ): Promise<{ uris: string[] } | { error: string }> => {
     if (requestedStorageIds === undefined) return { uris: [] };
     if (
@@ -108,17 +120,15 @@ export async function makeGoogleDocsTools(
             "Each embedded image must be available to the active institution for this conversation.",
         };
       }
-      if (!GOOGLE_DOCS_IMAGE_MIME_TYPES.has(image.mimeType)) {
-        return {
-          error:
-            "Google Docs can embed only approved PNG, JPEG, or GIF images.",
-        };
-      }
       selectedImages.push(image);
     }
 
     const uris: string[] = [];
-    for (const image of selectedImages) {
+    for (const selected of selectedImages) {
+      const image = (await opts.prepareImage?.(selected)) ?? selected;
+      if (image.storageId !== selected.storageId) {
+        preparedCopies.push(image.storageId);
+      }
       const blob = await ctx.storage.get(image.storageId);
       if (!blob) {
         return {
@@ -126,6 +136,8 @@ export async function makeGoogleDocsTools(
             "One approved image is no longer available in storage. Choose another visible image reference.",
         };
       }
+      // Checked here, after prepareImage: a HEIC or WebP original is fine once
+      // it has become a JPEG.
       const mimeType = blob.type || image.mimeType;
       if (!GOOGLE_DOCS_IMAGE_MIME_TYPES.has(mimeType)) {
         return {
@@ -154,10 +166,12 @@ export async function makeGoogleDocsTools(
   const resolveDocsToken = async (): Promise<
     { institutionId: Id<"institutions">; token: string } | { error: string }
   > => {
-    const institution = await ctx.runQuery(
-      internal.driveSyncState.resolveInstitutionForCaller,
-      { userId: callerUserId, scope: institutionScope },
-    );
+    const institution = opts.institutionId
+      ? { institutionId: opts.institutionId }
+      : await ctx.runQuery(internal.driveSyncState.resolveInstitutionForCaller, {
+          userId: callerUserId,
+          scope: institutionScope,
+        });
     if (!institution) {
       return {
         error: JSON.stringify({
@@ -331,20 +345,28 @@ export async function makeGoogleDocsTools(
       const shareWithRequester = input.share_with_requester ?? true;
       const docsAccess = await resolveDocsToken();
       if ("error" in docsAccess) return docsAccess.error;
-      const images = await resolveImageUris(
-        (input as { image_storage_ids?: unknown }).image_storage_ids,
-        docsAccess.institutionId,
-      );
-      if ("error" in images) return images.error;
-      return await createSharedDocument({
-        institutionId: docsAccess.institutionId,
-        token: docsAccess.token,
-        title,
-        initialContent: input.initial_content,
-        shareWithRequester,
-        imageUris: images.uris,
-        toolName: "create_shared_doc",
-      });
+      const preparedCopies: Id<"_storage">[] = [];
+      try {
+        const images = await resolveImageUris(
+          (input as { image_storage_ids?: unknown }).image_storage_ids,
+          docsAccess.institutionId,
+          preparedCopies,
+        );
+        if ("error" in images) return images.error;
+        return await createSharedDocument({
+          institutionId: docsAccess.institutionId,
+          token: docsAccess.token,
+          title,
+          initialContent: input.initial_content,
+          shareWithRequester,
+          imageUris: images.uris,
+          toolName: "create_shared_doc",
+        });
+      } finally {
+        // Google copies an image by URL inside the batchUpdate that inserts it,
+        // which createSharedDocument awaits, so nothing reads these afterward.
+        await Promise.all(preparedCopies.map((id) => ctx.storage.delete(id)));
+      }
     },
   });
 

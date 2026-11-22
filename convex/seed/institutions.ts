@@ -4,9 +4,9 @@
 // (run from the backfill migration). For DEV we don't want the real brand all
 // over throwaway worktrees, so the seed creates "Moli School" (a fictional
 // primary school — moli = the Laysan albatross) as the primary institution, plus
-// the shared "Guests" bucket, and drops most seeded scholars into Moli with a
-// couple of "outside testers" in Guests so the roster's hide-guests default is
-// immediately testable. "Kona Tutoring" is the second school used by the
+// the shared "Guests" bucket, and drops most seeded scholars into Moli with the
+// base seed's "guest" outside tester in Guests (shown as "Friends") so the
+// roster's hide-guests default is immediately testable. "Kona Tutoring" is the second school used by the
 // multi-institution teacher fixture in seed/devPersonas.ts.
 //
 // Reused by: convex/seedRichCohort.ts (so the rich cohort + its tests populate
@@ -31,8 +31,9 @@ export const DEV_ALBATROSS_SLUG = "albatross-society";
 // of the cohort and the Guests bucket is non-empty for testing the filter.
 const GUEST_SCHOLAR_USERNAMES = new Set<string>([
   "guest", // the base seed's default guest scholar
-  "makoa_texeira", // rich-cohort tester
-  "anela_cruz", // rich-cohort tester
+  // No rich-cohort scholar belongs here: every one of them sits on a Moli
+  // roster (Honu, ʻIwa, Robotics), and a roster can't span two schools
+  // (TRA-615, enforced by seed/rosterTenancy.ts).
 ]);
 const KONA_TUTORING_SCHOLAR_USERNAMES = new Set<string>([
   "noe_tutoring",
@@ -106,7 +107,7 @@ export async function ensureDevInstitutions(ctx: MutationCtx): Promise<{
     roundsCadences: DEV_ROUNDS_CADENCES,
   });
   const guests = await ensure(DEV_GUEST_SLUG, {
-    name: "Guests",
+    name: "Friends",
     kind: "guest",
     emoji: "🧪",
   });

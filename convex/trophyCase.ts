@@ -291,7 +291,10 @@ export const trailsForScholar = authedQuery({
     const trails = [];
     for (const agg of aggs.slice(0, 12)) {
       const unit = await ctx.db.get(agg.unitId);
-      if (!unit) continue;
+      // A proposed Quest, in any state, is its proposer's: following it
+      // would fail (lib/seeds.ts insertSeed), so it is no trail until 5d turns
+      // following into the follower's own proposal (TRA-685).
+      if (!unit || unit.questApproval) continue;
       // Up to 3 earner names/avatars for the social-proof line; keep the
       // full count for "+N more".
       const earners = [];
@@ -309,10 +312,13 @@ export const trailsForScholar = authedQuery({
         unitId: agg.unitId,
         unitTitle: unit.title,
         unitEmoji: unit.emoji ?? null,
-        // A trail is a pod-mate's unit, so keep the teacher-facing
-        // (neutral / 3rd-person) blurb — a 2nd-person "your…" would be wrong
-        // for someone else's quest.
-        unitDescription: unit.description ?? null,
+        // Shown to OTHER scholars, so only scholar-facing copy: the
+        // teacher-facing `description` of a Quest a teacher offered one
+        // scholar is the teacher's notes about that child. A scholar-authored
+        // Quest carries the author's own words here too (both fields are
+        // written at creation). With none, the card shows the title alone.
+        // The key stays for older BunnyPad builds.
+        unitDescription: unit.scholarDescription ?? null,
         badgeIcon: agg.icon ?? unit.emoji ?? "🏅",
         domain: unit.subject ?? null,
         earners,

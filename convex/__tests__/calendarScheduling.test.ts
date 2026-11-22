@@ -1,10 +1,15 @@
 import { convexTest } from "convex-test";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { setSchedule } from "./scheduleFixtures";
+import { readSchedule, writeSchedule } from "../lib/scheduleStore";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
+import { schoolDayEndAt } from "../lib/schoolDays";
+import { DEFAULT_TIMEZONE } from "../../shared/institutionDay";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api, internal } from "../_generated/api";
-import { liveActivityAt } from "../assignments";
+import { liveActivityAt, RELOAD_TO_GIVE } from "../assignments";
 import { plannedReleaseArgs } from "../../shared/plannedRelease";
+import { dayKeyForTimezone } from "../../shared/institutionDay";
 import type { Doc, Id } from "../_generated/dataModel";
 
 const modules = (
@@ -72,13 +77,24 @@ async function seedUnitWithActivity(
       kind: "online",
       systemPrompt: "...",
       order: 0,
-      defaultMode: "classFocus",
     });
     return { unitId, lessonId, activityId };
   });
 }
 
 const HOUR = 3_600_000;
+
+// Every test here runs on a pinned school-day midday (noon HST). These tests
+// schedule work relative to "now", and on a real clock any window that crosses
+// Hawaii midnight changes the outcome, so they failed every evening.
+// A test that needs another time sets it itself.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-11-09T22:00:00.000Z"));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("calendar scheduling (planned vs live)", () => {
   test("a future scheduleActivity is PLANNED — teacher sees it, scholars don't", async () => {
@@ -237,11 +253,11 @@ describe("calendar scheduling (planned vs live)", () => {
     // Move startsAt into the past, then fire activation directly.
     await t.run(async (ctx) => {
       const a = await ctx.db.get(assignmentId);
-      const schedule = (a!.activitySchedule ?? []).map((e) => ({
+      const schedule = (await readSchedule(ctx, a!)).map((e) => ({
         ...e,
         startsAt: Date.now() - 1000,
       }));
-      await ctx.db.patch(assignmentId, { activitySchedule: schedule });
+      await writeSchedule(ctx, a!, schedule);
     });
     await t.run(async (ctx) =>
       ctx.runMutation(internal.assignments.activateScheduledActivity, {
@@ -277,12 +293,12 @@ describe("calendar scheduling (planned vs live)", () => {
     });
     await t.run(async (ctx) => {
       const a = await ctx.db.get(assignmentId);
-      const schedule = (a!.activitySchedule ?? []).map((entry) => ({
+      const schedule = (await readSchedule(ctx, a!)).map((entry) => ({
         ...entry,
         startsAt: Date.now() - 2_000,
         endsAt: Date.now() - 1_000,
       }));
-      await ctx.db.patch(assignmentId, { activitySchedule: schedule });
+      await writeSchedule(ctx, a!, schedule);
     });
 
     await t.run(async (ctx) =>
@@ -292,8 +308,9 @@ describe("calendar scheduling (planned vs live)", () => {
       }),
     );
 
-    const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    expect(assignment?.activitySchedule).toEqual([]);
+    expect(
+      await t.run(async (ctx) => readSchedule(ctx, { _id: assignmentId })),
+    ).toEqual([]);
     const mirror = await t.run(async (ctx) =>
       ctx.db
         .query("pushes")
@@ -326,8 +343,9 @@ describe("calendar scheduling (planned vs live)", () => {
       }),
     ).rejects.toThrow(new Date(pastEnd).toISOString());
 
-    const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    expect(assignment?.activitySchedule).toEqual([]);
+    expect(
+      await t.run(async (ctx) => readSchedule(ctx, { _id: assignmentId })),
+    ).toEqual([]);
   });
 
   test("clearActivity removes a planned entry", async () => {
@@ -413,7 +431,6 @@ describe("calendar scheduling (planned vs live)", () => {
         kind: "online",
         systemPrompt: "...",
         order: 1,
-        defaultMode: "classFocus",
       }),
     );
     const asTeacher = await withUser(t, teacherId);
@@ -425,8 +442,7 @@ describe("calendar scheduling (planned vs live)", () => {
     const base = Date.now();
     // Activity 1 live [base, base+HOUR); Activity 2 live [base+2h, open).
     await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: [
+      await setSchedule(ctx, assignmentId, [
           {
             activityId,
             mode: "classFocus" as const,
@@ -441,8 +457,7 @@ describe("calendar scheduling (planned vs live)", () => {
             startsAt: base + 2 * HOUR,
             scholarIds: [targetedScholarId],
           },
-        ],
-      });
+        ]);
     });
 
     const at = (ts: number, sid = scholarId) =>
@@ -525,7 +540,7 @@ describe("calendar scheduling (planned vs live)", () => {
 });
 
 describe("re-scheduling an already-live entry (postpone semantics)", () => {
-  test("rescheduling a planned class focus preserves its window duration", async () => {
+  test("rescheduling a planned in-class focus re-reads its end at the new time", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
     const scholarId = await seedUser(t, "scholar");
@@ -553,10 +568,15 @@ describe("re-scheduling an already-live entry (postpone semantics)", () => {
       startsAt: movedStart,
     });
 
-    const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
-    const entry = assignment!.activitySchedule![0];
+    const entry = (
+      await t.run(async (ctx) => readSchedule(ctx, { _id: assignmentId }))
+    )[0];
     expect(entry.startsAt).toBe(movedStart);
-    expect(entry.endsAt).toBe(movedStart + HOUR);
+    // No bell schedule here, so "in that class" ends with the school day the
+    // work now shows up in — not the old window shifted (TRA-571 review #10).
+    expect(entry.endsAt).toBe(
+      schoolDayEndAt(dayKeyForTimezone(movedStart, DEFAULT_TIMEZONE), DEFAULT_TIMEZONE),
+    );
   });
 
   test("scheduleActivity on a LIVE entry re-times it but keeps it live, subset intact", async () => {
@@ -580,8 +600,9 @@ describe("re-scheduling an already-live entry (postpone semantics)", () => {
       endsAt: Date.now() + HOUR,
     });
     const live = await t.run(async (ctx) => {
-      const a = await ctx.db.get(assignmentId);
-      return a!.activitySchedule!.find((e) => e.activityId === activityId)!;
+      return (await readSchedule(ctx, { _id: assignmentId })).find(
+        (e) => e.activityId === activityId,
+      )!;
     });
     expect(live.setAt).toBeDefined();
     expect(live.scholarIds).toEqual([scholarA]);
@@ -596,34 +617,45 @@ describe("re-scheduling an already-live entry (postpone semantics)", () => {
       startsAt: newStart,
     });
     const after = await t.run(async (ctx) => {
-      const a = await ctx.db.get(assignmentId);
-      return a!.activitySchedule!.find((e) => e.activityId === activityId)!;
+      return (await readSchedule(ctx, { _id: assignmentId })).find(
+        (e) => e.activityId === activityId,
+      )!;
     });
     expect(after.setAt).toBe(live.setAt);
     expect(after.startsAt).toBe(newStart);
     expect(after.scholarIds).toEqual([scholarA]);
     expect(after.endsAt).toBe(live.endsAt);
-    // Still live → no activation job was scheduled for it.
-    expect(after.scheduledFnId).toBeUndefined();
+    // Still live → no activation job was scheduled for it; the row keeps
+    // the live focus's own auto-clear job, unchanged.
+    expect(after.scheduledFnId).toBe(live.scheduledFnId);
+    const job = await t.run(async (ctx) =>
+      after.scheduledFnId ? ctx.db.system.get(after.scheduledFnId) : null,
+    );
+    expect(job?.name ?? "").not.toContain("activateScheduledActivity");
   });
 });
 
-test("assigning a unit does not invent a class-focus lifetime", async () => {
+test("assigning a unit with no finish is refused (no invented class-focus lifetime)", async () => {
   const t = convexTest(schema, modules);
   const teacherId = await seedUser(t, "teacher");
   const scholarId = await seedUser(t, "scholar");
   const { unitId } = await seedUnitWithActivity(t, teacherId);
   const asTeacher = await withUser(t, teacherId);
 
-  const assignmentId = await asTeacher.mutation(api.assignments.assignWork, {
-    unitId,
-    scholarIds: [scholarId],
-    startsAt: Date.now() + HOUR,
-    target: { kind: "unit" },
-  });
+  await expect(
+    asTeacher.mutation(api.assignments.assignWork, {
+      unitId,
+      scholarIds: [scholarId],
+      startsAt: Date.now() + HOUR,
+      target: { kind: "unit" },
+    }),
+  ).rejects.toThrow(RELOAD_TO_GIVE);
 
-  const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
-  expect(assignment?.activitySchedule?.[0].endsAt).toBeUndefined();
+  // Nothing written: no assignment, so no schedule with an invented mode.
+  const assignments = await t.run(async (ctx) =>
+    ctx.db.query("assignments").collect(),
+  );
+  expect(assignments).toEqual([]);
 });
 
 describe("the Run page's planned-vs-sent read", () => {
@@ -648,7 +680,6 @@ describe("the Run page's planned-vs-sent read", () => {
         kind: "online",
         systemPrompt: "...",
         order: 0,
-        defaultMode: "homework",
       });
       return { unitId, lessonId, activityId };
     });
@@ -670,6 +701,11 @@ describe("the Run page's planned-vs-sent read", () => {
       scholarIds: [scholarId],
       startsAt: Date.now() + 24 * HOUR,
       target: { kind: "unit" },
+      // "By a date" — three days out, after the day it shows up.
+      finish: {
+        kind: "by",
+        dayKey: dayKeyForTimezone(Date.now() + 72 * HOUR, "Pacific/Honolulu"),
+      },
     });
 
     // The header eyebrow's inputs: nothing is live, one thing is planned.
@@ -711,6 +747,11 @@ describe("the Run page's planned-vs-sent read", () => {
       scholarIds: [scholarId],
       startsAt: Date.now() + 24 * HOUR,
       target: { kind: "unit" },
+      // "By a date" — three days out, after the day it shows up.
+      finish: {
+        kind: "by",
+        dayKey: dayKeyForTimezone(Date.now() + 72 * HOUR, "Pacific/Honolulu"),
+      },
     });
     const progress = await asTeacher.query(api.assignments.activityProgress, {
       assignmentId,
@@ -721,7 +762,7 @@ describe("the Run page's planned-vs-sent read", () => {
     await asTeacher.mutation(api.assignments.pushActivity, {
       assignmentId,
       activityId,
-      ...plannedReleaseArgs(planned, Date.now()),
+      ...plannedReleaseArgs(planned, Date.now(), "Pacific/Honolulu"),
     });
 
     const run = await asTeacher.query(api.assignments.get, { assignmentId });
@@ -732,8 +773,9 @@ describe("the Run page's planned-vs-sent read", () => {
     const homework = await asScholar.query(api.assignments.homeworkForMe, {});
     expect(homework).toHaveLength(1);
     const entry = await t.run(async (ctx) => {
-      const a = await ctx.db.get(assignmentId);
-      return a!.activitySchedule!.find((e) => e.activityId === activityId)!;
+      return (await readSchedule(ctx, { _id: assignmentId })).find(
+        (e) => e.activityId === activityId,
+      )!;
     });
     expect(entry.setAt).toBeDefined();
     expect(entry.dueAt).toBe(planned.dueAt);
@@ -759,6 +801,7 @@ describe("the Run page's planned-vs-sent read", () => {
         kind: "activity",
         activityId,
         mode: "homework",
+        dueAt: Date.now() + 48 * HOUR,
         scholarIds: [targetedScholarId],
       },
     });
@@ -772,12 +815,13 @@ describe("the Run page's planned-vs-sent read", () => {
     await asTeacher.mutation(api.assignments.pushActivity, {
       assignmentId,
       activityId,
-      ...plannedReleaseArgs(planned, Date.now()),
+      ...plannedReleaseArgs(planned, Date.now(), "Pacific/Honolulu"),
     });
 
     const entry = await t.run(async (ctx) => {
-      const a = await ctx.db.get(assignmentId);
-      return a!.activitySchedule!.find((e) => e.activityId === activityId)!;
+      return (await readSchedule(ctx, { _id: assignmentId })).find(
+        (e) => e.activityId === activityId,
+      )!;
     });
     expect(entry.scholarIds).toEqual([targetedScholarId]);
     expect(
@@ -785,7 +829,7 @@ describe("the Run page's planned-vs-sent read", () => {
     ).toEqual([]);
   });
 
-  test("Start now drops a stale planned end and releases an unspecified focus", async () => {
+  test("Start now re-reads a planned focus's end at release instead of keeping a stale one", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
     const scholarId = await seedUser(t, "scholar");
@@ -814,20 +858,22 @@ describe("the Run page's planned-vs-sent read", () => {
     await asTeacher.mutation(api.assignments.pushActivity, {
       assignmentId,
       activityId,
-      ...plannedReleaseArgs(planned, Date.now()),
+      ...plannedReleaseArgs(planned, Date.now(), "Pacific/Honolulu"),
     });
 
     expect(
       await asScholar.query(api.assignments.currentClassFocusForMe, {}),
     ).toHaveLength(1);
     const released = await t.run(async (ctx) => {
-      const assignment = await ctx.db.get(assignmentId);
-      return assignment!.activitySchedule!.find(
+      return (await readSchedule(ctx, { _id: assignmentId })).find(
         (entry) => entry.activityId === activityId,
       )!;
     });
     expect(released.setAt).toBeDefined();
-    expect(released.endsAt).toBeUndefined();
+    // Released now with no bell schedule: it ends with today's school day.
+    expect(released.endsAt).toBe(
+      schoolDayEndAt(dayKeyForTimezone(Date.now(), DEFAULT_TIMEZONE), DEFAULT_TIMEZONE),
+    );
   });
 
   test("a same-day overrun focus stays live and reads as sent, not planned", async () => {
@@ -837,11 +883,9 @@ describe("the Run page's planned-vs-sent read", () => {
     const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
     const asTeacher = await withUser(t, teacherId);
 
-    const assignmentId = await asTeacher.mutation(api.assignments.assignWork, {
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
       unitId,
       scholarIds: [scholarId],
-      startsAt: Date.now(),
-      target: { kind: "unit" },
     });
     await asTeacher.mutation(api.assignments.pushActivity, {
       assignmentId,
@@ -854,11 +898,13 @@ describe("the Run page's planned-vs-sent read", () => {
     // focus remains visible even though its blocking window closed.
     await t.run(async (ctx) => {
       const a = await ctx.db.get(assignmentId);
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: a!.activitySchedule!.map((e) =>
+      await writeSchedule(
+        ctx,
+        a!,
+        (await readSchedule(ctx, a!)).map((e) =>
           e.activityId === activityId ? { ...e, endsAt: Date.now() - 1 } : e,
         ),
-      });
+      );
     });
 
     const run = await asTeacher.query(api.assignments.get, { assignmentId });
@@ -867,7 +913,7 @@ describe("the Run page's planned-vs-sent read", () => {
     expect(run!.sentCount).toBe(1);
     expect(run!.plannedCount).toBe(0);
     expect(run!.sentCount + run!.plannedCount).toBe(
-      run!.activitySchedule.length,
+      run!.schedule.length,
     );
 
     // And the row agrees: not planned, so it keeps the sent badge and its
@@ -920,7 +966,7 @@ describe("re-timing a live class focus", () => {
     });
     const entry = async () =>
       t.run(async (ctx) =>
-        (await ctx.db.get(assignmentId))!.activitySchedule!.find(
+        (await readSchedule(ctx, { _id: assignmentId })).find(
           (e) => e.activityId === activityId,
         ) ?? null,
       );
@@ -929,6 +975,9 @@ describe("re-timing a live class focus", () => {
 
   test("moved later: the push's clear job follows the new end instead of dropping it", async () => {
     vi.useFakeTimers();
+    // Pin a school-day midday: an unpinned clock let these fail whenever
+    // "now + 1h" fell late enough in the Hawaii evening to cross midnight.
+    vi.setSystemTime(new Date("2026-11-09T22:00:00.000Z"));
     const { t, start, entry } = await pushThenRetime(2 * HOUR);
     expect((await entry())!.setAt).toBeDefined();
 
@@ -984,6 +1033,9 @@ describe("re-timing a live class focus", () => {
 
   test("moved earlier: the focus clears at the new end, not the old one", async () => {
     vi.useFakeTimers();
+    // Pin a school-day midday: an unpinned clock let these fail whenever
+    // "now + 1h" fell late enough in the Hawaii evening to cross midnight.
+    vi.setSystemTime(new Date("2026-11-09T22:00:00.000Z"));
     const { t, start, entry } = await pushThenRetime(HOUR / 2);
 
     vi.advanceTimersByTime(HOUR / 2 + 1);

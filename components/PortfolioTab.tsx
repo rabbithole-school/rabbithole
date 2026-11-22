@@ -19,7 +19,8 @@ import {
   Portal,
   SimpleGrid,
 } from "@chakra-ui/react";
-import { Plus, Trash, FileText, Upload, ArrowSquareOut } from "@phosphor-icons/react";
+import { Plus, Trash, FileText, Upload, ArrowSquareOut, VideoCamera } from "@phosphor-icons/react";
+import { captureMediaKind } from "@/shared/captureMedia";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { formatTimeAgo } from "@/lib/relativeTime";
 import { openExternal } from "@/lib/native";
@@ -233,7 +234,8 @@ function PortfolioCard({
       | "upload"
       | "photo"
       | "manual"
-      | "capture_station";
+      | "capture_station"
+      | "decibel_meter";
     pageRange?: { start: number; end: number };
     thumbUrl?: string | null;
     thumbStatus?: "pending" | "ready" | "error";
@@ -242,8 +244,11 @@ function PortfolioCard({
   const removeItem = useMutation(api.portfolio.deleteItem);
   const fileUrl = useQuery(api.portfolio.getFileUrl, { itemId: item._id });
   // A thumbnail is still rendering if the file pipeline is done but the thumb
-  // hasn't landed yet (covers both images and PDFs).
+  // hasn't landed yet (covers both images and PDFs). Nothing renders one for a
+  // video: its poster, when there is one, arrives with it.
+  const isVideo = captureMediaKind(item.fileMimeType) === "video";
   const thumbPending =
+    !isVideo &&
     item.processingStatus === "ready" &&
     !item.thumbUrl &&
     item.thumbStatus !== "error";
@@ -277,6 +282,8 @@ function PortfolioCard({
           />
         ) : thumbPending ? (
           <Spinner size="sm" color="violet.400" />
+        ) : isVideo ? (
+          <VideoCamera size={36} color="#AD60BF" />
         ) : (
           <FileText size={36} color="#AD60BF" />
         )}

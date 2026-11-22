@@ -8,6 +8,9 @@ import { Id } from "@/convex/_generated/dataModel";
 import { PaperPlaneTilt, WarningCircle } from "@phosphor-icons/react";
 import { FlairChips } from "./FlairChips";
 import { toaster } from "@/lib/toaster";
+import { confirmFinishAndSend } from "@/lib/confirmFinishAndSend";
+import { FINISH_AND_SEND_LABEL } from "@/shared/finishAndSend";
+import { useQuestSession } from "./QuestShowing";
 
 export interface ArtifactDeliverableButtonProps {
   sessionId: Id<"sessions">;
@@ -23,6 +26,8 @@ export interface ArtifactDeliverableButtonProps {
   };
   /** Flush, submit, and (for rubric-backed work) ask the tutor to check it. */
   onSubmit?: () => Promise<void>;
+  /** Finish without checking, even while criteria are still being prepared. */
+  finishOnly?: boolean;
   /** When true, the check button is disabled (e.g., a previous AI
    *  response is still streaming). */
   checkDisabled?: boolean;
@@ -46,6 +51,7 @@ export function ArtifactDeliverableButton({
   artifactId,
   deliverableSpec,
   onSubmit,
+  finishOnly = false,
   checkDisabled = false,
   isAiCheckingRubric = false,
   animateFlairArrivals = true,
@@ -53,6 +59,7 @@ export function ArtifactDeliverableButton({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRetryingSetup, setIsRetryingSetup] = useState(false);
   const retrySetup = useMutation(api.sessions.ensureActivitySetup);
+  const questSession = useQuestSession();
 
   // Per-artifact deliverable lookup. Earned flair lives here.
   const existing = useQuery(api.deliverables.getForSessionActivity, {
@@ -62,8 +69,30 @@ export function ArtifactDeliverableButton({
   });
 
   const totalCount = deliverableSpec.criteria.length;
+  const finishesActivity = finishOnly || deliverableSpec.mode === "none";
+
+  const flair = (
+    <FlairChips
+      // Keyed by the document this panel is showing: the tab switch swaps
+      // artifactId without remounting, and a stale baseline would treat the
+      // other document's existing flair as arriving.
+      key={artifactId}
+      flairEarned={existing?.flairEarned}
+      criteria={deliverableSpec.criteria}
+      deliverableId={existing?._id}
+      resolved={existing !== undefined}
+      animateArrivals={animateFlairArrivals}
+      sessionId={sessionId}
+    />
+  );
+
+  // A Quest's session hands in from the header's "I'm ready to show"
+  // (TRA-720), so it never offers Finish and send here, nor while that is
+  // still being looked up. Its flair stays; a check that hands nothing in
+  // ("Check my work") would stay too.
+  if (finishesActivity && questSession !== null) return flair;
   const criteriaUnavailable =
-    deliverableSpec.mode === "auto" && totalCount === 0;
+    !finishOnly && deliverableSpec.mode === "auto" && totalCount === 0;
   if (criteriaUnavailable) {
     const setupFailed = deliverableSpec.criteriaStatus === "error";
     return (
@@ -110,6 +139,7 @@ export function ArtifactDeliverableButton({
 
   const runSubmit = async () => {
     if (!onSubmit || checkDisabled || isAiCheckingRubric || isSubmitting) return;
+    if (finishesActivity && !confirmFinishAndSend()) return;
     setIsSubmitting(true);
     try {
       await onSubmit();
@@ -119,18 +149,13 @@ export function ArtifactDeliverableButton({
   };
 
   return (
-    <Stack gap={2.5} align="center">
-      <FlairChips
-        // Keyed by the document this panel is showing: the tab switch swaps
-        // artifactId without remounting, and a stale baseline would treat the
-        // other document's existing flair as arriving.
-        key={artifactId}
-        flairEarned={existing?.flairEarned}
-        criteria={deliverableSpec.criteria}
-        deliverableId={existing?._id}
-        resolved={existing !== undefined}
-        animateArrivals={animateFlairArrivals}
-      />
+    <Stack
+      gap={2.5}
+      align="center"
+      direction={finishOnly ? "row" : undefined}
+      wrap={finishOnly ? "wrap" : undefined}
+    >
+      {flair}
       <Button
         size="sm"
         colorPalette="violet"
@@ -141,11 +166,11 @@ export function ArtifactDeliverableButton({
       >
         {isSubmitting || isAiCheckingRubric ? (
           <Spinner size="xs" />
-        ) : deliverableSpec.mode === "none" ? (
+        ) : finishesActivity ? (
           <PaperPlaneTilt weight="fill" />
         ) : null}
-        {deliverableSpec.mode === "none"
-          ? "Send it"
+        {finishesActivity
+          ? FINISH_AND_SEND_LABEL
           : "Check my work"}
       </Button>
     </Stack>

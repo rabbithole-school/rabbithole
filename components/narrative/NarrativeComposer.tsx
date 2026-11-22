@@ -1,88 +1,42 @@
 "use client";
 
 /**
- * The narrative composer (review/assessment-and-goals-plan.html §7, redesigned
- * 2026-07-02): a convenient way for a teacher to VIEW a scholar's evidence and
- * WRITE a report. AI help (drafting, checking, rating suggestions) was pulled
- * out entirely — that now lives in the curriculum bot's side panel, not baked
- * into this surface. The layout borrows the Whole Child meeting mode's visual
- * language: a header (scholar + subject/period + status + prev/next), a
- * horizontal tab strip (one per report tab), and a clean two-pane body
- * (evidence | authoring) inside rounded white cards, uniform across every tab
- * (components/narrative/BinderPane.tsx's `EvidenceHeader`).
+ * The parent-report composer: one prose report for one subject (or SEL), for
+ * one scholar and period.
  *
- * Owns every query/mutation for a single narrative; `EvidencePane`/
- * `OverallEvidence` and `WorkingLevelReadout` are pure display,
- * `NarrativeSectionEditor` owns each section's own autosave.
- *
- * Units are no longer teacher-picked — they're derived live from the
- * scholar's sessions this period (`courseNarratives.derivedUnits`) and fed
- * straight into the binder's `unitIds` arg; there is no unit-toggle UI left
- * anywhere in this composer.
+ * Left: the evidence the draft is written from — exactly what
+ * `parentReports.evidence` hands the model, family goals first — so every
+ * sentence in the draft can be checked against the record. Right: the prose,
+ * with bracketed placeholders highlighted, a Draft/Redraft button, and the
+ * done + publish controls. A report with unfilled placeholders can't be
+ * published (enforced server-side in `courseNarratives.share`).
  */
 import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery } from "convex/react";
-import { Box, Button, Checkbox, Flex, Heading, HStack, Spinner, Switch, Tabs, Text, VStack } from "@chakra-ui/react";
-import { CaretLeft, CaretRight, Check, ShareNetwork } from "@phosphor-icons/react";
+import { Box, Button, Flex, Heading, HStack, Spinner, Text, VStack } from "@chakra-ui/react";
+import { ArrowsClockwise, CaretLeft, CaretRight, ShareNetwork, Sparkle, X } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import {
+  isDrafting,
+  isEnrichmentSubject,
+  isSelSubject,
+  reportTitle,
+  legacySectionNotes,
+  publishBlocker,
+  reportBody,
+  type ParentReportEvidence,
+} from "@/convex/lib/parentReport";
 import { toaster } from "@/lib/toaster";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
+import { useNow } from "@/hooks/useNow";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { Surface } from "@/components/ui/Surface";
-import { PaneTabs } from "@/components/ui/PaneTabs";
-import { RubricSlider } from "@/components/ui/RubricSlider";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { ReportShell } from "@/components/narrative/ReportShell";
-import { SectionStatusIcon, sectionState, type SectionState } from "@/components/narrative/SectionStatusIcon";
-import {
-  reportDone,
-  reportShared,
-  SharedTag,
-  MarkReportDoneToggle,
-} from "@/components/narrative/reportStatus";
-import { EvidenceHeader, EvidencePane, OverallEvidence, type SectionKey } from "@/components/narrative/BinderPane";
-import { WorkingLevelReadout } from "@/components/narrative/RubricStrip";
-import { NarrativeSectionEditor } from "@/components/narrative/NarrativeSectionEditor";
-import { PCM_META, type PcmDimension } from "@/convex/lib/pcm";
-
-const TAB_LABELS: Record<SectionKey, string> = {
-  context: "Context",
-  progress: "Progress",
-  dim_core: "Core",
-  dim_connections: "Connections",
-  dim_practice: "Practice",
-  dim_identity: "Identity",
-  goals: "Goals",
-  overall: "Overall",
-  approvals: "Approvals",
-};
-
-const TAB_ORDER: SectionKey[] = [
-  "context",
-  "progress",
-  "dim_core",
-  "dim_connections",
-  "dim_practice",
-  "dim_identity",
-  "goals",
-  "overall",
-  "approvals",
-];
-
-const SECTIONS: {
-  key: Exclude<SectionKey, "overall" | "approvals">;
-  title: string;
-  dimension?: PcmDimension;
-  rows: number;
-}[] = [
-  { key: "context", title: "Context — what we studied", rows: 3 },
-  { key: "progress", title: "Progress & accomplishments", rows: 6 },
-  { key: "dim_core", title: "Core", dimension: "core", rows: 6 },
-  { key: "dim_connections", title: "Connections", dimension: "connections", rows: 6 },
-  { key: "dim_practice", title: "Practice", dimension: "practice", rows: 6 },
-  { key: "dim_identity", title: "Identity", dimension: "identity", rows: 6 },
-  { key: "goals", title: "Goals for Continued Growth", rows: 4 },
-];
+import { reportDone, reportShared, SharedTag, MarkReportDoneToggle } from "@/components/narrative/reportStatus";
+import { ReportProseEditor } from "@/components/narrative/ReportProseEditor";
 
 export function NarrativeComposer({
   narrativeId,
@@ -94,185 +48,70 @@ export function NarrativeComposer({
   rosterHref?: string;
 }) {
   const narrative = useQuery(api.courseNarratives.get, { narrativeId });
+  // The "Enrichment and projects" row is a list filled from the record (its
+  // lines then rewritten for parents by the drafter): no evidence pane, no
+  // placeholder hint.
+  const listRow = narrative ? isEnrichmentSubject(narrative.subject) : false;
+  const evidence = useQuery(api.parentReports.evidence, narrative && !listRow ? { narrativeId } : "skip");
   const { hrefWithActiveInstitution } = useActiveInstitution();
-  const derivedUnits = useQuery(
-    api.courseNarratives.derivedUnits,
-    narrative
-      ? { scholarId: narrative.scholarId, periodId: narrative.periodId, subject: narrative.subject }
-      : "skip",
-  );
-  const binder = useQuery(
-    api.assessmentBinder.forScholar,
-    narrative && derivedUnits !== undefined
-      ? {
-          scholarId: narrative.scholarId,
-          periodId: narrative.periodId,
-          subject: narrative.subject,
-          unitIds: derivedUnits.map((u) => u.id),
-        }
-      : "skip",
-  );
-  const workingLevel = useQuery(
-    api.workingLevel.forScholar,
-    narrative ? { scholarId: narrative.scholarId, periodId: narrative.periodId } : "skip",
-  );
-  const period = useQuery(
-    api.reportingPeriods.get,
-    narrative ? { periodId: narrative.periodId } : "skip",
-  );
+  const period = useQuery(api.reportingPeriods.get, narrative ? { periodId: narrative.periodId } : "skip");
   const periodNarratives = useQuery(
     api.courseNarratives.listForPeriod,
     narrative ? { periodId: narrative.periodId } : "skip",
   );
 
-  const setRatings = useMutation(api.courseNarratives.setRatings);
-  const setGoals = useMutation(api.courseNarratives.setGoals);
-  const toggleSignoff = useMutation(api.courseNarratives.toggleSignoff);
-  const setSectionDone = useMutation(api.courseNarratives.setSectionDone);
   const setDone = useMutation(api.courseNarratives.setDone);
   const share = useMutation(api.courseNarratives.share);
+  const requestDraft = useMutation(api.parentReports.requestDraft);
 
-  const [activeSection, setActiveSection] = useState<SectionKey>("context");
-  const [signingOff, setSigningOff] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [confirmRedraft, setConfirmRedraft] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);
+  const now = useNow(15_000);
 
-  const acceptedGoalIds = useMemo(
-    () => new Set((narrative?.goalIds ?? []).map(String)),
-    [narrative?.goalIds],
-  );
-
-  // Prev/next scholar nav — this teacher's narratives in the same period,
-  // alphabetical by scholar name (the same ordering the roster + Whole Child
-  // meeting mode use).
-  const sortedPeriodNarratives = useMemo(
-    () => (periodNarratives ?? []).slice().sort((a, b) => a.scholarName.localeCompare(b.scholarName)),
+  // Prev/next — this teacher's reports in the period, by scholar then subject.
+  const sorted = useMemo(
+    () =>
+      (periodNarratives ?? [])
+        .slice()
+        .sort((a, b) => a.scholarName.localeCompare(b.scholarName) || a.subject.localeCompare(b.subject)),
     [periodNarratives],
   );
-  const positionIndex = sortedPeriodNarratives.findIndex((n) => String(n._id) === String(narrativeId));
-  const positionLabel =
-    positionIndex >= 0 ? `${positionIndex + 1} of ${sortedPeriodNarratives.length}` : null;
-  const prevId = positionIndex > 0 ? sortedPeriodNarratives[positionIndex - 1]._id : null;
-  const nextId =
-    positionIndex >= 0 && positionIndex < sortedPeriodNarratives.length - 1
-      ? sortedPeriodNarratives[positionIndex + 1]._id
-      : null;
+  const position = sorted.findIndex((n) => String(n._id) === String(narrativeId));
+  const prevId = position > 0 ? sorted[position - 1]._id : null;
+  const nextId = position >= 0 && position < sorted.length - 1 ? sorted[position + 1]._id : null;
 
-  const toggleGoal = useCallback(
-    async (goalId: Id<"scholarGoals">) => {
-      if (!narrative) return;
-      const current = new Set(narrative.goalIds.map(String));
-      if (current.has(String(goalId))) current.delete(String(goalId));
-      else current.add(String(goalId));
-      try {
-        await setGoals({ narrativeId: narrative._id, goalIds: [...current] as Id<"scholarGoals">[] });
-      } catch (e) {
-        toaster.error({
-          title: "Couldn't update goals",
-          description: e instanceof Error ? e.message : String(e),
-        });
-      }
-    },
-    [narrative, setGoals],
-  );
-
-  const handleSectionDone = useCallback(
-    async (key: string, title: string, done: boolean) => {
-      if (!narrative) return;
-      try {
-        await setSectionDone({ narrativeId: narrative._id, key, done, title });
-      } catch (e) {
-        toaster.error({
-          title: "Couldn't update status",
-          description: e instanceof Error ? e.message : String(e),
-        });
-      }
-    },
-    [narrative, setSectionDone],
-  );
-
-  const setDimensionRating = useCallback(
-    async (dim: PcmDimension, value: number) => {
-      if (!narrative) return;
-      try {
-        await setRatings({
-          narrativeId: narrative._id,
-          pcmRatings: { ...(narrative.pcmRatings ?? {}), [dim]: value },
-          courseRating: narrative.courseRating,
-        });
-      } catch (e) {
-        toaster.error({
-          title: "Couldn't save rating",
-          description: e instanceof Error ? e.message : String(e),
-        });
-      }
-    },
-    [narrative, setRatings],
-  );
-
-  const setCourseRating = useCallback(
-    async (value: number) => {
-      if (!narrative) return;
-      try {
-        await setRatings({
-          narrativeId: narrative._id,
-          pcmRatings: narrative.pcmRatings ?? {},
-          courseRating: value,
-        });
-      } catch (e) {
-        toaster.error({
-          title: "Couldn't save the Course Performance Rating",
-          description: e instanceof Error ? e.message : String(e),
-        });
-      }
-    },
-    [narrative, setRatings],
-  );
-
-  const handleToggleSignoff = useCallback(async () => {
-    if (!narrative) return;
-    setSigningOff(true);
+  const handleDraft = useCallback(async () => {
+    setConfirmRedraft(false);
     try {
-      await toggleSignoff({ narrativeId: narrative._id });
+      await requestDraft({ narrativeId });
     } catch (e) {
-      toaster.error({
-        title: "Couldn't update signoff",
-        description: e instanceof Error ? e.message : String(e),
-      });
-    } finally {
-      setSigningOff(false);
+      toaster.error({ title: "Couldn't start the draft", description: serverErrorMessage(e) });
     }
-  }, [narrative, toggleSignoff]);
+  }, [requestDraft, narrativeId]);
 
   const handleSetDone = useCallback(
     async (done: boolean) => {
-      if (!narrative) return;
       try {
-        await setDone({ narrativeId: narrative._id, done });
+        await setDone({ narrativeId, done });
       } catch (e) {
-        toaster.error({
-          title: "Couldn't update status",
-          description: e instanceof Error ? e.message : String(e),
-        });
+        toaster.error({ title: "Couldn't update status", description: e instanceof Error ? e.message : String(e) });
       }
     },
-    [setDone, narrative],
+    [setDone, narrativeId],
   );
 
   const handleShare = useCallback(async () => {
-    if (!narrative) return;
     setSharing(true);
     try {
-      await share({ narrativeId: narrative._id });
-      toaster.success({ title: "Narrative published" });
+      await share({ narrativeId });
+      toaster.success({ title: "Report published to parents" });
     } catch (e) {
-      toaster.error({
-        title: "Couldn't publish",
-        description: e instanceof Error ? e.message : String(e),
-      });
+      toaster.error({ title: "Couldn't publish", description: e instanceof Error ? e.message : String(e) });
     } finally {
       setSharing(false);
     }
-  }, [share, narrative]);
+  }, [share, narrativeId]);
 
   if (narrative === undefined) {
     return (
@@ -285,7 +124,7 @@ export function NarrativeComposer({
     return (
       <Flex h="full" align="center" justify="center" direction="column" gap={2}>
         <Text color="charcoal.400" fontFamily="heading">
-          Narrative not found.
+          Report not found.
         </Text>
         <Link href={backHref}>
           <Text color="violet.600" fontSize="sm">
@@ -296,36 +135,41 @@ export function NarrativeComposer({
     );
   }
 
-  // Keep the period and the active school (?inst=) when stepping between
-  // scholars, so the breadcrumbs lead back to the same school's roster.
   const siblingHref = (id: Id<"courseNarratives">) =>
     hrefWithActiveInstitution(`/teacher/report?n=${String(id)}&period=${String(narrative.periodId)}`);
+
+  const body = reportBody(narrative.sections);
+  const legacyNotes = legacySectionNotes(narrative.sections);
+  const drafting = isDrafting(narrative, now);
+  const shared = reportShared(narrative.status);
+  const blocker = publishBlocker(narrative.sections);
+  const title = isSelSubject(narrative.subject) ? "SEL" : reportTitle(narrative.subject);
 
   return (
     <ReportShell
       crumbs={[
         { label: "All scholars", href: rosterHref },
         { label: narrative.scholarName, href: backHref },
-        { label: narrative.subject },
+        { label: title },
       ]}
       scholarId={narrative.scholarId}
       actions={
         <HStack gap={1}>
           {prevId && (
             <Button asChild size="sm" variant="outline" fontFamily="heading">
-              <Link href={siblingHref(prevId)} aria-label="Previous scholar">
+              <Link href={siblingHref(prevId)} aria-label="Previous report">
                 <CaretLeft />
               </Link>
             </Button>
           )}
-          {positionLabel && (
-            <Text fontSize="xs" color="charcoal.400" fontFamily="heading" whiteSpace="nowrap" px={1}>
-              {positionLabel}
+          {position >= 0 && (
+            <Text fontSize="sm" color="charcoal.400" fontFamily="heading" whiteSpace="nowrap" px={1}>
+              {position + 1} of {sorted.length}
             </Text>
           )}
           {nextId && (
             <Button asChild size="sm" variant="outline" fontFamily="heading">
-              <Link href={siblingHref(nextId)} aria-label="Next scholar">
+              <Link href={siblingHref(nextId)} aria-label="Next report">
                 <CaretRight />
               </Link>
             </Button>
@@ -337,7 +181,7 @@ export function NarrativeComposer({
         <Flex justify="space-between" align="center" gap={3} wrap="wrap">
           <Box>
             <Heading fontFamily="heading" fontWeight="700" size="lg" color="navy.600">
-              {narrative.subject}
+              {narrative.scholarName} · {title}
             </Heading>
             <HStack gap={2.5} align="center" wrap="wrap" mt={0.5}>
               <Text fontSize="sm" color="charcoal.400" fontFamily="heading">
@@ -346,202 +190,254 @@ export function NarrativeComposer({
               <SharedTag status={narrative.status} />
             </HStack>
           </Box>
-          <MarkReportDoneToggle
-            done={reportDone(narrative.status)}
-            onToggle={handleSetDone}
-            disabled={reportShared(narrative.status)}
-            label="Mark report as done"
-          />
+          <HStack gap={3} wrap="wrap">
+            <MarkReportDoneToggle
+              done={reportDone(narrative.status)}
+              onToggle={handleSetDone}
+              disabled={shared}
+              label="Mark as done"
+            />
+            <Button
+              size="sm"
+              colorPalette="violet"
+              fontFamily="heading"
+              onClick={handleShare}
+              loading={sharing}
+              disabled={shared || !reportDone(narrative.status) || blocker !== null || unsaved}
+              title={
+                shared
+                  ? undefined
+                  : (blocker ??
+                    (unsaved ? "Saving your edits…" : reportDone(narrative.status) ? undefined : "Mark the report done first"))
+              }
+            >
+              <ShareNetwork style={{ marginRight: 4 }} />
+              {shared ? "Published to parents" : "Publish to parents"}
+            </Button>
+          </HStack>
         </Flex>
       </Box>
 
-      <Box px={6} pb={6} flex={1} minH={0}>
-        <PaneTabs
-          value={activeSection}
-          onChange={(v) => setActiveSection(v as SectionKey)}
-          mb={4}
-          items={TAB_ORDER.map((key) => {
-            const stored = narrative.sections.find((sec) => sec.key === key);
-            let state: SectionState;
-            if (key === "overall") {
-              state = narrative.courseRating != null ? "done" : "empty";
-            } else if (key === "approvals") {
-              state =
-                reportDone(narrative.status)
-                  ? "done"
-                  : narrative.signoffs.length > 0
-                    ? "content"
-                    : "empty";
-            } else {
-              state = sectionState(!!stored?.body.trim(), !!stored?.done);
-            }
-            return {
-              value: key,
-              label: TAB_LABELS[key],
-              icon: <SectionStatusIcon state={state} size={13} />,
-            };
-          })}
-        >
+      <Box px={6} pb={6}>
+        <Flex gap={4} align="stretch" wrap="wrap">
+          {!listRow && (
+            <Surface flex="1 1 360px" minW="300px" p={4}>
+              <EvidencePane evidence={evidence} />
+            </Surface>
+          )}
 
-          {SECTIONS.map((s) => {
-            const stored = narrative.sections.find((sec) => sec.key === s.key);
-            return (
-              <Tabs.Content key={s.key} value={s.key}>
-                <Flex gap={4} align="stretch" wrap="wrap">
-                  <Surface flex="1 1 380px" minW="320px" p={4}>
-                    <EvidencePane
-                      section={s.key}
-                      binder={binder}
-                      units={derivedUnits}
-                      acceptedGoalIds={acceptedGoalIds}
-                      onToggleGoal={toggleGoal}
-                    />
-                  </Surface>
-
-                  <Surface flex="1 1 380px" minW="320px" p={4}>
-                    {s.dimension && (
-                      <Box mb={4} pb={4} borderBottom="1px solid" borderColor="gray.100">
-                        <RubricSlider
-                          label={`${PCM_META[s.dimension].label} rating`}
-                          blurb={PCM_META[s.dimension].blurb}
-                          value={narrative.pcmRatings?.[s.dimension]}
-                          onChange={(n) => setDimensionRating(s.dimension!, n)}
-                        />
-                      </Box>
-                    )}
-                    <NarrativeSectionEditor
-                      narrativeId={narrative._id}
-                      sectionKey={s.key}
-                      title={stored?.title ?? s.title}
-                      initialBody={stored?.body ?? ""}
-                      rows={s.rows}
-                    />
-                    <Flex justify="flex-end" mt={3} pt={3} borderTop="1px solid" borderColor="gray.100">
-                      <Switch.Root
-                        checked={!!stored?.done}
-                        onCheckedChange={(d) => handleSectionDone(s.key, s.title, !!d.checked)}
-                        colorPalette="green"
-                        size="sm"
-                      >
-                        <Switch.HiddenInput />
-                        <Switch.Control>
-                          <Switch.Thumb />
-                        </Switch.Control>
-                        <Switch.Label fontSize="xs" fontFamily="heading" color="charcoal.500">
-                          Mark as done
-                        </Switch.Label>
-                      </Switch.Root>
-                    </Flex>
-                  </Surface>
-                </Flex>
-              </Tabs.Content>
-            );
-          })}
-
-          <Tabs.Content value="overall">
-            <Flex gap={4} align="stretch" wrap="wrap">
-              <Surface flex="1 1 380px" minW="320px" p={4}>
-                <OverallEvidence binder={binder} pcmRatings={narrative.pcmRatings} />
-                <Box mt={4} pt={4} borderTop="1px solid" borderColor="gray.100">
-                  <WorkingLevelReadout workingLevel={workingLevel} />
-                </Box>
-              </Surface>
-              <Surface flex="1 1 380px" minW="320px" p={4}>
-                <RubricSlider
-                  label="Course performance rating"
-                  value={narrative.courseRating}
-                  onChange={setCourseRating}
-                />
-              </Surface>
-            </Flex>
-          </Tabs.Content>
-
-          <Tabs.Content value="approvals">
-            <Flex gap={4} align="stretch" wrap="wrap">
-              <Surface flex="1 1 380px" minW="320px" p={4}>
-                <VStack align="stretch" gap={4}>
-                  <EvidenceHeader label="Approvals" blurb="Team signoff — who's reviewed this report." />
-                  <Checkbox.Root
-                    size="md"
-                    checked={narrative.signedOffByMe}
-                    onCheckedChange={() => handleToggleSignoff()}
-                    disabled={signingOff}
-                  >
-                    <Checkbox.HiddenInput />
-                    <Checkbox.Control />
-                    <Checkbox.Label fontSize="sm" fontFamily="heading" fontWeight="600" color="navy.600">
-                      I&apos;ve reviewed this report
-                    </Checkbox.Label>
-                  </Checkbox.Root>
-                  <VStack align="stretch" gap={1.5}>
-                    {narrative.signoffs.length === 0 ? (
-                      <Text fontSize="xs" color="charcoal.300" fontFamily="body">
-                        No one has signed off yet.
-                      </Text>
-                    ) : (
-                      narrative.signoffs.map((s) => (
-                        <HStack
-                          key={String(s.userId)}
-                          justify="space-between"
-                          px={2.5}
-                          py={1.5}
-                          borderWidth="1px"
-                          borderColor="gray.100"
-                          borderRadius="md"
-                          bg="white"
-                        >
-                          <Text fontSize="xs" fontFamily="heading" fontWeight="600" color="navy.600">
-                            {s.name} — {new Date(s.at).toLocaleDateString()}
-                          </Text>
-                          <Check size={14} color="#2f855a" />
-                        </HStack>
-                      ))
-                    )}
-                  </VStack>
-                </VStack>
-              </Surface>
-
-              <Surface flex="1 1 380px" minW="320px" p={4}>
-                <VStack align="stretch" gap={4}>
-                  <HStack justify="space-between" align="start" gap={2}>
-                    <Heading size="md" color="navy.600" fontFamily="heading">
-                      Publish
-                    </Heading>
-                    <SharedTag status={narrative.status} />
+          <Surface flex="1.4 1 440px" minW="320px" p={4}>
+            <Flex justify="space-between" align="center" gap={3} mb={3} wrap="wrap">
+              <Heading size="md" color="navy.600" fontFamily="heading">
+                Report for parents
+              </Heading>
+              {!shared &&
+                (drafting ? (
+                  <HStack gap={2}>
+                    <Spinner size="sm" color="violet.500" />
+                    <Text fontSize="sm" fontFamily="heading" color="charcoal.500">
+                      Drafting…
+                    </Text>
                   </HStack>
-                  <Box>
-                    <MarkReportDoneToggle
-                      done={reportDone(narrative.status)}
-                      onToggle={handleSetDone}
-                      disabled={reportShared(narrative.status)}
-                      label="Mark report as done"
-                    />
-                    <Text fontSize="xs" color="charcoal.300" fontFamily="body" mt={1.5}>
-                      Marks the write-up complete and snapshots the Working Level. Publishing becomes available once done.
+                ) : evidence?.draftBlocked ? (
+                  // A second report in the class's slot, or a class with no
+                  // work: the server refuses a draft, so none is offered.
+                  <Text fontSize="sm" fontFamily="body" color="charcoal.400" maxW="sm" textAlign="right">
+                    {evidence.draftBlocked}
+                  </Text>
+                ) : confirmRedraft ? (
+                  <HStack gap={2}>
+                    <Text fontSize="sm" fontFamily="heading" color="charcoal.600">
+                      Replace the current text?
                     </Text>
-                  </Box>
-                  <Box>
-                    <Button
-                      size="sm"
-                      colorPalette="violet"
-                      fontFamily="heading"
-                      onClick={handleShare}
-                      loading={sharing}
-                      disabled={!reportDone(narrative.status) || reportShared(narrative.status)}
-                    >
-                      <ShareNetwork style={{ marginRight: 4 }} />
-                      {reportShared(narrative.status) ? "Published to parents" : "Publish to parents"}
+                    <Button size="sm" colorPalette="violet" fontFamily="heading" disabled={unsaved} onClick={handleDraft}>
+                      Redraft
                     </Button>
-                    <Text fontSize="xs" color="charcoal.300" fontFamily="body" mt={1.5}>
-                      Publishes the report to the family. Enabled once the report is marked done.
-                    </Text>
-                  </Box>
-                </VStack>
-              </Surface>
+                    <Button size="sm" variant="ghost" fontFamily="heading" onClick={() => setConfirmRedraft(false)}>
+                      Cancel
+                    </Button>
+                  </HStack>
+                ) : body.trim() ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    fontFamily="heading"
+                    disabled={unsaved}
+                    title={unsaved ? "Saving your edits…" : undefined}
+                    onClick={() => setConfirmRedraft(true)}
+                  >
+                    <ArrowsClockwise style={{ marginRight: 4 }} /> Redraft
+                  </Button>
+                ) : (
+                  <Button size="sm" colorPalette="violet" fontFamily="heading" disabled={unsaved} onClick={handleDraft}>
+                    <Sparkle style={{ marginRight: 4 }} /> Draft from the record
+                  </Button>
+                ))}
             </Flex>
-          </Tabs.Content>
-        </PaneTabs>
+            {narrative.draftError && !drafting && (
+              <Text fontSize="sm" color="red.600" fontFamily="body" mb={3}>
+                The last draft didn&apos;t finish ({narrative.draftError}). Try again, or write the report by hand.
+              </Text>
+            )}
+            {!listRow && (
+              <Text fontSize="sm" color="charcoal.400" fontFamily="body" mb={3}>
+                Highlighted [brackets] mark details the record doesn&apos;t hold. Replace each one, or delete it, before
+                publishing.
+              </Text>
+            )}
+            <ReportProseEditor
+              narrativeId={narrative._id}
+              initialBody={body}
+              readOnly={drafting}
+              published={shared}
+              onUnsavedChange={setUnsaved}
+            />
+            <ReportPieces narrativeId={narrative._id} />
+
+            {legacyNotes.length > 0 && (
+              <Box mt={5} pt={4} borderTopWidth="1px" borderColor="gray.100">
+                <Text fontFamily="heading" fontWeight="700" fontSize="sm" color="navy.600" mb={1}>
+                  Your earlier notes
+                </Text>
+                <Text fontSize="sm" color="charcoal.400" fontFamily="body" mb={2}>
+                  {shared && !body.trim()
+                    ? "Written in the old section-by-section form. This report was published that way, so parents see these sections."
+                    : "Written in the old section-by-section form. Drafts use them; parents never see them."}
+                </Text>
+                <VStack align="stretch" gap={2}>
+                  {legacyNotes.map((n) => (
+                    <Text key={n.title} fontSize="sm" color="charcoal.600" fontFamily="body" whiteSpace="pre-wrap">
+                      <b>{n.title}:</b> {n.body}
+                    </Text>
+                  ))}
+                </VStack>
+              </Box>
+            )}
+          </Surface>
+        </Flex>
       </Box>
     </ReportShell>
+  );
+}
+
+const COLLAPSED_ITEMS = 5;
+
+function EvidencePane({ evidence }: { evidence: ParentReportEvidence | null | undefined }) {
+  if (evidence === undefined) {
+    return (
+      <Flex justify="center" py={10}>
+        <Spinner color="violet.500" />
+      </Flex>
+    );
+  }
+  if (evidence === null) return null;
+  const groups = evidence.groups.filter((g) => g.items.length > 0);
+  return (
+    <VStack align="stretch" gap={4}>
+      <Box>
+        <Heading size="md" color="navy.600" fontFamily="heading">
+          What the draft draws on
+        </Heading>
+        <Text fontSize="sm" color="charcoal.400" fontFamily="body">
+          {evidence.periodLabel}. The draft may only say what is here; everything else becomes a placeholder.
+        </Text>
+      </Box>
+      <EvidenceGroupView
+        label="Goals the family shared"
+        items={evidence.familyGoals}
+        empty="None recorded. Add family goals in the interim check-in, or file conference notes on the scholar's Documents."
+      />
+      {groups.length === 0 ? (
+        <EmptyState title="No evidence this term yet" hint="A draft will be mostly placeholders." />
+      ) : (
+        groups.map((g) => <EvidenceGroupView key={g.key} label={g.label} items={g.items} />)
+      )}
+    </VStack>
+  );
+}
+
+function EvidenceGroupView({ label, items, empty }: { label: string; items: string[]; empty?: string }) {
+  const [open, setOpen] = useState(false);
+  const shown = open ? items : items.slice(0, COLLAPSED_ITEMS);
+  return (
+    <Box>
+      <Text fontFamily="heading" fontWeight="700" fontSize="sm" color="navy.600" mb={1}>
+        {label}
+      </Text>
+      {items.length === 0 ? (
+        <Text fontSize="sm" color="charcoal.400" fontFamily="body">
+          {empty}
+        </Text>
+      ) : (
+        <VStack align="stretch" gap={1}>
+          {shown.map((item, i) => (
+            <Text key={i} fontSize="sm" color="charcoal.600" fontFamily="body" lineHeight="1.5">
+              • {item}
+            </Text>
+          ))}
+          {items.length > COLLAPSED_ITEMS && (
+            <Button
+              size="xs"
+              variant="ghost"
+              alignSelf="flex-start"
+              fontFamily="heading"
+              fontSize="sm"
+              color="violet.600"
+              onClick={() => setOpen((o) => !o)}
+            >
+              {open ? "Show less" : `Show all ${items.length}`}
+            </Button>
+          )}
+        </VStack>
+      )}
+    </Box>
+  );
+}
+
+/**
+ * The portfolio pieces listed under the report for the family to open. The
+ * drafter picks them; the teacher takes off any that don't belong. A piece
+ * the portfolio doesn't share with the family never shows under their report.
+ */
+function ReportPieces({ narrativeId }: { narrativeId: Id<"courseNarratives"> }) {
+  const pieces = useQuery(api.parentReports.reportPieces, { narrativeId });
+  const remove = useMutation(api.parentReports.removeReportPiece);
+  if (!pieces || pieces.length === 0) return null;
+  return (
+    <Box mt={4}>
+      <Text fontFamily="heading" fontWeight="700" fontSize="sm" color="navy.600" mb={1}>
+        Work in this report
+      </Text>
+      <Text fontSize="sm" color="charcoal.400" fontFamily="body" mb={2}>
+        The family can open these from under the report.
+      </Text>
+      <VStack align="stretch" gap={1}>
+        {pieces.map((p) => (
+          <HStack key={p.id} gap={2}>
+            <Text fontSize="sm" color="charcoal.600" fontFamily="body" flex="1" minW={0}>
+              {p.title}
+              {!p.familyCanSee && (
+                <Text as="span" color="charcoal.400">
+                  {" "}
+                  · not shared with the family, so it won&apos;t show
+                </Text>
+              )}
+            </Text>
+            <Button
+              size="xs"
+              variant="ghost"
+              aria-label={`Take ${p.title} off this report`}
+              onClick={() =>
+                remove({ narrativeId, pieceId: p.id }).catch((e) =>
+                  toaster.error({ title: "Couldn't take that piece off", description: serverErrorMessage(e) }),
+                )
+              }
+            >
+              <X />
+            </Button>
+          </HStack>
+        ))}
+      </VStack>
+    </Box>
   );
 }

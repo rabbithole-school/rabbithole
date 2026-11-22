@@ -192,9 +192,9 @@ export function useManagedClaimBootstrap({
             subject,
           });
 
-          // In-flight work needs no guard here. Everything a scholar does is
-          // server-held, so a hand-over costs at most an unsent composer draft —
-          // exactly what the manual sign-out staff perform today already costs.
+          // In-flight work needs no guard here. Everything a scholar does in
+          // Rabbithole is server-held, so a hand-over costs at most an unsent
+          // draft; photos and third-party app projects stay on the iPad untouched.
           // A capture station's shot-but-unuploaded media is the one durable
           // LOCAL artifact, and it survives a swap on its own: the persisted
           // record carries its own station `sessionToken`, and the mutation that

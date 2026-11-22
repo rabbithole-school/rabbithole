@@ -3,11 +3,11 @@
 /**
  * The activity's MISSION group of the activity editor (TRA-519 B1) — the
  * steering note the tutor (or, on an app activity, the App designer) reads
- * alongside the prompt. Stored as `activities.buildContract` (+ allowSilence);
+ * alongside the prompt. Stored as `activities.buildContract`;
  * "mission" is the name for it everywhere a person reads it. Shown for every
  * online activity:
- *   • app activity: "Must be true" (invariants), "Scholar owns", "Gate", and
- *     the stay-silent switch;
+ *   • app activity: "Must be true" (invariants), "Scholar owns", and
+ *     "Mission" — one open line scholars see that never holds a build back;
  *   • any other online activity: only "Gate" and "Scholar owns" — its
  *     must-be-true items belong in the deliverable's criteria.
  * Each list is edited one entry per line and saved on blur; limits are
@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Box, Stack, Switch, Text, Textarea, Input } from "@chakra-ui/react";
+import { Stack, Text, Textarea, Input } from "@chakra-ui/react";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Field, SectionHeader } from "./shared";
 import { toaster } from "@/lib/toaster";
@@ -65,9 +65,8 @@ export function gateFieldCopy(appActivity: boolean): {
 } {
   return appActivity
     ? {
-        hint: "What must exist and have run once before the designer builds cosmetic requests.",
-        placeholder:
-          "e.g. One generation of seeds dropped and sprouted, before any redesign",
+        hint: "One open line scholars see: what their app should help them understand. It never holds a build back.",
+        placeholder: "e.g. Understand escape velocity",
       }
     : {
         hint: "The first thing the scholar must make before side ideas get explored. Left blank, a default from the deliverable applies.",
@@ -80,7 +79,6 @@ export function MissionFields({
   appActivity,
   defaultGate,
   buildContract,
-  allowSilence,
   update,
 }: {
   activityId: Id<"activities">;
@@ -89,11 +87,9 @@ export function MissionFields({
   /** The gate the tutor steers by when none is written (lib/mission.ts). */
   defaultGate?: string | null;
   buildContract: BuildContract | undefined;
-  allowSilence: boolean | undefined;
   update: (args: {
     id: Id<"activities">;
     buildContract?: BuildContract | null;
-    allowSilence?: boolean;
   }) => Promise<unknown>;
 }) {
   const remoteInvariants = (buildContract?.invariants ?? []).join("\n");
@@ -206,50 +202,17 @@ export function MissionFields({
           {...textareaProps}
         />
       </Field>
-      <Field label="Gate" hint={gateCopy.hint}>
+      <Field label={appActivity ? "Mission" : "Gate"} hint={gateCopy.hint}>
         <Input
           size="sm"
           value={gate}
           onChange={(e) => setGate(e.target.value)}
           onBlur={() => void save()}
           placeholder={defaultGate ? `Default: ${defaultGate}` : gateCopy.placeholder}
-          aria-label="Gate"
+          aria-label={appActivity ? "Mission" : "Gate"}
           {...textareaProps}
         />
       </Field>
-      {appActivity && (
-        <Box>
-          <Switch.Root
-            // Silence only applies under a mission (the server drops
-            // allowSilence without one), so the switch waits for it.
-            disabled={!buildContract}
-            checked={!!allowSilence && !!buildContract}
-            onCheckedChange={(d) =>
-              void update({ id: activityId, allowSilence: !!d.checked }).catch(
-                (err: unknown) => {
-                  console.error(err);
-                  toaster.error({ title: "Couldn't change the setting" });
-                },
-              )
-            }
-            colorPalette="violet"
-            size="sm"
-          >
-            <Switch.HiddenInput />
-            <Switch.Control>
-              <Switch.Thumb />
-            </Switch.Control>
-            <Switch.Label fontFamily="heading" fontSize="sm" color="charcoal.600">
-              Designer may stay silent until a question is answered
-            </Switch.Label>
-          </Switch.Root>
-          <Text fontSize="2xs" color="charcoal.400" pl={6} mt={0.5}>
-            {buildContract
-              ? "When the designer asks a learning question, it waits for a real answer instead of building past it."
-              : "Needs a mission"}
-          </Text>
-        </Box>
-      )}
     </Stack>
   );
 }

@@ -113,6 +113,7 @@ import { SummitHandoff } from "@/components/practice/SummitHandoff";
 import { DictationMicButton } from "@/components/DictationMicButton";
 import { ComposerAttachMenu } from "@/components/ComposerAttachMenu";
 import { usePendingImage } from "@/hooks/usePendingImage";
+import { useComposeKeyTarget } from "@/hooks/useComposeKey";
 import { useNow } from "@/hooks/useNow";
 import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -154,10 +155,19 @@ import { ExpressionEditor } from "@/components/practice/ExpressionEditor";
 import { ExpressionKeypad } from "@/components/practice/ExpressionKeypad";
 import { UnitKeys } from "@/components/practice/UnitKeys";
 import { FractionKey } from "@/components/practice/FractionKey";
-import { UNIT_MISSING_NUDGE, unitOutcomeNudge } from "@/components/practice/unitAnswerCopy";
+import { UNIT_MISSING_NUDGE, nearMissNudge } from "@/components/practice/unitAnswerCopy";
 import { useExpressionTemplate } from "@/hooks/useExpressionTemplate";
 import { useExpressionTemplateKeyboard } from "@/hooks/useExpressionTemplateKeyboard";
 import { hasPracticeMath } from "@/shared/fractions";
+import {
+  answerFormHint,
+  formNudgeOf,
+  usesAlgebraEditor,
+  type AnswerPalette,
+} from "@/shared/practiceAnswerForm";
+import { answerToLatex, isTypesetAnswer } from "@/shared/answerLatex";
+import { latexToPlainSpeech, renderableMathLatex } from "@/shared/stemMath";
+import { MathText } from "@/components/MathText";
 import type { PracticePromptVisual } from "@/shared/practicePromptVisual";
 import { parseManipulativeSpec } from "@/lib/manipulative/grade";
 import { MANIPULATIVE_ANSWER_TYPE } from "@/lib/manipulative/practiceContract";
@@ -266,7 +276,21 @@ type ServedItem = {
   // practiceItem (lane 2) can be served through the same shape — see
   // convex/lib/practice/session.ts's `ServedItem` (the source of truth this
   // mirrors) + lib/manipulative/practiceContract.ts.
-  answerType: "integer" | "decimal" | "fraction" | "expression" | "multipleChoice" | "manipulative" | "dialogue";
+  answerType:
+    | "integer"
+    | "decimal"
+    | "fraction"
+    | "expression"
+    | "solutionSet"
+    | "multipleChoice"
+    | "manipulative"
+    | "dialogue";
+  /** Algebra answers (mirrors convex/lib/practice/session.ts): the iPad shows
+   *  an algebra keypad for these; web types them in a plain field in the
+   *  answer grammar (`(x+3)(x-2)`, `log_2(8)`, `3,-2`, `none`). */
+  answerPalette?: AnswerPalette;
+  /** The answer form the item asks for — one hint line under the field. */
+  answerForm?: string;
   /** The measurement unit this item's answer must carry, DISPLAY form ("cm³") —
    *  mirrors convex/lib/practice/session.ts's ServedItem. Present ⇒ the answer
    *  is value + unit ("112 cm³") and the surface offers the unit keys; absent ⇒
@@ -337,6 +361,9 @@ type SubmitResult = {
    *  ("missing") or not the one asked for ("wrong") — the "so close" signal a
    *  unit-bearing item earns. Still a miss in every other respect. */
   unitOutcome?: "missing" | "wrong";
+  /** The same signal for a required representation: the value was right but
+   *  not in lowest terms / not written as a decimal. Still a miss. */
+  formOutcome?: "notLowestTerms" | "notDecimal";
   skillKey: string;
   skillLabel: string;
   repetition: number;
@@ -682,6 +709,11 @@ export function PracticeSession({
    *  reading it we congratulate a scholar for a boundary someone else drew. */
   const [scopeBlocked, setScopeBlocked] = useState(false);
   const [input, setInput] = useState("");
+  // The grader's form nudge ("That's equal. Now write it in factored form."),
+  // keyed by item; cleared by the next edit. The count goes back to the
+  // server as `formNudgesUsed` on every submit of the item.
+  const [formNudge, setFormNudge] = useState<{ itemId: string; message: string } | null>(null);
+  const formNudgesRef = useRef<{ itemId: string; count: number }>({ itemId: "", count: 0 });
   const [result, setResult] = useState<SubmitResult | null>(null);
   // The consolidation "comes back ~Thursday" line (P1e), precomputed in the
   // submit handler (Date.now() is impure — never called during render) and shown
@@ -1120,9 +1152,9 @@ export function PracticeSession({
         activeSkillKeys || stretchHint ? undefined : includeMapping || undefined,
     };
     // `questionFraming`: this client renders the frame as the "Can you already
-    // do this?" pill (item_steps frames, no daily cap). An older backend
-    // (deploy skew: Vercel can land before Convex) rejects the unknown arg —
-    // retry once without it rather than fail the run.
+    // do this?" pill. The server no longer branches on the flag (TRA-475) but
+    // still accepts it. A backend older than the flag rejects the unknown arg
+    // — retry once without it rather than fail the run.
     const res = await convex
       .query(api.practiceSkills.practiceSession, { ...serveArgs, questionFraming: true })
       .catch((error: unknown) => {
@@ -1529,6 +1561,13 @@ export function PracticeSession({
     !!current &&
     current.answerShape === "twoD" &&
     (current.answerType === "fraction" || current.answerType === "expression");
+  // An algebra item (an answer palette, or a set of solutions). The iPad has an
+  // algebra keypad; web takes the answer grammar in a plain text field, since
+  // a hardware keyboard is the norm here (web keypad parity comes later).
+  const algebraItem = !!current && usesAlgebraEditor(current);
+  const formHint = answerFormHint(current?.answerForm);
+  const formNudgeLine =
+    formNudge && current && formNudge.itemId === current.itemId ? formNudge.message : null;
 
   // "See an example" shelf (instructional segments v1): the verified strand-level
   // worked example for the CURRENT item's strand, if any. This is what keeps a
@@ -1865,13 +1904,22 @@ export function PracticeSession({
       machine.send({ type: "lane:entered", lane: "mapping" });
       setLaneBusy(true);
       try {
+        const nudgesUsed = formNudgesRef.current.itemId === current.itemId ? formNudgesRef.current.count : 0;
         const graded = await submitMapping({
           scholarId,
           domain: current.domain ?? domain ?? "",
           itemId: current.itemId,
           seed: seedRef.current,
           answer,
+          formNudgesUsed: nudgesUsed,
         });
+        const mappingNudge = formNudgeOf(graded);
+        if (mappingNudge) {
+          formNudgesRef.current = { itemId: current.itemId, count: nudgesUsed + 1 };
+          setFormNudge({ itemId: current.itemId, message: mappingNudge });
+          machine.send({ type: "lane:exited" });
+          return;
+        }
         // A stale/unresolvable item means the current batch is no longer useful;
         // recompose immediately, still without presenting a verdict.
         if (graded.outcome === null || graded.alreadyMapped) {
@@ -1906,6 +1954,7 @@ export function PracticeSession({
           // `submitMappingAnswer` reports the unit verdict at the top level
           // (the placement pair nests it under `graded`).
           unitOutcome: graded.unitOutcome,
+          formOutcome: graded.formOutcome,
           skillKey: current.skillKey,
           skillLabel: current.skillLabel,
           repetition: 0,
@@ -1958,6 +2007,8 @@ export function PracticeSession({
       record: firstAttempt,
       dontKnow: false,
       predictedConfidence: firstAttempt ? predictedConfidence : null,
+      formNudgesUsed:
+        formNudgesRef.current.itemId === current.itemId ? formNudgesRef.current.count : 0,
       ...breakerSubmitContext,
     });
     const reusesClientEvent =
@@ -1992,6 +2043,8 @@ export function PracticeSession({
       servedLane: current.lane === "challenge" ? "challenge" : "required",
       ...(timing.firstKeyMs !== undefined ? { latencyMs: timing.firstKeyMs } : {}),
       ...(timing.elapsedMs !== undefined ? { thinkTimeMs: timing.elapsedMs } : {}),
+      formNudgesUsed:
+        formNudgesRef.current.itemId === current.itemId ? formNudgesRef.current.count : 0,
     };
     // Fast math: a bare fact is checked on the client so the verdict is
     // instant; the server still grades and records it (factVerdict.ts).
@@ -2689,6 +2742,10 @@ export function PracticeSession({
   // round-trip would otherwise leave the box unfocused; this refocuses so the
   // kid can keep typing without clicking back in.
   const handoffComposerRef = useRef<HTMLTextAreaElement>(null);
+  useComposeKeyTarget(
+    () => handoffComposerRef.current?.focus(),
+    !!handoff && (handoff.mode === "dialogue" ? !dialogueVerdict : !handoff.ended),
+  );
   const handoffComposerFocusable =
     !!handoff &&
     !handoff.ended &&
@@ -2817,6 +2874,15 @@ export function PracticeSession({
 
   const installGrade = useCallback(
     (raw: unknown, entry: OutboxAnswer) => {
+      // Right value, not yet in the form asked: nothing was recorded, and the
+      // machine returns the item to answering. Keep the answer, show the line.
+      const nudge = formNudgeOf(raw);
+      if (nudge) {
+        const used = formNudgesRef.current.itemId === entry.itemId ? formNudgesRef.current.count : 0;
+        formNudgesRef.current = { itemId: entry.itemId, count: used + 1 };
+        setFormNudge({ itemId: entry.itemId, message: nudge });
+        return;
+      }
       if (
         typeof raw !== "object" ||
         raw === null ||
@@ -2908,6 +2974,7 @@ export function PracticeSession({
         correct: verdict.correct,
         correctAnswer: verdict.correctAnswer,
         unitOutcome: verdict.unitOutcome,
+        formOutcome: verdict.formOutcome,
         skillKey: item.skillKey,
         skillLabel: item.skillLabel,
         repetition: 0,
@@ -3000,6 +3067,7 @@ export function PracticeSession({
     enabled:
       !placementGateActive &&
       !usesTemplateEditor &&
+      !algebraItem &&
       ((phase === "answering" && !hintRungActiveForCurrent) || implicitRetryAvailable),
     onKey: phase === "answering" ? onKey : onImplicitFlatRetryKey,
     onEnter: phase === "answering" ? () => void onSubmit() : undefined,
@@ -3060,8 +3128,6 @@ export function PracticeSession({
     (event: Parameters<typeof questionFrameWritesFor>[0]) => {
       if (!frameKey) return;
       for (const w of questionFrameWritesFor(event, { preview: rehearse || isRemote, scholarId })) {
-        // `framing: "question"`: without it the server treats the caller as an
-        // older iPad build and refuses writes for a key with no content row.
         const args = { scholarId, key: frameKey, framing: "question" as const };
         if (w.type === "recordChoice") void recordInstructionChoice({ ...args, choice: w.choice }).catch(() => {});
         else if (w.type === "recordViewed") void recordInstructionViewed(args).catch(() => {});
@@ -3071,8 +3137,8 @@ export function PracticeSession({
     [frameKey, isRemote, rehearse, recordInstructionChoice, recordInstructionCompleted, recordInstructionViewed, scholarId],
   );
   // Claim the impression when the framed item first renders (shownAt — the
-  // denominator). `framing: "question"` exempts it from the cross-key daily
-  // cap; a "suppressed" refusal (already engaged elsewhere) drops the frame.
+  // denominator). A "suppressed" refusal (already engaged elsewhere) drops the
+  // frame.
   const frameClaimedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!frameOnItem || !frameKey || frameStage !== "ask") return;
@@ -4008,6 +4074,8 @@ export function PracticeSession({
   const isHandoffPhase = phase === "handoff";
   const fbCorrect = phase === "feedback" && !!result && !result.dontKnow && result.correct;
   const fbMiss = phase === "feedback" && !!result && !result.dontKnow && !result.correct;
+  // The "so close" line a right value earns when only its unit or form was off.
+  const nearMiss = result ? nearMissNudge(result) : null;
   const nextLabel = isLastItem(idx, items.length) ? "Finish" : "Next";
   const isDialogueChat = handoff?.mode === "dialogue";
   const dialogueHasIdea = !!handoff?.messages.some((m) => m.role === "user");
@@ -4135,6 +4203,35 @@ export function PracticeSession({
             onSetCaret={onSetCaret}
             interactive={phase === "answering" && !hintRungActiveForCurrent}
           />
+        ) : algebraItem && phase === "answering" ? (
+          <input
+            aria-label="Answer"
+            autoFocus
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            value={input}
+            placeholder={current?.answerType === "solutionSet" ? "e.g. 3, -2   or   none" : "type your answer"}
+            onChange={(e) => {
+              setFormNudge(null);
+              setInput(e.target.value);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void onSubmit();
+              }
+            }}
+            style={{
+              width: "100%",
+              border: "none",
+              outline: "none",
+              background: "transparent",
+              textAlign: "center",
+              font: "inherit",
+              color: "inherit",
+            }}
+          />
         ) : (
           input || <Text as="span" color="#9bbcc2">type your answer</Text>
         )}
@@ -4151,7 +4248,9 @@ export function PracticeSession({
               if (
                 !current ||
                 current.answerType === MANIPULATIVE_ANSWER_TYPE ||
-                current.answerType === "dialogue"
+                current.answerType === "dialogue" ||
+                // A set of answers has no spoken form yet; it is typed.
+                current.answerType === "solutionSet"
               )
                 return;
               // A unit item's spoken answer carries the unit ("112 cubic
@@ -5057,7 +5156,9 @@ export function PracticeSession({
                             _active={{ bg: "#dff0f2", transform: "scale(0.98)" }}
                             transition="transform 0.06s ease-out, background 0.06s ease-out"
                           >
-                            {hasPracticeMath(choice) ? (
+                            {isTypesetAnswer(choice) ? (
+                              <MathText ariaLabel={latexToPlainSpeech(answerToLatex(choice) ?? "")} latex={renderableMathLatex(answerToLatex(choice) ?? "", false)} fontSize={20} />
+                            ) : hasPracticeMath(choice) ? (
                               <FractionText value={choice} inline fontSize={20} color="inherit" align="center" />
                             ) : (
                               choice
@@ -5071,6 +5172,18 @@ export function PracticeSession({
                   {/* Typed answer — the field carries the submitted number into
                       feedback (read-only + verdict-tinted). */}
                   {answerFieldEl}
+                  {/* The requested answer form, and the grader's calm "right
+                      value, now write it in that form" line. */}
+                  {showAnswerField && formHint ? (
+                    <Text fontSize="14px" color="#5a655d" textAlign="center">
+                      {formHint}
+                    </Text>
+                  ) : null}
+                  {phase === "answering" && formNudgeLine ? (
+                    <Text fontSize="15px" fontWeight="600" color="#143" textAlign="center" aria-live="polite">
+                      {formNudgeLine}
+                    </Text>
+                  ) : null}
                   {/* The honest don't-know for the framed item — a quiet text
                       link, not a button competing with Check. */}
                   {notYetVisible && (
@@ -5143,13 +5256,17 @@ export function PracticeSession({
                       {result.correctAnswer && !result.correct && (
                         <Text fontSize="14px" color="#5a655d" textAlign="center">
                           The answer was{" "}
-                          <FractionText value={result.correctAnswer} inline fontSize={14} color="inherit" align="center" />
+                          {isTypesetAnswer(result.correctAnswer) ? (
+                            <MathText ariaLabel={latexToPlainSpeech(answerToLatex(result.correctAnswer) ?? "")} latex={renderableMathLatex(answerToLatex(result.correctAnswer) ?? "", false)} />
+                          ) : (
+                            <FractionText value={result.correctAnswer} inline fontSize={14} color="inherit" align="center" />
+                          )}
                           .
                         </Text>
                       )}
-                      {result.unitOutcome && (
+                      {nearMiss && (
                         <Text fontSize="14px" color="#8a6d16" textAlign="center">
-                          {unitOutcomeNudge(result.unitOutcome)}
+                          {nearMiss}
                         </Text>
                       )}
                       <Text
@@ -5169,23 +5286,23 @@ export function PracticeSession({
                   {/* A miss NEVER reveals the answer (anti-offloading). The stamp
                       says "Not quite"; a short nudge lives here, and the CTA lane
                       offers try-again (1st) or Continue / Walk-me-through (2nd). */}
-                  {/* The value was right and only the unit was off — the normal
+                  {/* The value was right and only the unit or form was off — the normal
                       incorrect treatment (stamp, tint, CTA lane), but the nudge
                       names what actually went wrong instead of "take another
                       look". Replaces the generic line rather than stacking. */}
-                  {fbMiss && !isMapping && result?.unitOutcome && (
+                  {fbMiss && !isMapping && nearMiss && (
                     <Text className="rh-note" fontSize="14px" color="#8a6d16" textAlign="center">
-                      {unitOutcomeNudge(result.unitOutcome)}
+                      {nearMiss}
                     </Text>
                   )}
-                  {fbMiss && !isMapping && !frameMoveVisible && !result?.unitOutcome && verdict === "retry" && (
+                  {fbMiss && !isMapping && !frameMoveVisible && !nearMiss && verdict === "retry" && (
                     <Text className="rh-note" fontSize="14px" color="#8a6d16" textAlign="center">
                       {current?.lane === "stretch"
                         ? "This one's meant to be hard — a miss here never touches your map. Take another look."
                         : "Take another look — you\u2019ve got this."}
                     </Text>
                   )}
-                  {fbMiss && !isMapping && !result?.unitOutcome && verdict === "stuck" && (
+                  {fbMiss && !isMapping && !nearMiss && verdict === "stuck" && (
                     <Text className="rh-note" fontSize="14px" color="#7a3b3b" textAlign="center">
                       {current?.lane === "stretch"
                         ? "A genuinely tough one — wrestling with it IS the work. Talk it through, or move on with nothing lost."

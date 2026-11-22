@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import { useQuery, useMutation } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import { api } from "@/convex/_generated/api";
+import { useSmoothedQueryWithPending } from "@/hooks/useSmoothedQuery";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
   Box,
@@ -18,22 +20,26 @@ import {
   VStack,
 } from "@chakra-ui/react";
 import { Avatar } from "@/components/Avatar";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { Camera } from "@phosphor-icons/react";
 import { ScholarPhotoDialog } from "@/components/ScholarPhotoDialog";
 import { formatRelative } from "@/lib/relativeTime";
 import { ParentMessages } from "@/components/ParentMessages";
-import { PasskeyUpsell } from "@/components/PasskeyUpsell";
 import SharedNarratives from "@/components/parent/SharedNarratives";
 import { type ParentTab } from "@/components/parent/parentTabs";
 import { EXTENDED_EDUCATION_LABEL } from "@/shared/scholarGroupRouting";
 import type { ParentChild } from "@/components/parent/ParentNav";
 import { ParentLibraryCard } from "@/components/parent/ParentLibraryCard";
+import { ParentBunnyPadTab } from "@/components/parent/ParentBunnyPadTab";
+import { ParentHomeTab } from "@/components/parent/ParentHomeTab";
 import { ParentCalendarTab } from "@/components/parent/ParentCalendarTab";
+import { ParentHomeworkTab } from "@/components/parent/ParentHomeworkTab";
 import {
   parentMathCannedQuestions,
   sendParentMathCannedQuestion,
 } from "@/components/parent/parentMathQuestions";
-import { MathSkillsPortrait } from "@/components/practice/MathSkillsPortrait";
+import { ParentMathPortrait } from "@/components/practice/ParentMathPortrait";
+import { PartOfPictureNote } from "@/components/parent/PartOfPictureNote";
 import { useAideDockOptional } from "@/components/aide/AideDockProvider";
 import { ParentPortfolioTab } from "@/components/parent/ParentPortfolioTab";
 import { ParentCourseView } from "@/components/parent/ParentCourseView";
@@ -120,11 +126,6 @@ export function ParentDashboard({
 
   return (
     <Container maxW="4xl" py={6}>
-      {/* Post-login nudge to add a passkey (faster sign-in next time).
-          Self-hides once the parent has one or dismisses it. Not part of a
-          staff preview — it's about the viewer's own account. */}
-      {!preview && !applicantOnly && <PasskeyUpsell />}
-
       {activeChild && (
         <ChildView
           scholarId={activeChild}
@@ -133,10 +134,6 @@ export function ParentDashboard({
           }
           childImage={
             childOptions.find((c) => c._id === activeChild)?.image ?? null
-          }
-          programGuest={
-            childOptions.find((c) => c._id === activeChild)
-              ?.enrollmentStanding === "program_guest"
           }
           tab={tab}
           courseId={courseId}
@@ -170,7 +167,6 @@ function ChildView({
   scholarId,
   childName,
   childImage,
-  programGuest,
   tab,
   courseId,
   hrefQuery,
@@ -179,117 +175,72 @@ function ChildView({
   scholarId: Id<"users">;
   childName: string;
   childImage: string | null;
-  programGuest: boolean;
   tab: ParentTab;
   courseId: string | null;
   hrefQuery: string;
   preview: boolean;
 }) {
-  const summary = useQuery(
-    api.parents.childSummary,
-    programGuest ? "skip" : { scholarId },
+  // The Records tab reads everything it shows in one query, so it renders
+  // once. Switching children keeps the previous child's tab on screen (dimmed,
+  // inert, under the incoming name) until the next one arrives, instead of dropping to the
+  // placeholder and back.
+  const { data: records, isPending: recordsPending } =
+    useSmoothedQueryWithPending(
+      api.parents.recordsTab,
+      tab === "records" ? { scholarId } : "skip",
+    );
+  // The standing "part of the picture" note, the same on Home, Progress,
+  // Portfolio and Math.
+  const pictureNote = (
+    <PartOfPictureNote childName={childName} messagesHref={`/parent/messages${hrefQuery}`} />
   );
-  const setChildPhoto = useMutation(api.parents.setChildPhoto);
-  const [photoDialogOpen, setPhotoDialogOpen] = useState(false);
   return (
     <VStack align="stretch" gap={6}>
-      {tab === "records" && (
-        <>
+      {tab === "records" &&
+        (records === undefined ? (
+          <RecordsTabPlaceholder />
+        ) : (
           <Box
-            bg="white"
-            borderRadius="xl"
-            borderWidth="1px"
-            borderColor="gray.200"
-            p={6}
+            opacity={recordsPending ? 0.6 : 1}
+            pointerEvents={recordsPending ? "none" : undefined}
+            aria-busy={recordsPending || undefined}
+            inert={recordsPending || undefined}
+            transition="opacity 0.15s"
           >
-            <HStack gap={4} align="center">
-              <Box
-                as={preview ? "div" : "button"}
-                position="relative"
-                flexShrink={0}
-                cursor={preview ? "default" : "pointer"}
-                borderRadius="full"
-                aria-label={
-                  preview ? undefined : `Change ${childName || "your child"}'s photo`
-                }
-                onClick={preview ? undefined : () => setPhotoDialogOpen(true)}
-              >
-                <Avatar
-                  name={childName || summary?.name}
-                  src={childImage ?? undefined}
-                  size="lg"
-                  colorKey={scholarId}
-                />
-                {!preview && (
-                  <Box
-                    position="absolute"
-                    bottom={0}
-                    right={0}
-                    bg="violet.500"
-                    borderRadius="full"
-                    w={7}
-                    h={7}
-                    display="flex"
-                    alignItems="center"
-                    justifyContent="center"
-                    border="2px solid white"
-                  >
-                    <Camera size={14} color="white" />
-                  </Box>
-                )}
-              </Box>
-              <Box flex={1} minW={0}>
-                <Heading
-                  size="lg"
-                  fontFamily="heading"
-                  color="navy.500"
-                  mb={1}
-                >
-                  {summary?.name ?? childName ?? "Loading…"}
-                </Heading>
-                {summary &&
-                  (summary.totalSessions > 0 ||
-                    summary.masteryDomainCount > 0 ||
-                    summary.masteryObservationCount > 0) && (
-                    <HStack gap={6} mt={3} flexWrap="wrap">
-                      {summary.totalSessions > 0 && (
-                        <Stat
-                          label="Sessions"
-                          value={String(summary.totalSessions)}
-                        />
-                      )}
-                      {summary.masteryDomainCount > 0 && (
-                        <Stat
-                          label="Topics explored"
-                          value={String(summary.masteryDomainCount)}
-                        />
-                      )}
-                      {summary.masteryObservationCount > 0 && (
-                        <Stat
-                          label="Mastery notes"
-                          value={String(summary.masteryObservationCount)}
-                        />
-                      )}
-                    </HStack>
-                  )}
-              </Box>
-            </HStack>
+            <RecordsTab
+              records={records}
+              childName={childName}
+              childImage={childImage}
+              preview={preview}
+            />
           </Box>
+        ))}
 
-          <ScholarPhotoDialog
-            open={photoDialogOpen}
-            onClose={() => setPhotoDialogOpen(false)}
-            scholarName={childName || summary?.name || "your child"}
-            currentImage={childImage}
-            onSave={async (imageStorageId) => {
-              await setChildPhoto({ scholarId, imageStorageId });
-            }}
-          />
-        </>
+      {tab === "home" && (
+        <ParentHomeTab
+          scholarId={scholarId}
+          childName={childName}
+          hrefQuery={hrefQuery}
+          preview={preview}
+          pictureNote={pictureNote}
+          formsBanner={
+            <>
+            </>
+          }
+        />
       )}
-
+      {tab === "bunnypad" &&
+        (preview ? (
+          <PreviewPlaceholder>
+            The BunnyPad controls are for {childName || "the scholar"}&apos;s
+            family only. They aren&apos;t part of this preview.
+          </PreviewPlaceholder>
+        ) : (
+          <ParentBunnyPadTab scholarId={scholarId} childName={childName} />
+        ))}
       {tab === "progress" && (
         <>
+          {pictureNote}
           <ProgressTab scholarId={scholarId} />
           <SharedNarratives scholarId={scholarId} />
         </>
@@ -303,37 +254,189 @@ function ChildView({
             preview={preview}
           />
         ) : (
-          <ParentPortfolioTab
-            scholarId={scholarId}
-            hrefQuery={hrefQuery}
-            preview={preview}
-          />
+          <VStack align="stretch" gap={5}>
+            {pictureNote}
+            <ParentPortfolioTab
+              scholarId={scholarId}
+              hrefQuery={hrefQuery}
+              preview={preview}
+            />
+          </VStack>
         ))}
-      {tab === "records" && preview && (
-        <PreviewPlaceholder>
-          Forms, health records and the library card are for{" "}
-          {childName || "the scholar"}&apos;s family only — they aren&apos;t
-          part of this preview.
-        </PreviewPlaceholder>
-      )}
-      {tab === "records" && !preview && (
-        <VStack align="stretch" gap={4}>
-          {!programGuest && (
-            <ParentLibraryCard key={scholarId} scholarId={scholarId} />
-          )}
-        </VStack>
-      )}
+      {tab === "reports" && <SharedNarratives scholarId={scholarId} />}
       {tab === "math" && (
-        <ParentMathSkillsTab
-          scholarId={scholarId}
-          scholarName={summary?.name ?? ""}
-        />
+        <ParentMathSkillsTab scholarId={scholarId} scholarName={childName} note={pictureNote} />
+      )}
+      {tab === "homework" && (
+        <ParentHomeworkTab key={scholarId} scholarId={scholarId} />
       )}
       {tab === "calendar" && <ParentCalendarTab scholarId={scholarId} />}
       {tab === "settings" && <NotificationSettings />}
     </VStack>
   );
 }
+
+type RecordsTabData = FunctionReturnType<typeof api.parents.recordsTab>;
+
+/**
+ * The Records tab, drawn from one `parents.recordsTab` result. Every card
+ * takes its data as props; the writes (photo, uploads, library card) stay in
+ * the cards. The ids and the summary come from `records`, so a retained
+ * previous child's result stays self-consistent while the next one loads.
+ */
+function RecordsTab({
+  records,
+  childName,
+  childImage,
+  preview,
+}: {
+  records: RecordsTabData;
+  childName: string;
+  childImage: string | null;
+  preview: boolean;
+}) {
+  const { scholarId, summary, programGuest, family } = records;
+  const name = childName || summary?.name || "";
+  const setChildPhoto = useMutation(api.parents.setChildPhoto);
+  const [photoDialogOpen, setPhotoDialogOpen] = useState(false);
+  return (
+    <VStack align="stretch" gap={6}>
+      <Box
+        bg="white"
+        borderRadius="xl"
+        borderWidth="1px"
+        borderColor="gray.200"
+        p={6}
+      >
+        <HStack gap={4} align="center">
+          <Box
+            as={preview ? "div" : "button"}
+            position="relative"
+            flexShrink={0}
+            cursor={preview ? "default" : "pointer"}
+            borderRadius="full"
+            aria-label={
+              preview ? undefined : `Change ${name || "your child"}'s photo`
+            }
+            onClick={preview ? undefined : () => setPhotoDialogOpen(true)}
+          >
+            <Avatar
+              name={name || undefined}
+              src={childImage ?? undefined}
+              size="lg"
+              colorKey={scholarId}
+            />
+            {!preview && (
+              <Box
+                position="absolute"
+                bottom={0}
+                right={0}
+                bg="violet.500"
+                borderRadius="full"
+                w={7}
+                h={7}
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
+                border="2px solid white"
+              >
+                <Camera size={14} color="white" />
+              </Box>
+            )}
+          </Box>
+          <Box flex={1} minW={0}>
+            <Heading
+              size="lg"
+              fontFamily="heading"
+              color="navy.500"
+              mb={1}
+            >
+              {summary?.name ?? name}
+            </Heading>
+            {summary &&
+              (summary.totalSessions > 0 ||
+                summary.masteryDomainCount > 0 ||
+                summary.masteryObservationCount > 0) && (
+                <HStack gap={6} mt={3} flexWrap="wrap">
+                  {summary.totalSessions > 0 && (
+                    <Stat
+                      label="Sessions"
+                      value={String(summary.totalSessions)}
+                    />
+                  )}
+                  {summary.masteryDomainCount > 0 && (
+                    <Stat
+                      label="Topics explored"
+                      value={String(summary.masteryDomainCount)}
+                    />
+                  )}
+                  {summary.masteryObservationCount > 0 && (
+                    <Stat
+                      label="Mastery notes"
+                      value={String(summary.masteryObservationCount)}
+                    />
+                  )}
+                </HStack>
+              )}
+          </Box>
+        </HStack>
+      </Box>
+
+      <ScholarPhotoDialog
+        open={photoDialogOpen}
+        onClose={() => setPhotoDialogOpen(false)}
+        scholarName={name || "your child"}
+        currentImage={childImage}
+        onSave={async (imageStorageId) => {
+          await setChildPhoto({ scholarId, imageStorageId });
+        }}
+      />
+
+      {preview || !family ? (
+        <PreviewPlaceholder>
+          Forms, health records and the library card are for{" "}
+          {name || "the scholar"}&apos;s family only — they aren&apos;t
+          part of this preview.
+        </PreviewPlaceholder>
+      ) : (
+        <VStack align="stretch" gap={4}>
+          {family.libraryCard && (
+            <ParentLibraryCard
+              key={scholarId}
+              scholarId={scholarId}
+              status={family.libraryCard}
+            />
+          )}
+        </VStack>
+      )}
+    </VStack>
+  );
+}
+
+/**
+ * What the Records tab shows until `parents.recordsTab` answers: one block the
+ * height of the typical loaded tab (the child header plus the forms list), so
+ * the tab arrives in one step instead of growing card by card.
+ */
+function RecordsTabPlaceholder() {
+  return (
+    <VStack align="stretch" gap={6} aria-busy="true" aria-label="Loading records">
+      <Box
+        bg="white"
+        borderRadius="xl"
+        borderWidth="1px"
+        borderColor="gray.200"
+        h="146px"
+      />
+      <Box h={RECORDS_PLACEHOLDER_BODY_HEIGHT} />
+    </VStack>
+  );
+}
+
+// Measured on the seeded enrolled family (header + forms list + library card)
+// at desktop width; a shorter tab (a visiting student's) settles upward once.
+const RECORDS_PLACEHOLDER_BODY_HEIGHT = "684px";
+
 
 /**
  * An Extended Education child has no school record — no sessions, mastery or
@@ -365,8 +468,9 @@ function ExtendedEducationNotice({ childName }: { childName: string }) {
 }
 
 /**
- * The parent Math Skills tab: the shared per-domain grade + growth portrait
- * (guardian-gated, non-sensitive), with a CTA that seeds the parent aide's
+ * The parent Math Skills tab: `ParentMathPortrait` over the shared portrait
+ * read (overall level, this term's pace, a per-area table; guardian-gated,
+ * non-sensitive), with a CTA that seeds the parent aide's
  * docked composer with "What is <name> working on in math?" — the parent
  * reviews/edits and hits send in the ONE portal chat (the header-Robot dock),
  * exactly like the teacher Curriculum landing's "Ask the bot" door. No second
@@ -382,9 +486,11 @@ function ExtendedEducationNotice({ childName }: { childName: string }) {
 function ParentMathSkillsTab({
   scholarId,
   scholarName,
+  note,
 }: {
   scholarId: Id<"users">;
   scholarName: string;
+  note: React.ReactNode;
 }) {
   const portrait = useQuery(api.parents.childMathPortrait, { scholarId });
   const aide = useAideDockOptional();
@@ -392,10 +498,11 @@ function ParentMathSkillsTab({
 
   return (
     <VStack align="stretch" gap={5}>
-      <MathSkillsPortrait
+      <ParentMathPortrait
         portrait={portrait}
         scholarName={scholarName}
         onAskAi={aide ? (question) => aide.seedComposer(question) : undefined}
+        note={note}
       />
       {aide && (
         <Flex wrap="wrap" gap={2}>
@@ -448,39 +555,21 @@ function NotificationSettings() {
   const addressDirty = draftAddress !== null && draftAddress !== savedAddress;
 
   return (
-    <Card title="Notifications">
-      <Text fontFamily="body" fontSize="sm" color="charcoal.400" mb={4}>
-        Choose how you&apos;d like to hear about your child&apos;s learning.
-        These are coming soon — saving your choices now means you&apos;ll be
-        set up when they go live.
-      </Text>
+    <Card title="Settings">
+      {/* Only what works today (parent portal decision board, 2026-11-18):
+          the message-email switch (parentMessageSend reads emailEnabled) and
+          the school's contact record. The digest, homework-reminder and SMS
+          switches were "coming soon" and read by nothing, so they're gone
+          until they do something. */}
       <VStack align="stretch" gap={4}>
         <ToggleRow
-          label="Email updates"
+          label="Email me when a teacher sends a message"
           checked={prefs.emailEnabled}
           onChange={(v) => update({ emailEnabled: v })}
         />
-        <ToggleRow
-          label="Weekly digest"
-          help="A Sunday summary of the week's learning."
-          checked={prefs.weeklyDigest}
-          onChange={(v) => update({ weeklyDigest: v })}
-        />
-        <ToggleRow
-          label="Homework reminders"
-          help="A nudge when an assignment is still open past its date."
-          checked={prefs.homeworkReminders}
-          onChange={(v) => update({ homeworkReminders: v })}
-        />
-        <ToggleRow
-          label="Text message (SMS) updates"
-          help="Requires a mobile number below."
-          checked={prefs.smsEnabled}
-          onChange={(v) => update({ smsEnabled: v })}
-        />
         <Box>
           <Text fontFamily="heading" fontSize="xs" color="charcoal.500" mb={1}>
-            Mobile number (for SMS)
+            Mobile number
           </Text>
           <HStack>
             <Input
@@ -609,14 +698,6 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <Text fontFamily="body" fontSize="sm" color="charcoal.300">
-      {children}
-    </Text>
-  );
-}
-
 function ProgressTab({ scholarId }: { scholarId: Id<"users"> }) {
   const mastery = useQuery(api.parents.childMastery, { scholarId });
   const signals = useQuery(api.parents.childSignals, { scholarId });
@@ -629,7 +710,10 @@ function ProgressTab({ scholarId }: { scholarId: Id<"users"> }) {
         {mastery === undefined ? (
           <Spinner size="sm" color="violet.400" />
         ) : Object.keys(mastery).length === 0 ? (
-          <Empty>No mastery notes yet — they&apos;ll appear as your child works.</Empty>
+          <EmptyState
+            title="No mastery notes yet"
+            hint="They'll appear as your child works."
+          />
         ) : (
           <VStack align="stretch" gap={6}>
             {Object.entries(mastery).map(([domain, groups]) => (
@@ -714,7 +798,7 @@ function ProgressTab({ scholarId }: { scholarId: Id<"users"> }) {
         {signals === undefined ? (
           <Spinner size="sm" color="violet.400" />
         ) : Object.keys(signals).length === 0 ? (
-          <Empty>No signals recorded yet.</Empty>
+          <EmptyState title="No signals recorded yet" />
         ) : (
           <Flex gap={2} flexWrap="wrap">
             {Object.entries(signals)
@@ -742,7 +826,7 @@ function ProgressTab({ scholarId }: { scholarId: Id<"users"> }) {
         {seeds === undefined ? (
           <Spinner size="sm" color="violet.400" />
         ) : seeds.length === 0 ? (
-          <Empty>No exploration suggestions right now.</Empty>
+          <EmptyState title="No exploration suggestions right now" />
         ) : (
           <VStack align="stretch" gap={3}>
             {seeds.map((s, i) => (
@@ -755,9 +839,13 @@ function ProgressTab({ scholarId }: { scholarId: Id<"users"> }) {
                     </Text>
                   ) : null}
                 </Text>
-                <Text fontFamily="body" fontSize="sm" color="charcoal.400">
-                  {s.rationale}
-                </Text>
+                {/* The scholar's own seed line (childSeeds sends it in
+                    `rationale`), or nothing: never a teacher's note. */}
+                {s.rationale ? (
+                  <Text fontFamily="body" fontSize="sm" color="charcoal.400">
+                    {s.rationale}
+                  </Text>
+                ) : null}
               </Box>
             ))}
           </VStack>
@@ -768,7 +856,7 @@ function ProgressTab({ scholarId }: { scholarId: Id<"users"> }) {
         {sessions === undefined ? (
           <Spinner size="sm" color="violet.400" />
         ) : sessions.length === 0 ? (
-          <Empty>No sessions yet.</Empty>
+          <EmptyState title="No sessions yet" />
         ) : (
           <VStack align="stretch" gap={3}>
             {sessions.map((p, i) => (

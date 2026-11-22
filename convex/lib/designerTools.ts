@@ -3,25 +3,25 @@
 // the doctrine is in prompts.ts buildTutorMissionSteering and
 // buildVibecodeSection:
 //
-// - park_idea / unpark_idea: an idea not done now (no domain twin, or asked
-//   before the mission's gate is met) is saved for later in the session's
-//   PARKING LOT, where the scholar sees it as a chip — visibly, never refused.
-// - stay_silent: builder only, with activities.allowSilence, a non-answer to
-//   the designer's standing learning question ends the turn with nothing shown.
+// - park_idea / unpark_idea: an idea not done now (no domain twin, or one
+//   this activity cannot hold) is saved for later in the session's PARKING
+//   LOT, where the scholar sees it as a chip — visibly, never refused.
+// - save_question (TRA-682): a question about the world the scholar asks
+//   mid-work, too big to answer in a sentence or two without leaving the
+//   work, is saved as a starter in "Things to wonder about". The model tells
+//   a question from a build idea by which tool it calls.
+//
+// The builder has no stay_silent: an app mission never holds a build, so no
+// turn waits on an answer. The app-update stay_silent is staySilentTool.ts.
 //
 // Kept apart from tutorSessionTools.ts and appended AFTER the factory's tools,
 // so the factory's tool order (and its prompt-cache prefix) is unchanged.
 // Like the factory, this dynamically imports `betaTool` and does no static
 // `@anthropic-ai/sdk` import.
 import type { BetaRunnableTool } from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool.js";
-// One name for both stay_silent tools (this one and the app-update one in
-// staySilentTool.ts); a turn is offered at most one of them. It lives in
-// appUpdateTools.ts because that module must stay import-free for the schema.
-import { STAY_SILENT_TOOL_NAME } from "./appUpdateTools";
-
-export { STAY_SILENT_TOOL_NAME };
 export const PARK_IDEA_TOOL_NAME = "park_idea";
 export const UNPARK_IDEA_TOOL_NAME = "unpark_idea";
+export const SAVE_QUESTION_TOOL_NAME = "save_question";
 
 export const PARKING_LOT_LIMITS = {
   maxEntries: 30,
@@ -117,7 +117,7 @@ function contentWords(text: string): string[] {
 }
 
 /**
- * Which mission tools a turn is offered (TRA-519 B1). Pure, so the gate is
+ * Which mission tools a turn is offered (TRA-519 B1). Pure, so the offer is
  * testable.
  *
  * park_idea / unpark_idea follow the prompt's MISSION steering exactly: any
@@ -126,51 +126,56 @@ function contentWords(text: string): string[] {
  * builder stance on an Edit turn — whoever is typing (a teacher in remote view
  * included), since that steering tells the model to park. Never a teacher
  * build, free play (no mission), or Play.
- *
- * stay_silent stays builder-only, app-activity-only and teacher-opt-in
- * (allowSilence): it is tied to the builder's rule that the next build waits
- * on a standing learning question, and a silent tutor in a writing activity
- * reads as a dead tutor. It is the owner's only — silence toward anyone else
- * would read as a dead tutor too — and buildSystemPromptParts renders the
- * silence branch under the same owner condition.
  */
 export function missionToolOffer(opts: {
   /** The session resolves a mission (lib/mission.ts resolveSessionMission). */
   hasMission: boolean;
-  /** TRA-519: the session takes the builder stance (its app is the work). */
-  builderStance: boolean;
   workshopMode: "edit" | "play";
   teacherBuild: boolean;
-  /** The activity is an app activity (shared/appSurface.ts isAppActivity). */
-  appActivity: boolean;
-  allowSilence: boolean;
-  callerIsSessionOwner: boolean;
-  /** A free-play session (TRA-489): no mission, nothing to park, no silence. */
+  /** A free-play session (TRA-489): no mission, nothing to park. */
   freePlay?: boolean;
-}): { parkIdea: boolean; staySilent: boolean } {
-  const parkIdea =
-    opts.hasMission &&
-    !opts.teacherBuild &&
-    opts.freePlay !== true &&
-    opts.workshopMode === "edit";
+}): { parkIdea: boolean } {
   return {
-    parkIdea,
-    staySilent:
-      parkIdea &&
-      opts.builderStance &&
-      opts.appActivity &&
-      opts.allowSilence &&
-      opts.callerIsSessionOwner,
+    parkIdea:
+      opts.hasMission &&
+      !opts.teacherBuild &&
+      opts.freePlay !== true &&
+      opts.workshopMode === "edit",
   };
 }
 
+/** What saving a starter did (sessions.saveStarterFromSession). */
+export type SaveStarterResult =
+  | "saved"
+  | "duplicate"
+  | "empty"
+  | "notHere"
+  | "alreadySaved";
+
+/** The tool result the model reads after save_question. */
+export function saveQuestionResultText(kind: SaveStarterResult): string {
+  switch (kind) {
+    case "saved":
+      return "Saved. It waits in Things to wonder about on their Quests tab.";
+    case "duplicate":
+      return "Already saved; nothing changed.";
+    case "notHere":
+      return "Nothing was saved here; just answer them briefly or go on with the work.";
+    default:
+      return "Nothing was saved: the question was empty.";
+  }
+}
+
 export async function makeDesignerTools(opts: {
-  offer: { parkIdea: boolean; staySilent: boolean };
+  offer: { parkIdea: boolean };
   parkIdea: (idea: { text: string; reason?: string }) => Promise<ParkingLotAppend["kind"]>;
   unparkIdea: (text: string) => Promise<ParkingLotRemove["kind"]>;
-  onSilence: () => void;
+  /** Save a question about the world as a starter (TRA-682). */
+  saveQuestion?: (text: string) => Promise<SaveStarterResult>;
+  /** Replace the scholar's "Something to figure out" question. */
+  setProvocation?: (text: string) => Promise<"set" | "cleared">;
 }): Promise<BetaRunnableTool[]> {
-  if (!opts.offer.parkIdea && !opts.offer.staySilent) return [];
+  if (!opts.offer.parkIdea) return [];
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
   );
@@ -180,7 +185,7 @@ export async function makeDesignerTools(opts: {
       betaTool({
         name: PARK_IDEA_TOOL_NAME,
         description:
-          "Save one of the scholar's ideas for later, where it waits as a chip they can see. When the activity is done they can build it or make it a Quest. Use it for an idea you are not doing now: one asked before the gate is met, or one with no domain twin. Text is the idea in the scholar's own words (short); reason is a few plain words a nine-year-old reads easily, e.g. \"after your first draft\". Then tell them in one sentence that it is saved for later.",
+          "Save one of the scholar's ideas for later, where it waits as a chip they can see. When the activity is done they can build it or make it a Quest. Use it for an idea you are not doing now: one with no domain twin, one this activity cannot hold, or, outside an app, one asked before the mission's gate is met. Text is the idea in the scholar's own words (short): copy what they asked for and never add your own reading of it, such as a weapon they did not name; reason is a few plain words a nine-year-old reads easily, e.g. \"after your first draft\". Then tell them in one sentence that it is saved for later.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -204,7 +209,7 @@ export async function makeDesignerTools(opts: {
             case "duplicate":
               return "Already parked; nothing changed.";
             case "full":
-              return "The parking lot is full (30 ideas). Nothing was parked; just tell the scholar it will have to wait for Free play.";
+              return "The parking lot is full (30 ideas). Nothing was parked; just tell the scholar it will have to wait.";
             default:
               return "Nothing was parked: the idea text was empty.";
           }
@@ -217,7 +222,7 @@ export async function makeDesignerTools(opts: {
       betaTool({
         name: UNPARK_IDEA_TOOL_NAME,
         description:
-          "Take an idea out of the scholar's saved-for-later list because you are starting it now (the gate has been met, or its domain twin is what you are doing). Call it in the same turn, before you start it (before create_code / str_replace_based_edit_tool when it is a build), with the idea's text as it was saved.",
+          "Take an idea out of the scholar's saved-for-later list: because you are starting it now (its domain twin is what you are doing, or what it waited on is done), or because the scholar says the saved version is not what they meant or that they no longer want it. When starting it, call it in the same turn, before you start it (before create_code / str_replace_based_edit_tool when it is a build). When they correct it, call it in that same turn, then park_idea their corrected words only if they still want the idea and it still has to wait. Pass the idea's text as it was saved.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -238,20 +243,53 @@ export async function makeDesignerTools(opts: {
       }) as BetaRunnableTool,
     );
   }
-  if (opts.offer.staySilent) {
+  if (opts.offer.parkIdea && opts.saveQuestion) {
+    const saveQuestion = opts.saveQuestion;
     tools.push(
       betaTool({
-        name: STAY_SILENT_TOOL_NAME,
+        name: SAVE_QUESTION_TOOL_NAME,
         description:
-          "End this turn without saying anything to the scholar. Use it only while one of your learning questions is standing and their message is a non-answer (\"idk\", \"just build it\", the same demand again, exclamation marks, a different request). Call it before writing any text; nothing you write in this turn is shown, and your question still stands.",
+          "Save a question about the world the scholar asked, one you can't answer in a sentence or two without leaving the work, so they can ask it later. It waits in \"Things to wonder about\" on their Quests tab, saying what they were building. A question is something they want to know (why, how, what is true); an idea for something to make or build goes to park_idea instead. Text is their question in their own words, as one question they'd want to read back later; never add your own angle. Then tell them in one sentence that it is saved on their Quests tab, and go back to the work.",
         inputSchema: {
           type: "object" as const,
-          properties: {},
+          properties: {
+            text: {
+              type: "string" as const,
+              description: "The question, in the scholar's words. Under 200 characters.",
+            },
+          },
+          required: ["text"] as const,
           additionalProperties: false,
         },
-        run: async () => {
-          opts.onSilence();
-          return "Silent. The scholar sees nothing from this turn. Do not write anything.";
+        run: async (input: { text: string }) =>
+          saveQuestionResultText(await saveQuestion(input.text)),
+      }) as BetaRunnableTool,
+    );
+  }
+  if (opts.offer.parkIdea && opts.setProvocation) {
+    const setProvocation = opts.setProvocation;
+    tools.push(
+      betaTool({
+        name: "set_provocation",
+        description:
+          "Set the ONE open question shown in the scholar's Flair tab under \"Something to figure out\". It replaces the previous one. Not after every build: only when the app has a mechanism worth wondering about. The scholar must be able to answer it by changing one thing and watching one thing in their own app. It names things and rules, never their numbers, and you never answer it for them. Pass empty text to clear it once they have figured it out. Do not mention the question in your chat reply; it lives in the Flair tab.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            text: {
+              type: "string" as const,
+              description:
+                "The question, in plain words a nine-year-old reads easily, under 140 characters. Empty clears it.",
+            },
+          },
+          required: ["text"] as const,
+          additionalProperties: false,
+        },
+        run: async (input: { text: string }) => {
+          const kind = await setProvocation(input.text);
+          return kind === "set"
+            ? "Set. It shows in the scholar's Flair tab."
+            : "Cleared.";
         },
       }) as BetaRunnableTool,
     );

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { useQuery } from "convex/react";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { api } from "@/convex/_generated/api";
 import type { ScholarPulse } from "@/convex/lib/rosterPulse";
 
@@ -34,11 +34,14 @@ export function useRosterPulse(
 } {
   const minuteNow =
     nowMs === undefined ? undefined : Math.floor(nowMs / 60_000) * 60_000;
-  const result = useQuery(
+  // Smoothed so the minute re-arm doesn't blink every pulse and presence dot
+  // (TRA-424); keyed on the lens so a school switch loads fresh.
+  const result = useSmoothedQuery(
     api.scholars.rosterPulse,
     institutionScope === undefined
       ? "skip"
       : { institutionScope, ...(minuteNow === undefined ? {} : { now: minuteNow }) },
+    { resetKey: institutionScope ?? null },
   );
 
   return useMemo(() => {

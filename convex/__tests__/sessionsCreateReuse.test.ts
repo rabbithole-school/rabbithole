@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -83,8 +84,8 @@ async function seedLiveAssignment(
     activityId: Id<"activities">;
   },
 ) {
-  return await t.run(async (ctx) =>
-    ctx.db.insert("assignments", {
+  const __mirrored = await t.run(async (ctx) =>
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds: [scholarId],
@@ -99,6 +100,7 @@ async function seedLiveAssignment(
       ],
     }),
   );
+  return __mirrored;
 }
 
 describe("sessions.create — live activity reuse", () => {
@@ -167,7 +169,7 @@ describe("sessions.create — live activity reuse", () => {
       teacherId,
     );
     const assignmentId = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId, targetedScholarId],

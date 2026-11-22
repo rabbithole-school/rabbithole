@@ -16,13 +16,28 @@ import {
   writeModeValidator,
 } from "./lib/readingLevels";
 import { writeReadWriteLevels } from "./scholars";
-import { deleteUserCore } from "./users";
+import { createScholarAs, deleteUserCore } from "./users";
+import { addScholarToGroupAs, removeScholarFromGroupAs } from "./scholarGroups";
+import {
+  resolveInstitutionLens,
+  scholarInstitutionReadableInLens,
+} from "./lib/institutionLens";
+import { assertNotImpersonating, requireScholarAdminFor } from "./lib/auth";
+import type { SchoolOperationsPrincipal } from "./lib/staffCapabilities";
 import { moveLessonToUnitCore } from "./lessons";
 import type { Doc, Id } from "./_generated/dataModel";
 import { normalizeStoredTutorModel } from "./lib/tutorModel";
 import { buildContractValidator } from "./lib/buildContract";
 import { isAppActivity } from "../shared/appSurface";
 import { requirePeriodForScholar } from "./reportingPeriods";
+import { assertProposalTakesNoStructure } from "./lib/questStructure";
+import {
+  resolveUnitSubject,
+  unitSubjectNotAClassError,
+  unitSubjectRequiredError,
+} from "./lib/unitSubject";
+import { resolveUnitGradeEdit, unitGradeUnreadableError } from "./lib/unitGrade";
+import { schoolSubjectOptions } from "./lib/classLink";
 
 /**
  * Teacher Aide helpers — internal mutations invoked by the curriculum-designer
@@ -225,6 +240,10 @@ const createCurriculumUnitArgs = {
   enduringUnderstandings: v.optional(v.array(v.string())),
   subject: v.optional(v.string()),
   gradeLevel: v.optional(v.string()),
+  /** The aide's tools set this: a NEW unit must name a subject, and one of
+   *  the school's classes when it has any (TRA-723); a reused same-title unit
+   *  needs none. Other callers leave it off. */
+  requireSubjectForNew: v.optional(v.boolean()),
 };
 
 /** The body of `createCurriculumUnit`, shared with the app installer
@@ -248,10 +267,28 @@ export async function createCurriculumUnitCore(
     (u) => !u.authorScholarId && u.title.trim().toLowerCase() === titleLower,
   );
   if (match) {
-    return { unitId: match._id, existed: true as const };
+    return { unitId: match._id, existed: true as const, filedUnder: undefined };
   }
-
   const institutionId = await institutionIdForUnitAuthor(ctx, args.authorId);
+  // The aide's tools: a NEW unit names one of the school's classes (TRA-723).
+  let subject = args.subject?.trim() || undefined;
+  let filedUnder: string | undefined;
+  if (args.requireSubjectForNew) {
+    const resolved = resolveUnitSubject(
+      args.subject,
+      await schoolSubjectOptions(ctx, institutionId, Date.now()),
+    );
+    if (resolved.kind === "missing") throw unitSubjectRequiredError();
+    if (resolved.kind === "ask") {
+      throw unitSubjectNotAClassError(resolved.given, resolved.options);
+    }
+    subject = resolved.subject;
+    if (resolved.mapped) filedUnder = resolved.subject;
+  }
+  // One grade or a span within K–8 (lib/unitGrade.ts); nothing is written
+  // for one that can't be read.
+  const grade = resolveUnitGradeEdit({}, args.gradeLevel ?? null);
+  if (grade.kind === "unreadable") throw unitGradeUnreadableError(grade.given);
   const unitId = await ctx.db.insert("units", {
     teacherId: args.authorId,
     institutionId,
@@ -265,13 +302,13 @@ export async function createCurriculumUnitCore(
     enduringUnderstandings: args.enduringUnderstandings
       ? toKeyedGranules(args.enduringUnderstandings, undefined, "eu")
       : undefined,
-    subject: args.subject?.trim() || undefined,
-    gradeLevel: args.gradeLevel?.trim() || undefined,
+    subject,
+    gradeLevel: grade.gradeLevel,
     isActive: true,
     // Teachers only until published or assigned (TRA-490).
     unpublished: true,
   });
-  return { unitId, existed: false as const };
+  return { unitId, existed: false as const, filedUnder };
 }
 
 export const createCurriculumUnit = internalMutation({
@@ -316,6 +353,8 @@ export async function createScholarLessonCore(
   ) {
     throw new Error("position must be a non-negative integer");
   }
+  // A waiting or declined Quest proposal takes no lesson (TRA-685).
+  assertProposalTakesNoStructure(await ctx.db.get(args.unitId));
 
   const existing = await ctx.db
     .query("lessons")
@@ -777,6 +816,128 @@ export const updateScholarProfile = internalMutation({
       await ctx.db.patch(args.scholarId, patch);
     }
     return { updated: Object.keys(patch) };
+  },
+});
+
+/**
+ * The acting human behind an agent write that has no Convex Auth identity
+ * (Slack bot, MCP connector, in-app aide). `callerUserId` is set by the
+ * surface, never by the model; `requireScholarAdminFor` re-applies the
+ * suspension, role and operations-scope checks `requireScholarAdmin` applies
+ * to a signed-in caller, and a read-only account or a view-as session is
+ * refused like `assertCanWrite` refuses it (the in-app aide runs as the real
+ * session owner, so the overlay would otherwise be ignored; Slack and MCP
+ * have no session, so the check passes there).
+ */
+async function requireScholarAdminCaller(
+  ctx: MutationCtx,
+  callerUserId: Id<"users">,
+): Promise<SchoolOperationsPrincipal> {
+  await assertNotImpersonating(ctx);
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller) throw new Error("Forbidden");
+  if (caller.readOnly) throw new Error("Forbidden: read-only account");
+  return await requireScholarAdminFor(ctx, caller);
+}
+
+/**
+ * Create a scholar account for the agent tool `create_scholar_account`. Same
+ * core as the directory's Add scholar button (`users.createScholar`), so the
+ * account lands in the caller's school with the same membership, default
+ * apps and onboarding.
+ */
+export const createScholarAsCaller = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    name: v.string(),
+    username: v.optional(v.string()),
+    // The turn's institution lens (the in-app `?inst=`), as the directory's
+    // button passes it; absent → the caller's home school.
+    scope: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const caller = await requireScholarAdminCaller(ctx, args.callerUserId);
+    const { userId } = await createScholarAs(ctx, caller, {
+      name: args.name,
+      username: args.username,
+      scope: args.scope,
+    });
+    const scholar = await ctx.db.get(userId);
+    return {
+      scholarId: userId,
+      name: scholar?.name ?? args.name.trim(),
+      username: scholar?.username ?? null,
+    };
+  },
+});
+
+/**
+ * Add a scholar to, or remove one from, a named group for the agent tool
+ * `update_group_membership`. The group is matched by name among the groups
+ * the caller may manage (exact name first, then a unique partial match); the
+ * write is the same core as the group page's add/remove.
+ */
+export const setGroupMembershipAsCaller = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    groupName: v.string(),
+    scholarId: v.id("users"),
+    action: v.union(v.literal("add"), v.literal("remove")),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<
+    | { ok: true; groupName: string; changed: boolean }
+    | { ok: false; message: string }
+  > => {
+    const caller = await requireScholarAdminCaller(ctx, args.callerUserId);
+    const lens = await resolveInstitutionLens(ctx, caller, "all");
+    const institutionIds: Array<Id<"institutions"> | undefined> = [
+      ...lens.allowedInstitutionIds,
+      undefined, // unstamped legacy groups count as the primary school
+    ];
+    const groups: Doc<"scholarGroups">[] = [];
+    for (const institutionId of institutionIds) {
+      const rows = await ctx.db
+        .query("scholarGroups")
+        .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
+        .collect();
+      for (const g of rows) {
+        if (scholarInstitutionReadableInLens(lens, g.institutionId)) groups.push(g);
+      }
+    }
+    const wanted = args.groupName.trim().toLowerCase();
+    if (!wanted) return { ok: false, message: "Name the group." };
+    const exact = groups.filter((g) => g.name.trim().toLowerCase() === wanted);
+    const matches = exact.length > 0
+      ? exact
+      : groups.filter((g) => g.name.toLowerCase().includes(wanted));
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        message: `No group named "${args.groupName}". Groups: ${groups
+          .map((g) => g.name)
+          .sort()
+          .join(", ")}. Nothing was changed.`,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        message: `"${args.groupName}" matches more than one group (${matches
+          .map((g) => g.name)
+          .join(", ")}). Ask which one; nothing was changed.`,
+      };
+    }
+    const group = matches[0];
+    // No try/catch here: a throw must roll the whole mutation back, so the
+    // tool (an action) catches it and reports nothing changed.
+    const { changed } =
+      args.action === "add"
+        ? await addScholarToGroupAs(ctx, caller, group._id, args.scholarId)
+        : await removeScholarFromGroupAs(ctx, caller, group._id, args.scholarId);
+    return { ok: true, groupName: group.name, changed };
   },
 });
 

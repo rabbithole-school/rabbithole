@@ -12,9 +12,8 @@
 // module answers "which calls, with what args", not "in what try/catch".
 
 import type { Id } from "@/convex/_generated/dataModel";
-import type { ActivityMode } from "@/lib/activityMode";
 import type { SimulatorRunBudgetValue } from "@/components/simulatorTeacher/SimulatorRunBudgetFields";
-import { MINUTE } from "./scheduling";
+import type { GiveFinish } from "@/components/GiveWindowFields";
 
 type AssignWorkTarget =
   | { kind: "unit" }
@@ -22,9 +21,6 @@ type AssignWorkTarget =
   | {
       kind: "activity";
       activityId: Id<"activities">;
-      mode: ActivityMode;
-      endsAt?: number;
-      dueAt?: number;
       scholarIds?: Id<"users">[];
     };
 
@@ -34,11 +30,10 @@ export interface TeacherAssignmentInputs {
   pickedActivityId: Id<"activities"> | null | undefined;
   targetKind: "unit" | "lesson" | "activity";
   isSingleActivity: boolean;
+  /** "Shows up: now". A single activity goes live; a unit/lesson plans at now. */
   deliverNow: boolean;
-  mode: ActivityMode;
-  durationMin: number;
-  /** The raw datetime-local value; parsed the same way the dialog does. */
-  dueAt: string;
+  /** "Finish" — the teacher's answer, sent as-is (TRA-571). */
+  finish: GiveFinish;
   scholarSel: Set<string>;
   effectiveForSel: Set<string> | null;
   startsMs: number;
@@ -56,6 +51,7 @@ interface TeacherAssignmentPlan {
     scholarIds: Id<"users">[];
     startsAt: number;
     target: AssignWorkTarget;
+    finish: GiveFinish;
   };
   /** Non-null → call `setAssignmentWorldBudget` with the assignment id added. */
   worldBudget: {
@@ -63,14 +59,11 @@ interface TeacherAssignmentPlan {
     perScholarWeek: number;
     seasonTicks: number | undefined;
   } | null;
-  /** Non-null → this is a live push; call `pushActivity` with the id added. */
-  pushActivity: {
-    activityId: Id<"activities">;
-    mode: ActivityMode;
-    endsAt?: number;
-    dueAt?: number;
-    scholarIds?: Id<"users">[];
-  } | null;
+  /** A single activity shown up "now": assignWork already makes it live
+   *  (one write, TRA-571), so there's no second push to make or to fail. */
+  liveNow: boolean;
+  /** How many scholars that live give reaches. */
+  liveScholarCount: number;
 }
 
 /**
@@ -89,9 +82,7 @@ export function buildTeacherAssignmentPlan(
     targetKind,
     isSingleActivity,
     deliverNow,
-    mode,
-    durationMin,
-    dueAt,
+    finish,
     scholarSel,
     effectiveForSel,
     startsMs,
@@ -110,19 +101,13 @@ export function buildTeacherAssignmentPlan(
     effectiveForSel.size < scholarSel.size
       ? Array.from(effectiveForSel).map((s) => s as Id<"users">)
       : undefined;
-  const effStartsMs = liveNow ? now : startsMs;
-  const endsAtMs =
-    mode === "classFocus" ? effStartsMs + durationMin * MINUTE : undefined;
-  const dueAtMs = mode === "homework" ? new Date(dueAt).getTime() : undefined;
+  const effStartsMs = deliverNow ? now : startsMs;
 
   const target: AssignWorkTarget =
     targetKind === "activity"
       ? {
           kind: "activity",
           activityId: pickedActivityId as Id<"activities">,
-          mode,
-          endsAt: endsAtMs,
-          dueAt: dueAtMs,
           ...(activityScholarIds ? { scholarIds: activityScholarIds } : {}),
         }
       : targetKind === "lesson"
@@ -135,6 +120,7 @@ export function buildTeacherAssignmentPlan(
       scholarIds,
       startsAt: effStartsMs,
       target,
+      finish,
     },
     worldBudget:
       hasWorldTarget && worldBudgetIsValid
@@ -144,15 +130,8 @@ export function buildTeacherAssignmentPlan(
             seasonTicks: worldBudget.seasonTicks ?? undefined,
           }
         : null,
-    pushActivity: liveNow
-      ? {
-          activityId: pickedActivityId as Id<"activities">,
-          mode,
-          ...(endsAtMs ? { endsAt: endsAtMs } : {}),
-          ...(dueAtMs ? { dueAt: dueAtMs } : {}),
-          ...(activityScholarIds ? { scholarIds: activityScholarIds } : {}),
-        }
-      : null,
+    liveNow,
+    liveScholarCount: activityScholarIds?.length ?? scholarIds.length,
   };
 }
 

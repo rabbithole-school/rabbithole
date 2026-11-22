@@ -118,7 +118,7 @@ export async function resolveWorkshopPolicy(
   args: {
     session: Pick<
       Doc<"sessions">,
-      "userId" | "activityId" | "assignmentId"
+      "userId" | "activityId" | "assignmentId" | "sourceCustomAppId"
     >;
     caller: Pick<Doc<"users">, "_id" | "role">;
     /** The session's activity when the caller already loaded it (saves a read). */
@@ -134,9 +134,15 @@ export async function resolveWorkshopPolicy(
   // The policy is an app-activity field (either shape, TRA-519): an activity
   // that stopped being an app may still carry it, and it must not gate
   // anything then — a non-app activity resolves to `always`.
-  const editAccess: EditAccess = isAppActivity(activity)
-    ? (activity?.editAccess ?? EDIT_ACCESS_DEFAULT)
-    : EDIT_ACCESS_DEFAULT;
+  // A tile session (lib/tileSessions.ts) holds a first-party app the scholar
+  // opened from their launcher, with no activity: Play-only, as an app
+  // activity under `never` is. The scholar types their own program inside the
+  // app; its source is not theirs (or the tutor's) to change.
+  const editAccess: EditAccess = args.session.sourceCustomAppId != null
+    ? "never"
+    : isAppActivity(activity)
+      ? (activity?.editAccess ?? EDIT_ACCESS_DEFAULT)
+      : EDIT_ACCESS_DEFAULT;
   const needsCompletion =
     editAccess === "afterCompletion" &&
     activity != null &&
@@ -196,7 +202,8 @@ export type WorkshopOpening = {
  *    rehearsal is not a build hand-off, so no auto-kickoff fires.
  *  - Otherwise today's rule: a build hand-off (`appRequest` on a test drive)
  *    opens in Edit with the build partner; a coached scholar session opens in
- *    Play; a plain vibecode session opens in Edit.
+ *    Play when it was handed the starter, else in Edit (nothing to play
+ *    yet); a plain vibecode session opens in Edit.
  *
  * Keyed on the SESSION's starter snapshot, not the activity's current
  * `starterAppId`: the build session's own autosave writes the starter, and
@@ -209,6 +216,9 @@ export function workshopOpeningFor(args: {
   /** The session was seeded from the activity's starter app. */
   openedOnStarter: boolean;
   hasAppRequest: boolean;
+  /** A tile session (lib/tileSessions.ts): it opens in Play for everyone, the
+   *  app in front, and is never a build hand-off. */
+  tileSession?: boolean;
 }): WorkshopOpening {
   const callerIsStaff = isTeacherRole(
     args.callerRole as Doc<"users">["role"],
@@ -220,13 +230,17 @@ export function workshopOpeningFor(args: {
     args.openedOnStarter &&
     scholarsCannotEdit;
   const teacherBuildKickoff =
-    args.isTestDrive && args.hasAppRequest && !rehearsesPlayableApp;
+    args.isTestDrive &&
+    args.hasAppRequest &&
+    !rehearsesPlayableApp &&
+    args.tileSession !== true;
   return {
-    defaultMode: rehearsesPlayableApp
+    defaultMode: rehearsesPlayableApp || args.tileSession === true
       ? "play"
       : defaultWorkshopMode({
           teacherBuildKickoff,
           hasAppRequest: args.hasAppRequest,
+          openedOnStarter: args.openedOnStarter,
         }),
     teacherBuildKickoff,
     teacherEditOverride: callerIsStaff && scholarsCannotEdit,

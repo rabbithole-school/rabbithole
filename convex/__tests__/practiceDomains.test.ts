@@ -114,6 +114,10 @@ describe("resolvePracticeDomainSlug — URL/alias → registered slug", () => {
     expect(resolvePracticeDomainSlug("negatives")).toBe("integers-coordinates");
     expect(resolvePracticeDomainSlug("patterns")).toBe("early-algebra");
     expect(resolvePracticeDomainSlug("quadratics")).toBe("algebra-1");
+    expect(resolvePracticeDomainSlug("Algebra 2")).toBe("algebra-2");
+    expect(resolvePracticeDomainSlug("alg2")).toBe("algebra-2");
+    expect(resolvePracticeDomainSlug("logarithms")).toBe("algebra-2");
+    expect(resolvePracticeDomainSlug("complex numbers")).toBe("algebra-2");
     expect(resolvePracticeDomainSlug("arithmetic")).toBe("whole-number-arithmetic");
   });
 
@@ -155,6 +159,8 @@ describe("resolvePracticeDomainSlug — URL/alias → registered slug", () => {
       "algebra",
       "equations",
       "patterns",
+      "algebra two",
+      "logarithms",
       "arithmetic",
       "whole number",
       ...PRACTICE_DOMAINS.map((d) => d.domain),

@@ -49,11 +49,14 @@ import { openExternal } from "@/lib/native";
 // it keeps that same promise to them too — a tool you can read is harder to
 // mistake for a mind (review/anti-parasocial-design.md). Desktop opens a new
 // tab; the iPad shell opens it in the built-in browser (the openExternal seam).
-let PROMPTS_SOURCE_URL =
+// Both URLs are the PUBLIC rabbithole-school repo in every build, the primary
+// school's included: its own downstream repo is private, so pointing at it 404'd for
+// parents, visiting educators and scholars — everyone the "read it yourself"
+// promise is made to (same reasoning as `promptsSourceUrl` in app/page.tsx).
+const PROMPTS_SOURCE_URL =
   "https://github.com/rabbithole-school/rabbithole/blob/main/convex/prompts.ts";
-let META_PROMPTS_SOURCE_URL =
+const META_PROMPTS_SOURCE_URL =
   "https://github.com/rabbithole-school/rabbithole/blob/main/convex/metaPrompts.ts";
-
 
 type LearningRecordSummary = NonNullable<
   FunctionReturnType<typeof api.learningRecord.mySummary>

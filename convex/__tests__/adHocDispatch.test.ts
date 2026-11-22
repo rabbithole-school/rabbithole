@@ -1,6 +1,7 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
+import { readSchedule } from "../lib/scheduleStore";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -95,11 +96,14 @@ describe("Ad-hoc dispatch — scholar starts", () => {
       title: "Multiplication practice",
       activityKind: "problem_set",
       targetSkillKeys: ["mult_facts_7_8_9"],
+      finish: { kind: "inClass" },
     });
 
-    const scheduled = await t.run((ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
-    );
+    // "In that class" also schedules its own end-of-class clear; only the
+    // practice-generation job is about the target.
+    const scheduled = (
+      await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())
+    ).filter((job) => job.name.includes("practiceGen"));
     expect(scheduled).toHaveLength(1);
     expect(scheduled[0].name).toContain("practiceGen:ensureProblemSetItems");
     expect(scheduled[0].args[0]).toEqual({ activityId });
@@ -113,14 +117,15 @@ describe("Ad-hoc dispatch — scholar starts", () => {
 
     const { assignmentId, activityId } = await asTeacher.mutation(
       api.assignments.dispatchActivity,
-      { scholarId, title: "Explore tessellations" },
+      { scholarId, title: "Explore tessellations", finish: { kind: "inClass" } },
     );
 
     // The dispatched assignment is unit-less with a populated schedule.
     const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
     expect(assignment!.kind).toBe("adHocDispatch");
     expect(assignment!.unitId).toBeUndefined();
-    expect((assignment!.activitySchedule ?? []).length).toBe(1);
+    const schedule = await t.run((ctx) => readSchedule(ctx, assignment!));
+    expect(schedule.length).toBe(1);
 
     const asScholar = await withUser(t, scholarId);
     const result = await asScholar.mutation(api.sessions.create, {
@@ -146,7 +151,7 @@ describe("Ad-hoc dispatch — scholar starts", () => {
 
     const { assignmentId } = await asTeacher.mutation(
       api.assignments.dispatchActivity,
-      { scholarId, title: "Explore tessellations" },
+      { scholarId, title: "Explore tessellations", finish: { kind: "inClass" } },
     );
     // A lesson-less activity that the assignment's schedule does NOT reference.
     const orphanActivityId = await seedOrphanActivity(t);
@@ -169,7 +174,7 @@ describe("Ad-hoc dispatch — scholar starts", () => {
 
     const { assignmentId, activityId } = await asTeacher.mutation(
       api.assignments.dispatchActivity,
-      { scholarId, title: "Explore tessellations" },
+      { scholarId, title: "Explore tessellations", finish: { kind: "inClass" } },
     );
 
     const asOutsider = await withUser(t, outsiderId);
@@ -188,7 +193,7 @@ describe("Ad-hoc dispatch — teacher/aide reads don't crash", () => {
 
     const { assignmentId } = await asTeacher.mutation(
       api.assignments.dispatchActivity,
-      { scholarId, title: "Explore tessellations" },
+      { scholarId, title: "Explore tessellations", finish: { kind: "inClass" } },
     );
 
     const listed = await t.run(async (ctx) =>
@@ -220,7 +225,7 @@ describe("Ad-hoc dispatch — teacher/aide reads don't crash", () => {
 
     const { assignmentId } = await asTeacher.mutation(
       api.assignments.dispatchActivity,
-      { scholarId, title: "Explore tessellations" },
+      { scholarId, title: "Explore tessellations", finish: { kind: "inClass" } },
     );
 
     const list = await asTeacher.query(api.assignments.listForTeacher, {});
@@ -247,7 +252,7 @@ describe("Ad-hoc dispatch — teacher/aide reads don't crash", () => {
 
     const { assignmentId } = await asTeacher.mutation(
       api.assignments.dispatchActivity,
-      { scholarId, title: "Explore tessellations" },
+      { scholarId, title: "Explore tessellations", finish: { kind: "inClass" } },
     );
     await asTeacher.mutation(api.assignments.archive, { assignmentId });
 

@@ -15,7 +15,7 @@ import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { UnitOutlineTree, type TreeSelection } from "./UnitOutlineTree";
 import { HierarchyColumn, HierarchyRow } from "@/components/hierarchy";
 import { SubjectFilterChips } from "@/components/SubjectFilterChips";
-import { subjectMatches, uniqueSubjects } from "@/lib/subjects";
+import { unitFitsSubjectFilter, unitSubjectFilterOptions } from "@/lib/subjects";
 
 interface UnitOption {
   id: string;
@@ -86,11 +86,11 @@ export function UnitPickerDialog({
 
   // Subject filter — derived from the units this picker was handed, so
   // it only offers subjects the scholar can actually see.
-  const subjects = useMemo(() => uniqueSubjects(units), [units]);
+  const subjects = useMemo(() => unitSubjectFilterOptions(units), [units]);
   const filteredUnits = useMemo(
     () =>
       selectedSubject
-        ? units.filter((u) => subjectMatches(u.subject, selectedSubject))
+        ? units.filter((u) => unitFitsSubjectFilter(u.subject, selectedSubject))
         : units,
     [units, selectedSubject],
   );
@@ -240,7 +240,7 @@ export function UnitPickerDialog({
                         key={u.id}
                         leading={u.emoji ?? "📚"}
                         label={u.title}
-                        sublabel={u.description ?? undefined}
+                        sublabel={u.description || undefined}
                         selected={exploringUnitId === u.id}
                         onClick={() => {
                           setExploringUnitId(u.id);

@@ -12,11 +12,14 @@ import {
   APP_STATE_PROTOCOL,
   APP_STATE_PROTOCOL_VERSION,
 } from "@/lib/appStateBridge.mjs";
+import { pressComposeKey } from "@/hooks/useComposeKey";
 import type { AppBridgeResponsePayload } from "@/shared/appAiPolicy";
 import {
   useAppStateIframeBridge,
   type AppBridgeRequestHandler,
 } from "../useAppStateIframeBridge";
+
+vi.mock("@/hooks/useComposeKey", () => ({ pressComposeKey: vi.fn() }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -79,12 +82,20 @@ async function mount(props: HostProps) {
       await Promise.resolve();
     });
   };
+  const fromOtherSource = async (data: Record<string, unknown>) => {
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent("message", {
+        source: window,
+        data: { protocol: APP_STATE_PROTOCOL, version: APP_STATE_PROTOCOL_VERSION, ...data },
+      }));
+    });
+  };
   const rerender = async (next: HostProps) => {
     await act(async () => {
       mounted.render(createElement(Host, next));
     });
   };
-  return { posted, fromFrame, rerender };
+  return { posted, fromFrame, fromOtherSource, rerender };
 }
 
 const sayRequest = (nonce: string, requestId = "q1") => ({
@@ -97,6 +108,24 @@ const sayRequest = (nonce: string, requestId = "q1") => ({
 
 const responses = (posted: Array<Record<string, unknown>>) =>
   posted.filter((message) => message.type === "response");
+
+describe("useAppStateIframeBridge compose key", () => {
+  test("dispatches the iframe shortcut only for the active source and nonce", async () => {
+    const { fromFrame, fromOtherSource } = await mount({ snapshot: null });
+    await fromFrame({ nonce: "n1", type: "ready" });
+    await fromFrame({ nonce: "n1", type: "composeKey" });
+    expect(pressComposeKey).toHaveBeenCalledOnce();
+
+    await fromOtherSource({ nonce: "n1", type: "composeKey" });
+    await fromFrame({ nonce: "stale", type: "composeKey" });
+    await fromFrame({ nonce: "n2", type: "ready" });
+    await fromFrame({ nonce: "n1", type: "composeKey" });
+    expect(pressComposeKey).toHaveBeenCalledOnce();
+
+    await fromFrame({ nonce: "n2", type: "composeKey" });
+    expect(pressComposeKey).toHaveBeenCalledTimes(2);
+  });
+});
 
 /** Let the reply chain (handler → catch → then) settle. */
 async function settle() {

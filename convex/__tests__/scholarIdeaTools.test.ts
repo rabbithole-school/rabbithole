@@ -3,7 +3,7 @@
 // convex-test/SSE, the capture is an injected stub, emit is a spy. Covers the
 // flag, the loop config (off-path is a no-op), and the send_idea_to_teacher
 // tool's run() wiring: the kid's words + optional refined pass straight
-// through, and each capture outcome (captured / at_cap / empty) yields the
+// through, and each capture outcome (captured / empty) yields the
 // right relayed message. The GUARDRAIL proof lives here: refined is optional,
 // and the tool never refuses.
 
@@ -14,7 +14,6 @@ import {
   IDEA_CONVOS_MAX_ITERATIONS,
   makeIdeaConvoTools,
   ideaSentMessage,
-  ideaAtCapMessage,
   IDEA_EMPTY_MESSAGE,
   type CaptureIdea,
   type CaptureIdeaArgs,
@@ -159,28 +158,6 @@ describe("send_idea_to_teacher — capture wiring", () => {
     expect(calls[0].refined).toBeUndefined();
   });
 
-  test("at cap → nothing sent, relays the friendly help-them-prioritize line", async () => {
-    const { capture } = stubCapture({ status: "at_cap", cap: 5 });
-    const emit = vi.fn();
-    const tools = await makeIdeaConvoTools(emit, capture);
-
-    const result = await runTool(tools[0], {
-      title: "One more",
-      scholarWords: "another idea",
-    });
-
-    const parsed = JSON.parse(result as string);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.sent).toBe(false);
-    expect(parsed.message).toBe(ideaAtCapMessage(5));
-    // Never frames the idea as not good enough — just a limit + prioritize.
-    expect(parsed.message).toMatch(/good one/i);
-    expect(parsed.message).toMatch(/matters most/i);
-    expect(emit).toHaveBeenCalledWith({
-      toolComplete: { name: "send_idea_to_teacher", result: "Not sent (at cap)" },
-    });
-  });
-
   test("empty words → not sent, asks for the kid's own words", async () => {
     const { capture } = stubCapture({ status: "empty" });
     const tools = await makeIdeaConvoTools(vi.fn(), capture);
@@ -198,9 +175,5 @@ describe("relayed messages", () => {
     expect(m).toContain('"Night mode"');
     expect(m).toMatch(/read every idea/i);
     expect(m).toMatch(/humans decide/i);
-  });
-
-  test("ideaAtCapMessage names the cap number", () => {
-    expect(ideaAtCapMessage(5)).toContain("5 ideas open");
   });
 });

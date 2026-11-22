@@ -25,20 +25,19 @@ function build(opts: {
   hasActivity: boolean;
 }) {
   return buildSystemPrompt(
-    null, // 1 teacherWhisper
-    null, // 2 readingLevel
-    "Kai", // 3 scholarName
-    null, // 4 unitContext
-    null, // 5 personaContext
-    null, // 6 perspectiveContext
-    null, // 7 processContext
-    null, // 8 processStateData
-    null, // 9 artifactData
-    null, // 10 dossierContent
-    null, // 11 seedsData
-    null, // 12 masteryContext
-    null, // 13 signalContext
-    null, // 14 timingContext
+    null, // 1 readingLevel
+    "Kai", // 2 scholarName
+    null, // 3 unitContext
+    null, // 4 personaContext
+    null, // 5 perspectiveContext
+    null, // 6 processContext
+    null, // 7 processStateData
+    null, // 8 artifactData
+    null, // 9 dossierContent
+    null, // 10 seedsData
+    null, // 11 masteryContext
+    null, // 12 signalContext
+    null, // 13 timingContext
     {
       title: "Experimental Design",
       strand: null,
@@ -46,8 +45,8 @@ function build(opts: {
       durationMinutes: null,
       processTitle: null,
       processEmoji: null,
-    }, // 15 lessonContext
-    null, // 16 teacherDirectives
+    }, // 14 lessonContext
+    null, // 15 teacherDirectives
     opts.hasActivity
       ? {
           title: "Experiment Detective",
@@ -58,7 +57,7 @@ function build(opts: {
           processTitle: null,
           processEmoji: null,
         }
-      : null, // 17 lessonActivityContext
+      : null, // 16 lessonActivityContext
   );
 }
 

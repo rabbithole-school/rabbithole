@@ -16,6 +16,8 @@ import {
 import { api } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "../seed/wholeNumberArithmeticGraph";
+import { FRACTION_ARITHMETIC_DOMAIN } from "../seed/fractionArithmeticGraph";
+import { GEOMETRY_MEASUREMENT_DOMAIN } from "../seed/geometryMeasurementGraph";
 import { FLUENT_REPS, OVERLEARNED_REPS } from "../lib/practice/scheduler";
 
 const modules = (
@@ -548,6 +550,91 @@ describe("cohortPractice.crossDomainMasteryForScholars — retention (Tier 1 hov
   });
 });
 
+describe("cohortPractice.crossDomainMasteryForScholars — overall level", () => {
+  test("each scholar's overallLevel is the overall level the profile's math portrait shows", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedTeacher(t);
+    const scholar = await seedScholarInTimeZone(t, HONOLULU);
+    const untouched = await seedScholarInInstitution(t, {
+      institutionId: await seedTestInstitution(t, { slug: "test-school" }),
+      name: "Juniper Quill",
+      username: "juniper1",
+    });
+    const now = Date.now();
+
+    await t.run(async (ctx) => {
+      const node = (nodeKey: string, domain: string, grade: string | undefined, order: number) =>
+        ctx.db.insert("knowledgeNodes", {
+          nodeKey,
+          label: nodeKey,
+          domain,
+          strand: "core",
+          ...(grade === undefined ? {} : { grade }),
+          order,
+        });
+      // Whole numbers: K and grade 1, plus an ungraded node.
+      await node("count_to_10", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "K", 1);
+      await node("count_to_20", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "K", 2);
+      await node("add_within_20", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "1", 3);
+      await node("sub_within_20", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "1", 4);
+      await node("number_talk", WHOLE_NUMBER_ARITHMETIC_DOMAIN, undefined, 5);
+      // Fractions: practiced through placement credit only.
+      await node("unit_fractions", FRACTION_ARITHMETIC_DOMAIN, "1", 1);
+      // Geometry: a domain nobody has touched still counts in the denominator.
+      await node("name_shapes", GEOMETRY_MEASUREMENT_DOMAIN, "K", 1);
+      await node("measure_length", GEOMETRY_MEASUREMENT_DOMAIN, "1", 2);
+
+      const row = (skillKey: string, domain: string, source: "practice" | "placement") =>
+        ctx.db.insert("practiceMastery", {
+          scholarId: scholar,
+          skillKey,
+          domain,
+          repetition: FLUENT_REPS,
+          halfLifeDays: 10,
+          lastPracticedAt: now,
+          lastAttemptAt: now,
+          frontier: false,
+          source,
+          updatedAt: now,
+          ...(source === "practice" ? { becameFluentAt: now } : {}),
+        });
+      await row("count_to_10", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "practice");
+      await row("count_to_20", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "practice");
+      await row("add_within_20", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "practice");
+      await row("number_talk", WHOLE_NUMBER_ARITHMETIC_DOMAIN, "practice");
+      await row("unit_fractions", FRACTION_ARITHMETIC_DOMAIN, "placement");
+    });
+
+    const asTeacher = await withUser(t, teacher);
+    const matrix = await asTeacher.query(api.cohortPractice.crossDomainMasteryForScholars, {
+      scholarIds: [scholar, untouched],
+    });
+    const portrait = await asTeacher.query(api.mathPortrait.forScholar, { scholarId: scholar });
+    const byId = new Map(matrix.scholars.map((entry) => [String(entry.scholarId), entry]));
+
+    // K: 2 of 3 skills; grade 1: 2 of 4 (one daily, one from placement).
+    const expected = 2 / 3 + 2 / 4;
+    expect(portrait.overall?.level?.value).toBeCloseTo(expected, 10);
+    expect(byId.get(String(scholar))?.overallLevel).toBeCloseTo(
+      portrait.overall!.level!.value,
+      10,
+    );
+    // It is not the mean of the domain cells.
+    const cells = (byId.get(String(scholar))?.domains ?? [])
+      .map((entry) => entry.gradeValue)
+      .filter((value): value is number => value !== null);
+    const mean = cells.reduce((sum, value) => sum + value, 0) / cells.length;
+    expect(byId.get(String(scholar))?.overallLevel).not.toBeCloseTo(mean, 5);
+
+    // A scholar with no credit at all reads null, as the portrait does.
+    const untouchedPortrait = await asTeacher.query(api.mathPortrait.forScholar, {
+      scholarId: untouched,
+    });
+    expect(untouchedPortrait.overall?.level ?? null).toBeNull();
+    expect(byId.get(String(untouched))?.overallLevel).toBeNull();
+  });
+});
+
 describe("cohortPractice.cohortTree", () => {
   test("collapses the cohort to a median band + histogram + frontier per node, in the tree shape", async () => {
     const t = convexTest(schema, modules);
@@ -650,5 +737,147 @@ describe("cohortPractice.domainRollup", () => {
     );
     expect(rollup.scholars[0]).not.toHaveProperty("focusConfigured");
     expect(rollup.scholars[0]).not.toHaveProperty("domainFocus");
+  });
+});
+
+describe("Mastery matrix grade level = the portrait's level (#2462)", () => {
+  // One fictional scholar in one domain:
+  //   grade 1: three skills, two demonstrated in practice
+  //   grade 2: two skills, one demonstrated, one credited by placement
+  //   grade 3: one skill credited by placement only (never answered)
+  // The level adds the shares from grade 1: 1 + 2/3 + 2/2 + 1/1, placement
+  // credit included. The legacy highest figure is grade 2 with half of it
+  // shown in practice: 2.5; placement credit never lifts it. Both surfaces
+  // must agree on both numbers.
+  async function seedPlacementAboveFrontier(t: TC, scholar: Id<"users">) {
+    const now = Date.now();
+    await t.run(async (ctx) => {
+      const nodes: [string, string][] = [
+        ["g1_a", "1"],
+        ["g1_b", "1"],
+        ["g1_c", "1"],
+        ["g2_a", "2"],
+        ["g2_b", "2"],
+        ["g3_a", "3"],
+      ];
+      for (const [order, [nodeKey, grade]] of nodes.entries()) {
+        await ctx.db.insert("knowledgeNodes", {
+          nodeKey,
+          label: nodeKey,
+          domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+          strand: "addition",
+          grade,
+          order,
+        });
+      }
+      const rows: [string, string][] = [
+        ["g1_a", "practice"],
+        ["g1_b", "practice"],
+        ["g2_a", "practice"],
+        ["g2_b", "placement"],
+        ["g3_a", "placement"],
+      ];
+      for (const [skillKey, source] of rows) {
+        await ctx.db.insert("practiceMastery", {
+          scholarId: scholar,
+          skillKey,
+          domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+          repetition: FLUENT_REPS,
+          halfLifeDays: 4,
+          lastPracticedAt: now,
+          frontier: false,
+          source,
+          updatedAt: now,
+        });
+      }
+    });
+  }
+
+  test("per-domain and all-domains matrix numbers equal the portrait's, placement credit included", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedTeacher(t);
+    const scholar = await seedScholarInTimeZone(t, HONOLULU);
+    await seedPlacementAboveFrontier(t, scholar);
+    const asTeacher = await withUser(t, teacher);
+
+    const portrait = await asTeacher.query(api.mathPortrait.forScholar, {
+      scholarId: scholar,
+    });
+    const portraitValue = portrait.domains.find(
+      (entry) => entry.domain === WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+    )?.gradeValue;
+    expect(portraitValue).toBeCloseTo(1 + 2 / 3 + 1 + 1, 10);
+    const portraitHighest = portrait.domains.find(
+      (entry) => entry.domain === WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+    )?.highestGradeValue;
+    expect(portraitHighest).toBeCloseTo(2.5, 10);
+
+    const perDomain = await asTeacher.query(api.cohortPractice.masteryForScholars, {
+      scholarIds: [scholar],
+      domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+    });
+    expect(perDomain.scholars[0]?.gradeValue).toBe(portraitValue);
+    expect(perDomain.scholars[0]?.highestGradeValue).toBe(portraitHighest);
+
+    const crossDomain = await asTeacher.query(
+      api.cohortPractice.crossDomainMasteryForScholars,
+      { scholarIds: [scholar] },
+    );
+    const crossEntry = crossDomain.scholars[0]?.domains.find(
+      (entry) => entry.domain === WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+    );
+    expect(crossEntry?.gradeValue).toBe(portraitValue);
+    expect(crossEntry?.highestGradeValue).toBe(portraitHighest);
+  });
+
+  test("placement-only credit gives a level and no highest figure, on every surface", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedTeacher(t);
+    const scholar = await seedScholarInTimeZone(t, HONOLULU);
+    const now = Date.now();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("knowledgeNodes", {
+        nodeKey: "g3_only",
+        label: "g3_only",
+        domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+        strand: "addition",
+        grade: "3",
+        order: 1,
+      });
+      await ctx.db.insert("practiceMastery", {
+        scholarId: scholar,
+        skillKey: "g3_only",
+        domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+        repetition: FLUENT_REPS,
+        halfLifeDays: 1,
+        lastPracticedAt: now,
+        frontier: false,
+        source: "placement",
+        updatedAt: now,
+      });
+    });
+    const asTeacher = await withUser(t, teacher);
+
+    const portrait = await asTeacher.query(api.mathPortrait.forScholar, {
+      scholarId: scholar,
+    });
+    // The area's catalog starts at grade 3 and all of it is credited: 4.0.
+    expect(portrait.domains[0]?.gradeValue).toBeCloseTo(4, 10);
+    expect(portrait.domains[0]?.highestGradeValue).toBeNull();
+    const perDomain = await asTeacher.query(api.cohortPractice.masteryForScholars, {
+      scholarIds: [scholar],
+      domain: WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+    });
+    expect(perDomain.scholars[0]?.gradeValue).toBeCloseTo(4, 10);
+    expect(perDomain.scholars[0]?.highestGradeValue).toBeNull();
+    const crossDomain = await asTeacher.query(
+      api.cohortPractice.crossDomainMasteryForScholars,
+      { scholarIds: [scholar] },
+    );
+    const crossEntry = crossDomain.scholars[0]?.domains.find(
+      (entry) => entry.domain === WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+    );
+    expect(crossEntry?.gradeValue).toBeCloseTo(4, 10);
+    expect(crossEntry?.highestGradeValue).toBeNull();
   });
 });

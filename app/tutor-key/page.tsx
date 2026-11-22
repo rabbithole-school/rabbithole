@@ -2,6 +2,7 @@
 // Served only on the public local runner (`pnpm local:setup`); a 404 on every
 // other deployment. The gate lives in lib/localRunnerKey.ts. `?next=<path>`
 // is where a successful save goes (validated by lib/tutorKeyReturn.ts).
+import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { localRunnerKeySetup, loopbackHost } from "@/lib/localRunnerKey";
@@ -9,6 +10,8 @@ import { safeTutorKeyReturnPath } from "@/lib/tutorKeyReturn";
 import { TutorKeyForm } from "./TutorKeyForm";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Add the tutor key" };
 
 export default async function TutorKeyPage({
   searchParams,

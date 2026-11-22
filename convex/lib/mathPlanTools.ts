@@ -159,6 +159,19 @@ export async function makeMathPlanTools(
             })),
           };
 
+    // Mirrors components/practice/PlaylistCard.tsx and
+    // native/src/components/practice/PracticePlaylistCard.tsx. An explicit
+    // limited plan shows its domains; an explicit open plan shows domains
+    // already started. Without an explicit plan, legacy standing governs.
+    const inSwitcher = (domain: string, inPlan: boolean) =>
+      editor.scopeSource === "math_plan"
+        ? editor.practiceScope.kind === "limited"
+          ? inPlan
+          : started.has(domain)
+        : editor.scopeSource === "legacy_standing"
+          ? legacyStandingDomains.has(domain)
+          : false;
+
     const domains = PRACTICE_DOMAINS.map(({ domain, label }) => {
       const definition = editorDomain.get(domain);
       const entry = scopeEntry?.get(domain);
@@ -198,20 +211,21 @@ export async function makeMathPlanTools(
           probesAnswered: placement?.probesAnswered ?? 0,
           ...(placedThroughGrade ? { placedThroughGrade } : {}),
         },
-        // Mirrors components/practice/PlaylistCard.tsx and
-        // native/src/components/practice/PracticePlaylistCard.tsx. An explicit
-        // limited plan shows its domains; an explicit open plan shows domains
-        // already started. Without an explicit plan, legacy standing governs.
-        shownInDomainSwitcher:
-          editor.scopeSource === "math_plan"
-            ? editor.practiceScope.kind === "limited"
-              ? inPlan
-              : started.has(domain)
-            : editor.scopeSource === "legacy_standing"
-              ? legacyStandingDomains.has(domain)
-              : false,
+        shownInDomainSwitcher: inSwitcher(domain, inPlan),
       };
     });
+
+    // The scholar's domain picker only renders with two or more domains
+    // (PlaylistCard's `switchableDomains.length > 1`). Without one, a
+    // per-domain `false` reads to a model as "this domain is hidden from the
+    // scholar" — on 2026-11-19 the staff aide told a teacher to "toggle those
+    // back on" for scholars whose practice was simply mixing every started
+    // domain. So say it once, at the top, and drop the per-domain flag.
+    const switcherCount = domains.filter((d) => d.shownInDomainSwitcher).length;
+    const hasDomainSwitcher = switcherCount > 1;
+    const domainSwitcher = hasDomainSwitcher
+      ? "shown: the scholar can pick one of the domains marked shownInDomainSwitcher, or practice them mixed."
+      : "none: the scholar sees no domain picker. This is normal and hides nothing. A plan with one domain practices that domain; with no plan of their own, practice mixes every domain they have started.";
 
     return {
       scholar: scholarName,
@@ -226,7 +240,10 @@ export async function makeMathPlanTools(
       checkpointSuppressed:
         editor.checkpoint === null && editor.groupCheckpoint !== null,
       conflict: editor.conflict,
-      domains,
+      domainSwitcher,
+      domains: hasDomainSwitcher
+        ? domains
+        : domains.map(({ shownInDomainSwitcher: _hidden, ...rest }) => rest),
     };
   }
 
@@ -251,7 +268,7 @@ export async function makeMathPlanTools(
   const getPlanTool = betaTool({
     name: "get_scholar_math_plan",
     description:
-      "Read a scholar's current teacher-authored Math plan: Practice scope, optional Checkpoint, per-domain check-in state, and whether each domain is shown in the scholar's domain switcher. `placed_without_checkin` means mastery rows exist from placement/accelerated credit but no check-in run converged. `conflict: true` means the Checkpoint is outside the Practice scope; widen the scope, move the Checkpoint, or clear it before treating the plan as coherent. Use this before diagnosing a missing Math domain or before any set_scholar_math_plan change. Read-only.",
+      "Read a scholar's current teacher-authored Math plan: Practice scope, optional Checkpoint, per-domain check-in state, and the scholar's domain picker (`domainSwitcher`; when it is shown, `shownInDomainSwitcher` marks which domains it offers). No picker is normal: practice then mixes the domains the scholar has started, so it never means a domain is hidden or switched off. `placed_without_checkin` means mastery rows exist from placement/accelerated credit but no check-in run converged. `conflict: true` means the Checkpoint is outside the Practice scope; widen the scope, move the Checkpoint, or clear it before treating the plan as coherent. Use this before diagnosing a missing Math domain or before any set_scholar_math_plan change. Read-only.",
     inputSchema: {
       type: "object" as const,
       properties: {

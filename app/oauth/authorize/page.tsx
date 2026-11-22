@@ -20,6 +20,7 @@ import {
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useAuthActions } from "@convex-dev/auth/react";
+import { useListAdmissionsTools } from "./useListAdmissionsTools";
 import {
   Box,
   Button,
@@ -33,12 +34,13 @@ import {
 } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { humanizeToolId } from "@/lib/toolLabels";
 import {
   allowedScholarReadTools,
-  SCHOLAR_READ_TOOLS,
   type ScholarReadToolName,
 } from "@/convex/lib/scholarReadPolicy";
-import { ROLES, isStaffRole, type Role } from "@/convex/lib/roles";
+import { ROLES, type Role } from "@/convex/lib/roles";
+import { describeConsentAccess } from "./consentAccess";
 
 const TOOL_LABELS: Record<ScholarReadToolName, string> = {
   list_scholars: "List scholars",
@@ -67,15 +69,6 @@ const ROLE_SCOPE_NOTE: Partial<Record<Role, string>> = {
   scholar: "for your own learning record only",
 };
 
-const SCHOLAR_READ_TOOL_NAMES = new Set<string>(SCHOLAR_READ_TOOLS);
-
-/** `create_scholar_activity` → "Create scholar activity". Derived from the
- *  tool id so the consent list stays complete as tools are added. */
-function humanizeToolName(name: string): string {
-  const words = name.replace(/_/g, " ").trim();
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
 function AuthorizeInner() {
   const params = useSearchParams();
   const router = useRouter();
@@ -86,6 +79,10 @@ function AuthorizeInner() {
   const codeChallengeMethod = params.get("code_challenge_method") ?? "";
   const scope = params.get("scope") ?? undefined;
   const responseType = params.get("response_type") ?? "";
+  // The RFC 8707 `resource` parameter is NOT read here, even when it names the
+  // read-only connector (/api/mcp/read): the grant isn't bound to it, so the
+  // token this page approves also works on the full connector. See
+  // ./consentAccess.ts (TRA-635).
 
   const { user, isLoading: userLoading, isAuthenticated } = useCurrentUser();
   const currentUserId = user?._id;
@@ -99,12 +96,22 @@ function AuthorizeInner() {
     api.mcp.whoami,
     isAuthenticated ? {} : "skip",
   );
+  // The same three list actions /api/mcp serves tools from, so this screen
+  // names exactly what the token can call (TRA-646).
   const listCurriculumTools = useAction(api.mcp.listCurriculumTools);
+  const listUnitDesignerTools = useAction(api.mcp.listUnitDesignerTools);
+  const listAdmissionsTools = useListAdmissionsTools();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [curriculumToolNames, setCurriculumToolNames] = useState<string[] | null>(
     null,
   );
+  const [unitDesignerToolNames, setUnitDesignerToolNames] = useState<
+    string[] | null
+  >(null);
+  const [admissionsToolNames, setAdmissionsToolNames] = useState<
+    string[] | null
+  >(null);
   const [toolListError, setToolListError] = useState(false);
   // "Remember this connection" — on by default, so the common case (reconnect
   // without re-clicking) just works after the first approval.
@@ -195,10 +202,19 @@ function AuthorizeInner() {
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset the previous request's tool state before this authenticated request starts.
     setCurriculumToolNames(null);
+    setUnitDesignerToolNames(null);
+    setAdmissionsToolNames(null);
     setToolListError(false);
-    void listCurriculumTools({})
-      .then((entries) => {
-        if (!cancelled) setCurriculumToolNames(entries.map((entry) => entry.name));
+    void Promise.all([
+      listCurriculumTools({}),
+      listUnitDesignerTools({}),
+      listAdmissionsTools({}),
+    ])
+      .then(([curriculum, unitDesigner, admissions]) => {
+        if (cancelled) return;
+        setCurriculumToolNames(curriculum.map((entry) => entry.name));
+        setUnitDesignerToolNames(unitDesigner.map((entry) => entry.name));
+        setAdmissionsToolNames(admissions.map((entry) => entry.name));
       })
       .catch((err) => {
         console.error("MCP tool list failed to load:", err);
@@ -207,7 +223,14 @@ function AuthorizeInner() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, currentUserId, problem, listCurriculumTools]);
+  }, [
+    isAuthenticated,
+    currentUserId,
+    problem,
+    listCurriculumTools,
+    listUnitDesignerTools,
+    listAdmissionsTools,
+  ]);
 
   const autoApproved = useRef(false);
   const [autoApproveFailed, setAutoApproveFailed] = useState(false);
@@ -242,25 +265,15 @@ function AuthorizeInner() {
       : role
         ? ROLE_SCOPE_NOTE[role]
         : undefined;
-  const callerToolNames = [...tools, ...(curriculumToolNames ?? [])];
-  // Which of the caller's tools can CHANGE something. SCHOLAR_READ_TOOLS is
-  // the only set guaranteed read-only; beyond it we classify by the tool id's
-  // verb, since `get_`/`list_` is the settled naming convention for reads
-  // across the aide tool layer. Deriving it from the id (rather than a
-  // hand-kept list) means a newly added tool is treated as a change until it
-  // is named like a read — wrong in the cautious direction, which is the
-  // direction this screen should err in.
-  const changeToolNames = callerToolNames
-    .filter(
-      (name) =>
-        !SCHOLAR_READ_TOOL_NAMES.has(name) &&
-        !name.startsWith("get_") &&
-        !name.startsWith("list_"),
-    )
-    .sort();
-  // If the tool list could not load we cannot enumerate, but staff genuinely
-  // do hold change tools, so say so rather than implying read-only.
-  const changesUnknown = toolListError && isStaffRole(role);
+  const { changeToolNames, changesUnknown, summary } = describeConsentAccess({
+    role,
+    readTools: tools,
+    curriculumToolNames,
+    unitDesignerToolNames,
+    admissionsToolNames,
+    toolListError,
+    scopeNote,
+  });
   const hasMutatingTool = changeToolNames.length > 0 || changesUnknown;
 
   if (problem) {
@@ -328,11 +341,7 @@ function AuthorizeInner() {
 
       <Box w="full">
         <Text fontSize="sm" color="fg.muted" mb={2}>
-          {callerToolNames.length > 0
-            ? hasMutatingTool
-              ? "This connection can read your Rabbithole data and change it. Some of what it can do is permanent, and some of it affects other people."
-              : `It will get read-only access${scopeNote ? ` ${scopeNote}` : ""}:`
-            : "Your role has no MCP tools available, so this connection won't be able to read anything."}
+          {summary}
         </Text>
         {tools.length > 0 && (
           <>
@@ -376,7 +385,7 @@ function AuthorizeInner() {
             >
               {changeToolNames.map((t) => (
                 <Text key={t} fontSize="sm">
-                  • {humanizeToolName(t)}
+                  • {humanizeToolId(t)}
                 </Text>
               ))}
             </VStack>

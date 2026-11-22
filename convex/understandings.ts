@@ -15,7 +15,7 @@
  */
 
 import { v } from "convex/values";
-import { action } from "./_generated/server";
+import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { MODELS } from "./lib/models";
@@ -57,7 +57,9 @@ const TOOL = {
 
 type TranslateResult = { items: Array<{ notation: string; understanding: string }> };
 
-export const translateBand = action({
+// Ops-only: no app caller. Run with `npx convex run understandings:translateBand`
+// (TRA-496 — it was public with no caller check).
+export const translateBand = internalAction({
   args: { strandKey: v.string(), grade: v.string() },
   handler: async (ctx, args): Promise<{ translated: number; skipped: number }> => {
     const standards = await ctx.runQuery(

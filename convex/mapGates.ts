@@ -20,32 +20,21 @@
 //          (placement is the check-in on-ramp the reveal fires on; a completed
 //          placement co-writes mastery, so it never opens ahead of a rendered
 //          tree over real/seeded data).
-//        • sky (convex/concepts.ts `skyFieldForScholar` → `buildScholarAtlas`)
-//          lights a GOLD star from a `masteryObservation` ONLY when the concept
-//          maps to a PLACED atlas node, and shows a SEED star from any
-//          pending/active `seed` (a seed free-floats even with no atlas). The
-//          atlas placement (skyX/skyY) comes from a separate embeddings
-//          PROJECTION (`conceptAtlas.projectAtlas`) that is NOT in the standard
-//          seed — so on an unprojected deployment (every worktree) observations
-//          light NOTHING and the sky renders seeds only. The gate is therefore
-//          deployment-faithful:
-//            sky unlocked = any pending/active `seed`
-//                           OR any `masteryObservation` that maps to a PLACED
-//                              atlas node (mirrors buildScholarAtlas `lit`)
-//                           OR welcome-unit complete.
-//          The night-museum layers (mastery + starter stars, skyMuseum.ts)
-//          never count — the Sky gate keys off EXPLORATION evidence only;
-//          museum layers decorate an already-earned sky (Andy, 2026-07-15).
-//          Welcome-completion is an ADDITIONAL trigger; in every real
-//          completion path the observer has already planted seeds (so it never
-//          opens ahead of a rendered sky). The CI invariant test
-//          (convex/__tests__/mapGatesHonesty.test.ts) asserts the biconditional
-//          against the REAL map-query output over fixtures so a seed-script (or
-//          query) change that breaks this honesty FAILS CI, not just today's
-//          snapshot.
+//        • sky (convex/skyStars.ts `forSelf`, the kid's own Sky both clients
+//          draw since TRA-699) draws one star per placed, unhidden `skyStars`
+//          row whose wonder or Quest still earns it. So:
+//            sky unlocked = the kid has at least one star `forSelf` would draw
+//          read through `skyHasStar`, which shares `forSelf`'s rule rather than
+//          copying it (TRA-708). The older Sky's evidence (seeds, atlas
+//          observations, the welcome badge) no longer counts: none of it draws
+//          a star.
+//      The CI invariant test (convex/__tests__/mapGatesHonesty.test.ts)
+//      asserts the biconditional against the REAL map-query output over
+//      fixtures, so a query change that breaks this honesty FAILS CI, not just
+//      today's snapshot.
 //   2. Is a map's one-time REVEAL still PENDING? — unlocked AND no `mapReveals`
-//      row yet. `acknowledgeReveal` stamps the row when the celebratory card is
-//      shown, so it never replays; migrations.backfillMapReveals pre-stamps
+//      row yet. `acknowledgeReveal` stamps the row when the scholar arrives at
+//      the map, so it never replays; migrations.backfillMapReveals pre-stamps
 //      every already-unlocked scholar so only genuinely NEW scholars see it.
 //
 // Scholar-self only: teachers / parents / observers always see every map for
@@ -55,9 +44,8 @@
 import { v } from "convex/values";
 import { authedQuery, authedMutation } from "./lib/customFunctions";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
-import { ONBOARDING_UNIT_SLUG } from "./onboardingData";
-import { normalizeLabel } from "./concepts";
+import type { Doc, Id } from "./_generated/dataModel";
+import { skyHasStar } from "./skyStars";
 
 export type MapKind = "sky" | "tree";
 
@@ -67,96 +55,21 @@ export type MapGates = { sky: boolean; tree: boolean };
 // mutation, or the backfill migration.
 type ReadCtx = QueryCtx | MutationCtx;
 
-/** A knowledge node is PLACED in the sky/atlas once the embeddings projection
- *  has stamped its coordinates. Mirrors the private `isPlaced` in
- *  convex/concepts.ts (the sky query's own render gate). */
-function isPlaced(n: { skyX?: number; skyY?: number }): boolean {
-  return n.skyX != null && n.skyY != null;
-}
-
-/** Has the scholar finished the "Welcome to Rabbithole" onboarding unit?
- *  Signalled by the completion badge (scholarUnitBadges) for that unit. */
-async function hasWelcomeBadge(
-  ctx: ReadCtx,
-  scholarId: Id<"users">,
-): Promise<boolean> {
-  const unit = await ctx.db
-    .query("units")
-    .withIndex("by_slug", (q) => q.eq("slug", ONBOARDING_UNIT_SLUG))
-    .first();
-  if (!unit) return false;
-  const badge = await ctx.db
-    .query("scholarUnitBadges")
-    .withIndex("by_scholar_unit", (q) =>
-      q.eq("scholarId", scholarId).eq("unitId", unit._id),
-    )
-    .first();
-  return badge !== null;
-}
-
-/**
- * Would the scholar's SKY light a GOLD star? Mirrors buildScholarAtlas `lit`:
- * a non-superseded, non-misconception `masteryObservation` lights a star ONLY
- * when its concept label matches a PLACED atlas node. On an unprojected
- * deployment (no placed nodes) this is always false, so observations don't
- * unlock a sky that would render empty. Bounded by the scholar's own
- * observation count and short-circuits on the first match.
- */
-async function anyObservationLitOnSky(
-  ctx: ReadCtx,
-  scholarId: Id<"users">,
-): Promise<boolean> {
-  const observations = await ctx.db
-    .query("masteryObservations")
-    .withIndex("by_scholar_current", (q) =>
-      q.eq("scholarId", scholarId).eq("isSuperseded", false),
-    )
-    .collect();
-  for (const o of observations) {
-    if (o.evidenceType === "misconception_signal") continue;
-    const node = await ctx.db
-      .query("knowledgeNodes")
-      .withIndex("by_normalized", (q) =>
-        q.eq("normalizedLabel", normalizeLabel(o.conceptLabel)),
-      )
-      .first();
-    if (node && isPlaced(node)) return true;
-  }
-  return false;
-}
-
 /**
  * Evidence-derived unlock state for a scholar's two maps. Pure reads, no
  * side-effects — reused by the query below and by tests.
  *
  * INVARIANT (f6 addendum): each predicate mirrors the set of conditions the
  * map's OWN query renders scholar-specific content from — so "unlocked" ⟺ "the
- * map query would render meaningful content", honest in both directions
- * (including on deployments where the sky atlas is unprojected). See the file
- * header for the per-map derivation.
+ * map query would render meaningful content", honest in both directions. See
+ * the file header for the per-map derivation.
  */
 export async function mapGatesForScholar(
   ctx: ReadCtx,
-  scholarId: Id<"users">,
+  scholar: Doc<"users">,
 ): Promise<MapGates> {
-  // A seed only unlocks the sky if it actually RENDERS there — buildScholarAtlas
-  // (convex/concepts.ts) shows only pending/active seeds, so a scholar whose only
-  // seed is dismissed/completed would otherwise get an unlocked-but-empty sky.
-  // Match that filter exactly (two point lookups on by_scholar_status), not a
-  // status-blind "any seed" read.
-  const [pendingSeed, activeSeed, mastery, placement] = await Promise.all([
-    ctx.db
-      .query("seeds")
-      .withIndex("by_scholar_status", (q) =>
-        q.eq("scholarId", scholarId).eq("status", "pending"),
-      )
-      .first(),
-    ctx.db
-      .query("seeds")
-      .withIndex("by_scholar_status", (q) =>
-        q.eq("scholarId", scholarId).eq("status", "active"),
-      )
-      .first(),
+  const scholarId = scholar._id;
+  const [mastery, placement, sky] = await Promise.all([
     ctx.db
       .query("practiceMastery")
       .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
@@ -165,30 +78,13 @@ export async function mapGatesForScholar(
       .query("practicePlacements")
       .withIndex("by_scholar_domain", (q) => q.eq("scholarId", scholarId))
       .first(),
+    skyHasStar(ctx, scholar),
   ]);
-  const seed = pendingSeed ?? activeSeed;
 
   // Tree: the proficiency/frontier/retention buildScholarTree renders from
   // practiceMastery, plus the placement on-ramp the reveal fires on. The tree
   // graph is always seeded, so a mastery/placement row reliably renders.
   const tree = mastery !== null || placement !== null;
-
-  // Sky: a seed star (always renders) OR a lit observation on a PLACED atlas
-  // node (renders only where the atlas is projected) OR welcome-completion. A
-  // seed short-circuits the (bounded) observation scan.
-  //
-  // The night-museum layers (skyMuseum.ts mastery + starter stars) are
-  // deliberately NOT unlock evidence (Andy's ruling, 2026-07-15: a pure
-  // driller's sky — fluent skills only, no exploration — is "totally
-  // uninteresting and should be locked"). The Sky is the EXPLORATION surface;
-  // its gate keys off exploration evidence only. The museum layers are
-  // decoration that enriches a sky the scholar has already earned — visible
-  // whenever the sky is visible, never what reveals it. (The tree is the
-  // practice-progress surface, so fluency rows unlock THAT.)
-  const sky =
-    seed !== null ||
-    (await hasWelcomeBadge(ctx, scholarId)) ||
-    (await anyObservationLitOnSky(ctx, scholarId));
 
   return { sky, tree };
 }
@@ -210,13 +106,13 @@ async function revealed(
 /**
  * The calling scholar's map gates + whether each map's one-time reveal is still
  * pending. Drives both the nav gate (show "Your Map" iff sky || tree, and which
- * lenses are available) and the celebratory reveal cards.
+ * lenses are available) and the reveal consumed on arrival at each map.
  */
 export const mine = authedQuery({
   args: {},
   handler: async (ctx) => {
     const scholarId = ctx.user._id;
-    const gates = await mapGatesForScholar(ctx, scholarId);
+    const gates = await mapGatesForScholar(ctx, ctx.user);
     const [skyRevealed, treeRevealed] = await Promise.all([
       revealed(ctx, scholarId, "sky"),
       revealed(ctx, scholarId, "tree"),
@@ -248,7 +144,7 @@ export const acknowledgeReveal = authedMutation({
       .first();
     if (existing) return existing._id;
 
-    const gates = await mapGatesForScholar(ctx, scholarId);
+    const gates = await mapGatesForScholar(ctx, ctx.user);
     if (!gates[map]) return null; // not unlocked yet — nothing to acknowledge
 
     return await ctx.db.insert("mapReveals", {

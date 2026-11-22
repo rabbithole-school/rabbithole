@@ -24,7 +24,6 @@ function promptWith(artifacts: ArtifactData[]): string {
     null,
     null,
     null,
-    null,
     artifacts,
   );
 }

@@ -15,6 +15,7 @@ import { createRehearseGrader } from "@/components/practice/rehearseGrader";
 import { isStaffSelfRehearsal } from "@/components/practice/rehearseZeroWrite";
 import { resolveTargetedPractice } from "@/components/practice/targetedPractice";
 import { QUICK_FACTS_PROBE_SEED, quickFactsEntryVerdict } from "./quickFactsEntry";
+import { standingExcludedStrands } from "./standingExclusions";
 import { FAST_MATH_NAME_INLINE } from "@/shared/fastMathName";
 import { Box, Flex, HStack, Text } from "@chakra-ui/react";
 import { VIEWPORT_SHELL_HEIGHT } from "@/lib/viewportShell";
@@ -61,6 +62,13 @@ function PracticeInner() {
   const resolvedDomain = resolvePracticeDomainSlug(domainParam);
   const choiceDomain = resolvePracticeDomainSlug(searchParams.get("choiceDomain"));
   const choiceStrand = searchParams.get("choiceStrand");
+  // A strand-tile Start carries `?domain=` === `?choiceDomain=` (the shared
+  // `strandPickStartParams`). Unlike a bare deep-link `?domain=`, it still reads
+  // the Math plan / legacy standing row, so a teacher's `excludedStrands` keep
+  // applying to the picked domain (see ./standingExclusions.ts for why the
+  // client list is sometimes the only enforcement).
+  const isStrandPickEntry = !!resolvedDomain && choiceDomain === resolvedDomain;
+  const readsStandingScope = !resolvedDomain || isStrandPickEntry;
   // PR2 Surface 1/2 revives the standalone check-in as an opt-IN accelerator:
   // `?checkin=all` (the Home CTA's link) requests the full multi-domain
   // orchestrator instead of Option D's ambient `· mapping` playlist band. Any
@@ -137,7 +145,7 @@ function PracticeInner() {
   // a session for one render while the plan subscription is still resolving.
   const mathPlan = useQuery(
     api.mathPlans.myPlan,
-    !activityId && !skillKey && !resolvedDomain && !quickFactsRequested && scholarIdForStanding
+    !activityId && !skillKey && readsStandingScope && !quickFactsRequested && scholarIdForStanding
       ? {}
       : "skip",
   ) as { scopeSource: PracticeScopeSource } | undefined;
@@ -155,10 +163,11 @@ function PracticeInner() {
   // A standing (open-ended) practice assignment picks the domain + a pinned
   // strand hint — skipped entirely for problem-set-scoped practice (?activity=
   // is a more specific mode), for the quick-facts entry, or when a valid domain
-  // is already given in the URL.
+  // is already given in the URL (except a strand-tile Start, which still needs
+  // the row's excludedStrands).
   const standing = useQuery(
     api.standingPractice.myActiveStanding,
-    !activityId && !skillKey && !resolvedDomain && !quickFactsRequested && scholarIdForStanding
+    !activityId && !skillKey && readsStandingScope && !quickFactsRequested && scholarIdForStanding
       ? { scholarId: scholarIdForStanding }
       : "skip",
   );
@@ -227,7 +236,7 @@ function PracticeInner() {
   if (
     !activityId &&
     !skillKey &&
-    !resolvedDomain &&
+    readsStandingScope &&
     !quickFactsRequested &&
     scholarIdForStanding &&
     standing === undefined &&
@@ -238,7 +247,7 @@ function PracticeInner() {
   if (
     !activityId &&
     !skillKey &&
-    !resolvedDomain &&
+    readsStandingScope &&
     !quickFactsRequested &&
     scholarIdForStanding &&
     mathPlan === undefined
@@ -275,7 +284,7 @@ function PracticeInner() {
   } else if (resolvedDomain) {
     domain = resolvedDomain;
     // Option D (F1): a You Pick EXPLICIT-domain entry (`?choiceDomain=` matching
-    // this `?domain=` — an out-of-set tile, mirroring native's out-of-set route)
+    // this `?domain=` — every strand-tile Start, via `strandPickStartParams`)
     // folds the `· mapping` band SCOPED to this domain, exactly as `choicePreview`
     // previews it — instead of routing to the retired standalone placement gate
     // (`<Placement>` via `needsPlacement`, which `includeMapping` suppresses). A
@@ -335,9 +344,16 @@ function PracticeInner() {
         : undefined;
   // A standing assignment's off-limits strands — never served (enforced in
   // practiceSession → the scheduler). Skipped for problem-set-scoped practice
-  // and for a mixed playlist because exclusions are not domain-qualified.
-  const excludedStrands =
-    !activityId && !isMixedSession ? effectiveStanding?.excludedStrands : undefined;
+  // and for a mixed playlist because exclusions are not domain-qualified; a
+  // strand-tile Start keeps them for the standing's own domain.
+  const excludedStrands = standingExcludedStrands({
+    isProblemSet: !!activityId,
+    isMixedSession,
+    explicitDomain: resolvedDomain,
+    isStrandPickEntry,
+    domain,
+    standing: effectiveStanding,
+  });
 
   return (
     // The app shell locks body scroll (globals.css: body overflow:hidden), so

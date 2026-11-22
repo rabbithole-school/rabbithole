@@ -26,7 +26,7 @@ function genericSiteMetadata(): Metadata {
     alt: "The Rabbithole astronaut rabbit",
   };
   return {
-    title: GENERIC_SITE_TITLE,
+    title: { absolute: GENERIC_SITE_TITLE },
     description: GENERIC_SITE_DESCRIPTION,
     openGraph: {
       title: GENERIC_SITE_TITLE,

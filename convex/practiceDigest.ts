@@ -32,7 +32,7 @@ import { requireScholarsAccessible } from "./lib/access";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
 import {
   fluentCount,
-  frontierGradeValue,
+  mathLevel,
   gradeLabelFromValueOrNull,
 } from "./lib/practice/frontierGrade";
 import { PRACTICE_DOMAIN_LABELS } from "../shared/practiceDomainLabels";
@@ -46,11 +46,7 @@ import { PRACTICE_DOMAINS } from "./lib/practice/domains";
 import { isMappedPlacementStatus } from "./lib/practice/domainMapStatus";
 import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "./seed/wholeNumberArithmeticGraph";
 import { requireAnthropicApiKey } from "./lib/anthropic";
-import {
-  ERROR_FLAG_WINDOW_MS,
-  openErrorPatterns,
-  type ErrorEvent,
-} from "./lib/practice/errorFlags";
+import { practiceFlagsFromEvents } from "./lib/practice/errorFlags";
 import {
   applyMathSkillsNarratives,
   buildMathSkillsNarrativeUserMessage,
@@ -60,6 +56,7 @@ import {
   parseMathSkillsNarrativeToolInput,
 } from "./lib/practice/mathSkillsNarrative";
 import {
+  topicKey,
   weeklyMathTopics,
   type WeeklyMathTopicEvidence,
 } from "./lib/practice/weeklyMathTopics";
@@ -67,6 +64,7 @@ import {
   computePracticeDigest,
   computeMathSkillsUpdate,
   computeWeeklyPracticeSignals,
+  mathSkillsUpdateParts,
   PRACTICE_DIGEST_WINDOW_MS,
   selectMathSkillsUpdateCohorts,
   type MathSkillsPriorityTopic,
@@ -150,57 +148,56 @@ function priorityReason(candidate: WeeklyMathTopicEvidence): string {
   const attemptWord = candidate.attemptCount === 1 ? "attempt" : "attempts";
   const missWord = candidate.missCount === 1 ? "miss" : "misses";
   const evidence = `${candidate.missCount} ${missWord} in ${candidate.attemptCount} ${attemptWord}`;
+  const spread =
+    candidate.missSittingCount > 1
+      ? ` across ${candidate.missSittingCount} sittings`
+      : " in one sitting";
   const ending =
     candidate.trailingCorrectCount > 0
       ? `finished with ${candidate.trailingCorrectCount} correct ${
           candidate.trailingCorrectCount === 1 ? "attempt" : "attempts"
         }`
       : "latest attempt was missed";
-  const support = {
-    triggered: "the practice brake stepped in",
-    repair_started: "guided support started",
-    repair_completed: "the guided step was completed",
-    coach_escalated: "the tutor workthrough started",
-    easy_exited: "the sitting ended there",
-    fresh_correct:
-      "after guided support, the fresh same-skill item was correct",
-    fresh_missed:
-      "after guided support, the fresh same-skill item was missed",
-  }[candidate.supportOutcome ?? "triggered"];
-  if (candidate.tier === "sustained") {
-    return `${evidence} across ${candidate.missSittingCount} sittings;${
-      candidate.supportOutcome ? ` ${support};` : ""
-    } ${ending}`;
-  }
-  if (candidate.tier === "acute") {
-    return `${evidence}; ${candidate.supportOutcome ? support : "the practice brake stepped in"}${
-      candidate.breakerCount > 1 ? ` ${candidate.breakerCount} times` : ""
-    }; ${ending}`;
-  }
-  const spread =
-    candidate.missSittingCount > 1
-      ? ` across ${candidate.missSittingCount} sittings`
-      : " in one sitting";
-  return `${evidence}${spread};${
-    candidate.supportOutcome ? ` ${support};` : ""
-  } ${ending}`;
+  // Teacher copy: what Rabbithole did after three misses in a row, in plain words.
+  const support = candidate.supportOutcome
+    ? {
+        triggered: "Rabbithole stepped in after three misses in a row",
+        repair_started: "a guided step started after three misses in a row",
+        repair_completed: "the guided step was completed",
+        coach_escalated: "the tutor walked through one",
+        easy_exited: "the sitting ended there",
+        fresh_correct: "after the guided step, a new problem was correct",
+        fresh_missed: "after the guided step, a new problem was missed",
+      }[candidate.supportOutcome]
+    : candidate.breakerCount > 0
+      ? "Rabbithole stepped in after three misses in a row"
+      : undefined;
+  const lastWeek = candidate.recurred ? "; also came up last week" : "";
+  return `${evidence}${spread}${lastWeek};${support ? ` ${support};` : ""} ${ending}`;
 }
 
 async function priorityTopicsFor(
   ctx: QueryCtx,
   errorRows: Doc<"practiceErrorEvents">[],
   practiceAttempts: Doc<"practiceAttempts">[],
+  lastWeekAttempts: Doc<"practiceAttempts">[],
   since: number,
   now: number,
 ): Promise<MathSkillsPriorityTopic[]> {
+  const lastWeekSince = since - (now - since);
+  const lastWeekTopicKeys = new Set(
+    weeklyMathTopics(errorRows, lastWeekAttempts, lastWeekSince, since).map(
+      (topic) => topicKey(topic.domain, topic.nodeKey),
+    ),
+  );
   const ranked = weeklyMathTopics(
     errorRows,
     practiceAttempts,
     since,
     now,
+    lastWeekTopicKeys,
   )
-    .filter((candidate) => MATH_PRACTICE_DOMAINS.has(candidate.domain))
-    .slice(0, 3);
+    .filter((candidate) => MATH_PRACTICE_DOMAINS.has(candidate.domain));
 
   const topics = await Promise.all(
     ranked.map(async (candidate): Promise<MathSkillsPriorityTopic | null> => {
@@ -225,6 +222,8 @@ async function priorityTopicsFor(
         latestAttemptCorrect: candidate.latestAttemptCorrect,
         trailingCorrectCount: candidate.trailingCorrectCount,
         breakerCount: candidate.breakerCount,
+        recurred: candidate.recurred,
+        notAttempted: candidate.notAttempted,
         ...(candidate.supportOutcome
           ? { supportOutcome: candidate.supportOutcome }
           : {}),
@@ -296,19 +295,12 @@ function openMisconceptionFlagsRaised(
   since: number,
   now: number,
 ): number {
-  const byNode = new Map<string, ErrorEvent[]>();
-  const flagWindowStart = now - ERROR_FLAG_WINDOW_MS;
-  for (const row of errorRows) {
-    if (row.domain !== domain) continue;
-    if (row.createdAt < flagWindowStart || row.createdAt > now) continue;
-    const events = byNode.get(row.nodeKey) ?? [];
-    events.push({ pattern: row.pattern, createdAt: row.createdAt });
-    byNode.set(row.nodeKey, events);
-  }
-
   let count = 0;
-  for (const events of byNode.values()) {
-    count += openErrorPatterns(events, now).filter((p) => p.lastAt >= since).length;
+  for (const { patterns } of practiceFlagsFromEvents(
+    errorRows.filter((row) => row.domain === domain),
+    now,
+  )) {
+    count += patterns.filter((p) => p.lastAt >= since).length;
   }
   return count;
 }
@@ -368,6 +360,16 @@ async function scholarDigestRow(
     .query("practiceAttempts")
     .withIndex("by_scholar_createdAt", (q) =>
       q.eq("scholarId", scholarId).gte("createdAt", since),
+    )
+    .collect();
+  // The week before, only to tell whether a topic came back.
+  const lastWeekAttempts = await ctx.db
+    .query("practiceAttempts")
+    .withIndex("by_scholar_createdAt", (q) =>
+      q
+        .eq("scholarId", scholarId)
+        .gte("createdAt", since - (now - since))
+        .lt("createdAt", since),
     )
     .collect();
   const recordedPracticeAttempts = practiceAttempts.filter(
@@ -449,6 +451,7 @@ async function scholarDigestRow(
       ctx,
       errorRows,
       practiceAttempts,
+      lastWeekAttempts,
       since,
       now,
     ),
@@ -507,19 +510,20 @@ function firstDailyBlockMinutes(
 export const WEEKLY_SIGNALS_MAX_SCHOLARS = 60;
 
 /**
- * The demonstrated-fluent math grade for one domain, plus its 7-day movement.
+ * The math level for one domain (`mathLevel`, the level the Math Skills
+ * portrait shows, placement check-in credit included), plus its 7-day movement.
  *
- * Reconstructed with `frontierGradeValue(rows, gradeByKey, asOf)` — the same
+ * Reconstructed with `mathLevel(rows, gradeByKey, { asOf })` — the same
  * function evaluated at two cutoffs — so a week-over-week delta needs no new
  * table and cannot disagree with the portrait's live value.
  *
  * LEFT-CENSORING (the caveat that must survive to the screen): a
  * demonstrated-fluent row with no `becameFluentAt` stamp predates the crossing
- * instrumentation and counts from the baseline, i.e. at EVERY cutoff. Such rows
- * therefore contribute identically at `since` and at `now` and cancel out of the
- * delta — which is what makes the delta honest. The failure mode is the
- * boundary case: when the scholar had no gradeable demonstrated-fluent skill at
- * `since` at all, `priorValue` is null, and rendering `value - 0` would show a
+ * instrumentation and counts from the baseline, i.e. at EVERY cutoff, as does
+ * every placement credit. Such rows therefore contribute identically at `since`
+ * and at `now` and cancel out of the delta — which is what makes the delta
+ * honest. The failure mode is the boundary case: when the scholar had no
+ * credited skill at `since` at all, `priorValue` is null, and rendering `value - 0` would show a
  * multi-grade "jump" that is really instrumentation starting. So the delta is
  * SUPPRESSED (null) with a reason rather than fabricated, and `leftCensored`
  * flags that part of the standing level rests on unstamped history.
@@ -529,11 +533,11 @@ export interface WeeklyMathGrade {
   domain: string;
   /** Human label for that domain, e.g. "Math". */
   domainLabel: string;
-  /** Continuous grade-equivalent now, e.g. 5.2. Null when no demonstrated-fluent skill has a known grade. */
+  /** The domain's level now, e.g. 5.2. Null when no credited skill has a known grade. */
   value: number | null;
   /** Compact label for `value`, e.g. "Grade 5.2". Null when `value` is null. */
   label: string | null;
-  /** The same value reconstructed at the window start, or null when nothing was demonstrated by then. */
+  /** The same value reconstructed at the window start, or null when nothing was credited by then. */
   priorValue: number | null;
   /** Compact label for `priorValue`, or null. */
   priorLabel: string | null;
@@ -577,7 +581,7 @@ export interface WeeklyPracticeSignalRow {
   frictionSkillLabel: string | null;
   /** Classified misses on that skill. 0 when there is no friction skill. */
   frictionMisses: number;
-  /** Demonstrated-fluent grade + honest 7-day movement, or null when the domain has no gradeable fluent skill. */
+  /** The domain's math level + honest 7-day movement, or null when the domain has no credited graded skill. */
   mathGrade: WeeklyMathGrade | null;
 }
 
@@ -755,13 +759,13 @@ export function weeklyMathGrade(
   gradeByKey: ReadonlyMap<string, string | null | undefined>,
   since: number,
 ): WeeklyMathGrade | null {
-  const value = frontierGradeValue(masteryRows, gradeByKey);
+  const value = mathLevel(masteryRows, gradeByKey)?.value ?? null;
   if (value === null) return null;
 
-  const priorValue = frontierGradeValue(masteryRows, gradeByKey, since);
+  const priorValue = mathLevel(masteryRows, gradeByKey, { asOf: since })?.value ?? null;
 
   // Suppress rather than fabricate. `priorValue === null` means nothing
-  // gradeable was demonstrated at the window start, so `value - 0` would render
+  // gradeable was credited at the window start, so `value - 0` would render
   // as a multi-grade jump that is really "we started tracking".
   let delta: number | null = null;
   let deltaSuppressedReason: WeeklyMathGrade["deltaSuppressedReason"] = null;

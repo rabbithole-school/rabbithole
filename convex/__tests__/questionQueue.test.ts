@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, withDefaultSchools } from "./scheduleFixtures";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -133,7 +134,11 @@ async function seedStory(t: T, scholarId: Id<"users">, fromKey: string, toKey: s
   });
 }
 
-async function seedTeacherQuest(t: T, scholarId: Id<"users">) {
+async function seedTeacherQuest(
+  t: T,
+  scholarId: Id<"users">,
+  opts: { rationale?: string; withInvitation?: boolean } = {},
+) {
   const teacherId = await seedUser(t, "quest-teacher", "teacher");
   return await t.run(async (ctx) => {
     const unitId = await ctx.db.insert("units", {
@@ -156,8 +161,10 @@ async function seedTeacherQuest(t: T, scholarId: Id<"users">) {
       status: "active",
       suggestionType: "teacher_suggestion",
       topic: "Tide pools",
-      rationale: "Try this",
-      scholarInvitation: "You'd love the crabs.",
+      rationale: opts.rationale ?? "Try this",
+      ...(opts.withInvitation === false
+        ? {}
+        : { scholarInvitation: "You'd love the crabs." }),
       unitId,
     });
     return { seedId, unitId };
@@ -196,7 +203,7 @@ describe("rankQuestionQueue / questionQueueSource (pure)", () => {
 
 describe("questionQueue.forSelf", () => {
   test("ranks missed → offered → never-carded → teacher, and excludes closed items", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "queue-scholar");
 
     const teacher = await seedTeacherQuest(t, scholarId);
@@ -271,7 +278,7 @@ describe("questionQueue.forSelf", () => {
   });
 
   test("a story souvenir becomes a question row cited to its unlocking skill", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "story-scholar");
     const seedId = await seedStory(t, scholarId, "fraction_as_parts", "music_rhythm");
 
@@ -288,8 +295,28 @@ describe("questionQueue.forSelf", () => {
     ]);
   });
 
+  test("an older quest offer with only a rationale shows the scholar no body, never the rationale", async () => {
+    const t = await withDefaultSchools(convexTest(schema, modules));
+    const scholarId = await seedUser(t, "offer-scholar");
+    const teacherRationale = "Offer-scholar keeps guessing — teacher note.";
+    const teacher = await seedTeacherQuest(t, scholarId, {
+      rationale: teacherRationale,
+      withInvitation: false,
+    });
+
+    const rows = await (await withUser(t, scholarId)).query(api.questionQueue.forSelf, {});
+    expect(rows).toEqual([
+      expect.objectContaining({
+        kind: "teacherQuest",
+        seedId: teacher.seedId,
+        body: null,
+      }),
+    ]);
+    expect(JSON.stringify(rows)).not.toContain(teacherRationale);
+  });
+
   test("self-only: another scholar's items never appear, and staff get nothing", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const me = await seedUser(t, "me");
     const other = await seedUser(t, "other");
     const teacher = await seedUser(t, "a-teacher", "teacher");
@@ -301,7 +328,7 @@ describe("questionQueue.forSelf", () => {
   });
 
   test("answering a never-carded row mints a list ledger row and grades it; the done-screen budget is untouched", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "answer-scholar");
     const seedId = await seedCrossDomain(t, scholarId, "Fresh");
     const asScholar = await withUser(t, scholarId);
@@ -352,7 +379,7 @@ describe("questionQueue.forSelf", () => {
   });
 
   test("a settled item cannot be re-minted from the list", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "settled-scholar");
     const seedId = await seedCrossDomain(t, scholarId, "Settled");
     await seedEvent(t, scholarId, seedId, {
@@ -381,7 +408,7 @@ describe("bestNextQuestionForScholar (the teacher Prep's bounded read)", () => {
         order: 0,
         seedId,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         scholarIds: [scholarId],
         title: "Homework question",
@@ -394,7 +421,7 @@ describe("bestNextQuestionForScholar (the teacher Prep's bounded read)", () => {
   }
 
   test("agrees with the full queue's top question row, skipping started and homework items", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "best-next-scholar");
     await seedTeacherQuest(t, scholarId);
     await seedCrossDomain(t, scholarId, "Never carded");
@@ -435,7 +462,7 @@ describe("bestNextQuestionForScholar (the teacher Prep's bounded read)", () => {
   });
 
   test("agrees on a never-carded story souvenir, and returns null when nothing is open", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "best-next-story");
     const empty = await t.run((ctx) => bestNextQuestionForScholar(ctx, scholarId));
     expect(empty).toBeNull();
@@ -452,7 +479,7 @@ describe("bestNextQuestionForScholar (the teacher Prep's bounded read)", () => {
 
 describe("the Quests-list offer never plants a story seed", () => {
   test("an edge the scholar never unlocked is refused and nothing is written", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "no-plant-scholar");
     const other = await seedUser(t, "unlocked-it");
     // The edge carries a story, but only ANOTHER scholar holds its seed.
@@ -479,7 +506,7 @@ describe("the Quests-list offer never plants a story seed", () => {
   });
 
   test("a story the scholar holds as an active story seed mints its ledger row on that seed", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const scholarId = await seedUser(t, "held-story-scholar");
     const seedId = await seedStory(t, scholarId, "fraction_as_parts", "music_rhythm");
     const asScholar = await withUser(t, scholarId);
@@ -497,5 +524,76 @@ describe("the Quests-list offer never plants a story seed", () => {
       (await ctx.db.query("seeds").collect()).filter((s) => s.scholarId === scholarId),
     );
     expect(seeds.map((s) => s._id)).toEqual([seedId]);
+  });
+});
+
+describe("dismissing a Keep going row on Scholar's Prep", () => {
+  test("a question row: minting it, then the 'dismissed' outcome, drops it for good", async () => {
+    const t = await withDefaultSchools(convexTest(schema, modules));
+    const scholarId = await seedUser(t, "dismiss-question-scholar");
+    const seedId = await seedCrossDomain(t, scholarId, "Not for me");
+    const kept = await seedCrossDomain(t, scholarId, "Still here");
+    const asScholar = await withUser(t, scholarId);
+
+    // The row was never carded, so the client mints its ledger row first.
+    const { eventId } = await asScholar.mutation(api.practiceMoments.recordMomentOffered, {
+      scholarId,
+      clientEventId: "prep-dismiss-1",
+      surface: "quests",
+      kind: "seed",
+      seedId,
+    });
+    await asScholar.mutation(api.practiceMoments.recordMomentOutcome, {
+      eventId,
+      outcome: "dismissed",
+    });
+
+    const rows = await asScholar.query(api.questionQueue.forSelf, {});
+    expect(rows.map((row) => row.seedId)).toEqual([kept]);
+    // The seed itself is untouched: only the question ended.
+    expect(await t.run((ctx) => ctx.db.get(seedId))).toMatchObject({ status: "active" });
+  });
+
+  test("a teacher quest: seeds.dismissForSelf drops it and marks who dismissed it", async () => {
+    const t = await withDefaultSchools(convexTest(schema, modules));
+    const scholarId = await seedUser(t, "dismiss-quest-scholar");
+    const quest = await seedTeacherQuest(t, scholarId);
+    const asScholar = await withUser(t, scholarId);
+    expect(await asScholar.query(api.questionQueue.forSelf, {})).toHaveLength(1);
+
+    await asScholar.mutation(api.seeds.dismissForSelf, { seedId: quest.seedId });
+    // Idempotent.
+    await asScholar.mutation(api.seeds.dismissForSelf, { seedId: quest.seedId });
+
+    expect(await asScholar.query(api.questionQueue.forSelf, {})).toEqual([]);
+    const seed = await t.run((ctx) => ctx.db.get(quest.seedId));
+    expect(seed).toMatchObject({
+      status: "dismissed",
+      dismissedReason: "Dismissed by the scholar",
+    });
+  });
+
+  test("seeds.dismissForSelf is self-only, scholar-only, and only for wonders and teacher quests", async () => {
+    const t = await withDefaultSchools(convexTest(schema, modules));
+    const me = await seedUser(t, "dismiss-me");
+    const other = await seedUser(t, "dismiss-other");
+    const teacher = await seedUser(t, "dismiss-teacher", "teacher");
+    const theirs = await seedTeacherQuest(t, other);
+    const aiSeed = await seedCrossDomain(t, me, "An idea");
+
+    await expect(
+      (await withUser(t, me)).mutation(api.seeds.dismissForSelf, { seedId: theirs.seedId }),
+    ).rejects.toThrow(/not found/i);
+    await expect(
+      (await withUser(t, teacher)).mutation(api.seeds.dismissForSelf, {
+        seedId: theirs.seedId,
+      }),
+    ).rejects.toThrow(/only a scholar/i);
+    await expect(
+      (await withUser(t, me)).mutation(api.seeds.dismissForSelf, { seedId: aiSeed }),
+    ).rejects.toThrow(/can't be dismissed/);
+    expect(await t.run((ctx) => ctx.db.get(theirs.seedId))).toMatchObject({
+      status: "active",
+    });
   });
 });

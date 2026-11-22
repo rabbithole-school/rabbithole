@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import { api } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -28,7 +29,7 @@ async function seedProgramGuestWork(t: ReturnType<typeof convexTest>) {
   const institutionId = await seedTestInstitution(t, {
     slug: "program-guest-unit-access",
   });
-  return await t.run(async (ctx) => {
+  const __mirrored = await t.run(async (ctx) => {
     const teacher = await ctx.db.insert("users", {
       name: "Program teacher",
       username: "program-unit-teacher",
@@ -88,7 +89,7 @@ async function seedProgramGuestWork(t: ReturnType<typeof convexTest>) {
       kind: "online",
       order: 1,
     });
-    const assignmentId = await ctx.db.insert("assignments", {
+    const assignmentId = await insertAssignmentWithSchedule(ctx, {
       teacherId: teacher,
       unitId: assignedUnit,
       scholarGroupId: groupId,
@@ -113,6 +114,7 @@ async function seedProgramGuestWork(t: ReturnType<typeof convexTest>) {
       ordinaryActivity,
     };
   });
+  return __mirrored;
 }
 
 async function expectInactiveProgramWorkDenied(
@@ -203,15 +205,98 @@ describe("program guest unit boundary", () => {
     });
   });
 
+  test("a program guest can make, list, and run their own Quest", async () => {
+    const t = convexTest(schema, modules);
+    const { guest } = await seedProgramGuestWork(t);
+    const asGuest = await asUser(t, guest);
+
+    // The Custom Quest dialog's sequence: mint the unit, then open a session.
+    const { unitId } = await asGuest.mutation(api.units.createQuest, {
+      title: "How do black holes work?",
+    });
+    const { id } = await asGuest.mutation(api.sessions.create, { unitId });
+    expect(await t.run((ctx) => ctx.db.get(id))).toMatchObject({
+      userId: guest,
+      unitId,
+    });
+
+    const units = await asGuest.query(api.units.list, {});
+    expect(units.map((unit) => unit._id)).toContain(unitId);
+    const reopened = await asGuest.mutation(api.sessions.startUnit, { unitId });
+    expect(await t.run((ctx) => ctx.db.get(reopened.id))).toMatchObject({
+      userId: guest,
+      unitId,
+    });
+
+    // A free-form chat mints its own Quest the same way.
+    const freeForm = await asGuest.mutation(api.sessions.create, {});
+    const freeFormSession = await t.run((ctx) => ctx.db.get(freeForm.id));
+    const freeFormUnit = await t.run((ctx) =>
+      ctx.db.get(freeFormSession!.unitId!),
+    );
+    expect(freeFormUnit?.authorScholarId).toBe(guest);
+  });
+
+  test("an own Quest cannot carry in an unassigned activity or lesson", async () => {
+    const t = convexTest(schema, modules);
+    const { guest, ordinaryActivity, ordinaryUnit } = await seedProgramGuestWork(t);
+    const asGuest = await asUser(t, guest);
+    const { unitId } = await asGuest.mutation(api.units.createQuest, {
+      title: "How do black holes work?",
+    });
+    const ordinaryLesson = await t.run(
+      async (ctx) => (await ctx.db.get(ordinaryActivity))!.lessonId!,
+    );
+    expect(ordinaryLesson).toBeDefined();
+    expect(ordinaryUnit).toBeDefined();
+
+    // Refused at the anchors now, for every scholar (sessions.ts
+    // requireConsistentSessionAnchors, TRA-685).
+    await expect(
+      asGuest.mutation(api.sessions.create, {
+        unitId,
+        activityId: ordinaryActivity,
+      }),
+    ).rejects.toThrow(/isn't part of this unit/i);
+    await expect(
+      asGuest.mutation(api.sessions.create, { unitId, lessonId: ordinaryLesson }),
+    ).rejects.toThrow(/isn't part of this unit/i);
+  });
+
+  test("a program guest still cannot open another scholar's Quest", async () => {
+    const t = convexTest(schema, modules);
+    const { guest } = await seedProgramGuestWork(t);
+    const otherQuest = await t.run(async (ctx) => {
+      const guestRow = await ctx.db.get(guest);
+      const other = await ctx.db.insert("users", {
+        name: "Other scholar",
+        username: "program-unit-other",
+        role: "scholar",
+        institutionId: guestRow!.institutionId,
+      });
+      return await ctx.db.insert("units", {
+        teacherId: other,
+        institutionId: guestRow!.institutionId,
+        authorScholarId: other,
+        title: "Someone else's Quest",
+        isActive: true,
+      });
+    });
+
+    await expect(
+      (await asUser(t, guest)).mutation(api.sessions.create, {
+        unitId: otherQuest,
+      }),
+    ).rejects.toThrow(/assigned program work/i);
+  });
+
   test("program guests cannot access work that has not been activated", async () => {
     const t = convexTest(schema, modules);
     const work = await seedProgramGuestWork(t);
     await t.run((ctx) =>
-      ctx.db.patch(work.assignmentId, {
-        activitySchedule: [
+      setSchedule(ctx, work.assignmentId, [
           { activityId: work.assignedActivity, mode: "homework" },
-        ],
-      }),
+        ]),
     );
 
     await expectInactiveProgramWorkDenied(t, work);
@@ -221,15 +306,13 @@ describe("program guest unit boundary", () => {
     const t = convexTest(schema, modules);
     const work = await seedProgramGuestWork(t);
     await t.run((ctx) =>
-      ctx.db.patch(work.assignmentId, {
-        activitySchedule: [
+      setSchedule(ctx, work.assignmentId, [
           {
             activityId: work.assignedActivity,
             mode: "homework",
             startsAt: Date.now() + 60_000,
           },
-        ],
-      }),
+        ]),
     );
 
     await expectInactiveProgramWorkDenied(t, work);
@@ -239,16 +322,14 @@ describe("program guest unit boundary", () => {
     const t = convexTest(schema, modules);
     const work = await seedProgramGuestWork(t);
     await t.run((ctx) =>
-      ctx.db.patch(work.assignmentId, {
-        activitySchedule: [
+      setSchedule(ctx, work.assignmentId, [
           {
             activityId: work.assignedActivity,
             mode: "homework",
             setAt: Date.now() - 60_000,
             endsAt: Date.now() - 1,
           },
-        ],
-      }),
+        ]),
     );
 
     await expectInactiveProgramWorkDenied(t, work);

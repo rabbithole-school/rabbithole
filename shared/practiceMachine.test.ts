@@ -4,6 +4,7 @@ import {
   breakerEasyItemMatchesCommand,
   breakerCommandId,
   DURABLE_COMMAND_KINDS,
+  gradeResultFromSubmitResponse,
   isDurableCommand,
   newPracticeState,
   practiceReduce,
@@ -13,6 +14,7 @@ import {
   type PracticeCommand,
   type PracticeEvent,
   type PracticeState,
+  type SubmitAnswerResponse,
 } from "./practiceMachine";
 import {
   advanceBreakerFlow,
@@ -88,6 +90,44 @@ function answered(state: PracticeState, correct: boolean, over: Partial<OutboxAn
     result: { correct },
   });
 }
+
+describe("form nudge (right value, not yet in the form asked)", () => {
+  it("projects the server outcome and returns to answering with nothing counted", () => {
+    const projected = gradeResultFromSubmitResponse(
+      { correct: false, formNudge: { form: "factored", message: "Now factor it." } } as SubmitAnswerResponse,
+      "item-1",
+    );
+    expect(projected.formNudge).toBe(true);
+
+    const e = entry();
+    const submitted = practiceReduce(start(), {
+      type: "ui:submit",
+      answer: e.answer,
+      clientEventId: e.clientEventId,
+      entry: e,
+    });
+    const step = practiceReduce(submitted.state, {
+      type: "server:submitSucceeded",
+      id: submitCommandId(e.clientEventId),
+      result: projected,
+    });
+    expect(step.commands).toEqual([]); // no haptic, no resume write
+    expect(step.state.item.phase).toEqual({ kind: "answering" });
+    expect(step.state.item.hasRecorded).toBe(false);
+    expect(step.state.item.missCount).toBe(0);
+    expect(step.state.item.clientEventId).toBeNull();
+    expect(step.state.run.answeredCount).toBe(submitted.state.run.answeredCount);
+    expect(step.state.run.correctCount).toBe(submitted.state.run.correctCount);
+
+    // The edited resubmission is graded normally.
+    const regraded = answered(step.state, true, { clientEventId: "evt-2", answer: "(x+1)(x+2)" });
+    expect(regraded.state.item.phase).toEqual({ kind: "feedback", correct: true });
+  });
+
+  it("an ordinary verdict carries no nudge flag", () => {
+    expect(gradeResultFromSubmitResponse({ correct: false }, "item-1").formNudge).toBeUndefined();
+  });
+});
 
 describe("ordinary submit", () => {
   it("emits exactly one submitAnswer, routed through the outbox domain", () => {
@@ -382,6 +422,182 @@ describe("drain acknowledgements stay off the current item", () => {
     expect(kinds(online.commands)).toEqual(["drainOutbox"]);
     // Same semantic id both times, so the host's claim registry collapses them.
     expect(ids(online.commands)).toEqual([`drain:${SCHOLAR}`]);
+  });
+});
+
+describe("submit response projection", () => {
+  const recovery = {
+    triggerAttemptId: "attempt-1",
+    triggerNodeKey: "node-1",
+    domain: "whole-number-arithmetic",
+  };
+  const project = (res: SubmitAnswerResponse) =>
+    gradeResultFromSubmitResponse(res, "item-1");
+
+  it("omits backOff when the server opened no breaker", () => {
+    // Even with recovery fields present: backOff alone opens the breaker.
+    const result = project({ correct: false, breakerRecovery: recovery });
+    expect(result).toEqual({ correct: false });
+    expect("backOff" in result).toBe(false);
+  });
+
+  it("gives a legacy breaker a legacy:<itemId> trigger and no recovery", () => {
+    expect(project({ correct: false, backOff: { missStreak: 3 } })).toEqual({
+      correct: false,
+      backOff: {
+        triggerAttemptId: "legacy:item-1",
+        triggerNodeKey: "",
+        domain: "",
+        missStreak: 3,
+        recoveryAvailable: false,
+        initialRepairStatus: "opening",
+        repairStepIndex: null,
+      },
+    });
+  });
+
+  it("maps an absent initial repair to opening", () => {
+    const result = project({
+      correct: false,
+      backOff: { missStreak: 3 },
+      breakerRecovery: recovery,
+    });
+    expect(result.backOff).toEqual({
+      ...recovery,
+      missStreak: 3,
+      recoveryAvailable: true,
+      initialRepairStatus: "opening",
+      repairStepIndex: null,
+    });
+  });
+
+  it("maps a null rung to unavailable", () => {
+    const result = project({
+      correct: false,
+      backOff: { missStreak: 3 },
+      breakerRecovery: {
+        ...recovery,
+        initialRepair: { rung: null, hasMore: false },
+      },
+    });
+    expect(result.backOff?.initialRepairStatus).toBe("unavailable");
+    expect(result.backOff?.repairStepIndex).toBeNull();
+  });
+
+  it("maps a reveal rung to done and a completion rung to open", () => {
+    const withRung = (kind: "completion" | "reveal", stepIndex: number) =>
+      project({
+        correct: false,
+        backOff: { missStreak: 3 },
+        breakerRecovery: {
+          ...recovery,
+          initialRepair: { rung: { kind, stepIndex }, hasMore: kind !== "reveal" },
+        },
+      }).backOff;
+    expect(withRung("reveal", 2)).toMatchObject({
+      initialRepairStatus: "done",
+      repairStepIndex: 2,
+    });
+    expect(withRung("completion", 1)).toMatchObject({
+      initialRepairStatus: "open",
+      repairStepIndex: 1,
+    });
+  });
+
+  it("keeps step index zero rather than collapsing it to null", () => {
+    const result = project({
+      correct: false,
+      backOff: { missStreak: 3 },
+      breakerRecovery: {
+        ...recovery,
+        initialRepair: { rung: { kind: "completion", stepIndex: 0 }, hasMore: true },
+      },
+    });
+    expect(result.backOff?.repairStepIndex).toBe(0);
+  });
+
+  it("carries breakerRecoveryVerified false but omits it when the server did", () => {
+    const verifiedFalse = project({ correct: true, breakerRecoveryVerified: false });
+    expect(verifiedFalse).toEqual({ correct: true, breakerRecoveryVerified: false });
+    const omitted = project({ correct: true });
+    expect(omitted).toEqual({ correct: true });
+    expect("breakerRecoveryVerified" in omitted).toBe(false);
+  });
+
+  it("drops fields the reducer does not read, such as dispatchCompleted", () => {
+    expect(project({ correct: true, dispatchCompleted: { id: "d-1" } })).toEqual({
+      correct: true,
+    });
+  });
+
+  describe("through the reducer", () => {
+    function graded(res: SubmitAnswerResponse) {
+      const e = entry();
+      const submitted = practiceReduce(start(), {
+        type: "ui:submit",
+        answer: e.answer,
+        clientEventId: e.clientEventId,
+        entry: e,
+      });
+      return practiceReduce(submitted.state, {
+        type: "server:submitSucceeded",
+        id: submitCommandId(e.clientEventId),
+        result: gradeResultFromSubmitResponse(res, e.itemId),
+      });
+    }
+
+    it("opens a legacy breaker that cannot mint recovery items", () => {
+      const step = graded({ correct: false, backOff: { missStreak: 3 } });
+      expect(step.state.breaker).toMatchObject({
+        triggerAttemptId: "legacy:item-1",
+        recoveryAvailable: false,
+        missStreak: 3,
+        triggerNodeKey: "",
+        domain: "",
+      });
+    });
+
+    it("serves the repair rung while the initial repair is still opening", () => {
+      const step = graded({
+        correct: false,
+        backOff: { missStreak: 3 },
+        breakerRecovery: recovery,
+      });
+      expect(kinds(step.commands)).toContain("serveHintRung");
+      expect(step.state.breaker?.triggerAttemptId).toBe("attempt-1");
+    });
+
+    it("escalates to the coach when the server reports no rung", () => {
+      const step = graded({
+        correct: false,
+        backOff: { missStreak: 3 },
+        breakerRecovery: {
+          ...recovery,
+          initialRepair: { rung: null, hasMore: false },
+        },
+      });
+      expect(kinds(step.commands)).toContain("launchCoach");
+      expect(kinds(step.commands)).not.toContain("serveHintRung");
+    });
+
+    it("pins an already-served completion rung at index zero for resume", () => {
+      const step = graded({
+        correct: false,
+        backOff: { missStreak: 3 },
+        breakerRecovery: {
+          ...recovery,
+          initialRepair: { rung: { kind: "completion", stepIndex: 0 }, hasMore: true },
+        },
+      });
+      expect(step.state.breaker?.repairStepIndex).toBe(0);
+      expect(kinds(step.commands)).not.toContain("serveHintRung");
+    });
+
+    it("grades a plain answer with no breaker", () => {
+      const step = graded({ correct: true });
+      expect(step.state.breaker).toBeNull();
+      expect(step.state.run.correctCount).toBe(1);
+    });
   });
 });
 

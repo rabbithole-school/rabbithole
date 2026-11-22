@@ -52,7 +52,7 @@
  * See review/scholar-home-activity-centric.md for the design rationale.
  */
 import { v } from "convex/values";
-import type { ActivityKind } from "../lib/activityKinds";
+import { SESSION_ACTIVITY_KINDS, type ActivityKind } from "../lib/activityKinds";
 import { authedQuery, teacherQuery } from "./lib/customFunctions";
 import { isTeacherRole } from "./lib/roles";
 import { requireActiveScholarAccess } from "./lib/access";
@@ -66,6 +66,7 @@ import {
   firstIncompleteSessionActivityInUnit,
   isReopenLive,
   isSessionActivityComplete,
+  LAUNCHABLE_LADDER_KINDS,
   suggestedQuestsForScholar,
   unitLaunchableProgressForScholar,
   unitSessionProgressForScholar,
@@ -83,15 +84,32 @@ import { canonicalPrepWindow } from "./lib/prepBlock";
 import { timeZoneForInstitution } from "./lib/institutionTime";
 import { homeTitleForIndependentStudyUnit } from "./lib/independentStudy";
 import { hasReadableOfflineHomeworkContent } from "./lib/activityResourceReachability";
-import { pickLockingFocus } from "../shared/focusLock";
+import { pickLiveFocus } from "../shared/classFocus";
 import { isFocusShowing } from "../shared/focusShowing";
 import { dayKeyForTimezone } from "../shared/institutionDay";
 import { uniqueSubjects } from "../lib/subjects";
 import type { Doc, Id } from "./_generated/dataModel";
+import { loadScheduleRows, readSchedule } from "./lib/scheduleStore";
+import {
+  firstClassIdByWork,
+  scheduleWorkKey,
+  workSubjectLabel,
+} from "./lib/homeworkSubject";
 import type { QueryCtx } from "./_generated/server";
 import { isAppActivity } from "../shared/appSurface";
+import { isOpenUntil, openUntilClosesAt } from "../shared/openUntil";
 import { sessionHasCodeArtifact } from "./lib/teacherArchive";
-import { assignedWorkMode, isBuiltAppSession } from "./lib/homeOrigin";
+import { isTileSession } from "./lib/tileSessions";
+import { isWonderChat, wonderSeedIdsAmong } from "./lib/seeds";
+import {
+  assignedWorkMode,
+  decidingEntry,
+  endedWorkMode,
+  isBuiltAppSession,
+  startedWorkMode,
+  type AssignmentWithSchedule,
+} from "./lib/homeOrigin";
+import type { ScheduleEntry } from "./lib/pushes";
 
 export const activeForMe = authedQuery({
   args: {
@@ -147,12 +165,19 @@ export async function unstartedAssignedRowSurface(
   activity: Doc<"activities">,
   mode: "classFocus" | "homework",
   includeWebActivities: boolean,
-): Promise<"launchable" | "offlineHomework" | null> {
+  /** The give is "Open until a date" (shared/openUntil.ts `isOpenUntil`):
+   *  stored as class focus, but the scholar works it on their own. */
+  openUntil = false,
+): Promise<"launchable" | "offlinePage" | null> {
   // Offline/share-back activities have no scholar-launched surface here.
   // Games do (native only — a browser renders a capability notice), so
   // they ride the same `includeWebActivities` native gate as kind="web".
+  // Homework is the exception to that gate: it lives only in the Homework section
+  // (shared/homeworkList.ts), whose web row launches websites and games
+  // through their own shells, so a website or game sent home must not vanish
+  // from the web Home.
   if (
-    includeWebActivities &&
+    (includeWebActivities || mode === "homework") &&
     (activity.kind === "web" || activity.kind === "game")
   ) {
     return "launchable";
@@ -165,20 +190,21 @@ export async function unstartedAssignedRowSurface(
   ) {
     return "launchable";
   }
-  // Offline HOMEWORK is the one deliberate exception. Work sent home has
-  // to be READABLE at home. It needs authored instructions or at least one
-  // reachable scholar-safe material. The row opens a read-only offline
-  // session without creating tutor chat or completion evidence. `offline` stays OUT of
-  // SCHOLAR_SOLO_STARTABLE_KINDS (convex/assignments.ts) so it is still
-  // never headlined as the live class focus. Offline CLASS FOCUS and shareBack
-  // stay excluded: those are run BY the teacher, in the room, and a card
-  // for them would be a to-do the scholar cannot act on.
+  // Offline HOMEWORK and offline OPEN-UNTIL work are the deliberate
+  // exceptions: both are work the scholar does on their own, so it has to be
+  // READABLE without the teacher. It needs authored instructions or at least
+  // one reachable scholar-safe material. The row opens a read-only offline
+  // session without creating tutor chat or completion evidence. `offline`
+  // stays OUT of SCHOLAR_SOLO_STARTABLE_KINDS (convex/assignments.ts) so it is
+  // still never headlined as the live class focus. Offline "In that class"
+  // work and shareBack stay excluded: those are run BY the teacher, in the
+  // room, and a card for them would be a to-do the scholar cannot act on.
   if (
     activity.kind === "offline" &&
-    mode === "homework" &&
+    (mode === "homework" || openUntil) &&
     (await hasReadableOfflineHomeworkContent(ctx, activity))
   ) {
-    return "offlineHomework";
+    return "offlinePage";
   }
   return null;
 }
@@ -208,6 +234,9 @@ export async function buildPlateForTarget(
     const unitProgressForScholar = includeWebActivities
       ? unitLaunchableProgressForScholar
       : unitSessionProgressForScholar;
+    const ladderKinds = new Set<string>(
+      includeWebActivities ? LAUNCHABLE_LADDER_KINDS : SESSION_ACTIVITY_KINDS,
+    );
     const timetable = await scholarTimetableContext(ctx, target);
     // Resolve once for this scholar's complete plate. Each row carries this
     // read-model value so card consumers never derive or borrow a calendar.
@@ -226,14 +255,21 @@ export async function buildPlateForTarget(
             q.eq("userId", target._id).eq("isArchived", false),
           )
           .collect();
-    const sessions = allSessions.filter(
+    const plateCandidates = allSessions.filter(
       (p) =>
         !p.isTestDrive &&
         !p.isOffline &&
+        // A tile session is never on Home (Now, Quests, Apps you built): the
+        // tile and its session switcher are its home (lib/tileSessions.ts).
+        !isTileSession(p) &&
         (!learnerInstitutionId ||
           p.institutionId === learnerInstitutionId ||
           (p.institutionId === undefined && hasLearnerEnrollment)),
     );
+    // A wonder's chat is never a Quest (TRA-678): it lists under the
+    // scholar's wonders (convex/wonders.ts), never as a plate row.
+    const wonderSeedIds = await wonderSeedIdsAmong(ctx, target._id, plateCandidates);
+    const sessions = plateCandidates.filter((p) => !isWonderChat(p, wonderSeedIds));
 
     // ── Classify assigned work by mode (classFocus / homework) ─────────
     // Assignment rows never fall back to "Quest" when the assignment is
@@ -246,31 +282,44 @@ export async function buildPlateForTarget(
     const now = Date.now();
     const todayDayKey = dayKeyForTimezone(now, timeZone);
     const allAssignments = await ctx.db.query("assignments").collect();
-    const assignmentById = new Map<Id<"assignments">, Doc<"assignments">>();
+    const assignmentById = new Map<
+      Id<"assignments">,
+      Doc<"assignments"> & AssignmentWithSchedule
+    >();
     const teacherIdByAssignment = new Map<Id<"assignments">, Id<"users">>();
     const unitIdByAssignment = new Map<Id<"assignments">, Id<"units">>();
-    const scheduleEntryByAssignmentActivity = new Map<
-      string,
-      NonNullable<Doc<"assignments">["activitySchedule"]>[number]
-    >();
+    const scheduleEntryByAssignmentActivity = new Map<string, ScheduleEntry>();
+    // The class each give is filed under (TRA-721), keyed by assignment,
+    // activity and mode: the same first-schedule-row rule the family Homework
+    // tab uses, so a row is labelled like the parent's and teacher's pages.
+    const filedClassByWork = new Map<string, Id<"classes"> | undefined>();
     const liveAssigned: Array<{
       assignmentId: Id<"assignments">;
       activityId: Id<"activities">;
       mode: "classFocus" | "homework";
       setAt?: number;
+      /** "Open until a date" (shared/openUntil.ts). */
+      openUntil: boolean;
     }> = [];
 
     for (const a of allAssignments) {
       if (a.archivedAt) continue;
       if (!a.scholarIds.includes(target._id)) continue;
       teacherIdByAssignment.set(a._id, a.teacherId);
-      assignmentById.set(a._id, a);
+      const scheduleRows = await loadScheduleRows(ctx, a._id);
+      const schedule = await readSchedule(ctx, a, undefined, scheduleRows);
+      for (const [workKey, classId] of firstClassIdByWork(scheduleRows)) {
+        filedClassByWork.set(`${a._id}::${workKey}`, classId);
+      }
+      // lib/homeOrigin's rule sees the same entries as this loop.
+      assignmentById.set(a._id, { ...a, schedule });
+
       // Standing (unitId-less) assignments have no unit — skip the map
       // entry; downstream code already treats a missing entry as "skip
       // this session's unit classification" (same as an archived/deleted
       // assignment today).
       if (a.unitId) unitIdByAssignment.set(a._id, a.unitId);
-      for (const e of a.activitySchedule ?? []) {
+      for (const e of schedule) {
         // Planned-but-never-pushed entries are invisible to scholars.
         if (e.setAt == null) continue;
         // Per-scholar targeting: an entry aimed at specific scholars is
@@ -283,7 +332,12 @@ export async function buildPlateForTarget(
         )
           continue;
         const key = `${a._id}::${e.activityId}`;
-        scheduleEntryByAssignmentActivity.set(key, e);
+        // One entry per activity, by the shared rule (never insertion order).
+        const held = scheduleEntryByAssignmentActivity.get(key);
+        scheduleEntryByAssignmentActivity.set(
+          key,
+          held ? (decidingEntry([held, e], now) ?? e) : e,
+        );
         const expired = e.endsAt != null && e.endsAt <= now;
         // Synthetic rows exist only while the assignment is showing. Started
         // sessions keep their mode through the map above, so they survive as
@@ -298,6 +352,7 @@ export async function buildPlateForTarget(
             activityId: e.activityId,
             mode: e.mode,
             setAt: e.setAt,
+            openUntil: isOpenUntil(e, timeZone),
           });
         }
       }
@@ -445,25 +500,47 @@ export async function buildPlateForTarget(
         ? `${p.assignmentId}::${p.activityId}`
         : null;
       if (p.assignmentId) {
+        // Archived, or no longer on this scholar's roster.
+        if (!assignmentById.has(p.assignmentId)) continue;
         const assignmentUnitId = unitIdByAssignment.get(p.assignmentId);
-        if (!assignmentUnitId) continue;
-        if (p.unitId && String(p.unitId) !== String(assignmentUnitId)) continue;
-        if (
-          !currentComplete &&
-          p.activityId &&
-          !modeForAssignmentActivity(p.assignmentId, p.activityId)
-        ) {
+        if (!assignmentUnitId) {
+          // A unit-less assignment (a standing one, or an ad-hoc dispatch
+          // such as question homework) keeps a started session on the plate
+          // only while its activity is pushed as HOMEWORK: the not-started
+          // row below is suppressed once a session exists, and homework has
+          // no other home than the Homework section (shared/homeworkList.ts).
+          const mode = p.activityId
+            ? startedWorkMode(
+                assignmentById.get(p.assignmentId),
+                p.activityId,
+                target._id,
+                now,
+              )
+            : null;
+          if (mode !== "homework") continue;
+        } else if (p.unitId && String(p.unitId) !== String(assignmentUnitId)) {
           continue;
         }
       }
-      if (assignmentActivityKey) {
+      if (assignmentActivityKey && p.assignmentId && p.activityId) {
         // Assignment-anchored → always classFocus/homework, never a Quest,
-        // even if the schedule window has since closed.
-        const mode =
-          p.assignmentId && p.activityId
-            ? modeForAssignmentActivity(p.assignmentId, p.activityId)
-            : undefined;
-        if (mode) origin = mode;
+        // even if the schedule window has since closed. Started work keeps
+        // its place when the activity was re-pushed to other scholars only
+        // (startedWorkMode). With no pushed entry at all its activity has
+        // ended: it lives in Archived as "Not finished", and comes back here
+        // only for the day the scholar chose "Keep working on this".
+        const mode = startedWorkMode(
+          assignmentById.get(p.assignmentId),
+          p.activityId,
+          target._id,
+          now,
+        );
+        if (mode) {
+          origin = mode;
+        } else if (!currentComplete) {
+          if (!isReopenLive(p, now, timeZone)) continue;
+          origin = await endedWorkMode(ctx, p.assignmentId, p.activityId);
+        }
       }
       if (currentComplete) {
         const unitId = p.unitId;
@@ -629,9 +706,15 @@ export async function buildPlateForTarget(
       unitCompletedCount: number | null;
       unitActivityCount: number | null;
       subject: string | null;
+      /** What a person reads as the row's subject (never null when the unit
+       *  names one, unlike `subject`, which picks a tab). the Homework row's label. */
+      subjectLabel: string | null;
       dueAt: number | null;
       timeZone: string;
       endsAt: number | null;
+      /** Set while the row is open-until work (shared/openUntil.ts): when its
+       *  window closes. Such a row lives in Homework until then. */
+      openUntil: number | null;
       assignmentId?: Id<"assignments">;
       teacherName?: string;
       teacherImage?: string;
@@ -652,6 +735,31 @@ export async function buildPlateForTarget(
       choicePickCount: number | null; // how many to complete (N)
       choicePickedCount: number | null; // how many already completed
       choiceOptionCount: number | null; // total options in the menu
+    };
+
+    // The filed class of a row's give and its subject: the entry's own mode
+    // when the row has one, else the mode it came from, else whichever mode
+    // names a class.
+    const classSubjectById = new Map<Id<"classes">, string | null>();
+    const filedClassFor = async (
+      assignmentId: Id<"assignments"> | undefined,
+      activityId: Id<"activities"> | null,
+      mode: "classFocus" | "homework" | null,
+    ): Promise<{ classId: Id<"classes"> | undefined; classSubject: string | null }> => {
+      if (!assignmentId || !activityId) return { classId: undefined, classSubject: null };
+      const modes = mode ? [mode] : (["homework", "classFocus"] as const);
+      let classId: Id<"classes"> | undefined;
+      for (const m of modes) {
+        classId = filedClassByWork.get(
+          `${assignmentId}::${scheduleWorkKey(activityId, m)}`,
+        );
+        if (classId) break;
+      }
+      if (!classId) return { classId: undefined, classSubject: null };
+      if (!classSubjectById.has(classId)) {
+        classSubjectById.set(classId, (await ctx.db.get(classId))?.subject ?? null);
+      }
+      return { classId, classSubject: classSubjectById.get(classId) ?? null };
     };
 
     // Choice-lesson tag for a row, read from the (choice-aware) unit
@@ -705,6 +813,7 @@ export async function buildPlateForTarget(
       }
       if (
         !includeWebActivities &&
+        origin !== "homework" &&
         (activity?.kind === "web" || activity?.kind === "game")
       )
         continue;
@@ -737,6 +846,12 @@ export async function buildPlateForTarget(
             )
           : undefined;
 
+      const filed = await filedClassFor(
+        p.assignmentId,
+        rowActivityId,
+        scheduleEntry?.mode ?? (origin === "is" ? null : origin),
+      );
+
       rows.push({
         sessionId: currentComplete ? null : p._id,
         title,
@@ -767,6 +882,12 @@ export async function buildPlateForTarget(
           p.assignmentId,
           rowActivityId,
           unit?.subject,
+          filed.classSubject,
+        ),
+        subjectLabel: workSubjectLabel(
+          filed.classSubject,
+          unit?.subject,
+          unit?.title,
         ),
         dueAt:
           origin === "homework" && scheduleEntry?.mode === "homework"
@@ -776,6 +897,10 @@ export async function buildPlateForTarget(
         endsAt:
           origin === "classFocus" && scheduleEntry?.mode === "classFocus"
             ? scheduleEntry.endsAt ?? null
+            : null,
+        openUntil:
+          origin === "classFocus" && scheduleEntry
+            ? openUntilClosesAt(scheduleEntry, timeZone)
             : null,
         assignmentId: p.assignmentId,
         teacherName,
@@ -854,10 +979,11 @@ export async function buildPlateForTarget(
             activity,
             ent.mode,
             includeWebActivities,
+            ent.openUntil,
           )
         : null;
       if (!activity || !surface) continue;
-      const offlineHomework = surface === "offlineHomework";
+      const offlinePage = surface === "offlinePage";
       emittedNotStarted.add(key);
 
       const lesson = activity.lessonId
@@ -878,13 +1004,19 @@ export async function buildPlateForTarget(
         // longer surfaced here) while leaving sequence lessons untouched
         // (every uncompleted sequence option is available).
         //
-        // Offline homework is exempt: `availableActivityIds` is computed from
-        // the unit's LAUNCHABLE ladder (orderedOnline/LaunchableActivitiesForUnit
-        // in lib/scholarReads.ts), which offline activities are not part of —
-        // so applying this gate would silently drop every unit-bearing offline
-        // homework row. Its own completion check ran above.
+        // Offline work read in place (homework or open-until) is exempt:
+        // `availableActivityIds` is computed from the unit's LAUNCHABLE ladder
+        // (orderedOnline/LaunchableActivitiesForUnit in lib/scholarReads.ts),
+        // which offline activities are not part of — so applying this gate
+        // would silently drop every unit-bearing offline row. Its own
+        // completion check ran above.
+        //
+        // The same holds for any kind THIS read's ladder doesn't count
+        // (problem sets always; web/game on the web read): it can never be in
+        // `availableActivityIds`, so the gate would drop it for good.
         if (
-          !offlineHomework &&
+          !offlinePage &&
+          ladderKinds.has(activity.kind) &&
           !unitProg.availableActivityIds.has(String(ent.activityId))
         )
           continue;
@@ -892,6 +1024,8 @@ export async function buildPlateForTarget(
       const tid = teacherIdByAssignment.get(ent.assignmentId);
       const teacher = tid ? teacherById.get(tid) : null;
       const scheduleEntry = scheduleEntryByAssignmentActivity.get(key);
+
+      const filed = await filedClassFor(ent.assignmentId, ent.activityId, ent.mode);
 
       rows.push({
         sessionId: null,
@@ -919,6 +1053,12 @@ export async function buildPlateForTarget(
           ent.assignmentId,
           ent.activityId,
           unit?.subject,
+          filed.classSubject,
+        ),
+        subjectLabel: workSubjectLabel(
+          filed.classSubject,
+          unit?.subject,
+          unit?.title,
         ),
         dueAt:
           ent.mode === "homework" && scheduleEntry?.mode === "homework"
@@ -929,11 +1069,15 @@ export async function buildPlateForTarget(
           ent.mode === "classFocus" && scheduleEntry?.mode === "classFocus"
             ? scheduleEntry.endsAt ?? null
             : null,
+        openUntil:
+          ent.mode === "classFocus" && scheduleEntry
+            ? openUntilClosesAt(scheduleEntry, timeZone)
+            : null,
         assignmentId: ent.assignmentId,
         teacherName: teacher?.name ?? undefined,
         teacherImage: teacher?.image ?? undefined,
         seedId: undefined,
-        description: offlineHomework
+        description: offlinePage
           ? activity.scholarDescription ?? null
           : activity.scholarDescription ?? unit?.scholarDescription ?? null,
         etaMinutes: activity.durationMinutes ?? null,
@@ -977,9 +1121,13 @@ function emptyResult() {
       unitCompletedCount: number | null;
       unitActivityCount: number | null;
       subject: string | null;
+      subjectLabel: string | null;
       dueAt: number | null;
       timeZone: string;
       endsAt: number | null;
+      /** Set while the row is open-until work (shared/openUntil.ts): when its
+       *  window closes. Such a row lives in Homework until then. */
+      openUntil: number | null;
       assignmentId?: Id<"assignments">;
       teacherName?: string;
       teacherImage?: string;
@@ -1052,9 +1200,9 @@ async function unitProvenance(
  *     scholar's 3-row cap.
  *   - `includeWebActivities: true` — the native contract (web-activity rows on).
  *   - The onboarding pin, verbatim.
- *   - The class-focus state (`scholarClassFocusEntries` → `pickLockingFocus`),
- *     the same soft "what the room is on" signal the iPad computes (it stopped
- *     being a lock — see shared/focusLock.ts).
+ *   - The class-focus state (`scholarClassFocusEntries` → `pickLiveFocus`),
+ *     the same soft "what the room is on" signal the iPad computes (see
+ *     shared/classFocus.ts).
  *   - The scholar's Prep-Time block (group daily block), teacher-readable.
  *   - Per-row provenance: origin, session/assignment/unit/seed ids, plus each
  *     row's unit `isActive` + maturity-`Draft` flags.
@@ -1185,20 +1333,20 @@ export const homeForScholar = teacherQuery({
 
     // Class-focus state — identical to what the iPad Home derives.
     const focusEntries = await scholarClassFocusEntries(ctx, args.scholarId);
-    const locking = pickLockingFocus(focusEntries);
-    const focusLock = locking
+    const picked = pickLiveFocus(focusEntries);
+    const liveFocus = picked
       ? {
-          unitId: locking.unitId ? String(locking.unitId) : null,
+          unitId: picked.unitId ? String(picked.unitId) : null,
           label:
-            locking.activityTitle ??
-            locking.lessonTitle ??
-            locking.unitTitle ??
+            picked.activityTitle ??
+            picked.lessonTitle ??
+            picked.unitTitle ??
             null,
           // "The turn, not the bell" — so a mirror surface can render the
           // same soft "with the class until ~10:25" awareness the scholar's
           // own Home shows, never a bare "paused until then".
-          endsAt: locking.endsAt ?? null,
-          timeZone: locking.timeZone,
+          endsAt: picked.endsAt ?? null,
+          timeZone: picked.timeZone,
         }
       : null;
 
@@ -1221,7 +1369,7 @@ export const homeForScholar = teacherQuery({
       suggested,
       subjectTabs: plate.subjectTabs,
       isTotalCount: plate.isTotalCount,
-      focusLock,
+      focusLock: liveFocus,
       prep,
     };
   },

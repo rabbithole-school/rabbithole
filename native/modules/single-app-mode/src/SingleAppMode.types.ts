@@ -7,20 +7,20 @@ type SingleAppModeModuleEvents = Record<never, never>;
 // extending the `NativeModule` class is what the JS runtime provides at runtime;
 // the methods below mirror the Swift `Function`/`AsyncFunction` definitions.
 export declare class SingleAppModeModule extends NativeModule<SingleAppModeModuleEvents> {
-  /** Point-in-time read of `UIAccessibility.isGuidedAccessEnabled`. */
+  /**
+   * `UIAccessibility.isGuidedAccessEnabled`, as last read on the main thread
+   * (UIKit is main-thread-only; this is called from the JS thread).
+   */
   isActive(): boolean;
   /**
-   * requestGuidedAccessSession(enabled: true). Resolves the OS success flag
-   * (false when the app isn't MDM-permitted for ASAM). Never rejects.
+   * requestGuidedAccessSession(enabled: true), queued behind any transition in
+   * flight. Resolves true once the lock holds (immediately if it already does);
+   * false when the app isn't MDM-permitted for ASAM. Never rejects.
    */
   enter(): Promise<boolean>;
   /**
-   * requestGuidedAccessSession(enabled: false). Resolves the OS success flag.
-   * Never rejects.
+   * requestGuidedAccessSession(enabled: false), queued the same way. Resolves
+   * true once released (immediately if already released). Never rejects.
    */
   exit(): Promise<boolean>;
-  /** Controls maximum brightness for the managed-app lifetime. */
-  setManagedMaximumBrightness?(enabled: boolean): Promise<void>;
-  /** Compatibility with dev clients built before setManagedMaximumBrightness. */
-  setBrightnessPinned?(pinned: boolean): Promise<void>;
 }

@@ -29,7 +29,6 @@ describe("buildSystemPrompt — intro + session context wiring", () => {
     lastSessionAt?: number | null;
   }) {
     return buildSystemPrompt(
-      null, // teacherWhisper
       null, // readingLevel
       "Kai", // scholarName
       null, // unitContext
@@ -134,7 +133,7 @@ describe("buildSystemPrompt — intro + session context wiring", () => {
   });
 
   test("default trailing args (omitted) behave as not-first / no intro", () => {
-    const prompt = buildSystemPrompt(null, null, "Kai", null, null, null);
+    const prompt = buildSystemPrompt(null, "Kai", null, null, null);
     expect(prompt).not.toContain("## Introduce yourself");
     expect(prompt).not.toContain("SESSION CONTEXT:");
   });

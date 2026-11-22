@@ -1,8 +1,8 @@
 "use client";
 
 // The teacher-assignment mode's own settings rendering: scholar picker, the
-// optional Simulator run budget, and the "When" panel (deliver now vs plan,
-// class-focus vs homework, timing, the per-activity "For" subset). Split out
+// optional Simulator run budget, the two give questions (shows up / finish,
+// components/GiveWindowFields.tsx), and the per-activity "For" subset. Split out
 // of StartAssignmentDialog so a third scheduling mode is a sibling module
 // rather than another branch in the shared shell (TRA-21).
 
@@ -14,9 +14,14 @@ import {
   SimulatorRunBudgetFields,
   type SimulatorRunBudgetValue,
 } from "@/components/simulatorTeacher/SimulatorRunBudgetFields";
-import { ActivityModeBadge, type ActivityMode } from "@/lib/activityMode";
-import { DURATIONS } from "./scheduling";
-import { DateTimeInput, PlainSelect, SubLabel } from "./primitives";
+import {
+  GiveWindowFields,
+  type GiveChoices,
+  type GiveRefusal,
+  type GiveFinish,
+  type ShowsUp,
+} from "@/components/GiveWindowFields";
+import { SubLabel } from "./primitives";
 
 export function TeacherSettings({
   scholarSel,
@@ -27,15 +32,12 @@ export function TeacherSettings({
   onWorldBudgetChange,
   isSingleActivity,
   deliverNow,
-  setDeliverNow,
-  mode,
-  setMode,
-  startsAt,
-  setStartsAt,
-  durationMin,
-  setDurationMin,
-  dueAt,
-  setDueAt,
+  nowMs,
+  giveChoices,
+  showsUp,
+  setShowsUp,
+  finish,
+  setFinish,
   effectiveForSel,
   setForSel,
   forScholarIds,
@@ -53,15 +55,12 @@ export function TeacherSettings({
   onWorldBudgetChange: (next: SimulatorRunBudgetValue) => void;
   isSingleActivity: boolean;
   deliverNow: boolean;
-  setDeliverNow: (value: boolean) => void;
-  mode: ActivityMode;
-  setMode: (value: ActivityMode) => void;
-  startsAt: string;
-  setStartsAt: (value: string) => void;
-  durationMin: number;
-  setDurationMin: (value: number) => void;
-  dueAt: string;
-  setDueAt: (value: string) => void;
+  nowMs: number;
+  giveChoices: GiveChoices | GiveRefusal | null | undefined;
+  showsUp: ShowsUp;
+  setShowsUp: (value: ShowsUp) => void;
+  finish: GiveFinish | null;
+  setFinish: (value: GiveFinish) => void;
   effectiveForSel: Set<string> | null;
   setForSel: (value: Set<string> | null) => void;
   forScholarIds: string[];
@@ -127,122 +126,16 @@ export function TeacherSettings({
         </Box>
       )}
 
-      {/* When — a single activity can go live now or be planned; a unit/lesson
-          always lands on the calendar. */}
+      {/* When it shows up and when they should finish it (TRA-571). */}
       <Box>
-        <Text
-          fontSize="xs"
-          color="charcoal.400"
-          fontFamily="heading"
-          fontWeight="600"
-          textTransform="uppercase"
-          letterSpacing="0.04em"
-          mb={2}
-        >
-          When
-        </Text>
-
-        {isSingleActivity && (
-          <HStack gap={2} mb={3}>
-            {(
-              [
-                { key: true, label: "Start now" },
-                { key: false, label: "Schedule" },
-              ] as const
-            ).map((opt) => (
-              <Box
-                as="button"
-                key={opt.label}
-                onClick={() => setDeliverNow(opt.key)}
-                aria-pressed={deliverNow === opt.key}
-                px={3}
-                py={1.5}
-                borderRadius="md"
-                borderWidth="1px"
-                borderColor={deliverNow === opt.key ? "violet.300" : "gray.200"}
-                bg={deliverNow === opt.key ? "violet.50" : "white"}
-                cursor="pointer"
-                _hover={{
-                  bg: deliverNow === opt.key ? undefined : "gray.50",
-                }}
-                fontFamily="heading"
-                fontWeight="700"
-                fontSize="sm"
-                color={deliverNow === opt.key ? "violet.700" : "charcoal.500"}
-              >
-                {opt.label}
-              </Box>
-            ))}
-          </HStack>
-        )}
-
-        {isSingleActivity && (
-          <HStack gap={2} mb={3}>
-            {(["classFocus", "homework"] as ActivityMode[]).map((m) => (
-              <Box
-                as="button"
-                key={m}
-                onClick={() => setMode(m)}
-                px={3}
-                py={1.5}
-                borderRadius="md"
-                borderWidth="1px"
-                borderColor={
-                  mode === m
-                    ? m === "classFocus"
-                      ? "violet.300"
-                      : "orange.300"
-                    : "gray.200"
-                }
-                bg={
-                  mode === m
-                    ? m === "classFocus"
-                      ? "violet.50"
-                      : "orange.50"
-                    : "white"
-                }
-                cursor="pointer"
-                _hover={{ bg: mode === m ? undefined : "gray.50" }}
-              >
-                <ActivityModeBadge mode={m} variant="soft" />
-              </Box>
-            ))}
-          </HStack>
-        )}
-
-        <HStack gap={4} align="flex-start" flexWrap="wrap">
-          {!(isSingleActivity && deliverNow) && (
-            <Box flex={1} minW="200px">
-              <SubLabel>
-                {isSingleActivity && mode === "homework"
-                  ? "Assign at"
-                  : "Starts"}
-              </SubLabel>
-              <DateTimeInput value={startsAt} onChange={setStartsAt} />
-            </Box>
-          )}
-          {isSingleActivity && mode === "classFocus" && (
-            <Box minW="140px">
-              <SubLabel>Duration</SubLabel>
-              <PlainSelect
-                value={String(durationMin)}
-                onChange={(v) => setDurationMin(Number(v))}
-              >
-                {DURATIONS.map((d) => (
-                  <option key={d.min} value={d.min}>
-                    {d.label}
-                  </option>
-                ))}
-              </PlainSelect>
-            </Box>
-          )}
-          {isSingleActivity && mode === "homework" && (
-            <Box flex={1} minW="200px">
-              <SubLabel>Due</SubLabel>
-              <DateTimeInput value={dueAt} onChange={setDueAt} />
-            </Box>
-          )}
-        </HStack>
+        <GiveWindowFields
+          choices={giveChoices}
+          nowMs={nowMs}
+          showsUp={showsUp}
+          onShowsUpChange={setShowsUp}
+          finish={finish}
+          onFinishChange={setFinish}
+        />
 
         {isSingleActivity && (
           <Box
@@ -333,20 +226,21 @@ export function TeacherSettings({
 
         {!isSingleActivity && (
           <Text fontSize="xs" color="charcoal.400" fontFamily="body" mt={2}>
-            The {targetKind === "lesson" ? "lesson" : "unit"}&apos;s activities
-            lay onto the agenda from this date using the pacing set in the
-            curriculum. Anything without a set gap lands on the start date —
-            push those to the class with &ldquo;Start now&rdquo; as you reach
-            them.
-          </Text>
-        )}
-
-        {isSingleActivity && deliverNow && (
-          <Text fontSize="xs" color="charcoal.400" fontFamily="body" mt={2}>
-            Scholars see this activity right away.
-            {mode === "classFocus"
-              ? " It clears from class focus after the duration above."
-              : " It lands on their plate with the due date above."}
+            Every activity in the {targetKind === "lesson" ? "lesson" : "unit"}{" "}
+            {showsUp.kind === "now"
+              ? "goes live now"
+              : `shows up ${new Intl.DateTimeFormat("en-US", {
+                  weekday: "short",
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                  timeZone:
+                    giveChoices && "timeZone" in giveChoices
+                      ? giveChoices.timeZone
+                      : undefined,
+                }).format(new Date(showsUp.at))}`}{" "}
+            with the same finish.
           </Text>
         )}
 

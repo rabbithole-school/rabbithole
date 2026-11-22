@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, withDefaultSchools } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
@@ -51,8 +52,8 @@ async function seedAssignment(
   liveActivityId: Id<"activities"> | null,
   entryScholarIds?: Id<"users">[],
 ) {
-  return await t.run(async (ctx) =>
-    ctx.db.insert("assignments", {
+  const __mirrored = await t.run(async (ctx) =>
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds: [scholarId],
@@ -72,6 +73,7 @@ async function seedAssignment(
         : [],
     }),
   );
+  return __mirrored;
 }
 
 async function storageId(t: ReturnType<typeof convexTest>) {
@@ -104,7 +106,7 @@ async function insertSegment(
 
 describe("scan auto-file via the live activity window (capstone)", () => {
   test("a matched scan auto-tags the live activity and materializes", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const teacherId = await seedUser(t, "teacher", "t1");
     const scholarId = await seedUser(t, "scholar", "s1");
     const { unitId, activityId } = await seedActivity(t, teacherId);
@@ -135,7 +137,7 @@ describe("scan auto-file via the live activity window (capstone)", () => {
   });
 
   test("no live window → activity stays open, nothing materializes", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const teacherId = await seedUser(t, "teacher", "t1");
     const scholarId = await seedUser(t, "scholar", "s1");
     const { unitId } = await seedActivity(t, teacherId);
@@ -163,7 +165,7 @@ describe("scan auto-file via the live activity window (capstone)", () => {
   });
 
   test("a live entry targeted to another rostered scholar does not auto-file", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const teacherId = await seedUser(t, "teacher", "t1");
     const scholarId = await seedUser(t, "scholar", "s1");
     const targetedScholarId = await seedUser(t, "scholar", "s2");

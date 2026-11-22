@@ -134,7 +134,7 @@ export function resolveCoachAgeBand(
   const gradeAge =
     gradeLevel === "K"
       ? 5
-      : gradeLevel && /^[1-9]$/.test(gradeLevel)
+      : gradeLevel && /^(?:[1-9]|1[01])$/.test(gradeLevel)
         ? Number(gradeLevel) + 5
         : null;
   const resolved = age ?? gradeAge;

@@ -5,7 +5,7 @@
 // belongs to the artifact's session or was inherited from a starter. Static
 // launcher apps resolve only the copied blobs recorded on their customApps row.
 
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internalQuery } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { isTeacherRole } from "./lib/roles";
@@ -14,7 +14,12 @@ import { MAX_APP_ASSETS } from "../shared/appAssets";
 import { assertMayReadTeacherArchived } from "./lib/teacherArchive";
 
 type AuthorizedAsset = {
+  /** The id the app HTML references. */
   id: Id<"_storage">;
+  /** The blob to serve for it. Differs from `id` for a raw chat-photo
+   *  reference whose message carries an app-usable copy (`appAssetId`): the
+   *  copy is served so an app built before photos were prepared still loads. */
+  storageId: Id<"_storage">;
   source: "session" | "starter";
 };
 
@@ -53,32 +58,49 @@ export const authorizeArtifactAssets = internalQuery({
       .query("messages")
       .withIndex("by_session", (q) => q.eq("sessionId", session._id))
       .collect();
-    const sessionImages = messages.flatMap((message) =>
-      message.imageId ? [message.imageId] : [],
-    );
+    // A chat photo's app-usable copy stands in for the raw upload, and is an
+    // asset in its own right (it is what the builder is told to reference).
+    const sessionImages = new Map<Id<"_storage">, Id<"_storage">>();
+    for (const message of messages) {
+      if (message.appAssetId) {
+        sessionImages.set(message.appAssetId, message.appAssetId);
+      }
+      if (message.imageId) {
+        sessionImages.set(
+          message.imageId,
+          message.appAssetId ?? message.imageId,
+        );
+      }
+    }
 
     const authorized: AuthorizedAsset[] = [];
     for (const id of ids) {
       const inheritedId = inherited.find((candidate) => candidate === id);
       if (inheritedId) {
-        authorized.push({ id: inheritedId, source: "starter" });
+        authorized.push({
+          id: inheritedId,
+          storageId: inheritedId,
+          source: "starter",
+        });
         continue;
       }
       const sessionAssetId = sessionAssets.find(
         (candidate) => candidate === id,
       );
       if (sessionAssetId) {
-        authorized.push({ id: sessionAssetId, source: "session" });
+        authorized.push({
+          id: sessionAssetId,
+          storageId: sessionAssetId,
+          source: "session",
+        });
         continue;
       }
-      const messageImageId = sessionImages.find(
-        (candidate) => candidate === id,
-      );
-      if (messageImageId) {
-        authorized.push({ id: messageImageId, source: "session" });
+      const servedImageId = sessionImages.get(id);
+      if (servedImageId) {
+        authorized.push({ id, storageId: servedImageId, source: "session" });
         continue;
       }
-      throw new Error("That app asset does not belong to this session.");
+      throw new ConvexError("That app asset does not belong to this session.");
     }
     return authorized;
   },
@@ -95,6 +117,14 @@ export const customAppForHost = internalQuery({
     const thumbnailUrl = row.thumbnailStorageId
       ? await ctx.storage.getUrl(row.thumbnailStorageId)
       : null;
+    // A scholar's app a teacher published to classmates credits its builder
+    // by first name (convex/publishedApps.ts). Like the app itself, the
+    // credit reaches whoever holds the token — normally the classmates it was
+    // granted to, but the link is a bearer link, so only a first name.
+    const builder = row.publishedFrom
+      ? await ctx.db.get(row.publishedFrom.builderId)
+      : null;
+    const credit = builder?.name?.trim().split(/\s+/)[0] || null;
     return {
       kind: row.kind,
       name: row.name,
@@ -110,6 +140,7 @@ export const customAppForHost = internalQuery({
       origin: row.origin ?? null,
       thumbnailUrl,
       appAssetIds: row.appAssetIds ?? [],
+      credit,
     };
   },
 });

@@ -4,6 +4,7 @@ import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { emptyHealthRecordFields } from "../lib/healthRecord";
+import { staffReplyToken } from "../lib/staffReplyToken";
 import {
   grantInstitutionMembership,
   grantStaffAccessToScholars,
@@ -2497,6 +2498,378 @@ describe("parentMessages — email channel (P2)", () => {
   });
 });
 
+describe("parentMessages — teacher email bridge", () => {
+  type TestT = ReturnType<typeof makeTestConvex>;
+  type SentEmail = {
+    to: string[];
+    from: string;
+    reply_to?: string;
+    subject: string;
+    text: string;
+  };
+
+  async function withResend(
+    run: (sent: () => SentEmail[]) => Promise<void>,
+  ): Promise<void> {
+    const previous = {
+      key: process.env.AUTH_RESEND_KEY,
+      domain: process.env.PARENT_INBOUND_DOMAIN,
+      webhook: process.env.RESEND_WEBHOOK_SECRET,
+    };
+    const realFetch = globalThis.fetch;
+    process.env.AUTH_RESEND_KEY = "re_test";
+    process.env.PARENT_INBOUND_DOMAIN = "inbound.example.com";
+    process.env.RESEND_WEBHOOK_SECRET = "whsec_test";
+    const bodies: SentEmail[] = [];
+    globalThis.fetch = async (input, init) => {
+      if (String(input) === "https://api.resend.com/emails") {
+        bodies.push(JSON.parse(String(init?.body)) as SentEmail);
+      }
+      return new Response(JSON.stringify({ id: `email-${bodies.length}` }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      await run(() => bodies);
+    } finally {
+      globalThis.fetch = realFetch;
+      for (const [name, value] of [
+        ["AUTH_RESEND_KEY", previous.key],
+        ["PARENT_INBOUND_DOMAIN", previous.domain],
+        ["RESEND_WEBHOOK_SECRET", previous.webhook],
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+
+  async function seedFamily(t: TestT) {
+    const teacher = await seedUser(t, "teacher", "lehua", "Lehua Torres", "lehua@moli.school");
+    const coTeacher = await seedUser(t, "teacher", "hoku", "Hoku Makani", "hoku@moli.school");
+    const kai = await seedUser(t, "scholar", "kai", "Kai Stone");
+    const pat = await seedUser(t, "parent", "pat", "Avery Stone", "avery@example.com");
+    await link(t, pat, kai);
+    // Hoku owns Kai's class: on the thread without having written in it.
+    const institutionId = await seedTestInstitution(t, { slug: "parent-messages-fixture" });
+    await t.run((ctx) =>
+      ctx.db.insert("scholarGroups", {
+        name: "Moli class",
+        teacherId: coTeacher,
+        scholarIds: [kai],
+        ownerId: coTeacher,
+        institutionId,
+      }),
+    );
+    const { threadIds } = await (await withUser(t, teacher)).mutation(
+      api.parentMessages.sendMessage,
+      { body: "Field trip tomorrow", scholarId: kai },
+    );
+    return { teacher, coTeacher, kai, pat, threadId: threadIds[0] };
+  }
+
+  test("a guardian's message reaches the thread's teachers, replyable by email", async () => {
+    await withResend(async (sent) => {
+      const t = makeTestConvex();
+      const { teacher, coTeacher, pat, threadId } = await seedFamily(t);
+      await t.finishAllScheduledFunctions(() => {});
+      // The teacher's own opener goes to the class owner, not back to her.
+      expect(
+        sent().filter((email) => email.to.includes("hoku@moli.school")),
+      ).toHaveLength(1);
+      expect(
+        sent().filter((email) => email.to.includes("lehua@moli.school")),
+      ).toHaveLength(0);
+
+      await (await withUser(t, pat)).mutation(api.parentMessages.replyInThread, {
+        threadId,
+        body: "Does Kai need a lunch?",
+        as: "parent",
+      });
+      await t.finishAllScheduledFunctions(() => {});
+
+      const toTeachers = sent().filter(
+        (email) =>
+          email.text.includes("Does Kai need a lunch?") &&
+          !email.to.includes("avery@example.com"),
+      );
+      expect(toTeachers.map((email) => email.to[0]).sort()).toEqual([
+        "hoku@moli.school",
+        "lehua@moli.school",
+      ]);
+      expect(toTeachers[0]).toMatchObject({
+        subject: "Kai's family: Field trip tomorrow",
+      });
+      // Each teacher's Reply-To carries their own token, never the thread's
+      // plain address (which every guardian has).
+      const replyTos = toTeachers.map((email) => email.reply_to);
+      for (const replyTo of replyTos) {
+        expect(replyTo).toMatch(
+          new RegExp(`^reply\\+${threadId}\\.[0-9a-f]{20}@inbound\\.example\\.com$`),
+        );
+      }
+      expect(new Set(replyTos).size).toBe(2);
+      expect(toTeachers[0].from).toContain("Avery Stone via Rabbithole");
+      expect(toTeachers[0].text).toContain(
+        `/teacher/messages?kind=families&thread=${threadId}`,
+      );
+
+      const message = await t.run(async (ctx) =>
+        (
+          await ctx.db
+            .query("parentMessages")
+            .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+            .collect()
+        ).at(-1)!,
+      );
+      const deliveries = await t.run((ctx) =>
+        ctx.db
+          .query("messageDeliveries")
+          .withIndex("by_message", (q) => q.eq("messageId", message._id))
+          .collect(),
+      );
+      expect(
+        deliveries
+          .filter((delivery) => delivery.channel === "email")
+          .map((delivery) => [delivery.parentUserId, delivery.status])
+          .sort(),
+      ).toEqual([
+        [coTeacher, "sent"],
+        [teacher, "sent"],
+      ].sort());
+
+      // A re-run sends nothing new.
+      const before = sent().length;
+      await t.action(internal.parentMessageStaffEmail.send, { messageId: message._id });
+      expect(sent()).toHaveLength(before);
+    });
+  });
+
+  test("a teacher's emailed reply posts as them and goes on to the family", async () => {
+    await withResend(async (sent) => {
+      const t = makeTestConvex();
+      const { coTeacher, threadId } = await seedFamily(t);
+      await t.finishAllScheduledFunctions(() => {});
+      // Hoku answers the copy of Lehua's opener: her own tokened address.
+      const hokuReplyTo = sent().find((email) =>
+        email.to.includes("hoku@moli.school"),
+      )!.reply_to!;
+
+      const result = await t.run((ctx) =>
+        ctx.runMutation(internal.parentMessages.ingestInboundEmail, {
+          toAddress: hokuReplyTo,
+          fromEmail: "HOKU@moli.school",
+          body: "Yes, please pack one.",
+          providerMessageId: "resend:teacher-reply",
+        }),
+      );
+      expect(result).toMatchObject({ ok: true, action: "message" });
+      await t.finishAllScheduledFunctions(() => {});
+
+      const last = await t.run(async (ctx) =>
+        (
+          await ctx.db
+            .query("parentMessages")
+            .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+            .collect()
+        ).at(-1)!,
+      );
+      expect(last).toMatchObject({
+        authorType: "teacher",
+        authorUserId: coTeacher,
+        body: "Yes, please pack one.",
+      });
+      const replies = sent().filter((email) => email.text.includes("pack one"));
+      // The family, and the other teacher on the thread — never the author.
+      expect(replies.map((email) => email.to[0]).sort()).toEqual([
+        "avery@example.com",
+        "lehua@moli.school",
+      ]);
+      // The family's copy is signed by the teacher who wrote it, not by the
+      // thread's opener (Lehua).
+      expect(
+        replies.find((email) => email.to.includes("avery@example.com"))!.from,
+      ).toContain("Hoku Makani via Rabbithole");
+
+      const duplicate = await t.run((ctx) =>
+        ctx.runMutation(internal.parentMessages.ingestInboundEmail, {
+          toAddress: hokuReplyTo,
+          fromEmail: "hoku@moli.school",
+          body: "Yes, please pack one.",
+          providerMessageId: "resend:teacher-reply",
+        }),
+      );
+      expect(duplicate).toMatchObject({ ok: true, action: "duplicate" });
+    });
+  });
+
+  test("a forged From can't post as a teacher without that teacher's own token", async () => {
+    await withResend(async (sent) => {
+      const t = makeTestConvex();
+      const { threadId } = await seedFamily(t);
+      await t.finishAllScheduledFunctions(() => {});
+      const lehuaReplyTo = sent().find((email) =>
+        email.to.includes("lehua@moli.school"),
+      );
+      const hokuReplyTo = sent().find((email) =>
+        email.to.includes("hoku@moli.school"),
+      )!.reply_to!;
+      expect(lehuaReplyTo).toBeUndefined(); // the opener's author got no copy
+      const attempts = [
+        // The plain address every guardian holds.
+        `reply+${threadId}@inbound.example.com`,
+        // A made-up token.
+        `reply+${threadId}.0123456789abcdef0123@inbound.example.com`,
+        // Hoku's real token, claiming to be Lehua.
+        hokuReplyTo,
+      ];
+      for (const [index, toAddress] of attempts.entries()) {
+        const result = await t.run((ctx) =>
+          ctx.runMutation(internal.parentMessages.ingestInboundEmail, {
+            toAddress,
+            fromEmail: "lehua@moli.school",
+            body: "forged",
+            providerMessageId: `resend:forged-${index}`,
+          }),
+        );
+        expect(result).toMatchObject({ ok: false, reason: "sender-mismatch" });
+      }
+      const bodies = await t.run(async (ctx) =>
+        (
+          await ctx.db
+            .query("parentMessages")
+            .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+            .collect()
+        ).map((message) => message.body),
+      );
+      expect(bodies).not.toContain("forged");
+    });
+  });
+
+  test("staff from another school, or no school role, cannot reply by email, even with their own token", async () => {
+    await withResend(async () => {
+      const t = makeTestConvex();
+      const { threadId } = await seedFamily(t);
+      const thisSchool = await seedTestInstitution(t, {
+        slug: "parent-messages-fixture",
+      });
+      const otherSchool = await seedTestInstitution(t, { slug: "other-school" });
+      const outsider = await t.run((ctx) =>
+        ctx.db.insert("users", {
+          name: "Sloane Kahale",
+          username: "sloane",
+          role: "teacher",
+          email: "sloane@moli.school",
+        }),
+      );
+      await grantInstitutionMembership(t, outsider, otherSchool, "teacher");
+      const roleless = await t.run((ctx) =>
+        ctx.db.insert("users", {
+          name: "No Role",
+          username: "norole",
+          role: "parent",
+          email: "norole@example.com",
+        }),
+      );
+      // Each sender writes to the address carrying their OWN valid token, so
+      // the token check passes and only the school rule can refuse them.
+      const tokenedAddress = async (userId: Id<"users">) =>
+        `reply+${threadId}.${(await staffReplyToken(threadId, userId))!}@inbound.example.com`;
+      const ingest = async (userId: Id<"users">, fromEmail: string, index: number) =>
+        await t.run(async (ctx) =>
+          ctx.runMutation(internal.parentMessages.ingestInboundEmail, {
+            toAddress: await tokenedAddress(userId),
+            fromEmail,
+            body: "let me in",
+            providerMessageId: `resend:outsider-${index}`,
+          }),
+        );
+      expect(await ingest(outsider, "sloane@moli.school", 0)).toMatchObject({
+        ok: false,
+        reason: "sender-mismatch",
+      });
+      expect(await ingest(roleless, "norole@example.com", 1)).toMatchObject({
+        ok: false,
+        reason: "sender-mismatch",
+      });
+
+      // Control: the same sender, address and token are accepted once Sloane
+      // is staff at the thread's school, so the refusal above was the
+      // tenancy rule (userCanOperateThread) and not the token.
+      await grantInstitutionMembership(t, outsider, thisSchool, "teacher");
+      expect(await ingest(outsider, "sloane@moli.school", 2)).toMatchObject({
+        ok: true,
+        action: "message",
+      });
+      const posted = await t.run(async (ctx) =>
+        (
+          await ctx.db
+            .query("parentMessages")
+            .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+            .collect()
+        ).filter((message) => message.body === "let me in"),
+      );
+      expect(posted.map((message) => message.authorUserId)).toEqual([outsider]);
+    });
+  });
+
+  test("the subject skips a withdrawn opening message", async () => {
+    await withResend(async (sent) => {
+      const t = makeTestConvex();
+      const { pat, threadId } = await seedFamily(t);
+      await t.finishAllScheduledFunctions(() => {});
+      await t.run(async (ctx) => {
+        const opener = (
+          await ctx.db
+            .query("parentMessages")
+            .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+            .collect()
+        ).find((message) => message.body === "Field trip tomorrow")!;
+        await ctx.db.patch(opener._id, { retractedAt: Date.now() });
+      });
+      await (await withUser(t, pat)).mutation(api.parentMessages.replyInThread, {
+        threadId,
+        body: "Is pickup still at 3?",
+        as: "parent",
+      });
+      await t.finishAllScheduledFunctions(() => {});
+      const toTeachers = sent().filter(
+        (email) =>
+          email.text.includes("Is pickup still at 3?") &&
+          !email.to.includes("avery@example.com"),
+      );
+      expect(toTeachers.length).toBeGreaterThan(0);
+      for (const email of toTeachers) {
+        expect(email.subject).toBe("Kai's family: Is pickup still at 3?");
+        expect(email.subject).not.toContain("Field trip");
+      }
+    });
+  });
+
+  test("a broadcast to several families is not copied to teachers", async () => {
+    await withResend(async (sent) => {
+      const t = makeTestConvex();
+      const { teacher, kai } = await seedFamily(t);
+      await t.finishAllScheduledFunctions(() => {});
+      const lani = await seedUser(t, "scholar", "lani", "Lani Stone");
+      const sam = await seedUser(t, "parent", "sam", "Sam Lee", "sam@example.com");
+      await link(t, sam, lani);
+      const before = sent().length;
+      await (await withUser(t, teacher)).mutation(api.parentMessages.sendMessage, {
+        body: "No school Friday",
+        scholarIds: [kai, lani],
+      });
+      await t.finishAllScheduledFunctions(() => {});
+      expect(
+        sent()
+          .slice(before)
+          .filter((email) => email.to[0].endsWith("@moli.school")),
+      ).toEqual([]);
+    });
+  });
+});
+
 describe("parentMessages — Slack teacher transport", () => {
   async function seedParentThread(t: ReturnType<typeof convexTest>) {
     const teacher = await seedUser(
@@ -2655,9 +3028,36 @@ describe("parentMessages — Slack teacher transport", () => {
       });
       expect(chatPosts).toHaveLength(1);
       expect(chatPosts[0].channel).toBe("C_PARENT_STAFF");
-      expect(String(chatPosts[0].markdown_text)).toContain("Pat Parent");
-      expect(String(chatPosts[0].markdown_text)).toContain("Kai Nakamura");
-      expect(String(chatPosts[0].markdown_text)).toContain("Can we talk");
+      expect(chatPosts[0].markdown_text).toBeUndefined();
+      expect(String(chatPosts[0].text)).toContain("Pat Parent");
+      // The relevant teacher (the one who opened the thread) is @-mentioned on
+      // a mrkdwn line of its own; the notice itself is full size; the
+      // how-to-reply aside is the grey line.
+      const blocks = chatPosts[0].blocks as Array<Record<string, unknown>>;
+      expect(blocks.map((block) => block.type)).toEqual(["section", "markdown", "context"]);
+      expect(blocks[0]).toEqual({
+        type: "section",
+        text: { type: "mrkdwn", text: "<@U_TEACHER>" },
+      });
+      expect(String(chatPosts[0].text)).toMatch(/^<@U_TEACHER>\n/);
+      blocks.shift();
+      const main = String(blocks[0].text);
+      expect(main).toContain("**Parent message in Rabbithole**");
+      expect(main).toContain("Pat Parent");
+      expect(main).toContain("Kai Nakamura");
+      expect(main).toContain("Can we talk");
+      expect(main).not.toContain("Reply in this Slack thread");
+      expect(blocks[1]).toMatchObject({
+        block_id: "rh_grey_0",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: expect.stringMatching(
+              /^Reply in this Slack thread to send a normal teacher message back to the parent\. <http:\/\/localhost:1092\/teacher\/messages\?[^|>]+\|Open Messages>$/,
+            ),
+          },
+        ],
+      });
 
       const secondParentMessageId = await t.run(async (ctx) =>
         ctx.db.insert("parentMessages", {
@@ -2679,6 +3079,159 @@ describe("parentMessages — Slack teacher transport", () => {
       delete process.env.SLACK_BOT_TOKEN;
       if (previousSiteUrl === undefined) delete process.env.SITE_URL;
       else process.env.SITE_URL = previousSiteUrl;
+    }
+  });
+
+  test("both sides of a family conversation reach the channel; the relevant teachers are tagged", async () => {
+    const t = convexTest(schema, modules);
+    const { threadId, firstParentMessageId, teacher, kai, pat } = await seedParentThread(t);
+    const admin = await seedUser(t, "platform_admin", "admin", "Admin");
+    // Kai's class owner is tagged; an operations staffer who writes in the
+    // thread is not (not on the teaching team); another class's owner is not.
+    const owner = await seedUser(t, "teacher", "owner", "Class Owner", undefined, "U_OWNER");
+    const ops = await seedUser(t, "staff", "ops", "Office Staff", undefined, "U_OPS");
+    const elsewhere = await seedUser(t, "teacher", "else", "Other Class", undefined, "U_ELSE");
+    await t.run(async (ctx) => {
+      const institutionId = (await ctx.db.get(kai))!.institutionId!;
+      await ctx.db.insert("scholarGroups", {
+        teacherId: owner,
+        ownerId: owner,
+        institutionId,
+        name: "Geckos",
+        scholarIds: [kai],
+      });
+      await ctx.db.insert("scholarGroups", {
+        teacherId: elsewhere,
+        ownerId: elsewhere,
+        institutionId,
+        name: "Seals",
+        scholarIds: [],
+      });
+    });
+    await t.mutation(internal.parentMessageSlack.linkParentMessageChannel, {
+      callerUserId: admin,
+      slackChannelId: "C_PARENT_STAFF",
+      unlink: false,
+    });
+
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    const realFetch = globalThis.fetch;
+    const chatPosts: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toContain("chat.postMessage");
+      chatPosts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ ok: true, ts: `222.${chatPosts.length}` }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const mentionsIn = (post: Record<string, unknown>) =>
+      [...String(post.text).matchAll(/<@([A-Z0-9_]+)>/g)].map((m) => m[1]).sort();
+    const insert = (authorType: "parent" | "teacher", authorUserId: Id<"users">, body: string, extra: Partial<Doc<"parentMessages">> = {}) =>
+      t.run(async (ctx) =>
+        ctx.db.insert("parentMessages", { threadId, authorType, authorUserId, body, ...extra }),
+      );
+    const notify = (messageId: Id<"parentMessages">) =>
+      t.action(internal.parentMessageSlack.notifyParentMessageChannel, { messageId });
+
+    try {
+      await notify(firstParentMessageId);
+      expect(chatPosts[0].thread_ts).toBeUndefined();
+      expect(mentionsIn(chatPosts[0])).toEqual(["U_OWNER", "U_TEACHER"]);
+
+      // A teacher's in-app reply joins the same Slack thread, tagging no one.
+      await notify(await insert("teacher", teacher, "Happy to, see you at pickup."));
+      expect(chatPosts[1].thread_ts).toBe("222.1");
+      expect(mentionsIn(chatPosts[1])).toEqual([]);
+      expect(JSON.stringify(chatPosts[1].blocks)).toContain("**Teacher message in Rabbithole**");
+      expect(JSON.stringify(chatPosts[1].blocks)).toContain("Ms Lani");
+
+      // A reply typed in Slack is already there: not posted again.
+      await notify(await insert("teacher", teacher, "From Slack", { source: "slack" }));
+      expect(chatPosts).toHaveLength(2);
+
+      // The operations staffer writes; the next guardian message still tags
+      // only the teaching team.
+      await notify(await insert("teacher", ops, "Pickup is at 3."));
+      await notify(await insert("parent", pat, "Thanks both!"));
+      expect(chatPosts).toHaveLength(4);
+      expect(mentionsIn(chatPosts[3])).toEqual(["U_OWNER", "U_TEACHER"]);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+    }
+  });
+
+  test("a rate-limited post waits out Retry-After and goes through", async () => {
+    const t = convexTest(schema, modules);
+    const { threadId, firstParentMessageId } = await seedParentThread(t);
+    const admin = await seedUser(t, "platform_admin", "admin", "Admin");
+    await t.mutation(internal.parentMessageSlack.linkParentMessageChannel, {
+      callerUserId: admin,
+      slackChannelId: "C_PARENT_STAFF",
+      unlink: false,
+    });
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(JSON.stringify({ ok: false, error: "ratelimited" }), {
+            status: 429,
+            headers: { "Content-Type": "application/json", "Retry-After": "0" },
+          })
+        : new Response(JSON.stringify({ ok: true, ts: "333.1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+    }) as typeof fetch;
+    try {
+      await t.action(internal.parentMessageSlack.notifyParentMessageChannel, {
+        messageId: firstParentMessageId,
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+    }
+    expect(calls).toBe(2);
+    const rows = await t.run((ctx) => ctx.db.query("parentSlackThreads").collect());
+    expect(rows).toMatchObject([{ parentThreadId: threadId, threadTs: "333.1" }]);
+  });
+
+  test("a staff message schedules the channel copy; a Slack-typed reply does not", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = convexTest(schema, modules);
+      const { teacher, threadId } = await seedParentThread(t);
+      const notifies = async () =>
+        (await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter(
+          (job) => job.name === "parentMessageSlack:notifyParentMessageChannel",
+        ).length;
+      await (await withUser(t, teacher)).mutation(api.parentMessages.replyInThread, {
+        threadId,
+        body: "See you Friday",
+        as: "staff",
+      });
+      expect(await notifies()).toBe(1);
+      await t.run(async (ctx) =>
+        ctx.db.insert("parentSlackThreads", {
+          parentThreadId: threadId,
+          channelId: "C_PARENT_STAFF",
+          threadTs: "111.222",
+          lastNotifiedAt: Date.now(),
+        }),
+      );
+      await t.mutation(internal.parentMessages.ingestInboundSlackReply, {
+        channelId: "C_PARENT_STAFF",
+        threadTs: "111.222",
+        slackUserId: "U_TEACHER",
+        body: "Typed in Slack",
+        eventId: "Ev_SCHED",
+      });
+      expect(await notifies()).toBe(1);
+    } finally {
+      vi.useRealTimers();
     }
   });
 

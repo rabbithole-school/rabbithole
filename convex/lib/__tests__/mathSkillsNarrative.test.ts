@@ -28,7 +28,7 @@ const cohorts: PracticeCohortDigestRow[] = [
             domain: "whole-number-arithmetic",
             nodeKey: "grouping",
             label: "Order of operations",
-            tier: "sustained",
+            tier: "persistent",
             pattern: "REVERSED_OPERANDS",
             patternDescription: "Order of the operation isn't yet anchored.",
             attemptCount: 6,
@@ -123,7 +123,7 @@ describe("math skills narratives", () => {
       ...twoTopics[0].scholars[0].priorityTopics![0],
       nodeKey: "fractions",
       label: "Add fractions",
-      tier: "practice",
+      tier: "watching",
     });
     const candidates = collectMathSkillsNarrativeCandidates(twoTopics);
     const narratives = parseMathSkillsNarrativeToolInput(

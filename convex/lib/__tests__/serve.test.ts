@@ -32,6 +32,7 @@ import {
   MANIPULATIVE_VERIFIER_KIND,
 } from "../../../lib/manipulative/practiceContract";
 import {
+  formSelector,
   serveItems,
   SESSION_POLICY,
   attachWorkedSteps,
@@ -596,6 +597,80 @@ describe("serveItems policy knobs", () => {
       }
       expect(missingCount / historical.length).toBeGreaterThan(0.6);
       expect(missingCount / historical.length).toBeLessThan(0.8);
+    });
+  });
+
+  test("order_of_operations takes the precedence form on ~3/8 of seeds at any fluency, and meets a + b × c about half the time", async () => {
+    const t = convexTest(schema, modules);
+    const KEY = "order_of_operations";
+    const row = (repetition: number): Doc<"practiceMastery"> =>
+      ({
+        _id: `mastery_${KEY}` as Id<"practiceMastery">,
+        _creationTime: 0,
+        scholarId: "scholar" as Id<"users">,
+        skillKey: KEY,
+        domain: DOMAIN,
+        repetition,
+        halfLifeDays: 10,
+        frontier: repetition === 0,
+        source: "practice",
+        updatedAt: Date.now(),
+      }) as Doc<"practiceMastery">;
+    const telling = /^\d+ \+ \d+ × \d+ = \?$/;
+
+    // The chooser itself: the same seeds get the form whether the scholar is
+    // brand new, practicing, or green-fluent; never "missing"; never another skill.
+    const fluentMastery = new Map([[KEY, row(5)], ["subtract_within_20", row(5)]]);
+    const fluent = formSelector(SESSION_POLICY, fluentMastery)!;
+    const fresh = formSelector(SESSION_POLICY, new Map())!;
+    const practicing = formSelector(SESSION_POLICY, new Map([[KEY, row(1)]]))!;
+    expect(isFluent(fluentMastery.get(KEY)!)).toBe(true);
+    let formed = 0;
+    for (let s = 1; s <= 800; s++) {
+      const f = fluent(KEY, s);
+      expect(f === undefined || f === "precedence").toBe(true);
+      expect(fresh(KEY, s)).toBe(f);
+      expect(practicing(KEY, s)).toBe(f);
+      if (f === "precedence") formed++;
+      expect(fluent("subtract_within_20", s)).not.toBe("precedence");
+      expect(fresh("mult_facts_7_8_9", s)).toBeUndefined();
+    }
+    expect(formed / 800).toBe(3 / 8);
+    expect(formSelector({ ...SESSION_POLICY, formPolicy: "directOnly" }, fluentMastery)).toBeUndefined();
+
+    // The real serve path, for a scholar new to the skill.
+    await t.run(async (ctx) => {
+      const served = await serveItems(
+        ctx,
+        {
+          entries: [{ key: KEY, domain: DOMAIN }],
+          labelByKey: new Map([[KEY, KEY]]),
+          masteryByKey: new Map(),
+          laneByKey: new Map([[KEY, "new" as const]]),
+          seed: 12_345,
+          size: 200,
+          stampDomain: false,
+          firstPostPlacementBlock: false,
+          calibrationSkillKeys: [],
+        },
+        SESSION_POLICY,
+      );
+      expect(served).toHaveLength(200);
+      let precedence = 0;
+      let tellingCount = 0;
+      for (const item of served) {
+        const parsed = parseItemId(item.itemId)!;
+        expect(parsed.form === "precedence").toBe(parsed.seed % 8 < 3);
+        if (parsed.form === "precedence") {
+          precedence++;
+          expect(item.stem).toMatch(telling);
+        }
+        if (telling.test(item.stem)) tellingCount++;
+      }
+      expect(precedence / served.length).toBeGreaterThan(0.25);
+      expect(precedence / served.length).toBeLessThan(0.5);
+      expect(tellingCount / served.length).toBeGreaterThanOrEqual(0.4);
+      expect(tellingCount / served.length).toBeLessThanOrEqual(0.6);
     });
   });
 

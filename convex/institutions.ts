@@ -25,15 +25,18 @@ import {
   staffQuery,
   authedQuery,
 } from "./lib/customFunctions";
-import { ROLES } from "./lib/roles";
+import { ROLES, isPlatformAdminRole } from "./lib/roles";
 import {
   curatableInstitutionIds,
   requireActiveScholarAccess,
   resolveActiveMembership,
 } from "./lib/access";
-import { resolveInstitutionLens } from "./lib/institutionLens";
+import {
+  lensInstitutionForScholar,
+  resolveInstitutionLens,
+} from "./lib/institutionLens";
 import { assertAllowedProfileImage } from "./lib/profileImage";
-import { requireTeacherOrSelf } from "./lib/auth";
+import { assertNotImpersonating, requireTeacherOrSelf } from "./lib/auth";
 import { institutionPromptProfileById } from "./lib/institutionPromptProfile";
 import {
   reconcileScholarEnrollment,
@@ -44,7 +47,9 @@ import {
   DEFAULT_TIMEZONE,
   institutionDayAt,
   isValidTimeZone,
+  shiftDayKey,
 } from "../shared/institutionDay";
+import { closuresForInstitution, hasUsableDays } from "./academicCalendar";
 import {
   effectiveInstitutionTimeZone,
   timeZoneForScholar,
@@ -58,7 +63,7 @@ import {
 } from "../lib/roundsCadence";
 import { primaryInstitutionId } from "./lib/primaryInstitution";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 
 export { primaryInstitutionId } from "./lib/primaryInstitution";
 
@@ -83,7 +88,7 @@ const SEED = [
   primaryInstitution,
   {
     slug: GUEST_SLUG,
-    name: "Guests",
+    name: "Friends",
     kind: "guest" as const,
     emoji: "🧪",
     isPrimary: false,
@@ -196,12 +201,19 @@ export const list = scholarAdminQuery({
     // default roster treats `institutionId === undefined` as home during the
     // transition), so count them toward the primary — otherwise the picker
     // badge undercounts the primary roster in the pre-backfill window.
-    const unassignedCount = (
-      await ctx.db
-        .query("users")
-        .withIndex("by_institution", (q) => q.eq("institutionId", undefined))
-        .collect()
-    ).filter((s) => s.role === ROLES.SCHOLAR).length;
+    // A scholar enrolled elsewhere through `memberships` alone is counted by
+    // that school's `scholarIdsForInstitution`, never here (TRA-654).
+    let unassignedCount = 0;
+    for (const scholar of await ctx.db
+      .query("users")
+      .withIndex("by_institution", (q) => q.eq("institutionId", undefined))
+      .collect()) {
+      if (scholar.role !== ROLES.SCHOLAR) continue;
+      const placement = await lensInstitutionForScholar(ctx, scholar);
+      if (placement.resolved && placement.institutionId === undefined) {
+        unassignedCount++;
+      }
+    }
     const withCounts = await Promise.all(
       institutions.map(async (inst) => {
         let count = (await scholarIdsForInstitution(ctx, inst._id)).size;
@@ -672,6 +684,11 @@ export const discardLogoUpload = schoolAdminMutation({
  * Institution-local day context for a scholar. The client uses this once to
  * schedule its local-midnight subscription refresh; each consuming query still
  * resolves the authoritative current day on the server.
+ *
+ * `closures`: the school's no-school days from two weeks back on, so the Now
+ * tab's "This week's homework" card can draw the week's school days and apply
+ * the "this week" display rule (shared/homeworkWeek.ts). Same source as the
+ * parent Calendar tab (academicCalendar.closuresForInstitution).
  */
 export const currentDayForScholar = authedQuery({
   args: { scholarId: v.optional(v.id("users")) },
@@ -682,7 +699,23 @@ export const currentDayForScholar = authedQuery({
       await requireActiveScholarAccess(ctx, ctx.user, scholarId);
     }
     const timeZone = await timeZoneForScholar(ctx, scholarId);
-    return institutionDayAt(Date.now(), timeZone);
+    // t11-ok: a stale clock only keeps older closures in the list; the
+    // client places the week with its own ticking clock.
+    const day = institutionDayAt(Date.now(), timeZone);
+    const institutionId = await scholarInstitutionId(ctx, scholarId);
+    const from = shiftDayKey(day.dayKey, -14);
+    const closures = institutionId
+      ? (await closuresForInstitution(ctx, institutionId))
+          .filter(hasUsableDays)
+          .filter((closure) => closure.endDayKey >= from)
+          .sort((a, b) => a.startDayKey.localeCompare(b.startDayKey))
+          .map((closure) => ({
+            startDayKey: closure.startDayKey,
+            endDayKey: closure.endDayKey,
+            label: closure.label,
+          }))
+      : [];
+    return { ...day, closures };
   },
 });
 
@@ -752,17 +785,108 @@ export const setScholarInstitution = platformAdminMutation({
     institutionId: v.id("institutions"),
   },
   handler: async (ctx, args) => {
-    const scholar = await ctx.db.get(args.scholarId);
-    if (!scholar || scholar.role !== ROLES.SCHOLAR) {
-      throw new Error("Scholar not found");
+    await moveScholarToInstitution(
+      ctx,
+      args.scholarId,
+      args.institutionId,
+      ctx.user._id,
+    );
+  },
+});
+
+/**
+ * The one move behind the profile's Institution picker and the agent tool
+ * `move_scholar_to_institution`. Returns the groups the move took the scholar
+ * out of (reconcileScholarEnrollment drops them from every group at another
+ * school), so the agent can say so.
+ */
+export async function moveScholarToInstitution(
+  ctx: MutationCtx,
+  scholarId: Id<"users">,
+  institutionId: Id<"institutions">,
+  movedBy: Id<"users">,
+): Promise<{ leftGroups: string[] }> {
+  const scholar = await ctx.db.get(scholarId);
+  if (!scholar || scholar.role !== ROLES.SCHOLAR) {
+    throw new Error("Scholar not found");
+  }
+  const inst = await ctx.db.get(institutionId);
+  if (!inst) throw new Error("Institution not found");
+  const { scrubbedGroupIds } = await reconcileScholarEnrollment(ctx, {
+    scholarId,
+    institutionId,
+    createdBy: movedBy,
+  });
+  const leftGroups: string[] = [];
+  for (const id of scrubbedGroupIds) {
+    const g = await ctx.db.get(id);
+    if (g) leftGroups.push(g.name);
+  }
+  return { leftGroups };
+}
+
+/**
+ * `move_scholar_to_institution` for an agent (Slack DM, MCP, in-app aide).
+ * Platform admin only, like setScholarInstitution: a move decides which
+ * staff can see the child. The surface supplies `callerUserId`; this
+ * re-checks it, and refuses inside a view-as session the way
+ * platformAdminMutation does (the in-app aide runs as the real owner). The
+ * destination must match a slug or name EXACTLY: the person approved the
+ * name they typed, so the server never picks a look-alike.
+ */
+export const moveScholarAsCaller = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    scholarId: v.id("users"),
+    institutionName: v.string(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<
+    | { ok: true; from: string | null; to: string; leftGroups: string[] }
+    | { ok: false; message: string }
+  > => {
+    await assertNotImpersonating(ctx);
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller || caller.readOnly || !isPlatformAdminRole(caller.role)) {
+      throw new Error("Forbidden: platform admin required.");
     }
-    const inst = await ctx.db.get(args.institutionId);
-    if (!inst) throw new Error("Institution not found");
-    await reconcileScholarEnrollment(ctx, {
-      scholarId: args.scholarId,
-      institutionId: args.institutionId,
-      createdBy: ctx.user._id,
-    });
+    const wanted = args.institutionName.trim().toLowerCase();
+    if (!wanted) return { ok: false, message: "Name the school to move them to." };
+    const all = await ctx.db.query("institutions").collect();
+    const matches: Doc<"institutions">[] = all.filter(
+      (i) => i.slug.toLowerCase() === wanted || i.name.toLowerCase() === wanted,
+    );
+    if (matches.length !== 1) {
+      const names = all.map((i) => i.name).sort().join(", ");
+      return {
+        ok: false,
+        message:
+          matches.length > 1
+            ? `"${args.institutionName}" names more than one school. Ask which one; nothing was changed.`
+            : `No school is named exactly "${args.institutionName}". Schools: ${names}. Confirm the exact name with the person; nothing was changed.`,
+      };
+    }
+    const to = matches[0];
+    if (to.disabledAt) {
+      return {
+        ok: false,
+        message: `${to.name} is paused, so they couldn't sign in there. Nothing was changed.`,
+      };
+    }
+    const fromId = await scholarInstitutionId(ctx, args.scholarId);
+    if (fromId === to._id) {
+      return { ok: false, message: `They're already at ${to.name}; nothing was changed.` };
+    }
+    const from = fromId ? ((await ctx.db.get(fromId))?.name ?? null) : null;
+    const { leftGroups } = await moveScholarToInstitution(
+      ctx,
+      args.scholarId,
+      to._id,
+      caller._id,
+    );
+    return { ok: true, from, to: to.name, leftGroups };
   },
 });
 

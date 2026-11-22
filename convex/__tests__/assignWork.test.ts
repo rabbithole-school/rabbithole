@@ -1,8 +1,12 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
+import { readSchedule } from "../lib/scheduleStore";
+import { MISSING_FINISH_QUESTION } from "../lib/giveQuestions";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api } from "../_generated/api";
+import { RELOAD_TO_GIVE } from "../assignments";
 import type { Id } from "../_generated/dataModel";
 import { schoolDayEndAt } from "../lib/schoolDays";
 
@@ -61,10 +65,10 @@ async function seedUnit(t: ReturnType<typeof convexTest>, teacherId: Id<"users">
     const lessonA = await ctx.db.insert("lessons", { unitId, title: "A", order: 0 });
     const lessonB = await ctx.db.insert("lessons", { unitId, title: "B", order: 1 });
     const a1 = await ctx.db.insert("activities", {
-      lessonId: lessonA, title: "A1", kind: "online", order: 0, defaultMode: "classFocus",
+      lessonId: lessonA, title: "A1", kind: "online", order: 0,
     });
     const a2 = await ctx.db.insert("activities", {
-      lessonId: lessonA, title: "A2", kind: "online", order: 1, defaultMode: "homework",
+      lessonId: lessonA, title: "A2", kind: "online", order: 1,
     });
     const b1 = await ctx.db.insert("activities", {
       lessonId: lessonB, title: "B1", kind: "online", order: 0,
@@ -74,14 +78,14 @@ async function seedUnit(t: ReturnType<typeof convexTest>, teacherId: Id<"users">
 }
 
 describe("assignWork", () => {
-  test("create defaults authored homework to the next open school day", async () => {
+  test("create plans nothing, even for an activity authored as homework", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(MONDAY_NOON_HST);
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar");
     const asT = await withUser(t, teacher);
-    const { unitId, a2 } = await seedUnit(t, teacher);
+    const { unitId } = await seedUnit(t, teacher);
 
     const id = await asT.mutation(api.assignments.create, {
       unitId,
@@ -89,13 +93,10 @@ describe("assignWork", () => {
     });
 
     const assignment = await t.run((ctx) => ctx.db.get(id));
-    expect(
-      assignment!.activitySchedule!.find((entry) => entry.activityId === a2)
-        ?.dueAt,
-    ).toBe(schoolDayEndAt("2026-08-25", TIME_ZONE));
+    expect(await t.run((ctx) => readSchedule(ctx, assignment!))).toEqual([]);
   });
 
-  test("single homework assign defaults from its scheduled day", async () => {
+  test("legacy undated homework is refused, never given an invented date", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar");
@@ -103,20 +104,17 @@ describe("assignWork", () => {
     const { unitId, a2 } = await seedUnit(t, teacher);
     const fridayNoonHst = Date.parse("2026-08-21T22:00:00.000Z");
 
-    const id = await asT.mutation(api.assignments.assignWork, {
-      unitId,
-      scholarIds: [scholar],
-      startsAt: fridayNoonHst,
-      target: { kind: "activity", activityId: a2, mode: "homework" },
-    });
-
-    const assignment = await t.run((ctx) => ctx.db.get(id));
-    expect(assignment!.activitySchedule![0].dueAt).toBe(
-      schoolDayEndAt("2026-08-24", TIME_ZONE),
-    );
+    await expect(
+      asT.mutation(api.assignments.assignWork, {
+        unitId,
+        scholarIds: [scholar],
+        startsAt: fridayNoonHst,
+        target: { kind: "activity", activityId: a2, mode: "homework" },
+      }),
+    ).rejects.toThrow(MISSING_FINISH_QUESTION);
   });
 
-  test("pushActivity defaults live homework to the next open school day", async () => {
+  test("pushActivity refuses legacy homework with no due date", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(MONDAY_NOON_HST);
     const t = convexTest(schema, modules);
@@ -125,7 +123,7 @@ describe("assignWork", () => {
     const asT = await withUser(t, teacher);
     const { unitId, a1 } = await seedUnit(t, teacher);
     const assignmentId = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId,
         scholarIds: [scholar],
@@ -134,16 +132,15 @@ describe("assignWork", () => {
       }),
     );
 
-    await asT.mutation(api.assignments.pushActivity, {
-      assignmentId,
-      activityId: a1,
-      mode: "homework",
-    });
-
+    await expect(
+      asT.mutation(api.assignments.pushActivity, {
+        assignmentId,
+        activityId: a1,
+        mode: "homework",
+      }),
+    ).rejects.toThrow(MISSING_FINISH_QUESTION);
     const assignment = await t.run((ctx) => ctx.db.get(assignmentId));
-    expect(assignment!.activitySchedule![0].dueAt).toBe(
-      schoolDayEndAt("2026-08-25", TIME_ZONE),
-    );
+    expect(await t.run((ctx) => readSchedule(ctx, assignment!))).toEqual([]);
   });
 
   test("legacy mixed rosters use the teacher's institution calendar", async () => {
@@ -166,7 +163,7 @@ describe("assignWork", () => {
     const asT = await withUser(t, teacher);
     const { unitId } = await seedUnit(t, teacher);
     const assignmentId = await t.run((ctx) =>
-      ctx.db.insert("assignments", {
+      insertAssignmentWithSchedule(ctx, {
         teacherId: teacher,
         unitId,
         scholarIds: [scholar, guest],
@@ -207,8 +204,9 @@ describe("assignWork", () => {
 
     const a = await t.run(async (ctx) => ctx.db.get(id));
     expect(a!.scholarIds).toEqual([scholar]);
-    expect(a!.activitySchedule).toHaveLength(1);
-    const e = a!.activitySchedule![0];
+    const schedule = await t.run((ctx) => readSchedule(ctx, a!));
+    expect(schedule).toHaveLength(1);
+    const e = schedule[0];
     expect(e.activityId).toBe(a1);
     expect(e.startsAt).toBe(startsAt);
     expect(e.mode).toBe("classFocus");
@@ -216,36 +214,65 @@ describe("assignWork", () => {
     expect(e.setAt).toBeUndefined(); // planned, not live
   });
 
-  test("whole unit, NO authored deltas: everything lands on the start date", async () => {
+  test("whole unit with no finish: asks for a reload and creates nothing", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const asT = await withUser(t, teacher);
+    const { unitId } = await seedUnit(t, teacher);
+
+    // An older client (deploy skew) giving a unit without "when should they
+    // finish it?" gets a reload message, never an empty success.
+    await expect(
+      asT.mutation(api.assignments.assignWork, {
+        unitId,
+        scholarIds: [scholar],
+        startsAt: Date.now() + DAY,
+        target: { kind: "unit" },
+      }),
+    ).rejects.toThrow(RELOAD_TO_GIVE);
+
+    const rows = await t.run(async (ctx) => ctx.db.query("assignments").collect());
+    expect(rows).toEqual([]);
+  });
+
+  test("whole unit with a finish: everything lands on the start date with that window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(MONDAY_NOON_HST);
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar");
     const asT = await withUser(t, teacher);
     const { unitId, a1, a2, b1 } = await seedUnit(t, teacher);
 
-    const startsAt = Date.now() + DAY;
+    const startsAt = MONDAY_NOON_HST + DAY;
     const id = await asT.mutation(api.assignments.assignWork, {
       unitId,
       scholarIds: [scholar],
       startsAt,
       target: { kind: "unit" },
+      finish: { kind: "by", dayKey: "2026-08-28" },
     });
 
     const a = await t.run(async (ctx) => ctx.db.get(id));
-    const sched = a!.activitySchedule!;
+    const sched = await t.run((ctx) => readSchedule(ctx, a!));
     expect(sched).toHaveLength(3);
     const byId = new Map(sched.map((e) => [String(e.activityId), e]));
     // No deltas → all on the start date (teacher paces live).
-    expect(byId.get(String(a1))!.startsAt).toBe(startsAt);
-    expect(byId.get(String(a2))!.startsAt).toBe(startsAt);
-    expect(byId.get(String(b1))!.startsAt).toBe(startsAt);
-    // Each still uses its own defaultMode (A2 = homework → has dueAt).
-    expect(byId.get(String(a1))!.mode).toBe("classFocus");
-    expect(byId.get(String(a2))!.mode).toBe("homework");
-    expect(byId.get(String(b1))!.mode).toBe("classFocus");
-    // Un-paced: no activation jobs — teacher paces live with Start now,
-    // so a whole unit doesn't flip every activity live at once.
-    for (const e of sched) expect(e.scheduledFnId).toBeUndefined();
+    for (const activityId of [a1, a2, b1]) {
+      const entry = byId.get(String(activityId))!;
+      expect(entry.startsAt).toBe(startsAt);
+      // One answer for the whole give; an activity's authored defaultMode
+      // is not read.
+      expect(entry.mode).toBe("homework");
+      expect(entry.dueAt).toBe(schoolDayEndAt("2026-08-28", TIME_ZONE));
+    }
+    // The teacher said when it shows up: every entry gets an activation job
+    // for that time (TRA-571 review #8), and none is live yet.
+    for (const e of sched) {
+      expect(e.scheduledFnId).toBeDefined();
+      expect(e.setAt).toBeUndefined();
+    }
   });
 
   test("whole unit skips an empty draft handout without blocking other activities", async () => {
@@ -257,7 +284,6 @@ describe("assignWork", () => {
     await t.run((ctx) =>
       ctx.db.patch(a2, {
         kind: "offline",
-        defaultMode: "homework",
         description: undefined,
       }),
     );
@@ -267,12 +293,15 @@ describe("assignWork", () => {
       scholarIds: [scholar],
       startsAt: Date.now() + DAY,
       target: { kind: "unit" },
+      finish: { kind: "by", dayKey: "2099-01-02" },
     });
 
     const assignment = await t.run((ctx) => ctx.db.get(id));
-    expect(
-      assignment!.activitySchedule!.map((entry) => String(entry.activityId)),
-    ).toEqual([String(a1), String(b1)]);
+    const schedule = await t.run((ctx) => readSchedule(ctx, assignment!));
+    expect(schedule.map((entry) => String(entry.activityId))).toEqual([
+      String(a1),
+      String(b1),
+    ]);
   });
 
   test("whole lesson: only that lesson's activities", async () => {
@@ -287,9 +316,11 @@ describe("assignWork", () => {
       scholarIds: [scholar],
       startsAt: Date.now() + DAY,
       target: { kind: "lesson", lessonId: lessonA },
+      finish: { kind: "inClass" },
     });
     const a = await t.run(async (ctx) => ctx.db.get(id));
-    const ids = a!.activitySchedule!.map((e) => String(e.activityId)).sort();
+    const schedule = await t.run((ctx) => readSchedule(ctx, a!));
+    const ids = schedule.map((e) => String(e.activityId)).sort();
     expect(ids).toEqual([String(a1), String(a2)].sort());
   });
 
@@ -306,11 +337,11 @@ describe("assignWork", () => {
     });
     const id2 = await asT.mutation(api.assignments.assignWork, {
       unitId, scholarIds: [s1], startsAt: Date.now() + 2 * DAY,
-      target: { kind: "activity", activityId: b1, mode: "homework" },
+      target: { kind: "activity", activityId: b1, mode: "homework", dueAt: Date.now() + 3 * DAY },
     });
     expect(id2).toBe(id1); // same cohort × unit → reused
     const a = await t.run(async (ctx) => ctx.db.get(id1));
-    expect(a!.activitySchedule).toHaveLength(2);
+    expect(await t.run((ctx) => readSchedule(ctx, a!))).toHaveLength(2);
 
     // A different roster → a separate assignment.
     const s2 = await seedUser(t, "scholar");

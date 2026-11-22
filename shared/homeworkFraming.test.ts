@@ -31,10 +31,10 @@ describe("homeworkEyebrow", () => {
     const now = localNoon(2026, 9, 4); // Friday
     expect(
       homeworkEyebrow(dueStatus(localNoon(2026, 9, 8), now, TZ)?.phrase, "Mr. Char"),
-    ).toBe("Homework · due Tuesday · with Mr. Char");
+    ).toBe("Homework · due Tue, Sep 8 · with Mr. Char");
     expect(
       homeworkEyebrow(dueStatus(localNoon(2026, 9, 3), now, TZ)?.phrase, "Mr. Char"),
-    ).toBe("Homework · was due yesterday · with Mr. Char");
+    ).toBe("Homework · was due Thu, Sep 3 · with Mr. Char");
     expect(
       homeworkEyebrow(dueStatus(localNoon(2026, 9, 4), now, TZ)?.phrase, "Mr. Char"),
     ).toBe("Homework · due today · with Mr. Char");

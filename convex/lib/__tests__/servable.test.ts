@@ -12,6 +12,7 @@
 
 import { describe, expect, test } from "vitest";
 import { makeItemId } from "../practice/session";
+import { generateItem } from "../practice/templates";
 import { formatAnswer, type TypedAnswer } from "../practice/answers";
 import type { Id } from "../../_generated/dataModel";
 import {
@@ -98,6 +99,20 @@ describe("servable resolver builders", () => {
     expect(buildTemplateServable("gen#abc123", node, DOMAIN)).toBeNull();
     expect(buildTemplateServable("totally_unknown_skill#5", node, DOMAIN)).toBeNull();
     expect(buildTemplateServable("garbage", node, DOMAIN)).toBeNull();
+  });
+
+  test("the precedence form survives id -> servable -> grade (seed 1 is (a + b) × c un-formed)", () => {
+    const formed = buildTemplateServable(makeItemId("order_of_operations", 1, "precedence"), node, DOMAIN)!;
+    expect(formed.ref).toEqual({ skillKey: "order_of_operations", seed: 1, form: "precedence" });
+    const m = /^(\d+) \+ (\d+) × (\d+) = \?$/.exec(formed.prompt.stem);
+    expect(m, formed.prompt.stem).not.toBeNull();
+    const [a, b, c] = m!.slice(1).map(Number);
+    const grade = (raw: string) => gradeSubmission(formed, { kind: "typed", raw }, PRACTICE_POLICY);
+    expect(grade(String(a + b * c)).correct).toBe(true);
+    // The un-formed seed-1 answer (54) must not pass against the formed id.
+    const unformed = generateItem("order_of_operations", 1)!.answer as { value: number };
+    expect(unformed.value).not.toBe(a + b * c);
+    expect(grade(String(unformed.value)).correct).toBe(false);
   });
 
   test("buildStoredServable dispatches manipulative vs stored on verifierKind", () => {

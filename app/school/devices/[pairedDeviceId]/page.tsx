@@ -28,6 +28,7 @@ import {
   RabbitholeLockControl,
   RoboticsCaptureStationModeControl,
 } from "../DeviceSecurityControls";
+import { deviceDisplayName } from "../deviceDisplayName";
 
 function formatTimestamp(value: number) {
   return new Date(value).toLocaleString();
@@ -82,7 +83,11 @@ export default function DeviceSettingsPage() {
   const appliedMatches =
     detail.appliedMatchesDesired &&
     detail.inSingleAppMode === desiredArmed;
-  const deviceName = detail.deviceLabel ?? detail.serial ?? "iPad";
+  const deviceName = deviceDisplayName({
+    managedName: detail.simpleMdm?.name,
+    serial: detail.serial,
+    deviceLabel: detail.deviceLabel,
+  });
 
   return (
     <VStack align="stretch" gap={6}>

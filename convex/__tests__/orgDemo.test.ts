@@ -1,3 +1,4 @@
+import { readSchedule } from "../lib/scheduleStore";
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
@@ -367,8 +368,8 @@ describe("orgDemo — setupPartnerOrg", () => {
     expect(result.assignments.length).toBe(1);
     const assignmentId = result.assignments[0].assignmentId;
     expect(assignmentId).toBeTruthy();
-    const assignment = await t.run((ctx) => ctx.db.get(assignmentId!));
-    const entry = assignment?.activitySchedule?.find((e) => e.activityId === activityId);
+    const schedule = await t.run((ctx) => readSchedule(ctx, { _id: assignmentId! }));
+    const entry = schedule.find((e) => e.activityId === activityId);
     expect(entry).toBeTruthy();
     expect(entry?.setAt).toBeDefined();
 

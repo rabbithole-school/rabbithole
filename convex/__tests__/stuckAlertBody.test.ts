@@ -581,10 +581,74 @@ describe("buildStuckAlertBody", () => {
         diagnosis: "The **grouping** procedure is _not yet_ stable.",
       }),
     );
-    expect(body).toContain(
-      "• **Use \\*groups\\* and \\_remainders\\_**",
-    );
+    // In a label, `*` is stripped (a backslash-escape doesn't survive Slack's
+    // markdown_text → mrkdwn round trip) and so are underscores at a word
+    // edge, which CommonMark reads as emphasis; intra-word ones stay (TRA-347).
+    expect(body).toContain("• **Use groups and remainders**");
+    expect(body).not.toContain("\\");
     expect(body).not.toContain("_AI read:_");
+  });
+
+  test("keeps intra-word underscores and drops edge ones in labels (TRA-347)", () => {
+    const body = buildStuckAlertBody(
+      input({
+        misses: [
+          {
+            nodeKey: "edges",
+            skillLabel: "_lead_ then trail_ and divide_by_6 and divide__by__6 and __dunder__",
+            stemSnapshot: "1 + 1",
+            answerText: "3",
+            isDontKnow: false,
+          },
+        ],
+      }),
+    );
+    expect(body).toContain("• **lead then trail and divide_by_6 and divide__by__6 and dunder**");
+  });
+
+  test("leaves math in a diagnosis untouched (TRA-347)", () => {
+    expect(
+      buildBreakerOutcomeReply(
+        {
+          lifecycle: {
+            version: 2,
+            triggeredAt: NOW,
+            repairShownAt: NOW + 1,
+            repairStartedAt: NOW + 2,
+            repairCompletedAt: NOW + 3,
+            freshResult: { correct: true },
+          },
+        },
+        "They evaluated 2*3 as 5 instead of 6.",
+      ),
+    ).toContain("_AI read:_ They evaluated 2*3 as 5 instead of 6.");
+  });
+
+  test("keeps underscored skill ids intact in labels (TRA-347)", () => {
+    const body = buildStuckAlertBody(
+      input({
+        misses: [
+          {
+            nodeKey: "divide_by_6",
+            skillLabel: "divide_by_6",
+            stemSnapshot: "36 ÷ 6",
+            answerText: "5",
+            expectedAnswer: "6",
+            isDontKnow: false,
+          },
+          {
+            nodeKey: "starred",
+            skillLabel: "prior_2 **bold** * stray",
+            stemSnapshot: "1 + 1",
+            answerText: "3",
+            isDontKnow: false,
+          },
+        ],
+      }),
+    );
+    expect(body).toContain("• **divide_by_6**");
+    expect(body).toContain("• **prior_2 bold  stray**");
+    expect(body).not.toContain("divideby6");
   });
 
   test("does not render an empty code span for a backtick-only answer", () => {

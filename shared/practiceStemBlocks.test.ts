@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   splitStemBlocks,
+  stemCodeBlock,
   stemPreviewText,
   stemTableColumnWidths,
   stemToSpeech,
@@ -299,6 +300,39 @@ describe("stemPreviewText — one scannable line for dense rows", () => {
       "Two aligned scales show equivalent ratios.\nMeters: 0 | 4 | 8 | 12\nSeconds: 0 | 5 | 10 | ?\nWhat value belongs at the final tick?";
     expect(stemPreviewText(stem)).toBe(
       "Two aligned scales show equivalent ratios. Meters: 0, 4, 8, 12 · Seconds: 0, 5, 10, ? What value belongs at the final tick?",
+    );
+  });
+});
+
+describe("splitStemBlocks — fenced code listings", () => {
+  const code = ["for i in range(n):", "    for j in range(i):", "        step()"];
+  const stem = `${stemCodeBlock(code)}\nHow many times does step() run when n = 5?`;
+
+  test("a fenced listing is lifted out with its indentation kept", () => {
+    expect(splitStemBlocks(stem)).toEqual([
+      { kind: "code", lines: code },
+      { kind: "text", text: "How many times does step() run when n = 5?" },
+    ]);
+  });
+
+  test("a pipe inside a listing is code, never a table", () => {
+    const blocks = splitStemBlocks(stemCodeBlock(["a = x | y", "b = x | z"]));
+    expect(blocks).toEqual([{ kind: "code", lines: ["a = x | y", "b = x | z"] }]);
+  });
+
+  test("an unclosed or empty fence stays ordinary text", () => {
+    const unclosed = "Look:\n```\nfor i in range(3):";
+    expect(splitStemBlocks(unclosed)).toEqual([{ kind: "text", text: unclosed }]);
+    const empty = "```\n```\nNothing here.";
+    expect(splitStemBlocks(empty)).toEqual([{ kind: "text", text: empty }]);
+  });
+
+  test("speech and the one-line preview carry no backticks", () => {
+    expect(stemToSpeech(stem)).toBe(
+      "for i in range n. for j in range i. step. How many times does step() run when n = 5?",
+    );
+    expect(stemPreviewText(stem)).toBe(
+      "for i in range(n):; for j in range(i):; step() How many times does step() run when n = 5?",
     );
   });
 });

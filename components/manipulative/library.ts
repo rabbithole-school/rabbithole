@@ -7,6 +7,7 @@
  * what a tutor or curriculum author would emit.
  */
 import type { ManipulativeSpec, MultiStepSequenceSpec } from "@/lib/manipulative/types";
+import { FUNCTION_GRAPH_EXAMPLES } from "@/lib/manipulative/functionGraphExamples";
 
 export interface Playlist {
   id: string;
@@ -655,6 +656,20 @@ export const PLAYLISTS: Playlist[] = [
       },
       {
         kind: "coordinatePlane",
+        id: "plot-complex-number",
+        concept: "The complex plane",
+        prompt: "Plot 3 − 2i on the complex plane.",
+        xMin: -5,
+        xMax: 5,
+        yMin: -5,
+        yMax: 5,
+        gridStep: 1,
+        axisLabels: { x: "Re", y: "Im" },
+        draggable: [{ start: { x: -1, y: 2 } }],
+        goal: { type: "placePoint", x: 3, y: -2 },
+      },
+      {
+        kind: "coordinatePlane",
         id: "explore-plane",
         concept: "The coordinate plane",
         prompt: "Drag the point around. What changes as you cross an axis?",
@@ -889,6 +904,14 @@ export const PLAYLISTS: Playlist[] = [
       goal: { type: "fewestPieces", cents: 185 },
       extraCredit: true,
     },
+  },
+  {
+    id: "function-graphs",
+    title: "Graphs of functions",
+    gradeBand: "Algebra 2",
+    blurb:
+      "Build the graph instead of describing it: drag a parent curve into place, set a polynomial's zeros and ends, or find a rational function's asymptotes.",
+    items: FUNCTION_GRAPH_EXAMPLES,
   },
 ];
 

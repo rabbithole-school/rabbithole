@@ -43,7 +43,8 @@ export function normalizePronouns(raw: string | null): string | null {
  * The parenthetical that follows an injected scholar name.
  *
  * With pronouns recorded this states them; without, it falls back to the
- * measured unknown-case hint above. STAFF-FACING GENERATORS ONLY — see the
+ * measured unknown-case hint above. STAFF-FACING GENERATORS, plus parent-report
+ * drafts a teacher reviews before publishing — see the
  * `users.pronouns` comment in schema.ts for why peer- and parent-visible
  * prose deliberately stays on the universal they/them default instead.
  */

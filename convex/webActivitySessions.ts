@@ -20,6 +20,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule } from "./lib/scheduleStore";
 import { webSessionHasContent } from "./lib/webSessionSummary";
 import { reconcileActivityCompletion } from "./lib/activityCompletionCore";
 import { markScholarHomeworkDone } from "./activityCompletions";
@@ -86,7 +87,7 @@ async function validateAssignmentScopeForWebActivity(
   // safe without a unitId assumption.
   if (assignment.selfPaced) return assignmentId;
   const now = Date.now();
-  const matchingEntry = (assignment.activitySchedule ?? []).find(
+  const matchingEntry = (await readSchedule(ctx, assignment)).find(
     (entry) =>
       String(entry.activityId) === String(activity._id) &&
       entryTargetsScholar(entry, scholarId),
@@ -183,6 +184,38 @@ export const start = authedMutation({
 });
 
 /**
+ * Open an app session for a custom-app tile opened on the web, where the page
+ * knows only the tile's token. Resolves it to the tile's launcher app and
+ * writes the same row an iPad launch (`start({ appId })`) does. Anyone can
+ * open a tile page that holds its link, so a tile that isn't on the caller's
+ * launcher (or has no launcher app) is not a launch to record: null, not a
+ * throw.
+ */
+export const startForTile = authedMutation({
+  args: { customAppToken: v.string() },
+  handler: async (ctx, args) => {
+    const token = args.customAppToken.trim();
+    const tile = token
+      ? await ctx.db
+          .query("customApps")
+          .withIndex("by_token", (q) => q.eq("token", token))
+          .first()
+      : null;
+    if (!tile?.externalAppId) return null;
+    const access = await scholarAppAccess(ctx, ctx.user, tile.externalAppId);
+    if (!access.allowed) return null;
+    const sessionId = await ctx.db.insert("webActivitySessions", {
+      scholarId: ctx.user._id,
+      appId: tile.externalAppId,
+      startedAt: Date.now(),
+      lastHeartbeatAt: Date.now(),
+      screenshotIds: [],
+    });
+    return { sessionId };
+  },
+});
+
+/**
  * Attach one webview screenshot (already uploaded via
  * files.generateUploadUrl). FIFO-evicts beyond the cap, deleting the
  * evicted blob so storage doesn't leak.
@@ -219,6 +252,14 @@ export const recordProgress = authedMutation({
     extractedSource: v.optional(v.union(v.literal("api"), v.literal("dom"))),
     lastUrl: v.optional(v.string()),
     offDomainBlockDelta: v.optional(v.number()),
+    // A page that failed to open; see `loadError` in the schema.
+    loadError: v.optional(
+      v.object({
+        url: v.string(),
+        status: v.optional(v.number()),
+        message: v.string(),
+      }),
+    ),
   },
   handler: async (ctx, args) => {
     const session = await requireOwnSession(ctx, args.sessionId, ctx.user._id);
@@ -230,6 +271,17 @@ export const recordProgress = authedMutation({
       patch.extractedSource = args.extractedSource ?? "dom";
     }
     if (args.lastUrl) patch.lastUrl = args.lastUrl.slice(0, 500);
+    if (args.loadError) {
+      const status = args.loadError.status;
+      patch.loadError = {
+        url: args.loadError.url.slice(0, 500),
+        ...(typeof status === "number" && Number.isInteger(status)
+          ? { status }
+          : {}),
+        message: args.loadError.message.slice(0, 300),
+        at: Date.now(),
+      };
+    }
     if (args.offDomainBlockDelta && args.offDomainBlockDelta > 0) {
       patch.offDomainBlocks =
         (session.offDomainBlocks ?? 0) + Math.round(args.offDomainBlockDelta);

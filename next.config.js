@@ -1,5 +1,9 @@
 /** @type {import("next").NextConfig} */
 const nextConfig = {
+  // `pnpm typecheck` (tsgo) is the type gate. Next's own type pass repeats it
+  // with stock tsc and runs out of memory on a 4 GB heap at this codebase's
+  // size, so the build skips it.
+  typescript: { ignoreBuildErrors: true },
   reactCompiler: {
     compilationMode: "infer",
     panicThreshold: "none",

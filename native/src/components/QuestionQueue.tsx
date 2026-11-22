@@ -1,7 +1,8 @@
 /**
  * The scholar's ONE list of open items (`api.questionQueue.forSelf`) — the RN
- * twin of components/QuestionQueue.tsx. The Quests tab renders the whole list;
- * the Scholar's Prep "Keep going" section renders its top rows with the SAME
+ * twin of components/QuestionQueue.tsx. The Scholar's Prep "Keep going"
+ * section renders its top rows, and the Quests tab's "Things to wonder about"
+ * (components/WonderLists, TRA-677) renders its question cards, with the SAME
  * row component (T1: one rendering). It replaced the native Suggested quests
  * and story-invitation cards.
  *
@@ -19,6 +20,13 @@
  * A row answered on THIS visit stays where it was (the reactive queue would
  * otherwise move a miss to the top and drop a correct answer instantly) until
  * the scholar taps Later or leaves. Copy: shared/questionQueue.ts (vendored).
+ *
+ * Dismiss (Scholar's Prep only, `dismissable`): a corner × that ends the row
+ * for good, as on web. A question row records the terminal "dismissed"
+ * outcome on its ledger row (minting one first if it was never carded), which
+ * the queue already drops; a teacher quest goes through
+ * `seeds.dismissForSelf`. The row hides at once and comes back, with an
+ * alert, if the write fails.
  */
 
 import { useCallback, useMemo, useState } from "react";
@@ -26,6 +34,7 @@ import { useMutation, useQuery, type ReactMutation } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   StyleSheet,
   Text,
@@ -37,11 +46,11 @@ import { useRouter } from "expo-router";
 import * as Haptics from "expo-haptics";
 
 import { api, type Id } from "@/lib/convex";
-import { HOME_SECTION_GAP } from "@/lib/homeRhythm";
 import { makePracticeShellStyles } from "@/lib/practiceShell";
 import { useContainedQuery } from "@/hooks/useContainedQuery";
-import { useExploreSeed, type ExploreSeedOptions } from "@/hooks/useExploreSeed";
+import type { ExploreSeedOptions } from "@/hooks/useExploreSeed";
 import { PracticeVerdictStamp } from "@/components/practice/PracticeVerdictStamp";
+import { DismissButton } from "@/components/ui/DismissButton";
 import {
   CHOICE_CELL_BORDER,
   CHOICE_CELL_PADDING_V,
@@ -74,7 +83,7 @@ export type StartTeacherQuest = (
 
 type QueueApi = Pick<
   ReturnType<typeof useQuestionQueue>,
-  "pin" | "unpin" | "setAside" | "scholarId"
+  "pin" | "unpin" | "setAside" | "dismiss" | "scholarId"
 >;
 
 /**
@@ -99,8 +108,18 @@ export function useQuestionQueue() {
     const base: QueueRow[] = rows.filter(
       (row) => !hidden.has(row.id) && !pinned.has(row.id),
     );
+    // A missed pick stays on the server's queue, so one the server no longer
+    // returns was dismissed or followed elsewhere (another tab's queue, the
+    // other app): drop it. A correct pick is expected to leave the server's
+    // queue and stays pinned until Later or the visit ends.
+    const live = new Set(rows.map((row) => row.id));
     const ordered = [...pinned.values()]
       .filter((entry) => !hidden.has(entry.row.id))
+      .filter(
+        (entry) =>
+          live.has(entry.row.id) ||
+          isCorrectChoice(entry.row.question, entry.choiceIndex),
+      )
       .sort((a, b) => a.index - b.index);
     for (const entry of ordered) {
       const answeredRow: QuestionRow = {
@@ -142,57 +161,94 @@ export function useQuestionQueue() {
   const setAside = useCallback((id: string) => {
     setHidden((prev) => new Set(prev).add(id));
   }, []);
+  const unhide = useCallback((id: string) => {
+    setHidden((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
 
-  return { rows: visible, pin, unpin, setAside, scholarId: me?._id ?? null };
+  // Dismiss for good: hide now, then write. The ledger row comes from the
+  // server's copy of the row (a row answered this visit is pinned from its
+  // older, pre-answer copy, which has no eventId yet). A promise chain, not
+  // try/catch (the React Compiler baseline).
+  const recordOffered = useMutation(api.practiceMoments.recordMomentOffered);
+  const recordOutcome = useMutation(api.practiceMoments.recordMomentOutcome);
+  const dismissSeed = useMutation(api.seeds.dismissForSelf);
+  const scholarId = me?._id ?? null;
+  const dismiss = useCallback(
+    (row: QueueRow) => {
+      setAside(row.id);
+      // A question answered correctly closed itself once the server has the
+      // answer (it has left the server's queue): nothing to write. Until then
+      // the dismiss is written like any other, so a failed answer write can't
+      // bring the row back.
+      if (
+        row.kind === "question" &&
+        row.answer?.correct &&
+        !rows?.some((r) => r.id === row.id)
+      ) {
+        return;
+      }
+      const live = rows?.find((r) => r.id === row.id);
+      const write =
+        row.kind === "teacherQuest"
+          ? dismissSeed({ seedId: row.seedId })
+          : dismissQuestionRow({
+              row,
+              eventId: (live?.kind === "question" ? live.eventId : null) ?? row.eventId,
+              scholarId,
+              recordOffered,
+              recordOutcome,
+            });
+      write.catch((error: unknown) => {
+        console.warn("[question-queue] dismiss not recorded", error);
+        unhide(row.id);
+        Alert.alert("Couldn't dismiss that", "Please try again.");
+      });
+    },
+    [rows, scholarId, recordOffered, recordOutcome, dismissSeed, setAside, unhide],
+  );
+
+  return { rows: visible, pin, unpin, setAside, dismiss, scholarId };
 }
 
-/** Quests tab: the whole queue on one white surface, two eyebrows. Owns its
- *  LEADING gap (it self-gates to nothing — see homeRhythm). */
-export function QuestionQueueList() {
-  const queue = useQuestionQueue();
-  const { exploreSeed, exploringSeedId, exploreSeedDialog } = useExploreSeed();
-  if (queue.rows === undefined || queue.rows.length === 0) return null;
-  const questions = queue.rows.filter((row) => row.kind === "question");
-  const teacher = queue.rows.filter((row) => row.kind === "teacherQuest");
-  return (
-    <View style={{ paddingTop: HOME_SECTION_GAP }}>
-      <QueueSurface>
-        {questions.length > 0 && (
-          <>
-            <Eyebrow>{QUESTION_QUEUE_COPY.openQuestions}</Eyebrow>
-            {questions.map((row, index) => (
-              <QuestionQueueRowView
-                key={row.id}
-                row={row}
-                divided={index > 0}
-                queue={queue}
-                onStartTeacherQuest={exploreSeed}
-                startingSeedId={exploringSeedId}
-              />
-            ))}
-          </>
-        )}
-        {teacher.length > 0 && (
-          <>
-            <Eyebrow divided={questions.length > 0}>
-              {QUESTION_QUEUE_COPY.fromTeacher}
-            </Eyebrow>
-            {teacher.map((row, index) => (
-              <QuestionQueueRowView
-                key={row.id}
-                row={row}
-                divided={index > 0}
-                queue={queue}
-                onStartTeacherQuest={exploreSeed}
-                startingSeedId={exploringSeedId}
-              />
-            ))}
-          </>
-        )}
-      </QueueSurface>
-      {exploreSeedDialog}
-    </View>
-  );
+/** The ledger write behind dismissing a question row: the terminal
+ *  "dismissed" outcome on its ledger row, minting it first (surface
+ *  "quests") when the item was never carded. */
+async function dismissQuestionRow({
+  row,
+  eventId,
+  scholarId,
+  recordOffered,
+  recordOutcome,
+}: {
+  row: QuestionRow;
+  eventId: Id<"momentEvents"> | null;
+  scholarId: Id<"users"> | null;
+  recordOffered: ReactMutation<typeof api.practiceMoments.recordMomentOffered>;
+  recordOutcome: ReactMutation<typeof api.practiceMoments.recordMomentOutcome>;
+}) {
+  let id = eventId;
+  if (!id) {
+    if (!scholarId) throw new Error("Not signed in");
+    const minted = await recordOffered({
+      scholarId,
+      clientEventId: makeClientEventId("prep-dismiss"),
+      surface: "quests",
+      ...(row.moment.kind === "seed"
+        ? { kind: "seed" as const, seedId: row.moment.seedId }
+        : {
+            kind: "story" as const,
+            fromKey: row.moment.fromKey,
+            toKey: row.moment.toKey,
+          }),
+    });
+    id = minted.eventId;
+  }
+  await recordOutcome({ eventId: id, outcome: "dismissed" });
 }
 
 /** The white list surface every queue / Prep section shares. */
@@ -228,31 +284,53 @@ export function QuestionQueueRowView({
   onStartTeacherQuest,
   startingSeedId,
   divided = false,
+  dismissable = false,
 }: {
   row: QueueRow;
   /** Hairline above the row (every row but the first under an eyebrow). */
   divided?: boolean;
+  /** A corner × that dismisses the row for good (Scholar's Prep only). */
+  dismissable?: boolean;
   queue: QueueApi;
   onStartTeacherQuest: StartTeacherQuest;
   startingSeedId: string | null;
 }) {
   if (row.kind === "teacherQuest") {
+    const starting = startingSeedId === String(row.seedId);
     return (
       <TeacherQuestRow
         row={row}
         divided={divided}
-        starting={startingSeedId === String(row.seedId)}
+        starting={starting}
         onStart={() =>
-          onStartTeacherQuest(row.seedId, { skipMenu: true, title: row.title })
+          onStartTeacherQuest(row.seedId, { title: row.title })
         }
         onNotNow={() => {
           Haptics.selectionAsync().catch(() => {});
           queue.setAside(row.id);
         }}
+        dismiss={
+          dismissable ? (
+            <DismissButton
+              label={row.title}
+              disabled={starting}
+              onPress={() => queue.dismiss(row)}
+            />
+          ) : null
+        }
       />
     );
   }
-  return <QuestionRowView row={row} queue={queue} divided={divided} />;
+  return (
+    <QuestionRowView row={row} queue={queue} divided={divided} dismissable={dismissable} />
+  );
+}
+
+/** The corner × on a dismissable row, over the row's top-right. */
+function DismissCorner({ children }: { children: React.ReactNode }) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  return <View style={styles.dismissCorner}>{children}</View>;
 }
 
 function RowHead({
@@ -260,16 +338,20 @@ function RowHead({
   meta,
   title,
   reserveStamp,
+  reserveDismiss,
 }: {
   emoji: string;
   meta: string;
   title: string;
   reserveStamp?: boolean;
+  reserveDismiss?: boolean;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
+  const reserve =
+    (reserveStamp ? STAMP_RESERVE : 0) + (reserveDismiss ? DISMISS_RESERVE : 0);
   return (
-    <View style={[styles.head, reserveStamp && styles.headReserve]}>
+    <View style={[styles.head, reserve > 0 && { paddingRight: reserve }]}>
       <Text style={styles.headEmoji} accessible={false}>
         {emoji}
       </Text>
@@ -287,9 +369,11 @@ function QuestionRowView({
   row,
   queue,
   divided,
+  dismissable,
 }: {
   row: QuestionRow;
   divided: boolean;
+  dismissable: boolean;
   queue: QueueApi;
 }) {
   const router = useRouter();
@@ -352,6 +436,7 @@ function QuestionRowView({
         meta={row.meta}
         title={question.prompt}
         reserveStamp={!!tone}
+        reserveDismiss={dismissable}
       />
       {!answer ? (
         // Keyed on the column count so a rotation re-measures from scratch.
@@ -404,7 +489,23 @@ function QuestionRowView({
           </View>
         </View>
       )}
-      <PracticeVerdictStamp feedback={tone} shell={shell} placement="row" />
+      {dismissable ? (
+        <>
+          {/* The stamp sits beside the corner ×, not under it. */}
+          <View style={styles.stampBesideDismiss} pointerEvents="none">
+            <PracticeVerdictStamp feedback={tone} shell={shell} placement="row" />
+          </View>
+          <DismissCorner>
+            <DismissButton
+              label={question.prompt}
+              disabled={opening}
+              onPress={() => queue.dismiss(row)}
+            />
+          </DismissCorner>
+        </>
+      ) : (
+        <PracticeVerdictStamp feedback={tone} shell={shell} placement="row" />
+      )}
     </View>
   );
 }
@@ -514,18 +615,25 @@ function TeacherQuestRow({
   starting,
   onStart,
   onNotNow,
+  dismiss,
 }: {
   row: TeacherRow;
   divided: boolean;
   starting: boolean;
   onStart: () => void;
   onNotNow: () => void;
+  dismiss: React.ReactNode;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   return (
     <View style={[styles.row, divided && styles.divided]}>
-      <RowHead emoji={row.emoji} meta={row.meta} title={row.title} />
+      <RowHead
+        emoji={row.emoji}
+        meta={row.meta}
+        title={row.title}
+        reserveDismiss={dismiss !== null}
+      />
       {row.body ? (
         <Text style={styles.body} numberOfLines={2}>
           {row.body}
@@ -563,12 +671,17 @@ function TeacherQuestRow({
           <Text style={styles.buttonSecondaryText}>{QUESTION_QUEUE_COPY.notNow}</Text>
         </Pressable>
       </View>
+      {dismiss ? <DismissCorner>{dismiss}</DismissCorner> : null}
     </View>
   );
 }
 
 /** Indent that lines body text up under the title (emoji column + gap). */
 const TEXT_INDENT = 34;
+/** Room the verdict stamp takes at the head's right. */
+const STAMP_RESERVE = 92;
+/** Room the corner × takes at the head's right. */
+const DISMISS_RESERVE = 36;
 
 function makeStyles(c: Colors) {
   return StyleSheet.create({
@@ -593,7 +706,14 @@ function makeStyles(c: Colors) {
     divided: { borderTopWidth: 1, borderTopColor: c.gray100 },
     row: { position: "relative", paddingHorizontal: 16, paddingVertical: 12 },
     head: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
-    headReserve: { paddingRight: 92 },
+    dismissCorner: { position: "absolute", top: 4, right: 4 },
+    stampBesideDismiss: {
+      position: "absolute",
+      top: 0,
+      bottom: 0,
+      left: 0,
+      right: DISMISS_RESERVE,
+    },
     headEmoji: { fontSize: 22, lineHeight: 26, flexShrink: 0 },
     headBody: { flex: 1, minWidth: 0, gap: 2 },
     meta: {

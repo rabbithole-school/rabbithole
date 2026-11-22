@@ -12,7 +12,11 @@ import { SymbolView, type SymbolViewProps } from "expo-symbols";
 import { fonts, useColors } from "@/theme";
 import { KID_SAFE_PRINCIPLES } from "@/lib/kidSafePrinciples";
 
-let promptSourceBase = "https://github.com/rabbithole-school/rabbithole/blob/main";
+// The PUBLIC rabbithole-school repo in every build, the primary school's
+// included: its own downstream repo is private, so linking it 404'd for everyone outside
+// the GitHub org. Kept identical to components/BehindTheCurtain.tsx.
+const promptSourceBase =
+  "https://github.com/rabbithole-school/rabbithole/blob/main";
 
 const PROMPT_SOURCES = [
   {

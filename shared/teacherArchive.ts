@@ -5,11 +5,18 @@
 // and only a teacher can lift it. One predicate and one set of copy, shared
 // by the server, web and the iPad (vendored by native/scripts/sync-vendor.js)
 // so the scholar sees the same words on both surfaces.
+//
+// A retracted quest is the teacher's other way of putting work away, and the
+// scholar's Archived list shows it the same way: its rows carry
+// `questRetracted` (sessions.finishedForScholar). That flag is derived from the
+// unit and never stored on a session, so server checks on a session document
+// see only `teacherArchivedAt`.
 
 export function isTeacherArchived(session: {
   teacherArchivedAt?: number | null;
+  questRetracted?: boolean;
 }): boolean {
-  return session.teacherArchivedAt != null;
+  return session.teacherArchivedAt != null || session.questRetracted === true;
 }
 
 export const TEACHER_ARCHIVE_COPY = {

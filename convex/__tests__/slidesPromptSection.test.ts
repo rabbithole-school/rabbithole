@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { buildSlidesSection } from "../sessionHelpers";
 import type { ArtifactData } from "../sessionHelpers";
-import { applySlideOps, emptyDeck } from "../../shared/slidesScene";
+import { applySlideOps, emptyDeck, MAX_TEXT_LENGTH, SLIDES_COPY } from "../../shared/slidesScene";
 import type { Deck } from "../../shared/slidesScene";
 
 /**
@@ -62,6 +62,33 @@ describe("buildSlidesSection", () => {
     expect(section).toContain(long);
   });
 
+  // TRA-702: a long Procedure box was cut at 600 characters with no marker, so
+  // a sentence the scholar appended to the end never reached the tutor, which
+  // kept saying the slide "still reads the same".
+  test("shows the end of a long text box, where scholars append new sentences", () => {
+    const procedure =
+      "We will test the tank water every Monday, Wednesday, and Friday. ".repeat(12) +
+      "Make sure to keep the fish food, temperature, and number of fish the same.";
+    expect(procedure.length).toBeGreaterThan(600);
+    const section = buildSlidesSection([slidesArtifact(deckWithText(procedure))]);
+    expect(section).toContain(
+      "Make sure to keep the fish food, temperature, and number of fish the same.",
+    );
+    expect(section).not.toContain("more characters not shown");
+  });
+
+  test("carries a text box at the editor's maximum length in full", () => {
+    const max = "B".repeat(MAX_TEXT_LENGTH);
+    const section = buildSlidesSection([slidesArtifact(deckWithText(max))]);
+    expect(section).toContain(max);
+  });
+
+  test("tells the tutor the text is complete, so it never blames a cropped view", () => {
+    const section = buildSlidesSection([slidesArtifact(deckWithText("Hello"))]);
+    expect(section).toContain("shown in FULL");
+    expect(section).toContain("never ask them to paste slide text into the chat");
+  });
+
   test("returns empty string when the session has no deck", () => {
     expect(buildSlidesSection(null)).toBe("");
     expect(
@@ -91,5 +118,17 @@ describe("buildSlidesSection", () => {
         },
       ]),
     ).toBe("");
+  });
+
+  test("tells the tutor how a scholar brings slides from an earlier session (TRA-704)", () => {
+    const section = buildSlidesSection([slidesArtifact(deckWithText("My hypothesis"))]);
+    // The tutor can't read other sessions' decks; it must route the scholar to
+    // the real Copy/Paste menu items rather than "ask your teacher".
+    expect(section).toContain(`"${SLIDES_COPY.copyAllSlides}"`);
+    expect(section).toContain(`"${SLIDES_COPY.pasteSlidesAfter(1)}"`);
+    expect(section).toContain("moveSlide");
+    // The tutor repeats this line to scholars, so it names their device.
+    expect(section).toContain("BunnyPad");
+    expect(section).not.toMatch(/\biPad\b/);
   });
 });

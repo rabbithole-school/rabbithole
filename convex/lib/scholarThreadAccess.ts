@@ -1,34 +1,69 @@
-// Who may read + write a scholar ↔ staff conversation (`parentThreads` of kind
-// "mentor" or "workshop"). The ONE access rule behind every scholarMessages.*
-// read and write, the mentor inbound-email path, and the mentor email batch —
-// so a revoked grant, a lost membership, or a suspended school ends access on
+// Who may read + write a scholar conversation (`parentThreads` of kind
+// "scholar"). The ONE access rule behind every scholarMessages.* read and
+// write, the inbound-email path for named adults, and their email batch — so
+// a revoked grant, a lost membership, or a suspended school ends access on
 // the very next call, everywhere.
 //
-//   kind      scholar            team (teacher/school_admin at    mentor grant
+// Two kinds of conversation: "family" (a scholar's guardians and staff) and
+// "scholar" (one scholar and adults). A scholar conversation has a FLAVOR:
+//
+//   flavor    scholar            team (teacher/school_admin at    mentor grant
 //                                the scholar's school, platform   covering the
 //                                admin)                           scholar
-//   mentor    own: read+reply    read, reply, create              open with a covered
+//   general   own: read+reply    read, reply, create              open with a covered
 //                                                                 scholar; read+reply
 //                                                                 only threads they
 //                                                                 are NAMED on
 //   workshop  own: read+reply    read, reply, start               no
+//   about     own: read+reply    read, reply, open                no
+//             (one thread per Quest or wonder; `thread.about` says which)
 //
 // Family threads are never reachable here, and these threads are never
 // reachable through the family paths (parentMessages.ts refuses them).
+//
+// STORAGE (mid-migration). New rows store `kind: "scholar"` + `flavor`.
+// Rows written before that store the flavor in `kind` itself, under its old
+// names ("mentor" = general, "workshop", "about"). `threadKind` and
+// `threadFlavor` read both, so nothing else ever looks at `thread.kind`.
 
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { ROLES, isPlatformAdminRole } from "./roles";
 import { mentorCoversScholar } from "./staffCapabilities";
 import { scholarInstitutionId } from "./scholarEnrollment";
+import {
+  flavorFromLegacyKind,
+  legacyKindForFlavor,
+  type LegacyScholarThreadKind,
+  type ScholarThreadFlavor,
+} from "../../shared/scholarThreadFlavor";
 
 type Ctx = QueryCtx | MutationCtx;
 
-export type ThreadKind = "family" | "mentor" | "workshop";
-export type ScholarThreadKindValue = "mentor" | "workshop";
+export type ThreadKind = "family" | "scholar";
+export type { LegacyScholarThreadKind, ScholarThreadFlavor };
+export { flavorFromLegacyKind, legacyKindForFlavor };
+
+type KindFields = Pick<Doc<"parentThreads">, "kind" | "flavor">;
 
 export function threadKind(thread: Pick<Doc<"parentThreads">, "kind">): ThreadKind {
-  return thread.kind ?? "family";
+  return thread.kind === undefined || thread.kind === "family" ? "family" : "scholar";
+}
+
+/** A scholar conversation's flavor; null for a family conversation (or a
+ *  malformed scholar row with no flavor, which then reaches no one). */
+export function threadFlavor(thread: KindFields): ScholarThreadFlavor | null {
+  if (thread.kind === undefined || thread.kind === "family") return null;
+  if (thread.kind === "scholar") return thread.flavor ?? null;
+  return flavorFromLegacyKind(thread.kind);
+}
+
+/** The fields a new scholar conversation is stored with. */
+export function scholarThreadKindFields(flavor: ScholarThreadFlavor): {
+  kind: "scholar";
+  flavor: ScholarThreadFlavor;
+} {
+  return { kind: "scholar", flavor };
 }
 
 export function isFamilyThread(
@@ -141,10 +176,47 @@ export async function scholarThreadInstitutionId(
   if (scholar.institutionId) return scholar.institutionId;
   const enrolled = await scholarInstitutionId(ctx, scholar._id);
   if (enrolled) return enrolled;
+  // Memberships that do not resolve to one school never default to the
+  // primary one (TRA-654): only a scholar with no learner membership does.
+  const learnerMembership = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", scholar._id))
+    .filter((q) =>
+      q.or(
+        q.eq(q.field("role"), ROLES.SCHOLAR),
+        q.eq(q.field("role"), ROLES.LIFELONG_LEARNER),
+      ),
+    )
+    .first();
+  if (learnerMembership) return null;
   const primary = (await ctx.db.query("institutions").collect()).find(
     (institution) => institution.isPrimary && institution.disabledAt === undefined,
   );
   return primary?._id ?? null;
+}
+
+/**
+ * An `about` thread's school: the scholar's REAL enrollment only. No primary
+ * fallback: an unenrolled scholar has no about threads anywhere, so no
+ * school's teachers can open, read or answer one for them.
+ */
+export async function aboutThreadInstitutionId(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+): Promise<Id<"institutions"> | null> {
+  if (scholar.role !== ROLES.SCHOLAR) return null;
+  return (await scholarInstitutionId(ctx, scholar._id)) ?? null;
+}
+
+/** The school a thread of `flavor` with this scholar belongs to right now. */
+async function institutionForFlavor(
+  ctx: Ctx,
+  scholar: Doc<"users">,
+  flavor: ScholarThreadFlavor,
+): Promise<Id<"institutions"> | null> {
+  return flavor === "about"
+    ? await aboutThreadInstitutionId(ctx, scholar)
+    : await scholarThreadInstitutionId(ctx, scholar);
 }
 
 /**
@@ -155,10 +227,11 @@ export async function scholarForThread(
   ctx: Ctx,
   thread: Doc<"parentThreads">,
 ): Promise<Doc<"users"> | null> {
-  if (isFamilyThread(thread) || !thread.scholarId) return null;
+  const flavor = threadFlavor(thread);
+  if (!flavor || !thread.scholarId) return null;
   const scholar = await ctx.db.get(thread.scholarId);
   if (!scholar || scholar.role !== ROLES.SCHOLAR) return null;
-  const institutionId = await scholarThreadInstitutionId(ctx, scholar);
+  const institutionId = await institutionForFlavor(ctx, scholar, flavor);
   if (
     !institutionId ||
     institutionId !== thread.institutionId ||
@@ -170,23 +243,23 @@ export async function scholarForThread(
 }
 
 /**
- * May a STAFF user reach a thread of this kind about this scholar? The same
+ * May a STAFF user reach a thread of this flavor about this scholar? The same
  * rule decides reading, replying, and opening one.
  */
 export async function staffCanReachScholar(
   ctx: Ctx,
   user: Pick<Doc<"users">, "_id" | "role">,
   scholar: Doc<"users">,
-  kind: ScholarThreadKindValue,
+  flavor: ScholarThreadFlavor,
 ): Promise<{ ok: boolean; asTeam: boolean }> {
   if (user.role === ROLES.SCHOLAR) return { ok: false, asTeam: false };
-  const institutionId = await scholarThreadInstitutionId(ctx, scholar);
+  const institutionId = await institutionForFlavor(ctx, scholar, flavor);
   if (!institutionId) return { ok: false, asTeam: false };
   if (await isTeamForInstitution(ctx, user, institutionId)) {
     return { ok: true, asTeam: true };
   }
   // A mentor grant only ever covers an explicitly enrolled scholar.
-  if (kind === "mentor" && (await mentorCoversScholar(ctx, user, scholar))) {
+  if (flavor === "general" && (await mentorCoversScholar(ctx, user, scholar))) {
     return { ok: true, asTeam: false };
   }
   return { ok: false, asTeam: false };
@@ -194,7 +267,7 @@ export async function staffCanReachScholar(
 
 export type ScholarThreadAccess = {
   viewer: "scholar" | "staff";
-  kind: ScholarThreadKindValue;
+  flavor: ScholarThreadFlavor;
   scholar: Doc<"users">;
   /** The thread's stamped (live) institution. */
   institutionId: Id<"institutions">;
@@ -222,14 +295,14 @@ async function namedStaffRow(
   return row?.side === "staff" ? row : null;
 }
 
-/** The caller's access to a mentor/workshop thread, or null (no access). */
+/** The caller's access to a scholar conversation, or null (no access). */
 export async function scholarThreadAccess(
   ctx: Ctx,
   user: Doc<"users">,
   thread: Doc<"parentThreads">,
 ): Promise<ScholarThreadAccess | null> {
-  const kind = threadKind(thread);
-  if (kind === "family" || !thread.scholarId || !thread.institutionId) return null;
+  const flavor = threadFlavor(thread);
+  if (!flavor || !thread.scholarId || !thread.institutionId) return null;
   const institutionId = thread.institutionId;
   const current = await scholarForThread(ctx, thread);
   if (current) {
@@ -237,7 +310,7 @@ export async function scholarThreadAccess(
       return user._id === current._id
         ? {
             viewer: "scholar",
-            kind,
+            flavor,
             scholar: current,
             institutionId,
             asTeam: false,
@@ -245,7 +318,7 @@ export async function scholarThreadAccess(
           }
         : null;
     }
-    const reach = await staffCanReachScholar(ctx, user, current, kind);
+    const reach = await staffCanReachScholar(ctx, user, current, flavor);
     if (!reach.ok) return null;
     // A mentor (grant holder, not the teaching team) reaches ONLY the threads
     // they are named on — never a teacher↔scholar thread or another mentor's
@@ -256,7 +329,7 @@ export async function scholarThreadAccess(
     }
     return {
       viewer: "staff",
-      kind,
+      flavor,
       scholar: current,
       institutionId,
       asTeam: reach.asTeam,
@@ -274,7 +347,7 @@ export async function scholarThreadAccess(
   if (!scholar || scholar.role !== ROLES.SCHOLAR) return null;
   if (!(await liveInstitution(ctx, institutionId))) return null;
   if (await isTeamForInstitution(ctx, user, institutionId)) {
-    return { viewer: "staff", kind, scholar, institutionId, asTeam: true, readOnly: true };
+    return { viewer: "staff", flavor, scholar, institutionId, asTeam: true, readOnly: true };
   }
   return null;
 }

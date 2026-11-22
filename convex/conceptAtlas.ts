@@ -11,32 +11,26 @@ import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { buildEdges, buildNeighborEdges, canonicalPairKey, NN_NEIGHBORS_K } from "./lib/atlasEdges";
-
-const EMBED_MODEL = "text-embedding-3-small";
-const EMBED_DIMS = 512;
-
-async function embedBatch(texts: string[], key: string): Promise<number[][]> {
-  const res = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model: EMBED_MODEL, input: texts, dimensions: EMBED_DIMS }),
-  });
-  if (!res.ok) throw new Error(`OpenAI embeddings ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  const json = (await res.json()) as { data: { embedding: number[] }[] };
-  return json.data.map((d) => d.embedding);
-}
+import {
+  EMBED_BATCH_SIZE,
+  EMBED_TEXT_MAX_CHARS,
+  embedBatch,
+  requireEmbeddingKey,
+} from "./lib/embeddings";
 
 /** Embed every concept that lacks an embedding (label + evidence) → side table. */
 export const embedConcepts = internalAction({
   args: {},
   handler: async (ctx): Promise<{ embedded: number }> => {
-    const key = process.env.OPENAI_API_KEY;
-    if (!key) throw new Error("OPENAI_API_KEY not set on this deployment");
+    const key = requireEmbeddingKey();
     const todo = await ctx.runQuery(internal.concepts._conceptsToEmbed, {});
     let done = 0;
-    for (let i = 0; i < todo.length; i += 128) {
-      const chunk = todo.slice(i, i + 128);
-      const vecs = await embedBatch(chunk.map((c) => c.text.slice(0, 1000)), key);
+    for (let i = 0; i < todo.length; i += EMBED_BATCH_SIZE) {
+      const chunk = todo.slice(i, i + EMBED_BATCH_SIZE);
+      const vecs = await embedBatch(
+        chunk.map((c) => c.text.slice(0, EMBED_TEXT_MAX_CHARS)),
+        key,
+      );
       const rows = chunk.map((c, k) => ({ nodeId: c.id as Id<"knowledgeNodes">, vector: vecs[k] }));
       for (let j = 0; j < rows.length; j += 32) {
         await ctx.runMutation(internal.concepts._insertEmbeddings, { rows: rows.slice(j, j + 32) });

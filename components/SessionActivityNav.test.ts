@@ -57,7 +57,6 @@ vi.mock("@/convex/_generated/api", () => ({
       startFreePlay: "sessions.startFreePlay",
       questFromParkedIdea: "sessions.questFromParkedIdea",
     },
-    quests: { appendBuildStep: "quests.appendBuildStep" },
     units: { get: "units.get" },
   },
 }));

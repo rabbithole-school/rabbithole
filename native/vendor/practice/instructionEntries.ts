@@ -426,22 +426,6 @@ export type RunLaunchpadCandidate = {
   move: FrameMoveSource;
 };
 
-/** The ≤1/day governor: true when some OTHER key was already shown today. */
-function dailyCapBlocks(
-  eventByKey: Map<string, InstructionEventLike>,
-  dayBucket: string,
-  key: string,
-): boolean {
-  // Scoped to OTHER keys, and not a softening of the rule. This selector runs
-  // inside the reactive `practiceSession` query, and the client claims its own
-  // impression on mount -- which writes `shownAt` for exactly this key. A
-  // blanket "anything shown today" test would flip to true the instant the
-  // frame appeared and retract the very offer being rendered.
-  return [...eventByKey.entries()].some(
-    ([k, e]) => k !== key && e.shownAt != null && e.lastShownDayBucket === dayBucket,
-  );
-}
-
 /** Serving lanes that can carry the framed item. `new` is frontier work;
  *  `review` is admitted because a placement-CREDITED skill the scholar never
  *  actually attempted is served there (the confirmation lane) and is, for the
@@ -482,10 +466,9 @@ export function frameMoveFor(
  * once a scholar has seen this node's move (viewed/completed/dismissed, or
  * skipped past the re-offer cap) the node is not framed again.
  *
- * The ≤1/day governor (`dailyCap`, default ON) reads the same `eventByKey`
- * regardless of key kind. Both run clients pass `false` — a pill on a real
- * graded item has nothing to ration. Advisory: a query cannot write, so the
- * claim mutation re-checks authoritatively.
+ * There is no cross-key daily governor: a pill on a real graded item has
+ * nothing to ration. At most one frame per RUN stays structural (one
+ * `launchpad`).
  */
 export function selectRunLaunchpad(params: {
   items: RunItemLike[];
@@ -495,14 +478,9 @@ export function selectRunLaunchpad(params: {
    *  (`compactMoveAtoms`) exists for this skillKey on this platform. */
   hasNodeContent: (skillKey: string) => boolean;
   eventByKey: Map<string, InstructionEventLike>;
-  dayBucket: string;
   reofferCap?: number;
-  /** The cross-key ≤1/day governor — default ON; the question framing passes
-   *  `false`. At most one frame per RUN stays structural (one `launchpad`). */
-  dailyCap?: boolean;
 }): RunLaunchpadCandidate | null {
   const cap = params.reofferCap ?? INSTRUCTION_REOFFER_CAP;
-  const dailyCap = params.dailyCap ?? true;
   for (let at = 0; at < params.items.length; at++) {
     const item = params.items[at];
     if (!isFrameableLane(item.lane)) continue;
@@ -513,7 +491,6 @@ export function selectRunLaunchpad(params: {
     if (!move) continue;
     const key = nodeInstructionKey(item.skillKey);
     if (isInstructionSuppressed(params.eventByKey.get(key), cap)) continue;
-    if (dailyCap && dailyCapBlocks(params.eventByKey, params.dayBucket, key)) return null;
     return { at, level: "node", domain: item.domain, strand, nodeKey: item.skillKey, key, move };
   }
   return null;

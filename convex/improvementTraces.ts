@@ -32,6 +32,7 @@ const executionValidator = v.object({
   provider: v.union(
     v.literal("github-cloud"),
     v.literal("autonomous-coordinator"),
+    v.literal("claude-tag"),
   ),
   executionId: v.string(),
   attemptId: v.optional(v.string()),

@@ -21,7 +21,9 @@
           "googlesheets",
           "spike",
           "stopmotionstudio",
-          "com.google.stella"
+          "com.google.stella",
+          "adobelightroom",
+          "brilliant"
         ]
       }
     },

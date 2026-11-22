@@ -681,6 +681,66 @@ describe("resolveScorableArtifactId + artifact_id fallback (missing-id bug)", ()
     expect(row?.textContent).not.toContain('"schemaVersion"');
   });
 
+  // TRA-702: the slides snapshot is the scholar's submitted work that teachers
+  // read and download (deliverables.textContent), so it must carry every word
+  // whole — no cut speaker notes or alt text, no "not shown" model marker.
+  test("slides snapshot keeps long speaker notes and alt text whole, with no marker", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const activityId = await seedActivityWithCriteria(t, teacherId, "slides");
+    const sessionId = await seedSession(t, scholarId, activityId);
+    const notes =
+      "First I will show the tank, then explain how the bacteria turn ammonia into nitrite. " +
+      "Last I will point at the plant roots and say why the water comes back clean.";
+    const alt =
+      "A labeled diagram of the aquaponics tank showing the fish, the grow bed, and the pump that moves water between them.";
+    expect(notes.length).toBeGreaterThan(120);
+    expect(alt.length).toBeGreaterThan(80);
+    const withImage = applySlideOps(
+      deckWithText("Our aquaponics plan"),
+      [
+        {
+          op: "addElement",
+          slideId: "slide-1",
+          element: {
+            type: "image",
+            frame: { x: 900, y: 40, w: 300, h: 300 },
+            assetId: "asset-1",
+            alt,
+          },
+        },
+        { op: "setSpeakerNotes", slideId: "slide-1", notes },
+      ],
+      () => `slide-element-${++slideElementId}`,
+    );
+    if (!withImage.ok) throw new Error(withImage.error);
+    await t.run((ctx) =>
+      ctx.db.insert("artifacts", {
+        sessionId,
+        title: "Aquaponics deck",
+        content: JSON.stringify(withImage.deck),
+        lastEditedBy: "scholar",
+        type: "slides",
+      }),
+    );
+
+    await t.mutation(internal.deliverables.applyRubricScoreFromTool, {
+      sessionId,
+      verdicts: [{ criterionId: "structure", level: "full" }],
+    });
+
+    const row = await t.run((ctx) =>
+      ctx.db
+        .query("deliverables")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .first(),
+    );
+    expect(row?.textContent).toContain(notes);
+    expect(row?.textContent).toContain(alt);
+    expect(row?.textContent).not.toContain("not shown");
+  });
+
   test("does not cross session boundaries", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");

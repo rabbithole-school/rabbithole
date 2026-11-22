@@ -89,8 +89,15 @@ import { KID_SAFE_PRINCIPLES } from "../kidSafePrinciples";
 // useful" promised only "a hint or a smaller step", so its blurb now names the
 // parallel example; the rest strengthen "Ask before answering", "No doing
 // your work for you" and "Notice what you figured out".
+// Re-baselined 2026-11-14 (TRA-661): a chat the scholar started themselves
+// (their own Quest's chat with no activity, or a seed chat) takes an ANSWER
+// FIRST stance — the role line, the follow-up bullet and the answering rules
+// swap; every other session renders byte-identically. Re-reviewed against the
+// gloss: "Ask before answering" promised a probe first for every big why/how
+// question, so its blurb now says that holds in activities and that a chat
+// the scholar starts answers first. The rest are unaffected.
 const EXPECTED_TUTOR_GUIDELINES_HASH =
-  "dba2d8007efa45dce59713c15b119f521903ad9ae77ab6984f8f92e614b1c02c";
+  "eaf0e905ee952baa0d92cd5f599c95c4c253a076234260fb3963c46c91116c83";
 
 const FORBIDDEN_TOKENS = [
   /\bwhisper\b/i,

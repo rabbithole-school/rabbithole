@@ -226,6 +226,25 @@ export default function ConnectPage() {
                 </Text>
               </Box>
 
+              <Box>
+                <Heading
+                  as="h2"
+                  size="sm"
+                  fontFamily="heading"
+                  color="navy.500"
+                  mb={2}
+                >
+                  Read-only link for coding
+                </Heading>
+                <Text fontFamily="body" fontSize="sm" color="charcoal.500" mb={3}>
+                  If you use Claude Code to debug Rabbithole, add this second
+                  link as its own connector the same way, and turn on only this
+                  one in coding sessions. It sees what you can see and
+                  can&rsquo;t change anything.
+                </Text>
+                <McpConnectorUrl readOnly />
+              </Box>
+
               <Box borderTopWidth="1px" borderColor="gray.100" pt={6}>
                 <McpConnectionsList />
               </Box>

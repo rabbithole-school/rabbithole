@@ -20,6 +20,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { api, type Doc, type Id } from "@/lib/convex";
 import { fonts, useColors } from "@/theme";
+import { EmptyState } from "@/components/ui/EmptyState";
 import {
   CodeArtifactWebView,
   type CodeArtifactWebViewHandle,
@@ -99,15 +100,18 @@ export function AppCard({
 
       {isEmpty ? (
         <View style={styles.empty}>
-          <SymbolView
-            name="chevron.left.forwardslash.chevron.right"
-            size={28}
-            tintColor={colors.violet}
+          <EmptyState
+            size="lg"
+            icon={(size, color) => (
+              <SymbolView
+                name="chevron.left.forwardslash.chevron.right"
+                size={size}
+                tintColor={color}
+              />
+            )}
+            title="Nothing here yet"
+            hint="Build your app with your tutor — it will show up here."
           />
-          <Text style={styles.emptyTitle}>Nothing here yet</Text>
-          <Text style={styles.emptyHint}>
-            Build your app with your tutor — it will show up here.
-          </Text>
         </View>
       ) : (
         <View style={styles.previewFrame}>
@@ -184,23 +188,7 @@ function makeStyles(c: ReturnType<typeof useColors>) {
       backgroundColor: c.white,
     },
     empty: {
-      alignItems: "center",
-      paddingVertical: 40,
       paddingHorizontal: 16,
-      gap: 8,
-      backgroundColor: c.white,
-    },
-    emptyTitle: {
-      fontFamily: fonts.semibold,
-      fontSize: 16,
-      color: c.charcoal,
-    },
-    emptyHint: {
-      fontFamily: fonts.regular,
-      fontSize: 14,
-      lineHeight: 20,
-      textAlign: "center",
-      color: c.charcoalMuted,
     },
   });
 }

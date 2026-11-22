@@ -122,6 +122,15 @@ describe("makeCustomAppTools gating", () => {
     ).input_schema.properties.html.description;
     expect(htmlDescription).toContain("window.rabbithole.setState");
     expect(tool.description).not.toContain("example.invalid");
+    // Static apps save state (appStates.updateCustomAppState), keyed to the
+    // signed-in scholar, so the tool must not tell the model they can't save
+    // across reloads, or that the save is the device's.
+    expect(tool.description).toContain("window.rabbithole.setState saves");
+    expect(tool.description).toMatch(/follows them to any iPad or browser they sign in on/);
+    expect(tool.description).not.toMatch(/belongs to the device/);
+    // The app's maker can read it: never claim it is private to the scholar.
+    expect(tool.description).toMatch(/the teacher who made the app can read it/);
+    expect(tool.description).not.toMatch(/CANNOT persist data across reloads/);
   });
 });
 
@@ -442,7 +451,10 @@ describe("custom-app write behavior", () => {
     expect(runMutation).not.toHaveBeenCalled();
   });
 
-  test("reports the durable planned assignment when the live push fails", async () => {
+  // The "assigned, then the live push failed" path is gone: the give is one
+  // aideAssignWork write (assignAndGiveActivity), so there is no second push
+  // to fail. What remains to guard is a send with no answered start.
+  test("a roster with no start asks when it shows up and writes no assignment", async () => {
     const scholar = "scholar_1" as Id<"users">;
     const runQuery = vi.fn().mockImplementation((ref) => {
       const name = getFunctionName(ref);
@@ -483,15 +495,6 @@ describe("custom-app write behavior", () => {
           kind: "vibecode",
         });
       }
-      if (name === "assignments:aideAssignWork") {
-        return Promise.resolve({
-          assignmentId: "assignment_1",
-          created: true,
-        });
-      }
-      if (name === "assignments:aidePushActivityNow") {
-        return Promise.reject(new Error("push unavailable"));
-      }
       throw new Error(`Unexpected mutation ${name}`);
     });
     const tools = await makeCustomAppTools(
@@ -512,14 +515,20 @@ describe("custom-app write behavior", () => {
         appName: "Force Explorer",
         buildBrief: "Coach a prediction-observation-explanation arc.",
         groupName: "Honu",
+        finish: "inClass",
       }),
     );
 
-    expect(result).toContain("PARTIAL:");
-    expect(result).toContain("/teacher/schedule/assignment_1");
-    expect(result).toContain("PLANNED");
-    expect(result).toContain("Scholars do NOT see it yet");
-    expect(result).toContain("push unavailable");
+    expect(result).toContain("NOT GIVEN");
+    expect(result).toContain("startsNow:true");
+    expect(result).toContain(
+      "/teacher/curriculum/unit_1/edit?lesson=lesson_1&activity=activity_1",
+    );
+    const mutations = runMutation.mock.calls.map(([ref]) =>
+      getFunctionName(ref),
+    );
+    expect(mutations).not.toContain("assignments:aideAssignWork");
+    expect(mutations).not.toContain("assignments:aidePushActivityNow");
   });
 
   test("reports the durable curriculum state when assignment creation fails", async () => {
@@ -586,6 +595,8 @@ describe("custom-app write behavior", () => {
         appName: "Force Explorer",
         buildBrief: "Coach a prediction-observation-explanation arc.",
         groupName: "Honu",
+        startsNow: true,
+        finish: "inClass",
       }),
     );
 
@@ -604,9 +615,25 @@ describe("custom-app write behavior", () => {
     ).not.toContain("assignments:aidePushActivityNow");
   });
 
+  // A coded app that needs a backend is a code change: there is no tool that
+  // starts one (the Copilot dispatch_custom_app is retired). The prompt
+  // section sends it to the Claude code-change handoff instead.
+  test("no custom-app tool starts a coded build", async () => {
+    for (const role of ["teacher", "school_admin", "platform_admin"] as const) {
+      expect(await toolNames(role)).not.toContain("dispatch_custom_app");
+    }
+  });
 });
 
 describe("CUSTOM_APPS_SYSTEM_PROMPT_SECTION", () => {
+  test("sends an app that needs a backend to the code-change handoff, never a dispatch tool", () => {
+    expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("An app that needs a backend");
+    expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("code-change handoff");
+    expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("Never say it is being built");
+    expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).not.toContain("dispatch_custom_app");
+    expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).not.toMatch(/copilot/i);
+  });
+
   test("names the available tools so the model can choose and revise", () => {
     expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("install_external_app");
     expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("create_custom_app");
@@ -616,6 +643,13 @@ describe("CUSTOM_APPS_SYSTEM_PROMPT_SECTION", () => {
     expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("update_custom_app");
     expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("kids to USE");
     expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain("kids BUILD");
+  });
+
+  test("agrees with create_custom_app that a tile may save each scholar's own work", () => {
+    expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).not.toMatch(/with no saved data/);
+    expect(CUSTOM_APPS_SYSTEM_PROMPT_SECTION).toContain(
+      "no saved data beyond a small save of each scholar's own work",
+    );
   });
 });
 

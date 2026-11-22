@@ -4,7 +4,8 @@
 // Two light template tables (schema.ts): `scheduleBlocks` (the bell-schedule
 // rows) and `schedulePlacements` (the class cells: group × weekday × block).
 // This module is the whole backend surface:
-//   - reads:  `grid` (blocks + enriched placements + shelf + derived coverage)
+//   - reads:  `grid` (blocks + enriched placements + classes with no day yet
+//             + derived coverage, plus the week's gives: lib/gridGives.ts)
 //   - writes: block CRUD, placement create/update/move/remove, the bulk
 //             `reassignTeacher` ("Lehua's out sick"), and the `shiftPlacement`
 //             teleport. There is NO manual publish step: a placed cell that
@@ -23,20 +24,33 @@
 // Reads are teacherQuery; writes are teacherMutation; the aide wrappers re-check
 // the caller is a teacher role explicitly (they have no ctx.user).
 
-import { v } from "convex/values";
+import { openUntilClosesAt, openUntilWeekdayPhrase } from "../shared/openUntil";
+import { ConvexError, v } from "convex/values";
 import { publishUnitOnAssign } from "./lib/unitPublication";
+import { appActivityHasNothingToOpen } from "./lib/appActivity";
 import { internalQuery, internalMutation } from "./_generated/server";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { primaryInstitutionId } from "./lib/primaryInstitution";
+import { gridGivesFor } from "./lib/gridGives";
 import {
-  requireAssignmentAccessible,
+  classFieldsForPush,
+  classLinkInputsChanged,
+  endFieldsForPush,
+  invalidateClassLinkClasses,
+  loadClassLinkData,
+  syncClassesForPlacements,
+  upsertClassForPlacement,
+  type ClassLinkReadCache,
+} from "./lib/classLink";
+import {
+  curatableInstitutionIds,
   requireGroupScholarAccess,
   requireScheduleScopeAccessible,
   requireStaffAccessible,
+  usesLegacyPrimaryStaffing,
 } from "./lib/access";
-import { requireUnitAccess } from "./lib/unitAccess";
 import {
   authedQuery,
   authedMutation,
@@ -44,7 +58,7 @@ import {
   teacherQuery,
   teacherMutation,
 } from "./lib/customFunctions";
-import { isTeacherRole } from "./lib/roles";
+import { isPlatformAdminRole, isTeacherRole, ROLES } from "./lib/roles";
 import {
   programCurriculumAccessStatus,
   programSchedulableUnits,
@@ -70,6 +84,7 @@ import {
 import { deleteResourcesForActivity } from "./activityResources";
 import {
   effectiveInstitutionTimeZone,
+  institutionDayForRequest,
   timeZoneForScholar,
 } from "./lib/institutionTime";
 import {
@@ -92,20 +107,28 @@ import {
   scheduleWeekdayTimeMs,
   shiftScheduleWeekStartMs,
 } from "../shared/scheduleWeek";
-import {
-  deriveClassMeetingPattern,
-  generateMeetingSlots,
-  clampSlotForward,
-  type MeetingPatternSlot,
-} from "../shared/meetingSlots";
-import { PRACTICE_DOMAINS } from "./lib/practice/domains";
-import { scheduleProblemSetItemGeneration } from "./practiceSkills";
+import { isSkillAdapterActivity } from "./lib/skillPractice";
+import { tripsForScholar } from "./fieldTrips";
+import { tripOverlaps } from "../shared/fieldTrips";
+import { instantForLocalMinutes } from "../shared/institutionDay";
 import {
   barePlacementWeekOverrideKey,
   normalizedSchedulePlacementSubject,
   normalizedSchedulePlacementText,
 } from "./lib/schedulePlacementIdentity";
 import { schedulePushProjectionRefresh } from "./lib/deviceAppUnlockScheduling";
+import { assertPushAllowed, explicitFocusEnd } from "./lib/pushes";
+import {
+  firstClassIdByWork,
+  homeworkSubjectLabel,
+  scheduleWorkKey,
+} from "./lib/homeworkSubject";
+import {
+  closeScheduleForAssignment,
+  loadScheduleRows,
+  readSchedule,
+  writeSchedule,
+} from "./lib/scheduleStore";
 
 const DAY = 86_400_000;
 const MINUTE = 60_000;
@@ -329,18 +352,13 @@ export function deriveCoverage(
   return { coverage, conflicts };
 }
 
-// ── Sequence + slot flags (Q2 — visible, dismissible, chat-resolvable) ────
+// ── Slot flags (visible, dismissible, chat-resolvable) ────────────────────
 //
-// Two flags the grid raises so a cascade never hides surprises:
-//   - overloaded: ≥2 CONTENT placements share one (group, weekday, block) slot
-//     (a "too much work in this block" signal), and
-//   - outOfOrder: a sequence's chips no longer sit in their authored
-//     sequenceIndex order (the teacher dragged one activity out of sequence).
-// Both are DISMISSIBLE: a slot flag is silenced once any of its placements
-// carries its flagId in `dismissedFlags`; an order flag is silenced by
-// `orderOverride` (accepted reorder) or its flagId in `dismissedFlags`. Pure so
-// it's unit-testable in isolation. `weekStartMs` anchors recurring placements
-// (no own week) to the current week for temporal ordering.
+// overloaded: ≥2 CONTENT placements share one (group, weekday, block) slot (a
+// "too much work in this block" signal). DISMISSIBLE: silenced once any of its
+// placements carries its flagId in `dismissedFlags`. Pure so it's
+// unit-testable in isolation. (The unit-flow out-of-order flag retired with
+// unit flow, TRA-582.)
 
 export type OverloadedSlot = {
   groupId: Id<"scholarGroups">;
@@ -350,19 +368,11 @@ export type OverloadedSlot = {
   flagId: string;
 };
 
-export type OutOfOrderFlag = {
-  placementId: Id<"schedulePlacements">;
-  sequenceId: string;
-  flagId: string;
-};
-
 export function deriveFlags(
   blocks: Pick<Doc<"scheduleBlocks">, "_id" | "order">[],
   effectiveWeekPlacements: Doc<"schedulePlacements">[],
   weekStartMs: number,
-  sequenceSourcePlacements: Doc<"schedulePlacements">[] = effectiveWeekPlacements,
-): { overloaded: OverloadedSlot[]; outOfOrder: OutOfOrderFlag[] } {
-  const blockOrder = new Map(blocks.map((b) => [String(b._id), b.order]));
+): { overloaded: OverloadedSlot[] } {
 
   // ── Overloaded slots ──────────────────────────────────────────────────
   // A slot only truly overloads when ≥2 content chips land in it in the SAME
@@ -406,46 +416,7 @@ export function deriveFlags(
     });
   }
 
-  // ── Out-of-order sequence chips ───────────────────────────────────────
-  // Ordering must retain the sequence's complete valid source context: a
-  // cascade can cross a week boundary. The returned flags remain scoped to the
-  // effective rows the requested week actually renders.
-  const visiblePlacementIds = new Set(
-    effectiveWeekPlacements.map((placement) => String(placement._id)),
-  );
-  const bySeq = new Map<string, Doc<"schedulePlacements">[]>();
-  for (const p of sequenceSourcePlacements) {
-    if (!p.sequenceId) continue;
-    if (p.weekday == null || p.blockId == null) continue; // only placed chips
-    if (!bySeq.has(p.sequenceId)) bySeq.set(p.sequenceId, []);
-    bySeq.get(p.sequenceId)!.push(p);
-  }
-  const outOfOrder: OutOfOrderFlag[] = [];
-  const temporalKey = (p: Doc<"schedulePlacements">) =>
-    (p.weekStartMs ?? weekStartMs) +
-    (p.weekday! - 1) * DAY +
-    (blockOrder.get(String(p.blockId)) ?? 0) * MINUTE;
-  for (const [sequenceId, rows] of bySeq) {
-    if (rows.length < 2) continue;
-    const flagId = `ooo:${sequenceId}`;
-    if (rows.some((r) => r.orderOverride)) continue; // accepted reorder
-    if (rows.some((r) => (r.dismissedFlags ?? []).includes(flagId))) continue;
-    const byIndex = [...rows].sort(
-      (a, b) => (a.sequenceIndex ?? 0) - (b.sequenceIndex ?? 0),
-    );
-    const indexRank = new Map(byIndex.map((p, i) => [String(p._id), i]));
-    const byTemporal = [...rows].sort((a, b) => temporalKey(a) - temporalKey(b));
-    byTemporal.forEach((p, tRank) => {
-      if (
-        visiblePlacementIds.has(String(p._id)) &&
-        indexRank.get(String(p._id)) !== tRank
-      ) {
-        outOfOrder.push({ placementId: p._id, sequenceId, flagId });
-      }
-    });
-  }
-
-  return { overloaded, outOfOrder };
+  return { overloaded };
 }
 
 /** Live state of a placement's linked activity, if any. */
@@ -462,10 +433,44 @@ type HomeworkDueProjection = {
   teacherUsername: string | null;
   groupId: Id<"scholarGroups">;
   dueAt: number;
+  /** When the give showed up. Moving its finish re-gives it from here, so a
+   *  drag to another day changes only the finish. */
+  startsAt: number;
   weekday: number;
   mode: "homework";
   linkState: "live";
 };
+
+/**
+ * Which weekday's "Homework due" row holds a grid chip in `week`, or null when
+ * the chip stays in its class cell. The chip follows its give's actual finish:
+ * a linked activity's live or planned schedule entry when there is one, else
+ * the cell's own `mode` (a cell that hasn't materialized yet). A dated finish
+ * lands on its due day when that day is a weekday of this week, else on the
+ * cell's own day; an in-class finish stays in the cell.
+ */
+export function homeworkRailWeekday(args: {
+  weekday: number | null;
+  inHomeworkBlock: boolean;
+  finishMode: "classFocus" | "homework";
+  dueAt: number | null;
+  week: number;
+  timeZone: string;
+}): number | null {
+  if (args.weekday == null) return null;
+  if (args.inHomeworkBlock) return args.weekday;
+  if (args.finishMode !== "homework") return null;
+  if (
+    args.dueAt != null &&
+    scheduleWeekStartMs(args.dueAt, args.timeZone) === args.week
+  ) {
+    const dueWeekday = weekdayForDayKey(
+      dayKeyForTimezone(args.dueAt, args.timeZone),
+    );
+    if (dueWeekday >= 1 && dueWeekday <= 5) return dueWeekday;
+  }
+  return args.weekday;
+}
 
 export async function coreGrid(
   ctx: QueryCtx,
@@ -587,25 +592,26 @@ export async function coreGrid(
   const groups = validGroupRows
     .map((g) => ({ _id: g._id, name: g.name, emoji: g.emoji ?? null }));
 
-  // Sequence labels ("n of N" on the chip) include valid source rows outside
-  // this week, even though only effective-week rows are returned. A cascade can
-  // span weeks, and its rank/length should not change when the grid navigates.
-  const sequenceRows = new Map<string, Doc<"schedulePlacements">[]>();
-  for (const p of placementsWithValidActivities) {
-    if (!p.sequenceId) continue;
-    const rows = sequenceRows.get(p.sequenceId) ?? [];
-    rows.push(p);
-    sequenceRows.set(p.sequenceId, rows);
-  }
-  const sequenceRanks = new Map<string, number>();
-  for (const rows of sequenceRows.values()) {
-    [...rows]
-      .sort((a, b) => (a.sequenceIndex ?? 0) - (b.sequenceIndex ?? 0))
-      .forEach((p, index) => sequenceRanks.set(String(p._id), index + 1));
-  }
+  const homeworkBlockIds = new Set(
+    blocks.filter((b) => b.kind === "homework").map((b) => String(b._id)),
+  );
 
   // Enrich the complete source feed. `placements` remains term-wide because
-  // class identity, drawers, and sequence tools need recurring and future rows.
+  // class identity and drawers need recurring and future rows.
+  // One schedule read per assignment, however many placements link to it:
+  // a term's worth of placements can share one assignment.
+  const scheduleByAssignment = new Map<
+    string,
+    Promise<Awaited<ReturnType<typeof readSchedule>>>
+  >();
+  const scheduleFor = (a: Doc<"assignments">) => {
+    let pending = scheduleByAssignment.get(String(a._id));
+    if (!pending) {
+      pending = readSchedule(ctx, a);
+      scheduleByAssignment.set(String(a._id), pending);
+    }
+    return pending;
+  };
   const enriched = await Promise.all(
     placementsWithValidActivities.map(async (p) => {
       let linkState: LinkState = "none";
@@ -615,6 +621,9 @@ export async function coreGrid(
       let unitId: Id<"units"> | null = null;
       let unitTitle: string | null = null;
       let isProgramHandout = false;
+      let linkedEntry:
+        | Awaited<ReturnType<typeof readSchedule>>[number]
+        | undefined;
       if (p.assignmentId) {
         const a = await ctx.db.get(p.assignmentId);
         if (a) {
@@ -630,9 +639,10 @@ export async function coreGrid(
             isProgramHandout =
               isProgramHandoutActivity(act, a) &&
               a.scholarGroupId === p.groupId;
-            const entry = (a.activitySchedule ?? []).find(
+            const entry = (await scheduleFor(a)).find(
               (e) => e.activityId === p.activityId,
             );
+            linkedEntry = entry;
             if (entry) linkState = entry.setAt == null ? "planned" : "live";
           }
         }
@@ -647,6 +657,25 @@ export async function coreGrid(
         if (push) linkState = push.setAt == null ? "planned" : "live";
       }
       const t = p.teacherId ? teacherById.get(String(p.teacherId)) : null;
+      // The give's actual finish: its schedule entry once materialized, else
+      // the cell's own mode.
+      const finishMode = linkedEntry?.mode ?? p.mode ?? "classFocus";
+      // Open until a later day (shared/openUntil.ts) is class work, not
+      // homework (TRA-724): it stays in its class cell, whose chip says
+      // "Open until Thu", and never rails to the Homework due row.
+      const openUntil = linkedEntry
+        ? openUntilClosesAt(linkedEntry, closureTimeZone)
+        : null;
+      const railWeekday = homeworkRailWeekday({
+        weekday: p.weekday ?? null,
+        inHomeworkBlock:
+          p.blockId != null && homeworkBlockIds.has(String(p.blockId)),
+        finishMode,
+        dueAt:
+          linkedEntry?.mode === "homework" ? (linkedEntry.dueAt ?? null) : null,
+        week,
+        timeZone: closureTimeZone,
+      });
       return {
         _id: p._id,
         groupId: p.groupId,
@@ -669,23 +698,28 @@ export async function coreGrid(
         // Unit title for the chip's secondary line ("<unit> · n of N").
         unitTitle,
         isProgramHandout,
+        // A skill practice pair (lib/skillPractice.ts, a lesson-less one-skill problem set): no
+        // curriculum owns it, so removing its LAST placement retires it and
+        // clears its live schedule (retireSkillAdapterIfOrphaned).
+        isSkillSlot: (() => {
+          const act = p.activityId ? activityById.get(String(p.activityId)) : undefined;
+          return act ? isSkillAdapterActivity(act) : false;
+        })(),
         mode: p.mode ?? null,
+        finishMode,
+        // When an open-until give's window closes, else null.
+        openUntil,
+        // "Open until Thu" on the chip: the grid's one sign of when it closes.
+        openUntilLabel:
+          openUntil != null ? openUntilWeekdayPhrase(openUntil, closureTimeZone) : null,
+        // Set when this chip renders in the Homework due row (that weekday)
+        // rather than its class cell. Relative to the requested week.
+        railWeekday,
         spanBlocks: p.spanBlocks ?? null,
         note: p.note ?? null,
         onShelf: p.weekday == null || p.blockId == null,
         linkState,
         weekStartMs: p.weekStartMs ?? null,
-        sequenceId: p.sequenceId ?? null,
-        sequenceIndex: p.sequenceIndex ?? null,
-        sequenceRank: p.sequenceId
-          ? sequenceRanks.get(String(p._id)) ?? null
-          : null,
-        // Total chips in this cascade sequence (for "n of N").
-        sequenceLength: p.sequenceId
-          ? sequenceRows.get(p.sequenceId)?.length ?? null
-          : null,
-        orderOverride: p.orderOverride ?? false,
-        createdFromStrategy: p.createdFromStrategy ?? null,
       };
     }),
   );
@@ -751,12 +785,16 @@ export async function coreGrid(
   const dueUnitCache = new Map<string, Doc<"units"> | null>();
   const dueTeacherCache = new Map<string, Doc<"users"> | null>();
   for (const assignment of assignmentRows) {
-    for (const entry of assignment.activitySchedule ?? []) {
+    const scheduleRows = await loadScheduleRows(ctx, assignment._id);
+    const filedClasses = firstClassIdByWork(scheduleRows);
+    for (const entry of await readSchedule(ctx, assignment, undefined, scheduleRows)) {
+      // A due date lands in the Homework due row of that day. Open-until work
+      // is class work, not homework (TRA-724), so it never does.
+      const closesAt = entry.mode === "homework" ? entry.dueAt : undefined;
       if (
-        entry.mode !== "homework" ||
         entry.setAt == null ||
-        entry.dueAt == null ||
-        scheduleWeekStartMs(entry.dueAt, closureTimeZone) !== week
+        closesAt == null ||
+        scheduleWeekStartMs(closesAt, closureTimeZone) !== week
       ) {
         continue;
       }
@@ -811,14 +849,18 @@ export async function coreGrid(
         );
       }
       const teacher = dueTeacherCache.get(teacherKey) ?? null;
-      const dueDayKey = dayKeyForTimezone(entry.dueAt, closureTimeZone);
+      const dueDayKey = dayKeyForTimezone(closesAt, closureTimeZone);
       const weekday = weekdayForDayKey(dueDayKey);
       if (weekday < 1 || weekday > 5) continue;
 
+      // The label is the same for every group, so it is read once per entry.
+      const workSubject = await homeworkSubjectLabel(ctx, {
+        classId: filedClasses.get(scheduleWorkKey(entry.activityId, entry.mode)),
+        ...(assignment.unitId
+          ? { unitId: assignment.unitId }
+          : { activityId: entry.activityId }),
+      });
       for (const group of matchedGroups) {
-        const linkedPlacement = linkedPlacements.find(
-          (placement) => placement.groupId === group._id,
-        );
         homeworkDue.push({
           key: `${assignment._id}:${entry.activityId}:${group._id}`,
           assignmentId: assignment._id,
@@ -826,16 +868,15 @@ export async function coreGrid(
           activityTitle: activity?.title ?? "(deleted activity)",
           unitTitle: unit?.title ?? assignment.title ?? null,
           subject:
-            linkedPlacement?.subject ??
-            unit?.subject ??
-            unit?.title ??
+            workSubject ??
             assignment.title ??
             "Homework",
           teacherId: assignment.teacherId,
           teacherName: teacher?.name ?? null,
           teacherUsername: teacher?.username ?? null,
           groupId: group._id,
-          dueAt: entry.dueAt,
+          dueAt: closesAt,
+          startsAt: entry.startsAt ?? entry.setAt,
           weekday,
           mode: "homework" as const,
           linkState: "live" as const,
@@ -848,10 +889,16 @@ export async function coreGrid(
       (item) => `${item.assignmentId}:${item.activityId}:${item.groupId}`,
     ),
   );
+  // The projection replaces a homework-block card. A card railed out of a
+  // CLASS cell stays: the client draws its class's block title in that cell
+  // (the class still met) and skips it in the Homework due row, where the
+  // projection already shows it.
   weekPlacements = weekPlacements.filter(
     (placement) =>
       !(
-        placement.mode === "homework" &&
+        placement.finishMode === "homework" &&
+        (placement.blockId == null ||
+          homeworkBlockIds.has(String(placement.blockId))) &&
         placement.assignmentId &&
         placement.activityId &&
         projectedHomeworkKeys.has(
@@ -865,14 +912,9 @@ export async function coreGrid(
   const { coverage, conflicts } = allowedGroupIds
     ? { coverage: [], conflicts: [] }
     : deriveCoverage(blocks, weekSourcePlacements, week);
-  const { overloaded, outOfOrder } = allowedGroupIds
-    ? { overloaded: [], outOfOrder: [] }
-    : deriveFlags(
-        blocks,
-        weekSourcePlacements,
-        week,
-        placementsWithValidActivities,
-      );
+  const { overloaded } = allowedGroupIds
+    ? { overloaded: [] }
+    : deriveFlags(blocks, weekSourcePlacements, week);
 
   return {
     period: period
@@ -893,14 +935,17 @@ export async function coreGrid(
     placements: enriched,
     weekPlacements,
     homeworkDue,
-    shelf: enriched.filter((p) => p.onShelf),
+    // Classes waiting for a day. Work never waits here (TRA-582); a legacy
+    // shelved work row stays hidden.
+    shelf: enriched.filter((p) => p.onShelf && !p.activityId && !p.assignmentId),
     coverage,
     conflicts,
     overloaded,
-    outOfOrder,
     teachers,
     groups,
     closureTimeZone,
+    // The institution-local Monday this grid describes.
+    weekStartMs: week,
     closures: closures.map((c) => ({
       startDayKey: c.startDayKey,
       endDayKey: c.endDayKey,
@@ -916,9 +961,25 @@ export const grid = teacherQuery({
     // The week the grid is anchored to (Monday 00:00 institution-local, via the shared
     // scheduleWeekStartMs). Optional — omitted means the wall-clock current week.
     weekStartMs: v.optional(v.number()),
+    // Readers that never draw gives (the Now view, Classes & times) skip them,
+    // so they neither pay for them nor re-run on every push write.
+    skipGives: v.optional(v.boolean()),
   },
-  handler: (ctx, { periodId, weekStartMs }) =>
-    coreGrid(ctx, periodId, weekStartMs),
+  handler: async (ctx, { periodId, weekStartMs, skipGives }) => {
+    // The term's school must be one the caller may see: the same boundary the
+    // placement and block mutations enforce, so a foreign periodId is refused
+    // instead of answering with another school's timetable.
+    await requireScheduleScopeAccessible(ctx, ctx.user, { periodId });
+    const grid = await coreGrid(ctx, periodId, weekStartMs);
+    // The work given this week, and each class meeting with its Up next
+    // (TRA-582).
+    return {
+      ...grid,
+      ...(skipGives
+        ? { gives: [], classMeetings: [] }
+        : await gridGivesFor(ctx, periodId, grid, { withUpNext: true })),
+    };
+  },
 });
 
 /** Reporting periods for the institutions represented by the caller's grants. */
@@ -985,14 +1046,20 @@ export const programGrid = staffQuery({
       weekStartMs,
       allowedGroupIds,
     );
+    const groups = periodGroups.map((group) => ({
+      _id: group._id,
+      name: group.name,
+      emoji: group.emoji ?? null,
+    }));
     return {
       ...scopedGrid,
       // A granted program remains selectable before its first timetable
       // placement; schedule rows must not be the authorization inventory.
-      groups: periodGroups.map((group) => ({
-        _id: group._id,
-        name: group.name,
-        emoji: group.emoji ?? null,
+      groups,
+      // Gives and class meetings of the granted groups only (TRA-582).
+      ...(await gridGivesFor(ctx, periodId, { ...scopedGrid, groups }, {
+        withUpNext: false,
+        cardsDrawn: true,
       })),
     };
   },
@@ -1150,7 +1217,9 @@ export const programGroupCurriculumAccess = authedQuery({
 export const aideGrid = internalQuery({
   args: { callerUserId: v.id("users"), periodId: v.id("reportingPeriods") },
   handler: async (ctx, { callerUserId, periodId }) => {
-    await requireTeacherCaller(ctx, callerUserId);
+    const caller = await requireTeacherCaller(ctx, callerUserId);
+    // termId is the model's string, so it gets the same school check as grid.
+    await requireScheduleScopeAccessible(ctx, caller, { periodId });
     return coreGrid(ctx, periodId);
   },
 });
@@ -1189,7 +1258,10 @@ export const aideTermTimeZone = internalQuery({
 export const periodClock = teacherQuery({
   args: { periodId: v.id("reportingPeriods") },
   handler: async (ctx, args) => {
+    await requireScheduleScopeAccessible(ctx, ctx.user, args);
     const { timeZone } = await closuresForPeriod(ctx, args.periodId);
+    // t11-ok: only the time zone is load-bearing. Its one caller passes this to
+    // useInstitutionDay, which swaps in the device clock's day right after mount.
     return institutionDayAt(Date.now(), timeZone);
   },
 });
@@ -1204,35 +1276,67 @@ function weekdayForDayKey(dayKey: string): number {
  * Today's bell-schedule structure for the calling scholar. The response is
  * intentionally limited to classroom-wall facts; linked work ids never cross
  * this boundary.
+ *
+ * Answers for the institution-local `dayKey` the client sends (its
+ * `useInstitutionDay`), so the subscription never depends on when the server
+ * last ran it (T11). A key `institutionDayForRequest` refuses (a neighbouring
+ * day away from midnight, or anything further) gets the server's own day.
  */
 export const currentBlockForSelf = authedQuery({
   args: { dayKey: v.string() },
   handler: async (ctx, args) => {
     const scholar = ctx.user;
     const timeZone = await timeZoneForScholar(ctx, scholar._id);
-    const now = Date.now();
-    const serverDayKey = dayKeyForTimezone(now, timeZone);
-    const weekday = weekdayForDayKey(serverDayKey);
-    // The requested key is a cache-buster only. All filtering uses the
-    // server-authoritative institution-local day.
-    void args.dayKey;
+    const { dayKey } = institutionDayForRequest(
+      args.dayKey,
+      timeZone,
+    );
+    const weekday = weekdayForDayKey(dayKey);
 
     // No-school day? Short-circuit to a closed state so the scholar's "Right
     // now" strip shows "No School — <label>" instead of an empty bell schedule.
     // Both holiday + staffOnly mean no classes for the scholar.
     const closures = await loadInstitutionClosures(ctx, scholar.institutionId);
-    const closure = isClosedDay(serverDayKey, closures);
+    const closure = isClosedDay(dayKey, closures);
     if (closure) {
       return {
         timeZone,
         blocks: [],
         closure: { label: closure.label, kind: closure.kind },
+        trip: null,
       };
     }
 
+    // A field trip today for one of the scholar's groups (TRA-601): Home names
+    // it, and the blocks it covers drop out of the strip because the scholar
+    // is away for them. Only the first trip of the day is named.
+    const { trips } = await tripsForScholar(ctx, scholar._id, dayKey, dayKey);
+    const todayTrip = [...trips].sort((a, b) => a.startLocal.localeCompare(b.startLocal))[0];
+    const trip = todayTrip
+      ? {
+          destination: todayTrip.destination,
+          startLocal: todayTrip.startLocal,
+          endLocal: todayTrip.endLocal,
+        }
+      : null;
+    const awayForBlock = (startLocal: string, endLocal: string) => {
+      const start = parseHHMM(startLocal);
+      const end = parseHHMM(endLocal);
+      if (start == null || end == null || trips.length === 0) return false;
+      let startsAt: number;
+      let endsAt: number;
+      try {
+        startsAt = instantForLocalMinutes(dayKey, start, timeZone);
+        endsAt = instantForLocalMinutes(dayKey, end, timeZone);
+      } catch {
+        return false; // a DST gap: no block meets there
+      }
+      return trips.some((t) => tripOverlaps(t, timeZone, startsAt, endsAt));
+    };
+
     const timetable = await scholarTimetableContext(ctx, scholar);
     if (!timetable.periodId || timetable.groupIds.length === 0) {
-      return { timeZone, blocks: [], closure: null };
+      return { timeZone, blocks: [], closure: null, trip };
     }
 
     const allBlocks = await ctx.db
@@ -1240,7 +1344,10 @@ export const currentBlockForSelf = authedQuery({
       .withIndex("by_period", (q) => q.eq("periodId", timetable.periodId!))
       .collect();
     const sharedBlocks = allBlocks.filter((block) => block.groupId == null);
-    const currentWeek = currentWeekStartMs(now, timeZone);
+    const currentWeek = currentWeekStartMs(
+      dayStartForDayKey(dayKey, timeZone),
+      timeZone,
+    );
     const placements = timetable.placements.filter(
       (placement) =>
         placement.weekday === weekday &&
@@ -1353,7 +1460,12 @@ export const currentBlockForSelf = authedQuery({
         a.key.localeCompare(b.key) ||
         (a.subject ?? "").localeCompare(b.subject ?? ""),
     );
-    return { timeZone, blocks, closure: null };
+    return {
+      timeZone,
+      blocks: blocks.filter((block) => !awayForBlock(block.startLocal, block.endLocal)),
+      closure: null,
+      trip,
+    };
   },
 });
 
@@ -1414,6 +1526,116 @@ async function coreCreateBlock(
   });
 }
 
+/** The refusal a teacher sees for a bell-schedule edit (Andy, 2026-11-08). */
+export const BELL_SCHEDULE_ADMIN_ONLY = "Only a school admin can change the bell schedule.";
+
+/**
+ * The bell schedule is school-wide, so only the school's leaders change it
+ * (Andy, 2026-11-08): a `school_admin` of the term's school, or a platform
+ * admin. Teachers keep editing their own groups' weekly classes through the
+ * placement mutations. The term's school must also be reachable by the caller
+ * (requireScheduleScopeAccessible), which closes the cross-tenant gap on a
+ * `createBlock` with no group (TRA-604). Standing comes from the caller's
+ * school_admin MEMBERSHIP at that school, not `users.role` alone, so a leader
+ * of one school who teaches at another can't reshape the other's day.
+ */
+/**
+ * Whether `user` leads the term's school: a `school_admin` membership there, a
+ * legacy school admin of the primary school (the shared
+ * `usesLegacyPrimaryStaffing` rule), or a platform admin. The bell-schedule
+ * gate below and the page's `canEditBellSchedule` both read this, so the page
+ * offers editing exactly when the server allows it.
+ */
+async function leadsTermSchool(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  periodId: Id<"reportingPeriods">,
+): Promise<boolean> {
+  if (isPlatformAdminRole(user.role)) return true;
+  const period = await ctx.db.get(periodId);
+  const institutionId =
+    period?.institutionId ?? (await primaryInstitutionId(ctx));
+  if (institutionId == null) return false;
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", user._id))
+    .collect();
+  if (
+    memberships.some(
+      (m) => m.role === ROLES.SCHOOL_ADMIN && m.institutionId === institutionId,
+    )
+  ) {
+    return true;
+  }
+  return (
+    user.role === ROLES.SCHOOL_ADMIN &&
+    usesLegacyPrimaryStaffing(user, memberships) &&
+    institutionId === (await primaryInstitutionId(ctx))
+  );
+}
+
+async function requireBellScheduleAdmin(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  periodId: Id<"reportingPeriods">,
+): Promise<void> {
+  await requireScheduleScopeAccessible(ctx, user, { periodId });
+  if (!(await leadsTermSchool(ctx, user, periodId))) {
+    throw new ConvexError(BELL_SCHEDULE_ADMIN_ONLY);
+  }
+}
+
+/**
+ * The school boundary for a write keyed by a term and a group: both must be in
+ * the caller's schools (requireScheduleScopeAccessible), and any block or
+ * placement the client names must belong to that same term, so a local term
+ * can't carry a write onto another term's row.
+ */
+async function requireTermWriteScope(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  args: {
+    periodId: Id<"reportingPeriods">;
+    groupId: Id<"scholarGroups">;
+    blockIds?: (Id<"scheduleBlocks"> | undefined)[];
+    placementIds?: (Id<"schedulePlacements"> | undefined)[];
+  },
+): Promise<void> {
+  await requireScheduleScopeAccessible(ctx, user, {
+    periodId: args.periodId,
+    groupId: args.groupId,
+  });
+  for (const blockId of args.blockIds ?? []) {
+    if (!blockId) continue;
+    const block = await ctx.db.get(blockId);
+    if (block && block.periodId !== args.periodId) {
+      throw new Error("Forbidden: that block belongs to a different term");
+    }
+  }
+  for (const placementId of args.placementIds ?? []) {
+    if (!placementId) continue;
+    const placement = await ctx.db.get(placementId);
+    if (placement && placement.periodId !== args.periodId) {
+      throw new Error("Forbidden: that placement belongs to a different term");
+    }
+  }
+}
+
+/** Whether the caller may change this term's bell schedule: the same rule the
+ *  block mutations enforce. False (never a throw) for a term the caller can't
+ *  reach, so the page simply shows the schedule read-only. */
+export const canEditBellSchedule = teacherQuery({
+  args: { periodId: v.id("reportingPeriods") },
+  handler: async (ctx, { periodId }) => {
+    try {
+      await requireScheduleScopeAccessible(ctx, ctx.user, { periodId });
+    } catch {
+      return false;
+    }
+    return leadsTermSchool(ctx, ctx.user, periodId);
+  },
+});
+
 export const createBlock = teacherMutation({
   args: {
     periodId: v.id("reportingPeriods"),
@@ -1428,25 +1650,26 @@ export const createBlock = teacherMutation({
     kind: v.optional(blockKindValidator),
   },
   handler: async (ctx, args) => {
-    // Institution boundary: groupId is optional (a shared/ungrouped block has
-    // none), so only guard when the caller named a group.
+    // A group-only block must also name a group the caller can reach; the
+    // tenancy refusal comes before the admin-only one.
     if (args.groupId) {
       await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
     }
+    await requireBellScheduleAdmin(ctx, ctx.user, args.periodId);
     return coreCreateBlock(ctx, args);
   },
 });
 
 // ── Homework (Q3) ─────────────────────────────────────────────────────────
 //
-// Homework is a scholar obligation with a due day, NOT a room reservation. To
-// keep the "a placed row has BOTH weekday and blockId" invariant while showing
-// homework in a top-of-day DUE RAIL (not a bell block), a term gets ONE virtual
-// `kind:"homework"` block that every homework chip pins to. The frontend pulls
-// kind:"homework" out of the bell grid and renders those chips as the due rail
-// on their weekday. Its startLocal ("08:00") is the MVP release time; reconcile
-// sets dueAt = end of the due day. Homework can also sit on the shelf (no
-// weekday) while its due day is undecided. See scheduling-model-sketches.html §5.
+// Homework is a scholar obligation with a due day, NOT a room reservation. A
+// term gets ONE virtual `kind:"homework"` block, the grid's top-of-day
+// Homework due row. On the teacher grid that row draws homework GIVES
+// (gridGiveActions.giveHomework writes them). Only program handouts still pin
+// a homework chip to the block (corePlaceHomework, from placeProgramHandout,
+// placeProgramHomework and placeProgramHomeworkOnDate); there is no public
+// homework-card writer. Its startLocal ("08:00") is a chip's release time; reconcile sets dueAt = end of the due day. See
+// scheduling-model-sketches.html §5.
 
 const HOMEWORK_BLOCK_KEY = "homework-due";
 
@@ -1476,9 +1699,13 @@ async function ensureHomeworkBlock(
   });
 }
 
-/** Place (or shelf) a homework chip. Resolves the virtual homework block so the
- *  caller only picks a DUE weekday (or omits it to shelf). */
-async function corePlaceHomework(
+/** Place a homework chip on its due weekday. Resolves the virtual homework
+ *  block so the caller only picks the DUE weekday. Work needs that day: with
+ *  none, corePlaceClass refuses it (WORK_NEEDS_A_DAY), as the shelf retired
+ *  for work (TRA-582). */
+// Exported for program handouts' own callers and for tests that seed a card
+// placed before TRA-582; the teacher grid gives work instead.
+export async function corePlaceHomework(
   ctx: MutationCtx,
   args: {
     periodId: Id<"reportingPeriods">;
@@ -1509,43 +1736,6 @@ async function corePlaceHomework(
   });
 }
 
-export const placeHomework = teacherMutation({
-  args: {
-    periodId: v.id("reportingPeriods"),
-    groupId: v.id("scholarGroups"),
-    subject: v.string(),
-    teacherId: v.optional(v.id("users")),
-    assignmentId: v.optional(v.id("assignments")),
-    activityId: v.optional(v.id("activities")),
-    dueWeekday: v.optional(v.number()),
-    weekStartMs: v.optional(v.number()),
-    note: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    // Institution boundary: the named group is the write key for this
-    // placement, teacherId (when supplied) is a second write key, and
-    // assignmentId (when supplied) is a third — linking a foreign assignment
-    // is exactly as much a tenancy question as naming a foreign group/staffer.
-    await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
-    if (args.teacherId) {
-      await requireStaffAccessible(ctx, ctx.user, args.teacherId);
-    }
-    if (args.assignmentId) {
-      await requireAssignmentAccessible(ctx, ctx.user, args.assignmentId);
-    } else if (args.activityId && args.teacherId) {
-      // Mirrors corePlaceHomework/corePlaceClass's own auto-provision
-      // condition (no explicit assignment + an owner) — without an
-      // assignmentId, a client-supplied activityId auto-ensures a NEW local
-      // assignment against THAT activity's unit. Authorize the unit first,
-      // or a foreign activityId could smuggle a foreign institution's
-      // curriculum into a locally-provisioned assignment.
-      const unitId = await unitIdForActivity(ctx, args.activityId);
-      if (unitId) await requireUnitAccess(ctx, unitId);
-    }
-    return corePlaceHomework(ctx, args);
-  },
-});
-
 /** Idempotently provision a term's virtual homework-due block so the top-of-day
  *  DUE RAIL is discoverable even before any homework exists. Without this the rail
  *  only appears after the first homework placement (chicken-and-egg): no block →
@@ -1553,7 +1743,10 @@ export const placeHomework = teacherMutation({
  *  affordance — never render. Find-or-create, so calling it repeatedly is safe. */
 export const ensureHomeworkRail = teacherMutation({
   args: { periodId: v.id("reportingPeriods") },
-  handler: (ctx, { periodId }) => ensureHomeworkBlock(ctx, periodId),
+  handler: async (ctx, { periodId }) => {
+    await requireScheduleScopeAccessible(ctx, ctx.user, { periodId });
+    return ensureHomeworkBlock(ctx, periodId);
+  },
 });
 
 async function coreUpdateBlock(
@@ -1610,13 +1803,16 @@ async function coreUpdateBlock(
   // WITHIN the same occurrence (same calendar date) a start/end edit legally
   // retimes an already-open push in place (reconcileAppPlacement), while a
   // teacher-cleared occurrence stays terminal through it regardless.
-  if (args.startLocal !== undefined || args.endLocal !== undefined) {
+  if (args.startLocal !== undefined || args.endLocal !== undefined ||
+      args.weekdays !== undefined || args.kind !== undefined) {
     const onBlock = await ctx.db
       .query("schedulePlacements")
       .withIndex("by_block", (q) => q.eq("blockId", args.blockId))
       .collect();
-    for (const p of onBlock) {
-      await reconcilePlacementById(ctx, p._id);
+    if (args.startLocal !== undefined || args.endLocal !== undefined) {
+      await reconcilePlacementsById(ctx, onBlock.map((p) => ({ id: p._id })));
+    } else {
+      await syncClassesForPlacements(ctx, onBlock);
     }
   }
 }
@@ -1636,14 +1832,21 @@ export const updateBlock = teacherMutation({
     const block = await ctx.db.get(args.blockId);
     if (block) {
       await requireScheduleScopeAccessible(ctx, ctx.user, block);
+      await requireBellScheduleAdmin(ctx, ctx.user, block.periodId);
     }
     return coreUpdateBlock(ctx, args);
   },
 });
 
+/** Work can't wait on the shelf (TRA-582): it is given to a class meeting. */
+export const WORK_NEEDS_A_DAY =
+  "Only a class can wait without a day. Work is given to a class meeting: pick a day and block.";
+
 /**
- * Delete a block. Any placements on it are moved to the SHELF (weekday/block
- * nulled) rather than deleted — never silently drop a teacher's planned class.
+ * Remove a bell block. Its classes move to "not yet scheduled" (Classes &
+ * times shows them); placements carrying work are deleted, leaving the work
+ * as the gives it already made (a placement's give outlives its card, as on
+ * the teacher grid). Returns how many classes moved.
  */
 async function coreRemoveBlock(ctx: MutationCtx, blockId: Id<"scheduleBlocks">): Promise<number> {
   const block = await ctx.db.get(blockId);
@@ -1652,19 +1855,18 @@ async function coreRemoveBlock(ctx: MutationCtx, blockId: Id<"scheduleBlocks">):
     .query("schedulePlacements")
     .withIndex("by_block", (q) => q.eq("blockId", blockId))
     .collect();
-  for (const p of onBlock) {
+  const work = onBlock.filter((p) => p.activityId != null || p.assignmentId != null);
+  const classes = onBlock.filter((p) => p.activityId == null && p.assignmentId == null);
+  for (const p of classes) {
     await ctx.db.patch(p._id, { blockId: undefined, weekday: undefined });
-    // A shelved placement has no live window: reconcile so it SETTLES
-    // rather than leaving a stale materialization behind — this is what
-    // unmaterializes a still-planned activitySchedule entry and, for an
-    // app target, clears its push (unmaterializeIfNoPlacementInWeek's
-    // shelf branch handles both; without this an app placement's push
-    // and scheduled jobs simply kept running against a slot that no
-    // longer exists).
-    await reconcilePlacementById(ctx, p._id);
   }
+  for (const p of work) await ctx.db.delete(p._id);
   await ctx.db.delete(blockId);
-  return onBlock.length;
+  // Shelved classes have no live window: settle their app pushes. Deleted
+  // work rows keep their gives; their class records re-sync.
+  await reconcilePlacementsById(ctx, classes.map((p) => ({ id: p._id })), classes);
+  await syncClassesForPlacements(ctx, work);
+  return classes.length;
 }
 
 export const removeBlock = teacherMutation({
@@ -1673,6 +1875,7 @@ export const removeBlock = teacherMutation({
     const block = await ctx.db.get(blockId);
     if (block) {
       await requireScheduleScopeAccessible(ctx, ctx.user, block);
+      await requireBellScheduleAdmin(ctx, ctx.user, block.periodId);
     }
     return coreRemoveBlock(ctx, blockId);
   },
@@ -1737,11 +1940,47 @@ async function ensureAssignmentForGroupUnit(
     unitId: args.unitId,
     scholarIds: roster,
     startedAt: Date.now(),
-    activitySchedule: [],
   });
 }
 
-async function corePlaceClass(
+/**
+ * Only a class block takes a class's work or an app. Recess, lunch and prep
+ * rows are not class time: they keep only BARE rows (a subject and a teacher,
+ * nothing pushed to scholars), which is how supervision is staffed
+ * (`blockStaffNeed` counts the adults placed there). The homework row takes
+ * only homework chips, which `corePlaceHomework` pins there with mode
+ * "homework". Before this check an activity or app could land in any row, and
+ * an app "all day" for a group became a copy in every row of the day, recess
+ * and lunch included (2026-10-30). Exported for tests.
+ */
+export function assertBlockTakesPlacement(
+  block: Pick<Doc<"scheduleBlocks">, "kind" | "label">,
+  placement: {
+    mode?: "classFocus" | "homework";
+    activityId?: Id<"activities">;
+    assignmentId?: Id<"assignments">;
+    externalAppId?: Id<"externalApps">;
+  },
+): void {
+  const kind = block.kind ?? "class";
+  if (kind === "class") return;
+  if (kind === "homework") {
+    if (placement.mode === "homework") return;
+    throw new ConvexError(
+      "The homework row holds homework only. Give the work a due date instead, or put the class in a class block.",
+    );
+  }
+  if (!placement.activityId && !placement.assignmentId && !placement.externalAppId) {
+    return;
+  }
+  throw new ConvexError(
+    `${block.label} is a ${kind} block, so it can't hold an activity or an app. Put it in a class block.`,
+  );
+}
+
+// Exported for tests that seed a card placed before TRA-582. The public
+// placeClass takes no work; program handouts call it in-file.
+export async function corePlaceClass(
   ctx: MutationCtx,
   args: {
     periodId: Id<"reportingPeriods">;
@@ -1759,9 +1998,6 @@ async function corePlaceClass(
     spanBlocks?: number;
     note?: string;
     weekStartMs?: number;
-    sequenceId?: string;
-    sequenceIndex?: number;
-    createdFromStrategy?: "contiguous" | "daily" | "unitPacing" | "classMeetings" | "sameDay" | "chat";
     // Signed-in teacher — owns an assignment auto-ensured for a slot-fill.
     actorId?: Id<"users">;
     // Internal callers that already resolved the term avoid a duplicate lookup.
@@ -1795,6 +2031,15 @@ async function corePlaceClass(
   const shelved = args.weekday == null && args.blockId == null;
   if (!placed && !shelved) {
     throw new Error("A placement needs BOTH weekday and blockId (to place it) or NEITHER (to shelf it)");
+  }
+  // The shelf retired for work (TRA-582): only a class can wait without a day.
+  if (shelved && (args.activityId || args.assignmentId)) {
+    throw new ConvexError(WORK_NEEDS_A_DAY);
+  }
+  if (placed) {
+    const block = await ctx.db.get(args.blockId!);
+    if (!block) throw new Error("That block no longer exists.");
+    assertBlockTakesPlacement(block, args);
   }
   const weekStartMs =
     args.weekStartMs == null
@@ -1836,9 +2081,6 @@ async function corePlaceClass(
       teacherId: args.teacherId,
       spanBlocks: args.spanBlocks,
       note: args.note,
-      sequenceId: args.sequenceId,
-      sequenceIndex: args.sequenceIndex,
-      createdFromStrategy: args.createdFromStrategy,
     });
     if (existing) {
       const patch: Partial<Doc<"schedulePlacements">> = {};
@@ -1854,18 +2096,6 @@ async function corePlaceClass(
       ) {
         patch.weekStartMs = undefined;
       }
-      if (args.sequenceId !== undefined && existing.sequenceId !== args.sequenceId) {
-        patch.sequenceId = args.sequenceId;
-      }
-      if (args.sequenceIndex !== undefined && existing.sequenceIndex !== args.sequenceIndex) {
-        patch.sequenceIndex = args.sequenceIndex;
-      }
-      if (
-        args.createdFromStrategy !== undefined &&
-        existing.createdFromStrategy !== args.createdFromStrategy
-      ) {
-        patch.createdFromStrategy = args.createdFromStrategy;
-      }
       if (args.teacherId !== undefined && existing.teacherId !== args.teacherId) {
         patch.teacherId = args.teacherId;
       }
@@ -1879,6 +2109,7 @@ async function corePlaceClass(
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(existing._id, patch);
       }
+      await upsertClassForPlacement(ctx, { ...existing, ...patch });
       return existing._id;
     }
   }
@@ -1896,9 +2127,6 @@ async function corePlaceClass(
     spanBlocks: args.spanBlocks,
     note: args.note?.trim() || undefined,
     weekStartMs,
-    sequenceId: args.sequenceId,
-    sequenceIndex: args.sequenceIndex,
-    createdFromStrategy: args.createdFromStrategy,
   });
   // Auto-materialize into the live push layer (no manual Publish step).
   await reconcilePlacementById(ctx, placementId, weekStartMs);
@@ -2015,8 +2243,6 @@ export const placeClass = teacherMutation({
     groupId: v.id("scholarGroups"),
     subject: v.string(),
     teacherId: v.optional(v.id("users")),
-    assignmentId: v.optional(v.id("assignments")),
-    activityId: v.optional(v.id("activities")),
     externalAppId: v.optional(v.id("externalApps")),
     mode: v.optional(modeValidator),
     weekday: v.optional(v.number()),
@@ -2025,29 +2251,32 @@ export const placeClass = teacherMutation({
     note: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Work is a give to a class (gridGiveActions), never a new card.
     // Institution boundary: the named group is the write key for this
-    // placement, teacherId (when supplied) is a second write key, and
-    // assignmentId (when supplied) is a third — linking a foreign assignment
-    // is exactly as much a tenancy question as naming a foreign group/staffer.
-    await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
+    // placement and teacherId (when supplied) is a second one. The term and
+    // the block are checked too.
+    await requireTermWriteScope(ctx, ctx.user, {
+      periodId: args.periodId,
+      groupId: args.groupId,
+      blockIds: [args.blockId],
+    });
     if (args.teacherId) {
       await requireStaffAccessible(ctx, ctx.user, args.teacherId);
-    }
-    if (args.assignmentId) {
-      await requireAssignmentAccessible(ctx, ctx.user, args.assignmentId);
-    } else if (args.activityId) {
-      // Mirrors corePlaceClass's own auto-provision condition — the actor
-      // is always a valid fallback owner here, so no explicit assignmentId
-      // means this activityId auto-ensures a NEW local assignment against
-      // its unit. Authorize that unit first, or a foreign activityId could
-      // smuggle a foreign institution's curriculum into a locally-
-      // provisioned assignment.
-      const unitId = await unitIdForActivity(ctx, args.activityId);
-      if (unitId) await requireUnitAccess(ctx, unitId);
     }
     return corePlaceClass(ctx, { ...args, actorId: ctx.user._id });
   },
 });
+
+// ── Program handouts: activity cards on purpose ─────────────────────────
+//
+// The teacher grid gives work to a class (TRA-582: gridGiveActions), but the
+// program writers below still create activity CARDS, deliberately. The program
+// grid draws those cards, a handout's draft is a day-less card that anchors
+// editing it (createProgramHandoutDraft), and removing one returns it to that
+// draft (removeProgramHandoutPlacement). Program staff may also lack the
+// teacher or curriculum:run standing the give writers require. Moving program
+// handouts to gives would change how program staff publish, so it is out of
+// scope for the gives model until Andy decides otherwise.
 
 const programHandoutTargetValidator = v.union(
   v.object({
@@ -2113,8 +2342,8 @@ async function requireProgramHandoutPeriod(
 }
 
 /**
- * Creates the existing lesson-less activity + ad-hoc assignment shape used by
- * scheduleSkill. The dormant schedule entry is the authorization anchor for
+ * Creates a lesson-less activity + ad-hoc assignment, the same shape as a
+ * skill practice pair (lib/skillPractice.ts). The dormant schedule entry is the authorization anchor for
  * resource editing; it is not live and has no timing until placement.
  */
 export const createProgramHandoutDraft = authedMutation({
@@ -2138,12 +2367,13 @@ export const createProgramHandoutDraft = authedMutation({
       if (
         assignment.archivedAt ||
         assignment.kind !== "adHocDispatch" ||
-        assignment.unitId ||
-        (assignment.activitySchedule ?? []).length !== 1
+        assignment.unitId
       ) {
         continue;
       }
-      const entry = assignment.activitySchedule![0];
+      const draftSchedule = await readSchedule(ctx, assignment);
+      if (draftSchedule.length !== 1) continue;
+      const entry = draftSchedule[0];
       const activity = await ctx.db.get(entry.activityId);
       if (
         activity &&
@@ -2185,8 +2415,10 @@ export const createProgramHandoutDraft = authedMutation({
       title,
       kind: "adHocDispatch",
       startedAt: Date.now(),
-      activitySchedule: [{ activityId, mode: "classFocus" }],
     });
+    await writeSchedule(ctx, assignmentId, [
+      { activityId, mode: "classFocus" },
+    ]);
     // A shelved placement carries the period + group before the staff member
     // chooses class time or a calendar due date. It never materializes because
     // it has neither a block nor weekday.
@@ -2255,7 +2487,7 @@ export const placeProgramHandout = authedMutation({
     if (handout.group._id !== group._id) {
       throw new Error("Forbidden: handout assignment belongs to a different program group.");
     }
-    const draftEntry = (handout.assignment.activitySchedule ?? []).find(
+    const draftEntry = (await readSchedule(ctx, handout.assignment)).find(
       (entry) => entry.activityId === args.activityId,
     );
     const isUnplacedDraft =
@@ -2478,18 +2710,17 @@ export const removeProgramHandoutPlacement = authedMutation({
     // ownership anchor and shelf row so the author can adjust and re-place the
     // same handout. A live entry intentionally remains live (the normal
     // remove-placement lifecycle never retracts scholar-visible work).
+    const current = assignment ? await readSchedule(ctx, assignment) : [];
     if (
       assignment &&
-      !(assignment.activitySchedule ?? []).some(
-        (entry) => entry.activityId === args.activityId,
-      )
+      !current.some((entry) => entry.activityId === args.activityId)
     ) {
-      await ctx.db.patch(assignment._id, {
-        activitySchedule: [
-          ...(assignment.activitySchedule ?? []),
-          { activityId: args.activityId, mode: "classFocus" },
-        ],
-      });
+      await writeSchedule(
+        ctx,
+        assignment,
+        [...current, { activityId: args.activityId, mode: "classFocus" }],
+        { activityId: args.activityId },
+      );
     }
     await ctx.db.insert("schedulePlacements", {
       periodId: placement.periodId,
@@ -2516,7 +2747,7 @@ export const discardProgramHandoutDraft = authedMutation({
       .query("schedulePlacements")
       .withIndex("by_activity", (q) => q.eq("activityId", args.activityId))
       .collect();
-    const entries = handout.assignment.activitySchedule ?? [];
+    const entries = await readSchedule(ctx, handout.assignment);
     const entry = entries.find((candidate) => candidate.activityId === args.activityId);
     const shelf = placements.find(
       (placement) =>
@@ -2544,6 +2775,7 @@ export const discardProgramHandoutDraft = authedMutation({
     // a sibling placement, or another week's handout.
     await coreRemovePlacement(ctx, shelf._id);
     await ctx.db.delete(args.activityId);
+    await closeScheduleForAssignment(ctx, args.assignmentId);
     await ctx.db.delete(args.assignmentId);
     return { discarded: true };
   },
@@ -2573,16 +2805,15 @@ export const updateProgramHandout = authedMutation({
     );
     await ctx.db.patch(args.activityId, { title });
     await ctx.db.patch(args.assignmentId, { title });
-    await Promise.all(
-      placements
-        .filter(
-          (placement) =>
-            placement.assignmentId === args.assignmentId &&
-            placement.groupId === handout.group._id &&
-            previousTitles.has(placement.subject),
-        )
-        .map((placement) => ctx.db.patch(placement._id, { subject: title })),
+    const renamed = placements.filter(
+      (placement) =>
+        placement.assignmentId === args.assignmentId &&
+        placement.groupId === handout.group._id &&
+        previousTitles.has(placement.subject),
     );
+    await Promise.all(renamed.map((placement) =>
+      ctx.db.patch(placement._id, { subject: title })));
+    await syncClassesForPlacements(ctx, renamed);
     return { activityId: args.activityId, assignmentId: args.assignmentId, title };
   },
 });
@@ -2900,180 +3131,9 @@ export const placeProgramActivity = authedMutation({
   },
 });
 
-/** True iff this activity is a skill-adapter throwaway a `scheduleSkill` call
- *  minted: a lesson-less one-node `problem_set`. Curriculum problem sets are
- *  always lesson-owned, so `lessonId` is the discriminator. */
-function isSkillAdapterActivity(act: Doc<"activities">): boolean {
-  return (
-    act.kind === "problem_set" &&
-    !act.lessonId &&
-    (act.problemSet?.targetSkillKeys.length ?? 0) === 1
-  );
-}
-
-/**
- * Find the (assignment, activity) adapter pair an earlier `scheduleSkill`
- * minted for this (group × nodeKey), so scheduling the same skill again
- * converges on ONE assignment — the skill twin of
- * `ensureAssignmentForGroupUnit`'s (unit × exact roster) dedupe, and the same
- * exact-roster key (roster drift mints a fresh pair, matching the unit
- * behavior). The pair is located through the group's placements (the
- * assignment itself carries no nodeKey), so a pair whose last placement was
- * removed — and therefore archived by `retireSkillAdapterIfOrphaned` — is
- * never revived.
- */
-async function findSkillAdapterForGroup(
-  ctx: MutationCtx,
-  args: {
-    periodId: Id<"reportingPeriods">;
-    groupId: Id<"scholarGroups">;
-    nodeKey: string;
-    roster: Id<"users">[];
-  },
-): Promise<{ assignmentId: Id<"assignments">; activityId: Id<"activities"> } | null> {
-  const rosterSet = new Set(args.roster.map(String));
-  const placements = await ctx.db
-    .query("schedulePlacements")
-    .withIndex("by_period_group", (q) =>
-      q.eq("periodId", args.periodId).eq("groupId", args.groupId),
-    )
-    .collect();
-  for (const p of placements) {
-    if (!p.assignmentId || !p.activityId) continue;
-    const act = await ctx.db.get(p.activityId);
-    if (!act || act.archivedAt || !isSkillAdapterActivity(act)) continue;
-    if (act.problemSet?.targetSkillKeys[0] !== args.nodeKey) continue;
-    const a = await ctx.db.get(p.assignmentId);
-    if (!a || a.archivedAt || a.kind !== "adHocDispatch") continue;
-    if (
-      a.scholarIds.length !== rosterSet.size ||
-      !a.scholarIds.every((id) => rosterSet.has(String(id)))
-    ) {
-      continue;
-    }
-    return { assignmentId: p.assignmentId, activityId: p.activityId };
-  }
-  return null;
-}
-
-/**
- * Put one procedural knowledge node on the timetable by adapting it to the
- * shipped activity schedule: a lesson-less `problem_set` activity carries the
- * node in `targetSkillKeys`, and an ad-hoc assignment carries the group's
- * roster. From there placement reconciliation, scholar visibility, and the
- * existing skill-scoped practice runner are unchanged.
- */
-export const scheduleSkill = teacherMutation({
-  args: {
-    periodId: v.id("reportingPeriods"),
-    groupId: v.id("scholarGroups"),
-    subject: v.string(),
-    nodeKey: v.string(),
-    teacherId: v.optional(v.id("users")),
-    weekday: v.optional(v.number()),
-    blockId: v.optional(v.id("scheduleBlocks")),
-    placementId: v.optional(v.id("schedulePlacements")),
-  },
-  handler: async (ctx, args) => {
-    // Institution boundary: the named group is the read/write key for this
-    // placement, and teacherId (when supplied) is a second write key.
-    const group = await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
-    if (!group) throw new Error("Group not found");
-    if (args.teacherId) {
-      await requireStaffAccessible(ctx, ctx.user, args.teacherId);
-    }
-    const node = await ctx.db
-      .query("knowledgeNodes")
-      .withIndex("by_nodeKey", (q) => q.eq("nodeKey", args.nodeKey))
-      .first();
-    const practiceDomains = new Set(PRACTICE_DOMAINS.map((info) => info.domain));
-    if (!node || !practiceDomains.has(node.domain)) {
-      throw new Error("That math skill does not have targeted practice.");
-    }
-    const subject = args.subject.trim();
-    if (!subject) throw new Error("A skill placement needs a subject label");
-    const placed = args.weekday != null && args.blockId != null;
-    const shelved = args.weekday == null && args.blockId == null;
-    if (!placed && !shelved) {
-      throw new Error(
-        "A skill placement needs BOTH weekday and blockId (to place it) or NEITHER (to shelf it)",
-      );
-    }
-    const existingPlacement = args.placementId
-      ? await ctx.db.get(args.placementId)
-      : null;
-    if (args.placementId && !existingPlacement) {
-      throw new Error("Placement not found");
-    }
-    if (
-      existingPlacement &&
-      (existingPlacement.periodId !== args.periodId ||
-        existingPlacement.groupId !== args.groupId)
-    ) {
-      throw new Error("Placement does not belong to this term and group");
-    }
-
-    const teacherId = args.teacherId ?? existingPlacement?.teacherId ?? ctx.user._id;
-    const roster = Array.from(new Set(group.scholarIds));
-    // Reuse the existing (group × nodeKey) adapter pair when there is one —
-    // a second placement of the same skill must not put a duplicate practice
-    // row on every scholar's plate.
-    const existingPair = await findSkillAdapterForGroup(ctx, {
-      periodId: args.periodId,
-      groupId: args.groupId,
-      nodeKey: node.nodeKey,
-      roster,
-    });
-    let activityId = existingPair?.activityId;
-    if (!activityId) {
-      activityId = await ctx.db.insert("activities", {
-        title: node.label,
-        kind: "problem_set",
-        problemSet: {
-          domain: node.domain,
-          targetSkillKeys: [node.nodeKey],
-        },
-        order: 0,
-      });
-      await scheduleProblemSetItemGeneration(ctx, activityId);
-    }
-    const assignmentId =
-      existingPair?.assignmentId ??
-      (await ctx.db.insert("assignments", {
-        teacherId,
-        scholarIds: roster,
-        title: node.label,
-        kind: "adHocDispatch",
-        startedAt: Date.now(),
-        activitySchedule: [],
-      }));
-
-    if (args.placementId) {
-      await coreUpdatePlacement(ctx, {
-        placementId: args.placementId,
-        assignmentId,
-        activityId,
-        actorId: ctx.user._id,
-      });
-      return { placementId: args.placementId, assignmentId, activityId };
-    }
-
-    const placementId = await corePlaceClass(ctx, {
-      periodId: args.periodId,
-      groupId: args.groupId,
-      subject,
-      teacherId,
-      assignmentId,
-      activityId,
-      weekday: args.weekday,
-      blockId: args.blockId,
-      actorId: ctx.user._id,
-    });
-    return { placementId, assignmentId, activityId };
-  },
-});
-
-async function coreUpdatePlacement(
+// Exported for tests that relink a card placed before TRA-582. The public
+// updatePlacement only unlinks work (null).
+export async function coreUpdatePlacement(
   ctx: MutationCtx,
   args: {
     placementId: Id<"schedulePlacements">;
@@ -3129,9 +3189,19 @@ async function coreUpdatePlacement(
     patch.activityId = undefined;
     patch.assignmentId = undefined;
   }
+  // Work waits on no shelf (TRA-582): a class with no day can't carry it.
+  if ((args.activityId || args.assignmentId) && (p.weekday == null || p.blockId == null)) {
+    throw new ConvexError(WORK_NEEDS_A_DAY);
+  }
   if (args.mode !== undefined) patch.mode = args.mode;
   if (args.spanBlocks !== undefined) patch.spanBlocks = args.spanBlocks ?? undefined;
   if (args.note !== undefined) patch.note = args.note?.trim() || undefined;
+  // Filling a bare row that sits in a recess, lunch or prep row would put an
+  // activity or app there, which placing it directly refuses.
+  if (p.blockId && (args.activityId || args.externalAppId || args.assignmentId || args.mode)) {
+    const block = await ctx.db.get(p.blockId);
+    if (block) assertBlockTakesPlacement(block, { ...p, ...patch });
+  }
   // Filling a slot with a concrete activity that has no assignment link would
   // be inert (reconcile can't push it). Auto-ensure the (group × unit)
   // assignment so a slot-fill genuinely assigns — mirror of corePlaceClass.
@@ -3178,7 +3248,7 @@ async function coreUpdatePlacement(
   if (prevExternalAppId && !nextExternalAppId) {
     await clearPlacementAppPush(ctx, p._id, "teacher");
   }
-  await reconcilePlacementById(ctx, args.placementId);
+  await reconcilePlacementById(ctx, args.placementId, undefined, p);
 }
 
 export const updatePlacement = teacherMutation({
@@ -3186,8 +3256,10 @@ export const updatePlacement = teacherMutation({
     placementId: v.id("schedulePlacements"),
     subject: v.optional(v.string()),
     teacherId: v.optional(v.union(v.id("users"), v.null())),
-    assignmentId: v.optional(v.union(v.id("assignments"), v.null())),
-    activityId: v.optional(v.union(v.id("activities"), v.null())),
+    // Only null, which unlinks a card placed before TRA-582 (the detail
+    // drawer's Remove). Linking work is a give (gridGiveActions).
+    assignmentId: v.optional(v.null()),
+    activityId: v.optional(v.null()),
     externalAppId: v.optional(v.union(v.id("externalApps"), v.null())),
     mode: v.optional(modeValidator),
     spanBlocks: v.optional(v.union(v.number(), v.null())),
@@ -3200,13 +3272,6 @@ export const updatePlacement = teacherMutation({
       if (args.teacherId) {
         await requireStaffAccessible(ctx, ctx.user, args.teacherId);
       }
-      if (args.assignmentId) {
-        await requireAssignmentAccessible(ctx, ctx.user, args.assignmentId);
-      }
-      if (args.activityId) {
-        const unitId = await unitIdForActivity(ctx, args.activityId);
-        if (unitId) await requireUnitAccess(ctx, unitId);
-      }
     }
     return coreUpdatePlacement(ctx, { ...args, actorId: ctx.user._id });
   },
@@ -3214,8 +3279,9 @@ export const updatePlacement = teacherMutation({
 
 /**
  * Move a placement to a new (weekday, block) — the drag-drop primitive. Pass
- * BOTH to place it, or NEITHER (both null) to send it to the shelf. A concrete
- * placement follows the displayed target week; recurring rows stay recurring.
+ * BOTH to place it, or NEITHER (both null) to take a CLASS off its day; work
+ * never loses its day (WORK_NEEDS_A_DAY, TRA-582). A concrete placement
+ * follows the displayed target week; recurring rows stay recurring.
  */
 async function coreMovePlacement(
   ctx: MutationCtx,
@@ -3233,6 +3299,14 @@ async function coreMovePlacement(
   const shelved = args.weekday == null && args.blockId == null;
   if (!placed && !shelved) {
     throw new Error("Move needs BOTH weekday and blockId, or NEITHER (to shelf)");
+  }
+  if (shelved && (p.activityId || p.assignmentId)) {
+    throw new ConvexError(WORK_NEEDS_A_DAY);
+  }
+  if (placed && args.blockId !== p.blockId) {
+    const block = await ctx.db.get(args.blockId!);
+    if (!block) throw new Error("That block no longer exists.");
+    assertBlockTakesPlacement(block, { ...p, mode: args.mode ?? p.mode });
   }
   const timeZone =
     p.weekStartMs != null && args.weekStartMs != null
@@ -3286,6 +3360,7 @@ async function coreMovePlacement(
     ctx,
     args.placementId,
     p.weekStartMs != null ? nextWeekStartMs : undefined,
+    p,
   );
 }
 
@@ -3383,8 +3458,8 @@ export const shiftPlacement = teacherMutation({
 });
 
 /**
- * Retire the throwaway (activity, assignment) adapter pair a `scheduleSkill`
- * call minted, once its LAST placement is gone. The pair exists only as a
+ * Retire a skill practice pair (lib/skillPractice.ts) an old grid card
+ * scheduled, once its LAST placement is gone. The pair exists only as a
  * schedule adapter — no curriculum surface owns it — so unscheduling must
  * actually stop it serving: without this, a live (`setAt != null`) entry keeps
  * the skill on every scholar's plate forever, and the pair leaks. Retirement
@@ -3416,17 +3491,21 @@ async function retireSkillAdapterIfOrphaned(
   // pending activation. (Inline rather than removeScheduleStateForActivity:
   // lib/activityCascade imports this module, and the pair's entries only ever
   // live on its own assignment.)
-  const entries = a.activitySchedule ?? [];
+  const entries = await readSchedule(ctx, a);
   for (const entry of entries) {
     if (entry.activityId === activityId && entry.scheduledFnId) {
       await ctx.scheduler.cancel(entry.scheduledFnId);
     }
   }
   if (entries.some((entry) => entry.activityId === activityId)) {
-    await ctx.db.patch(assignmentId, {
-      activitySchedule: entries.filter((entry) => entry.activityId !== activityId),
-    });
+    await writeSchedule(
+      ctx,
+      a,
+      entries.filter((entry) => entry.activityId !== activityId),
+      { activityId },
+    );
   }
+
   await ctx.db.patch(activityId, { archivedAt: Date.now() });
   if (!a.archivedAt) {
     await ctx.db.patch(assignmentId, { archivedAt: Date.now() });
@@ -3437,35 +3516,38 @@ async function retireSkillAdapterIfOrphaned(
 async function coreRemovePlacement(ctx: MutationCtx, placementId: Id<"schedulePlacements">): Promise<boolean> {
   const p = await ctx.db.get(placementId);
   if (!p) return false;
-  await ctx.db.delete(placementId);
-  // An app placement's push is cleared unconditionally (live or planned) —
-  // deleting the class slot outright is an explicit teacher action, the same
-  // "wrap it up" clearPush already performs for a teacher-pushed app focus.
-  // (Unlike unmaterializePlannedActivity below, which protects in-progress
-  // curriculum work by leaving a LIVE entry alone — an app tile carries no
-  // in-progress state of its own to strand.) Routed through the SAME shared
-  // helper every other placement-deletion path uses (settlePlacementAppPush)
-  // so there is exactly one place this rule lives.
-  await settlePlacementAppPush(ctx, p);
-  // Drop any planned entry this placement seeded (leave a live entry alone),
-  // then — for a skill-adapter pair with no remaining placements — retire the
-  // pair outright (see retireSkillAdapterIfOrphaned).
-  if (p.assignmentId && p.activityId) {
-    await unmaterializePlannedActivity(ctx, p.assignmentId, p.activityId);
-    const retired = await retireSkillAdapterIfOrphaned(ctx, p.assignmentId, p.activityId);
-    if (!retired) {
-      // A sibling placement (the same pair scheduled on another slot) shares
-      // the ONE schedule entry the unmaterialize above just dropped — rebuild
-      // it now instead of leaving a gap until the next cron tick.
-      const sibling = await ctx.db
-        .query("schedulePlacements")
-        .withIndex("by_activity", (q) => q.eq("activityId", p.activityId))
-        .filter((q) => q.eq(q.field("assignmentId"), p.assignmentId))
-        .first();
-      if (sibling) await reconcilePlacementById(ctx, sibling._id);
+  await coreRemovePlacements(ctx, [p]);
+  return true;
+}
+
+async function coreRemovePlacements(
+  ctx: MutationCtx,
+  placements: readonly Doc<"schedulePlacements">[],
+  removedPlacements?: Doc<"schedulePlacements">[],
+): Promise<void> {
+  for (const p of placements) await ctx.db.delete(p._id);
+  // Archive against the complete pre-cascade pattern, never an intermediate
+  // pattern with only the last row left to delete.
+  if (removedPlacements) removedPlacements.push(...placements);
+  else await syncClassesForPlacements(ctx, placements);
+  for (const p of placements) {
+    // App pushes always close on removal; live curriculum work stays intact.
+    await settlePlacementAppPush(ctx, p);
+    if (p.assignmentId && p.activityId) {
+      await unmaterializePlannedActivity(ctx, p.assignmentId, p.activityId);
+      const retired = await retireSkillAdapterIfOrphaned(ctx, p.assignmentId, p.activityId);
+      if (!retired) {
+        // A surviving sibling owns the same planned entry; rebuild it after
+        // the whole deletion batch, never against a row about to disappear.
+        const sibling = await ctx.db
+          .query("schedulePlacements")
+          .withIndex("by_activity", (q) => q.eq("activityId", p.activityId))
+          .filter((q) => q.eq(q.field("assignmentId"), p.assignmentId))
+          .first();
+        if (sibling) await reconcilePlacementById(ctx, sibling._id);
+      }
     }
   }
-  return true;
 }
 
 export const removePlacement = teacherMutation({
@@ -3491,14 +3573,13 @@ export const removePlacement = teacherMutation({
 export async function removeSchedulePlacementsForActivity(
   ctx: MutationCtx,
   activityId: Id<"activities">,
+  removedPlacements?: Doc<"schedulePlacements">[],
 ): Promise<void> {
   const placements = await ctx.db
     .query("schedulePlacements")
     .withIndex("by_activity", (q) => q.eq("activityId", activityId))
     .collect();
-  for (const p of placements) {
-    await coreRemovePlacement(ctx, p._id);
-  }
+  await coreRemovePlacements(ctx, placements, removedPlacements);
 }
 
 // ── Bulk reassign ("Lehua is out sick, help me shuffle") ──────────────────
@@ -3524,13 +3605,16 @@ async function coreReassignTeacher(
     .withIndex("by_period", (q) => q.eq("periodId", args.periodId))
     .collect();
   const affected: Id<"schedulePlacements">[] = [];
+  const changed: Doc<"schedulePlacements">[] = [];
   for (const p of rows) {
     if (p.teacherId !== args.fromTeacherId) continue;
     if (args.weekday != null && p.weekday !== args.weekday) continue;
     if (args.groupId != null && p.groupId !== args.groupId) continue;
     await ctx.db.patch(p._id, { teacherId: args.toTeacherId ?? undefined });
+    changed.push(p);
     affected.push(p._id);
   }
+  await syncClassesForPlacements(ctx, changed);
   return { count: affected.length, placementIds: affected };
 }
 
@@ -3555,302 +3639,7 @@ export const reassignTeacher = teacherMutation({
   },
 });
 
-// ── Unit cascade (Q2 — generators of visible concrete placements) ─────────
-//
-// Dropping a whole unit writes one visible, draggable placement row per
-// activity, all sharing a `sequenceId`. The rows are the ground truth — there
-// is NO hidden recurrence rule. The layout is CLASS-ANCHORED (Phase 2): the
-// clicked class slot supplies the class's weekly meeting pattern, and the unit's
-// activities flow onto those meetings one per meeting, chronologically, skipping
-// no-school days (shared/meetingSlots.ts — the same pure generator the palette
-// preview renders). `createdFromStrategy` is stored for explanation only, never
-// to regenerate. Legacy contiguous/daily/unitPacing rows still render honestly.
-
-const cascadeStrategyValidator = v.union(
-  v.literal("contiguous"),
-  v.literal("daily"),
-  v.literal("unitPacing"),
-  v.literal("classMeetings"),
-);
-
-// How a unit's activities lay onto the grid. "flow" (default) is the
-// class-anchored cascade — one activity per class meeting, spread across days.
-// "sameDay" stacks the WHOLE unit onto the single chosen day/block (the
-// secondary "assign it all on one day" choice).
-const cascadeLayoutValidator = v.union(v.literal("flow"), v.literal("sameDay"));
-
-/** A unit's activities in canonical order (lessons by order → activities by
- *  order, flattened). */
-async function orderedUnitActivities(
-  ctx: MutationCtx,
-  unitId: Id<"units">,
-): Promise<Doc<"activities">[]> {
-  const lessons = await ctx.db
-    .query("lessons")
-    .withIndex("by_unit", (q) => q.eq("unitId", unitId))
-    .collect();
-  lessons.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  const perLesson = await Promise.all(
-    lessons.map((l) =>
-      ctx.db
-        .query("activities")
-        .withIndex("by_lesson", (q) => q.eq("lessonId", l._id))
-        .collect(),
-    ),
-  );
-  return perLesson.flatMap((acts) =>
-    acts
-      .filter((a) => !a.archivedAt) // never cascade-place an archived activity
-      .slice()
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
-  );
-}
-
-/** Block-order lookup for a term: every block's id → its sort order (chronological
- *  key material for the meeting-slot generator), plus the class blocks. */
-async function termBlockOrder(
-  ctx: MutationCtx,
-  periodId: Id<"reportingPeriods">,
-): Promise<{ blockOrder: Map<string, number>; classBlocks: Doc<"scheduleBlocks">[] }> {
-  const blocks = await ctx.db
-    .query("scheduleBlocks")
-    .withIndex("by_period", (q) => q.eq("periodId", periodId))
-    .collect();
-  blocks.sort((a, b) => a.order - b.order);
-  const blockOrder = new Map(blocks.map((b) => [String(b._id), b.order]));
-  const classBlocks = blocks.filter((b) => (b.kind ?? "class") === "class");
-  return { blockOrder, classBlocks };
-}
-
-/** Derive a class's weekly meeting pattern from its recurring schedule rows —
- *  the DB side of shared/meetingSlots.deriveClassMeetingPattern. */
-async function classMeetingPattern(
-  ctx: MutationCtx,
-  args: {
-    periodId: Id<"reportingPeriods">;
-    groupId: Id<"scholarGroups">;
-    subject: string;
-    blockOrder: Map<string, number>;
-  },
-): Promise<MeetingPatternSlot[]> {
-  const rows = await ctx.db
-    .query("schedulePlacements")
-    .withIndex("by_period_group", (q) =>
-      q.eq("periodId", args.periodId).eq("groupId", args.groupId),
-    )
-    .collect();
-  return deriveClassMeetingPattern({
-    placements: rows.map((r) => ({
-      weekStartMs: r.weekStartMs ?? null,
-      weekday: r.weekday ?? null,
-      blockId: r.blockId ? String(r.blockId) : null,
-      groupId: String(r.groupId),
-      subject: r.subject,
-      mode: r.mode ?? null,
-    })),
-    groupId: String(args.groupId),
-    subject: args.subject,
-    blockOrder: args.blockOrder,
-  });
-}
-
-async function coreCascadeUnit(
-  ctx: MutationCtx,
-  args: {
-    periodId: Id<"reportingPeriods">;
-    groupId: Id<"scholarGroups">;
-    assignmentId: Id<"assignments">;
-    startWeekday: number;
-    startBlockId: Id<"scheduleBlocks">;
-    // The clicked class slot. Supplies the class's subject + weekly meeting
-    // pattern. Absent (a drop onto an unstructured cell) → the picked slot is
-    // treated as the class's only weekly meeting (one chip per week).
-    anchorPlacementId?: Id<"schedulePlacements">;
-    teacherId?: Id<"users">;
-    weekStartMs?: number;
-    mode?: "classFocus" | "homework";
-    // "flow" (default) = one activity per class meeting across days; "sameDay" =
-    // every activity stacked on the single chosen start slot.
-    layout?: "flow" | "sameDay";
-  },
-): Promise<{
-  sequenceId: string;
-  placementIds: Id<"schedulePlacements">[];
-  strategy: string;
-}> {
-  const assignment = await ctx.db.get(args.assignmentId);
-  if (!assignment) throw new Error("Assignment not found");
-  if (!assignment.unitId) throw new Error("Assignment has no unit to cascade");
-  const activities = await orderedUnitActivities(ctx, assignment.unitId);
-  if (activities.length === 0) throw new Error("Unit has no activities to place");
-
-  const unit = await ctx.db.get(assignment.unitId);
-  const teacherId = args.teacherId ?? assignment.teacherId;
-  const closureCtx = await closuresForPeriod(ctx, args.periodId);
-  const baseWeek = currentWeekStartMs(
-    args.weekStartMs ?? Date.now(),
-    closureCtx.timeZone,
-  );
-  const sequenceId = crypto.randomUUID();
-
-  const { blockOrder, classBlocks } = await termBlockOrder(ctx, args.periodId);
-  if (classBlocks.length === 0) throw new Error("This term has no class blocks");
-
-  // The chip subject is the CLASS's subject (not the unit title) — taken from the
-  // anchor class slot, so a scholar's bell schedule keeps reading the class name.
-  // The class's weekly meeting pattern comes from its recurring rows; with no
-  // anchor there's no class to read, so the generator falls back to a single
-  // weekly meeting at the clicked slot.
-  const anchor = args.anchorPlacementId
-    ? await ctx.db.get(args.anchorPlacementId)
-    : null;
-  const subject = anchor?.subject ?? assignment.title ?? unit?.title ?? "Class";
-  const pattern = anchor
-    ? await classMeetingPattern(ctx, {
-        periodId: args.periodId,
-        groupId: args.groupId,
-        subject,
-        blockOrder,
-      })
-    : [];
-
-  // "sameDay" stacks the whole unit on the clicked slot; "flow" spreads one
-  // activity per class meeting across days (skipping no-school days).
-  const layout = args.layout ?? "flow";
-  let slots: ReturnType<typeof generateMeetingSlots>;
-  if (layout === "sameDay") {
-    slots = activities.map(() => ({
-      weekStartMs: baseWeek,
-      weekday: args.startWeekday,
-      blockId: String(args.startBlockId),
-    }));
-  } else {
-    slots = generateMeetingSlots({
-      pattern,
-      blockOrder,
-      startWeekStartMs: baseWeek,
-      startWeekday: args.startWeekday,
-      startBlockId: String(args.startBlockId),
-      count: activities.length,
-      closures: closureCtx.closures,
-      timeZone: closureCtx.timeZone,
-    });
-  }
-  const strategy = layout === "sameDay" ? "sameDay" : "classMeetings";
-
-  const placementIds: Id<"schedulePlacements">[] = [];
-  for (let i = 0; i < activities.length; i++) {
-    const s = slots[i];
-    const id = await corePlaceClass(ctx, {
-      periodId: args.periodId,
-      groupId: args.groupId,
-      subject,
-      teacherId,
-      assignmentId: args.assignmentId,
-      activityId: activities[i]._id,
-      mode: args.mode ?? "classFocus",
-      weekday: s.weekday,
-      blockId: s.blockId as Id<"scheduleBlocks">,
-      weekStartMs: s.weekStartMs,
-      sequenceId,
-      sequenceIndex: i,
-      createdFromStrategy: strategy,
-      timeZone: closureCtx.timeZone,
-    });
-    placementIds.push(id);
-  }
-  return { sequenceId, placementIds, strategy };
-}
-
-export const cascadeUnit = teacherMutation({
-  args: {
-    periodId: v.id("reportingPeriods"),
-    groupId: v.id("scholarGroups"),
-    assignmentId: v.id("assignments"),
-    startWeekday: v.number(),
-    startBlockId: v.id("scheduleBlocks"),
-    anchorPlacementId: v.optional(v.id("schedulePlacements")),
-    // Accepted for backward compatibility (older callers / stored vocabulary);
-    // the layout is always class-anchored now, so this no longer shapes it.
-    strategy: v.optional(cascadeStrategyValidator),
-    layout: v.optional(cascadeLayoutValidator),
-    teacherId: v.optional(v.id("users")),
-    weekStartMs: v.optional(v.number()),
-    mode: v.optional(modeValidator),
-  },
-  handler: async (ctx, { strategy: _strategy, ...args }) => {
-    // Institution boundary: the named group is the write key for this
-    // cascade, teacherId (when supplied) is a second write key, and the
-    // (required, here) assignmentId is a third — the exact escape #3559 left
-    // open: an accessible local group plus a foreign assignmentId.
-    await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
-    if (args.teacherId) {
-      await requireStaffAccessible(ctx, ctx.user, args.teacherId);
-    }
-    await requireAssignmentAccessible(ctx, ctx.user, args.assignmentId);
-    return coreCascadeUnit(ctx, args);
-  },
-});
-
-/**
- * Cascade a unit into a GROUP's schedule in one step — the schedule-grid entry
- * point. Resolves the group's roster → find-or-creates the (roster × unit)
- * assignment → flows every activity onto the grid via `coreCascadeUnit`. This
- * is what a unit-drop in the grid calls; the teacher never has to pre-create an
- * assignment, and the placements go live because they carry that assignmentId.
- */
-export const cascadeUnitForGroup = teacherMutation({
-  args: {
-    periodId: v.id("reportingPeriods"),
-    groupId: v.id("scholarGroups"),
-    unitId: v.id("units"),
-    startWeekday: v.number(),
-    startBlockId: v.id("scheduleBlocks"),
-    // The clicked class slot (supplies the class subject + meeting pattern).
-    anchorPlacementId: v.optional(v.id("schedulePlacements")),
-    strategy: v.optional(cascadeStrategyValidator),
-    layout: v.optional(cascadeLayoutValidator),
-    teacherId: v.optional(v.id("users")),
-    weekStartMs: v.optional(v.number()),
-    mode: v.optional(modeValidator),
-  },
-  handler: async (ctx, args) => {
-    // Institution boundary: the named group is the write key for this
-    // cascade, teacherId (when supplied) is a second write key, and the
-    // client-supplied unitId is a third — without this, a caller with an
-    // accessible local group could cascade a FOREIGN institution's curriculum
-    // unit (ensureAssignmentForGroupUnit would happily provision a local
-    // assignment against it). requireUnitAccess is the same boundary every
-    // other curriculum surface (activities.ts, lessons.ts, units.ts) already
-    // uses — including its "legacy unstamped unit belongs to the primary
-    // institution" rule (convex/lib/unitAccess.ts).
-    await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
-    if (args.teacherId) {
-      await requireStaffAccessible(ctx, ctx.user, args.teacherId);
-    }
-    await requireUnitAccess(ctx, args.unitId);
-    const owner = args.teacherId ?? ctx.user._id;
-    const assignmentId = await ensureAssignmentForGroupUnit(ctx, {
-      groupId: args.groupId,
-      unitId: args.unitId,
-      teacherId: owner,
-    });
-    return await coreCascadeUnit(ctx, {
-      periodId: args.periodId,
-      groupId: args.groupId,
-      assignmentId,
-      startWeekday: args.startWeekday,
-      startBlockId: args.startBlockId,
-      anchorPlacementId: args.anchorPlacementId,
-      teacherId: args.teacherId,
-      weekStartMs: args.weekStartMs,
-      mode: args.mode,
-      layout: args.layout,
-    });
-  },
-});
-
-// ── Sequence + flag edits (dismiss, accept reorder, bulk move) ────────────
+// ── Flag edits (dismiss) ──────────────────────────────────────────────────
 
 /** Silence a slot/order flag: append its flagId to every listed placement's
  *  dismissedFlags (the acknowledge/× action — not a data move). */
@@ -3885,300 +3674,6 @@ export const dismissFlag = teacherMutation({
       }
     }
     return coreDismissFlag(ctx, args);
-  },
-});
-
-/** "Keep as reorder": accept the sequence's new actual order as truth by
- *  marking orderOverride on every chip in it, so its out-of-order flag stops
- *  re-raising. */
-async function coreAcceptReorder(
-  ctx: MutationCtx,
-  sequenceId: string,
-): Promise<number> {
-  const rows = await ctx.db
-    .query("schedulePlacements")
-    .withIndex("by_sequence", (q) => q.eq("sequenceId", sequenceId))
-    .collect();
-  for (const p of rows) {
-    if (!p.orderOverride) await ctx.db.patch(p._id, { orderOverride: true });
-  }
-  return rows.length;
-}
-
-export const acceptReorder = teacherMutation({
-  args: { sequenceId: v.string() },
-  handler: async (ctx, { sequenceId }) => {
-    const placements = await ctx.db
-      .query("schedulePlacements")
-      .withIndex("by_sequence", (q) => q.eq("sequenceId", sequenceId))
-      .collect();
-    for (const placement of placements) {
-      if (!placement.orderOverride) {
-        await requireScheduleScopeAccessible(ctx, ctx.user, placement);
-      }
-    }
-    return coreAcceptReorder(ctx, sequenceId);
-  },
-});
-
-/** Bulk-move every chip in a sequence: ±weeks shifts each chip's week (a
- *  recurring chip becomes concrete on the current week first); ±days shifts
- *  each weekday within Mon–Fri (wrapping). Re-materializes each. Returns the
- *  touched ids so the caller can offer an undo. */
-async function coreMoveSequence(
-  ctx: MutationCtx,
-  args: { sequenceId: string; deltaWeeks?: number; deltaDays?: number },
-): Promise<{ count: number; merged: number; placementIds: Id<"schedulePlacements">[] }> {
-  const rows = await ctx.db
-    .query("schedulePlacements")
-    .withIndex("by_sequence", (q) => q.eq("sequenceId", args.sequenceId))
-    .collect();
-  const timeZone =
-    rows.length > 0
-      ? (await closuresForPeriod(ctx, rows[0].periodId)).timeZone
-      : DEFAULT_TIMEZONE;
-  const base = currentWeekStartMs(Date.now(), timeZone);
-  const touched: Id<"schedulePlacements">[] = [];
-  let merged = 0;
-  for (const p of rows) {
-    if (p.weekday == null || p.blockId == null) continue; // shelf chips don't move
-    const patch: Partial<Doc<"schedulePlacements">> = {};
-    if (args.deltaWeeks) {
-      const week = p.weekStartMs ?? base;
-      patch.weekStartMs = shiftScheduleWeekStartMs(
-        week,
-        args.deltaWeeks,
-        timeZone,
-      );
-    }
-    if (args.deltaDays) {
-      patch.weekday = (((p.weekday - 1 + args.deltaDays) % 5) + 5) % 5 + 1;
-    }
-    if (Object.keys(patch).length === 0) continue;
-    const weekday = patch.weekday ?? p.weekday;
-    const blockId = patch.blockId ?? p.blockId;
-    const weekStartMs =
-      "weekStartMs" in patch ? patch.weekStartMs : p.weekStartMs;
-    const identical = await findIdenticalPlacement(ctx, {
-      periodId: p.periodId,
-      groupId: p.groupId,
-      weekday: weekday!,
-      blockId: blockId!,
-      weekStartMs,
-      subject: p.subject,
-      activityId: p.activityId,
-      assignmentId: p.assignmentId,
-      externalAppId: p.externalAppId,
-      mode: p.mode,
-      teacherId: p.teacherId,
-      spanBlocks: p.spanBlocks,
-      note: p.note,
-      sequenceId: p.sequenceId,
-      sequenceIndex: p.sequenceIndex,
-      createdFromStrategy: p.createdFromStrategy,
-      excludePlacementId: p._id,
-    });
-    if (identical) {
-      // The destination already holds an identical row, so this is a true
-      // merge. Plain delete (not coreRemovePlacement — that would unmaterialize
-      // the shared planned entry the survivor owns), then reconcile the
-      // survivor: the mover may have last written that entry with its OLD slot
-      // timing. The MOVER's own app push (if any) is keyed to ITS OWN
-      // placement id — never shared with the survivor — so it is orphaned by
-      // a plain delete unless settled explicitly here.
-      await settlePlacementAppPush(ctx, p);
-      await ctx.db.delete(p._id);
-      await reconcilePlacementById(
-        ctx,
-        identical._id,
-        identical.weekStartMs ?? undefined,
-      );
-      touched.push(p._id);
-      merged++;
-      continue;
-    }
-    await ctx.db.patch(p._id, patch);
-    await reconcilePlacementById(ctx, p._id);
-    touched.push(p._id);
-  }
-  return { count: touched.length, merged, placementIds: touched };
-}
-
-export const moveSequence = teacherMutation({
-  args: {
-    sequenceId: v.string(),
-    deltaWeeks: v.optional(v.number()),
-    deltaDays: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    if (args.deltaWeeks || args.deltaDays) {
-      const placements = await ctx.db
-        .query("schedulePlacements")
-        .withIndex("by_sequence", (q) => q.eq("sequenceId", args.sequenceId))
-        .collect();
-      for (const placement of placements) {
-        if (placement.weekday != null && placement.blockId != null) {
-          await requireScheduleScopeAccessible(ctx, ctx.user, placement);
-        }
-      }
-    }
-    return coreMoveSequence(ctx, args);
-  },
-});
-
-/**
- * Re-flow the tail of a unit sequence (§7 "Did this activity happen? · No — push
- * the rest"): the meeting for chip `fromIndex` was missed, so chips
- * `sequenceIndex ≥ fromIndex` all slide one meeting later. Re-runs the SAME §5·2.1
- * meeting-slot generator over the tail, anchored at the meeting immediately after
- * the first tail chip's current slot, and updates the existing rows IN PLACE (same
- * ids — drags, dismissed flags, and the live layer reconcile exactly as any other
- * move), each reconciled. A pure plan-layer write: no completion is recorded.
- *
- * Deterministic by design — the shift is measured from the tail's current slots
- * (clamped forward past today), not a raw wall-clock instant — so "push the rest"
- * is repeatable (do it again to push another meeting; §7 calls that out as the
- * intended cheap/reversible UX). The anchor CLAMPS FORWARD: the tail restarts at
- * the first pattern meeting strictly after BOTH the missed chip's slot AND the
- * current day, so a class several meetings behind catches up to the next REAL
- * upcoming meeting in one click (a same-week miss is unchanged). Without the
- * clamp, a weeks-past tail would re-flow into still-past weeks the current-week
- * materializer just drops. The already-live edge is handled by reconcile: a tail
- * chip whose activity flipped live keeps its historical live entry (unmaterialize
- * only clears planned) and re-materializes when its new week becomes current.
- */
-async function coreReflowSequence(
-  ctx: MutationCtx,
-  args: { sequenceId: string; fromIndex: number },
-): Promise<{ count: number; merged: number; placementIds: Id<"schedulePlacements">[] }> {
-  const rows = await ctx.db
-    .query("schedulePlacements")
-    .withIndex("by_sequence", (q) => q.eq("sequenceId", args.sequenceId))
-    .collect();
-  const tail = rows
-    .filter(
-      (p) =>
-        p.sequenceIndex != null &&
-        p.sequenceIndex >= args.fromIndex &&
-        p.weekday != null &&
-        p.blockId != null,
-    )
-    .sort((a, b) => (a.sequenceIndex ?? 0) - (b.sequenceIndex ?? 0));
-  if (tail.length === 0) return { count: 0, merged: 0, placementIds: [] };
-
-  const first = tail[0];
-  const { closures, timeZone } = await closuresForPeriod(ctx, first.periodId);
-  const { blockOrder } = await termBlockOrder(ctx, first.periodId);
-  const pattern = await classMeetingPattern(ctx, {
-    periodId: first.periodId,
-    groupId: first.groupId,
-    subject: first.subject,
-    blockOrder,
-  });
-
-  // Anchor: the meeting after the missed chip's current slot, CLAMPED FORWARD so
-  // it's also strictly after today — a class weeks behind restarts its tail at
-  // the next real upcoming meeting, not a still-past week the materializer drops.
-  const now = Date.now();
-  const nowWeekStartMs = currentWeekStartMs(now, timeZone);
-  const sundayBasedWeekday = weekdayForTimezone(now, timeZone);
-  const nowWeekday = sundayBasedWeekday === 0 ? 7 : sundayBasedWeekday;
-  const currentSlot = {
-    weekStartMs: first.weekStartMs ?? nowWeekStartMs,
-    weekday: first.weekday!,
-    blockId: String(first.blockId!),
-  };
-  const anchor = clampSlotForward(
-    currentSlot,
-    pattern,
-    blockOrder,
-    nowWeekStartMs,
-    nowWeekday,
-  );
-
-  const slots = generateMeetingSlots({
-    pattern,
-    blockOrder,
-    startWeekStartMs: anchor.weekStartMs,
-    startWeekday: anchor.weekday,
-    startBlockId: anchor.blockId,
-    count: tail.length,
-    closures,
-    timeZone,
-  });
-
-  const touched: Id<"schedulePlacements">[] = [];
-  let merged = 0;
-  for (let i = 0; i < tail.length; i++) {
-    const p = tail[i];
-    const s = slots[i];
-    const identical = await findIdenticalPlacement(ctx, {
-      periodId: p.periodId,
-      groupId: p.groupId,
-      weekday: s.weekday,
-      blockId: s.blockId as Id<"scheduleBlocks">,
-      weekStartMs: s.weekStartMs,
-      subject: p.subject,
-      activityId: p.activityId,
-      assignmentId: p.assignmentId,
-      externalAppId: p.externalAppId,
-      mode: p.mode,
-      teacherId: p.teacherId,
-      spanBlocks: p.spanBlocks,
-      note: p.note,
-      sequenceId: p.sequenceId,
-      sequenceIndex: p.sequenceIndex,
-      createdFromStrategy: p.createdFromStrategy,
-      excludePlacementId: p._id,
-    });
-    if (identical) {
-      // The destination already holds an identical row, so this is a true
-      // merge. Plain delete (not coreRemovePlacement — that would unmaterialize
-      // the shared planned entry the survivor owns), then reconcile the
-      // survivor: the mover may have last written that entry with its OLD slot
-      // timing. The MOVER's own app push (if any) is keyed to ITS OWN
-      // placement id — never shared with the survivor — so it is orphaned by
-      // a plain delete unless settled explicitly here.
-      await settlePlacementAppPush(ctx, p);
-      await ctx.db.delete(p._id);
-      await reconcilePlacementById(
-        ctx,
-        identical._id,
-        identical.weekStartMs ?? undefined,
-      );
-      touched.push(p._id);
-      merged++;
-      continue;
-    }
-    await ctx.db.patch(p._id, {
-      weekStartMs: s.weekStartMs,
-      weekday: s.weekday,
-      blockId: s.blockId as Id<"scheduleBlocks">,
-    });
-    await reconcilePlacementById(ctx, p._id);
-    touched.push(p._id);
-  }
-  return { count: touched.length, merged, placementIds: touched };
-}
-
-export const reflowSequence = teacherMutation({
-  args: { sequenceId: v.string(), fromIndex: v.number() },
-  handler: async (ctx, args) => {
-    const placements = await ctx.db
-      .query("schedulePlacements")
-      .withIndex("by_sequence", (q) => q.eq("sequenceId", args.sequenceId))
-      .collect();
-    for (const placement of placements) {
-      if (
-        placement.sequenceIndex != null &&
-        placement.sequenceIndex >= args.fromIndex &&
-        placement.weekday != null &&
-        placement.blockId != null
-      ) {
-        await requireScheduleScopeAccessible(ctx, ctx.user, placement);
-      }
-    }
-    return coreReflowSequence(ctx, args);
   },
 });
 
@@ -4240,9 +3735,14 @@ type ClosureContext = { closures: SchoolClosure[]; timeZone: string };
 async function closuresForPeriod(
   ctx: QueryCtx,
   periodId: Id<"reportingPeriods">,
+  classLinkCache?: ClassLinkReadCache,
 ): Promise<ClosureContext> {
   const period = await ctx.db.get(periodId);
   const institutionId = period?.institutionId;
+  if (classLinkCache) {
+    const { closures, timeZone } = await loadClassLinkData(ctx, institutionId, classLinkCache);
+    return { closures, timeZone };
+  }
   const institution = institutionId ? await ctx.db.get(institutionId) : null;
   const timeZone = effectiveInstitutionTimeZone(institution?.timeZone);
   return { closures: await loadInstitutionClosures(ctx, institutionId), timeZone };
@@ -4250,7 +3750,7 @@ async function closuresForPeriod(
 
 /** Closures scoped to an institution, plus any institution-agnostic ones. */
 export async function loadInstitutionClosures(
-  ctx: QueryCtx,
+  ctx: Pick<QueryCtx, "db">,
   institutionId: Id<"institutions"> | undefined,
 ): Promise<SchoolClosure[]> {
   const scoped = institutionId
@@ -4333,7 +3833,7 @@ async function unmaterializeIfNoPlacementInWeek(
 
 // ── App-target placements ("standing assignment") ─────────────────────────
 //
-// The counterpart to applyScheduleActivity/syncScheduleMirror for a
+// The counterpart to applyScheduleActivity/writeSchedule for a
 // schedulePlacements row that carries `externalAppId` instead of
 // assignmentId+activityId. Materializes into `pushes` rows keyed by WINDOW
 // IDENTITY — see the schema comment on `pushes.occurrenceDate` and
@@ -4478,7 +3978,7 @@ async function openAppPushForDisplay(
  *  one, bounded — see openPushesForPlacement). Used whenever the placement
  *  should have NO live occurrence right now: closed day, out of horizon,
  *  its app archived/deleted, or the placement shelved/deleted. Mirrors
- *  clearMirrorsForActivity's shape (lib/scheduleMirror.ts): stamped, never
+ *  clearMirrorsForActivity's shape (lib/scheduleStore.ts): stamped, never
  *  deleted, and cancels the pending job rather than leaving it to fire
  *  against an already-closed row. */
 async function clearPlacementAppPush(
@@ -4527,7 +4027,7 @@ export async function settlePlacementAppPush(
 /**
  * Resolve the institution a placement's push should be stamped with, from its
  * group — the same "legacy unstamped ⇒ primary school" convention
- * `institutionForAssignment` (lib/scheduleMirror.ts) uses for an assignment's
+ * `institutionForAssignment` (lib/scheduleStore.ts) uses for an assignment's
  * roster. Returns null (and the caller skips, loudly) when even that fails,
  * which cannot happen on a real deployment but must never throw inside a
  * cron reconciliation pass.
@@ -4580,6 +4080,8 @@ async function reconcileAppPlacement(
   occurrenceDate: string,
   startsAt: number,
   endsAt: number | undefined,
+  timeZone: string,
+  classLinkCache: ClassLinkReadCache,
 ): Promise<void> {
   if (endsAt == null || endsAt <= startsAt) {
     // Defense in depth: reconcilePlacement's caller already screens both of
@@ -4653,9 +4155,40 @@ async function reconcileAppPlacement(
   const timingChanged =
     windowPush === null ||
     windowPush.startsAt !== startsAt ||
-    windowPush.timing.kind !== "focus" ||
-    windowPush.timing.endsAt !== endsAt;
+    explicitFocusEnd(windowPush) !== endsAt;
   const needsReschedule = timingChanged || (!wasLive && goesLiveNow);
+  const institutionId = windowPush?.institutionId ?? await institutionIdForPlacementGroup(ctx, group);
+  if (!institutionId) {
+    console.warn(
+      `[placementAppPush] skipped placement ${p._id}: no resolvable institution.`,
+    );
+    return;
+  }
+  // The kind alone; the end lives in `endsAt` + `afterEnd` (TRA-580).
+  const timing = { kind: "focus" as const };
+  const setAt = wasLive ? windowPush?.setAt : goesLiveNow ? now : undefined;
+  const audience = { kind: "group" as const, groupId: p.groupId };
+  const classFields = !windowPush ||
+    classLinkInputsChanged(windowPush, { startsAt, setAt, audience })
+    ? await classFieldsForPush(ctx, {
+      institutionId,
+      audience,
+      // Deliberate: the class meeting starts at the bell, not at the early
+      // push's start (which can fall in the preceding class).
+      at: startsAt + APP_PLACEMENT_LEAD_MS,
+      timeZone,
+      timingKind: "focus",
+    }, classLinkCache) : {};
+  const endFields = endFieldsForPush("focus", endsAt, setAt, startsAt, timeZone);
+  // The write boundary every push writer shares: an app give must end
+  // (TRA-336). A placement's end is its block's end plus grace, so this never
+  // refuses a real class; it pins the invariant at the second app writer.
+  assertPushAllowed({
+    target: { kind: "app", externalAppId: p.externalAppId! },
+    timing,
+    blocking: false,
+    endsAt: endFields.endsAt,
+  });
 
   let pushId: Id<"pushes">;
   if (windowPush !== null) {
@@ -4665,28 +4198,25 @@ async function reconcileAppPlacement(
     }
     await ctx.db.patch(windowPush._id, {
       target: { kind: "app", externalAppId: p.externalAppId! },
-      audience: { kind: "group", groupId: p.groupId },
-      timing: { kind: "focus", endsAt },
+      audience,
+      timing,
+      ...endFields,
+      ...classFields,
       startsAt,
       // Never demote an already-live push back to planned on a re-time —
       // "access follows the block," never a fresh start stamp.
-      setAt: wasLive ? windowPush.setAt : goesLiveNow ? now : undefined,
+      setAt,
     });
   } else {
-    const institutionId = await institutionIdForPlacementGroup(ctx, group);
-    if (!institutionId) {
-      console.warn(
-        `[placementAppPush] skipped placement ${p._id}: no resolvable institution.`,
-      );
-      return;
-    }
     pushId = await ctx.db.insert("pushes", {
       institutionId,
       target: { kind: "app", externalAppId: p.externalAppId! },
-      audience: { kind: "group", groupId: p.groupId },
-      timing: { kind: "focus", endsAt },
+      audience,
+      timing,
+      ...endFields,
+      ...classFields,
       blocking: false,
-      setAt: goesLiveNow ? now : undefined,
+      setAt,
       startsAt,
       // A label only, never a permission: a class with no teacher still
       // opens its app, credited to whoever created its group.
@@ -4785,46 +4315,67 @@ export const activatePlacementAppPush = internalMutation({
   },
 });
 
+/** Prune before the batch sync, so neither archived history nor subsequent
+ * gives see a partially deleted class pattern. Preserve reconciliation's
+ * existing scope: missing assignments self-heal only in a usable live slot. */
+async function pruneInvalidPlacement(
+  ctx: MutationCtx,
+  p: Doc<"schedulePlacements">,
+  weekStartMs: number,
+  closureCtx: ClosureContext,
+): Promise<boolean> {
+  if (p.activityId) {
+    const act = await ctx.db.get(p.activityId);
+    if (!act || act.archivedAt) {
+      if (p.assignmentId) {
+        await unmaterializePlannedActivity(ctx, p.assignmentId, p.activityId);
+      }
+      await ctx.db.delete(p._id);
+      return true;
+    }
+    if (await appActivityHasNothingToOpen(ctx, act)) return false;
+  }
+  if (p.externalAppId) {
+    const app = await ctx.db.get(p.externalAppId);
+    if (!app || app.archived) {
+      await clearPlacementAppPush(ctx, p._id, "expired");
+      await ctx.db.delete(p._id);
+      return true;
+    }
+    return false;
+  }
+  if (placementInWeek(p, weekStartMs) && !placementOnClosedDay(p, weekStartMs, closureCtx)) {
+    const block = await ctx.db.get(p.blockId!);
+    if (block && placementStartMs(
+      weekStartMs, p.weekday!, block.startLocal, closureCtx.timeZone,
+    ) != null) {
+      const assignment = await ctx.db.get(p.assignmentId!);
+      if (!assignment || assignment.archivedAt) {
+        await ctx.db.delete(p._id);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
- * Make the live push layer agree with ONE placement for the current week:
- * materialize it (plan its activity at the block's start time) when it's in
- * horizon, else drop any planned entry it previously seeded. Idempotent —
- * applyScheduleActivity replaces (never duplicates) the entry for an activity,
- * and unmaterialize only touches a still-planned entry.
- *
- * A placement that lands on a no-school day (holiday / staff-development day) is
- * treated like out-of-horizon: any planned entry is dropped and nothing new is
- * pushed, so no class ever goes live on a closed day. A LIVE entry a teacher
- * already pushed is left untouched (unmaterialize only clears planned).
+ * Materialize a surviving placement, or settle an out-of-horizon/closed-day
+ * window. The caller prunes invalid targets and syncs classes for the whole
+ * batch first. Live curriculum entries are never retracted by a grid edit.
  */
 async function reconcilePlacement(
   ctx: MutationCtx,
   p: Doc<"schedulePlacements">,
   weekStartMs: number,
   closureCtx: ClosureContext,
+  classLinkCache: ClassLinkReadCache,
 ): Promise<void> {
   if (p.activityId) {
     const act = await ctx.db.get(p.activityId);
-    // Deleted OR archived: the activity is out of the active curriculum, so
-    // the placement must never materialize — unwind and self-heal the row.
-    // (Archive normally removes placements itself; this covers stale rows.)
-    if (!act || act.archivedAt) {
-      if (p.assignmentId) {
-        await unmaterializePlannedActivity(ctx, p.assignmentId, p.activityId);
-      }
-      await ctx.db.delete(p._id);
-      return;
-    }
+    if (act && await appActivityHasNothingToOpen(ctx, act)) return;
   }
   if (p.externalAppId) {
-    const app = await ctx.db.get(p.externalAppId);
-    // Deleted OR archived: same self-heal as an activity target above — the
-    // catalog app is gone, so this cell must never grant it again.
-    if (!app || app.archived) {
-      await clearPlacementAppPush(ctx, p._id, "expired");
-      await ctx.db.delete(p._id);
-      return;
-    }
     // A term that doesn't cover today never opens its app — the same rule the
     // cron sweeps by, so a write-time edit can't schedule what the cron
     // wouldn't (TRA-449). Settle anything already open.
@@ -4901,16 +4452,12 @@ async function reconcilePlacement(
       await clearPlacementAppPush(ctx, p._id, "expired");
       return;
     }
-    await reconcileAppPlacement(ctx, p, occurrenceDate, appStartsAt, endsAt);
+    await reconcileAppPlacement(
+      ctx, p, occurrenceDate, appStartsAt, endsAt, closureCtx.timeZone, classLinkCache,
+    );
     return;
   }
-  const a = await ctx.db.get(p.assignmentId!);
-  if (!a || a.archivedAt) {
-    // Archive normally deletes linked chips; self-heal any legacy row so a
-    // later reconciliation cannot resurrect an archived assignment.
-    await ctx.db.delete(p._id);
-    return;
-  }
+  const a = (await ctx.db.get(p.assignmentId!))!;
   // A dated future override can be authored while this week's recurring class
   // is already planned. Do not let the one-entry assignment layer retime that
   // current plan to the future override; the cron will materialize the concrete
@@ -4958,9 +4505,13 @@ async function reconcilePlacement(
       mode,
       startsAt,
       endsAt: mode === "classFocus" ? endsAt : undefined,
+      // A class cell runs for its block: "in that class", never open until a
+      // later day (a placement has no such finish; TRA-726).
+      openUntilKind: mode === "classFocus" ? false : undefined,
       dueAt: mode === "homework" ? dayEnd : undefined,
     },
     true,
+    classLinkCache,
   );
 }
 
@@ -4974,16 +4525,42 @@ export async function reconcilePlacementById(
   ctx: MutationCtx,
   placementId: Id<"schedulePlacements">,
   weekStartMs?: number,
+  previousPlacement?: Doc<"schedulePlacements">,
 ): Promise<void> {
-  const p = await ctx.db.get(placementId);
-  if (!p) return;
-  const closureCtx = await closuresForPeriod(ctx, p.periodId);
-  await reconcilePlacement(
-    ctx,
-    p,
-    weekStartMs ?? currentWeekStartMs(Date.now(), closureCtx.timeZone),
-    closureCtx,
+  await reconcilePlacementsById(
+    ctx, [{ id: placementId, weekStartMs }],
+    previousPlacement ? [previousPlacement] : [],
   );
+}
+
+/** Finish plan edits before syncing, so each group's new pattern is read once
+ * and every materialized give sees the complete pattern, not a partial edit. */
+export async function reconcilePlacementsById(
+  ctx: MutationCtx,
+  entries: { id: Id<"schedulePlacements">; weekStartMs?: number }[],
+  previous: Doc<"schedulePlacements">[] = [],
+): Promise<void> {
+  const rows = await Promise.all(entries.map(async (entry) => ({
+    ...entry, placement: await ctx.db.get(entry.id),
+  })));
+  const classLinkCache: ClassLinkReadCache = new Map();
+  const surviving: {
+    placement: Doc<"schedulePlacements">; weekStartMs: number; closureCtx: ClosureContext;
+  }[] = [];
+  for (const { placement: p, weekStartMs } of rows) {
+    if (!p) continue;
+    const closureCtx = await closuresForPeriod(ctx, p.periodId, classLinkCache);
+    const week = weekStartMs ?? currentWeekStartMs(Date.now(), closureCtx.timeZone);
+    if (!(await pruneInvalidPlacement(ctx, p, week, closureCtx))) {
+      surviving.push({ placement: p, weekStartMs: week, closureCtx });
+    }
+  }
+  await syncClassesForPlacements(ctx, [
+    ...previous, ...rows.flatMap((row) => row.placement ? [row.placement] : []),
+  ]);
+  for (const { placement, weekStartMs, closureCtx } of surviving) {
+    await reconcilePlacement(ctx, placement, weekStartMs, closureCtx, classLinkCache);
+  }
 }
 
 /** Reconcile every placement in a term against `weekStartMs`. The cron path —
@@ -4993,16 +4570,37 @@ async function coreReconcileWeek(
   periodId: Id<"reportingPeriods">,
   weekStartMs: number,
   providedClosureCtx?: ClosureContext,
+  classLinkCache: ClassLinkReadCache = new Map(),
 ): Promise<{ materialized: number; cleared: number }> {
   const closureCtx =
-    providedClosureCtx ?? (await closuresForPeriod(ctx, periodId));
+    providedClosureCtx ?? (await closuresForPeriod(ctx, periodId, classLinkCache));
   const rows = await ctx.db
     .query("schedulePlacements")
     .withIndex("by_period", (q) => q.eq("periodId", periodId))
     .collect();
   let materialized = 0;
   let cleared = 0;
+  const surviving: Doc<"schedulePlacements">[] = [];
+  const removed: Doc<"schedulePlacements">[] = [];
   for (const p of rows) {
+    try {
+      if (placementInWeek(p, weekStartMs) &&
+          await pruneInvalidPlacement(ctx, p, weekStartMs, closureCtx)) {
+        removed.push(p);
+        if (placementOnClosedDay(p, weekStartMs, closureCtx)) cleared++;
+        else materialized++;
+      } else {
+        surviving.push(p);
+      }
+    } catch (error) {
+      console.error(
+        `[coreReconcileWeek] skipped placement ${p._id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  await syncClassesForPlacements(ctx, removed);
+  if (removed.length > 0) await invalidateClassLinkClasses(classLinkCache);
+  for (const p of surviving) {
     // The cron sweeps EVERY placement in the term in one mutation — a
     // throw from any single row's reconcile (a still-unforeseen edge case,
     // not just the DST/end<=start ones already screened upstream) would
@@ -5019,7 +4617,7 @@ async function coreReconcileWeek(
         // reconcilePlacement clears (not materializes) a closed-day placement —
         // count it honestly so cron logs reflect what happened.
         const closed = placementOnClosedDay(p, weekStartMs, closureCtx);
-        await reconcilePlacement(ctx, p, weekStartMs, closureCtx);
+        await reconcilePlacement(ctx, p, weekStartMs, closureCtx, classLinkCache);
         if (closed) cleared++;
         else materialized++;
       } else if (p.assignmentId && p.activityId) {
@@ -5063,6 +4661,7 @@ export const autoMaterializeTick = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
     const terms = await ctx.db.query("reportingPeriods").collect();
+    const classLinkCache: ClassLinkReadCache = new Map();
     let materialized = 0;
     let cleared = 0;
     let scanned = 0;
@@ -5070,13 +4669,14 @@ export const autoMaterializeTick = internalMutation({
       // Only terms whose span covers today — skip archived/future terms.
       if (!termCoversNow(t, now)) continue;
       scanned++;
-      const closureCtx = await closuresForPeriod(ctx, t._id);
+      const closureCtx = await closuresForPeriod(ctx, t._id, classLinkCache);
       const termWeekStartMs = currentWeekStartMs(now, closureCtx.timeZone);
       const r = await coreReconcileWeek(
         ctx,
         t._id,
         termWeekStartMs,
         closureCtx,
+        classLinkCache,
       );
       materialized += r.materialized;
       cleared += r.cleared;
@@ -5121,6 +4721,7 @@ export const aideCreateBlock = internalMutation({
     if (args.groupId) {
       await requireGroupScholarAccess(ctx, caller, args.groupId);
     }
+    await requireBellScheduleAdmin(ctx, caller, args.periodId);
     return coreCreateBlock(ctx, args);
   },
 });
@@ -5132,12 +4733,13 @@ export const aidePlaceClass = internalMutation({
     groupId: v.id("scholarGroups"),
     subject: v.string(),
     teacherId: v.optional(v.id("users")),
-    assignmentId: v.optional(v.id("assignments")),
-    activityId: v.optional(v.id("activities")),
-    // A catalog app placed on a block is the ONLY clock-bounded way to grant a
-    // managed app (live for the block + APP_PLACEMENT_GRACE_MS, then cleared).
-    // Without it the aide's sole app-grant verb is a standing `appAudiences`
-    // grant, which has no clock at all — the 2026-09-15 Stop Motion incident.
+    // Work for the class goes through gridGiveActions.aideGiveToClass: it is a
+    // give to the class that day, never a card (TRA-582).
+    // A catalog app placed on a block grants a managed app for that block
+    // (live for the block + APP_PLACEMENT_GRACE_MS, then cleared): the
+    // 2026-09-15 Stop Motion incident was a standing `appAudiences` grant with
+    // no clock. A whole day for a group is enable_app_for_group's one-day
+    // grant, not one placement per block (2026-10-30).
     externalAppId: v.optional(v.id("externalApps")),
     mode: v.optional(modeValidator),
     weekday: v.optional(v.number()),
@@ -5147,15 +4749,13 @@ export const aidePlaceClass = internalMutation({
   },
   handler: async (ctx, { callerUserId, ...args }) => {
     const caller = await requireTeacherCaller(ctx, callerUserId);
-    await requireScheduleScopeAccessible(ctx, caller, {
+    await requireTermWriteScope(ctx, caller, {
       periodId: args.periodId,
+      groupId: args.groupId,
+      blockIds: [args.blockId],
     });
-    await requireGroupScholarAccess(ctx, caller, args.groupId);
     if (args.teacherId) {
       await requireStaffAccessible(ctx, caller, args.teacherId);
-    }
-    if (args.assignmentId) {
-      await requireAssignmentAccessible(ctx, caller, args.assignmentId);
     }
     return corePlaceClass(ctx, args);
   },
@@ -5212,8 +4812,6 @@ export const aideUpdatePlacement = internalMutation({
     placementId: v.id("schedulePlacements"),
     subject: v.optional(v.string()),
     teacherId: v.optional(v.union(v.id("users"), v.null())),
-    assignmentId: v.optional(v.union(v.id("assignments"), v.null())),
-    activityId: v.optional(v.union(v.id("activities"), v.null())),
     // Null clears the app target, so attaching one is not a one-way door.
     externalAppId: v.optional(v.union(v.id("externalApps"), v.null())),
     mode: v.optional(modeValidator),
@@ -5223,13 +4821,10 @@ export const aideUpdatePlacement = internalMutation({
     const caller = await requireTeacherCaller(ctx, callerUserId);
     const placement = await ctx.db.get(args.placementId);
     if (placement) {
-      await requireGroupScholarAccess(ctx, caller, placement.groupId);
+      await requireScheduleScopeAccessible(ctx, caller, placement);
     }
     if (args.teacherId) {
       await requireStaffAccessible(ctx, caller, args.teacherId);
-    }
-    if (args.assignmentId) {
-      await requireAssignmentAccessible(ctx, caller, args.assignmentId);
     }
     return coreUpdatePlacement(ctx, args);
   },
@@ -5273,102 +4868,6 @@ export const aideReassignTeacher = internalMutation({
   },
 });
 
-export const aideCascadeUnit = internalMutation({
-  args: {
-    callerUserId: v.id("users"),
-    periodId: v.id("reportingPeriods"),
-    groupId: v.id("scholarGroups"),
-    assignmentId: v.id("assignments"),
-    startWeekday: v.number(),
-    startBlockId: v.id("scheduleBlocks"),
-    anchorPlacementId: v.optional(v.id("schedulePlacements")),
-    strategy: v.optional(cascadeStrategyValidator),
-    layout: v.optional(cascadeLayoutValidator),
-    teacherId: v.optional(v.id("users")),
-    weekStartMs: v.optional(v.number()),
-    mode: v.optional(modeValidator),
-  },
-  handler: async (ctx, { callerUserId, strategy: _strategy, ...args }) => {
-    const caller = await requireTeacherCaller(ctx, callerUserId);
-    await requireScheduleScopeAccessible(ctx, caller, {
-      periodId: args.periodId,
-    });
-    await requireGroupScholarAccess(ctx, caller, args.groupId);
-    if (args.teacherId) {
-      await requireStaffAccessible(ctx, caller, args.teacherId);
-    }
-    await requireAssignmentAccessible(ctx, caller, args.assignmentId);
-    return coreCascadeUnit(ctx, args);
-  },
-});
-
-export const aideReflowSequence = internalMutation({
-  args: {
-    callerUserId: v.id("users"),
-    sequenceId: v.string(),
-    fromIndex: v.number(),
-  },
-  handler: async (ctx, { callerUserId, ...args }) => {
-    const caller = await requireTeacherCaller(ctx, callerUserId);
-    const placements = await ctx.db
-      .query("schedulePlacements")
-      .withIndex("by_sequence", (q) => q.eq("sequenceId", args.sequenceId))
-      .collect();
-    for (const placement of placements) {
-      if (
-        placement.sequenceIndex != null &&
-        placement.sequenceIndex >= args.fromIndex &&
-        placement.weekday != null &&
-        placement.blockId != null
-      ) {
-        await requireScheduleScopeAccessible(ctx, caller, placement);
-      }
-    }
-    return coreReflowSequence(ctx, args);
-  },
-});
-
-export const aideMoveSequence = internalMutation({
-  args: {
-    callerUserId: v.id("users"),
-    sequenceId: v.string(),
-    deltaWeeks: v.optional(v.number()),
-    deltaDays: v.optional(v.number()),
-  },
-  handler: async (ctx, { callerUserId, ...args }) => {
-    const caller = await requireTeacherCaller(ctx, callerUserId);
-    if (args.deltaWeeks || args.deltaDays) {
-      const placements = await ctx.db
-        .query("schedulePlacements")
-        .withIndex("by_sequence", (q) => q.eq("sequenceId", args.sequenceId))
-        .collect();
-      for (const placement of placements) {
-        if (placement.weekday != null && placement.blockId != null) {
-          await requireScheduleScopeAccessible(ctx, caller, placement);
-        }
-      }
-    }
-    return coreMoveSequence(ctx, args);
-  },
-});
-
-export const aideAcceptReorder = internalMutation({
-  args: { callerUserId: v.id("users"), sequenceId: v.string() },
-  handler: async (ctx, { callerUserId, sequenceId }) => {
-    const caller = await requireTeacherCaller(ctx, callerUserId);
-    const placements = await ctx.db
-      .query("schedulePlacements")
-      .withIndex("by_sequence", (q) => q.eq("sequenceId", sequenceId))
-      .collect();
-    for (const placement of placements) {
-      if (!placement.orderOverride) {
-        await requireScheduleScopeAccessible(ctx, caller, placement);
-      }
-    }
-    return coreAcceptReorder(ctx, sequenceId);
-  },
-});
-
 // TRA-246: guard placementIds ownership with the shared follow-up primitive.
 export const aideDismissFlag = internalMutation({
   args: {
@@ -5391,41 +4890,23 @@ export const aideDismissFlag = internalMutation({
   },
 });
 
-export const aidePlaceHomework = internalMutation({
-  args: {
-    callerUserId: v.id("users"),
-    periodId: v.id("reportingPeriods"),
-    groupId: v.id("scholarGroups"),
-    subject: v.string(),
-    teacherId: v.optional(v.id("users")),
-    assignmentId: v.optional(v.id("assignments")),
-    activityId: v.optional(v.id("activities")),
-    dueWeekday: v.optional(v.number()),
-    weekStartMs: v.optional(v.number()),
-    note: v.optional(v.string()),
-  },
-  handler: async (ctx, { callerUserId, ...args }) => {
-    const caller = await requireTeacherCaller(ctx, callerUserId);
-    await requireScheduleScopeAccessible(ctx, caller, {
-      periodId: args.periodId,
-    });
-    await requireGroupScholarAccess(ctx, caller, args.groupId);
-    if (args.teacherId) {
-      await requireStaffAccessible(ctx, caller, args.teacherId);
-    }
-    if (args.assignmentId) {
-      await requireAssignmentAccessible(ctx, caller, args.assignmentId);
-    }
-    return corePlaceHomework(ctx, args);
-  },
-});
-
 /** List the terms (reporting periods) so the bot can pick a periodId. */
 export const aideListTerms = internalQuery({
   args: { callerUserId: v.id("users") },
   handler: async (ctx, { callerUserId }) => {
-    await requireTeacherCaller(ctx, callerUserId);
-    const rows = await ctx.db.query("reportingPeriods").order("desc").collect();
+    const caller = await requireTeacherCaller(ctx, callerUserId);
+    // Only terms the caller could open with get_master_schedule: the same
+    // school rule as requireScheduleScopeAccessible, where an unstamped legacy
+    // term belongs to the primary school.
+    const scope = await curatableInstitutionIds(ctx, caller);
+    const primaryId = await primaryInstitutionId(ctx);
+    const rows = (
+      await ctx.db.query("reportingPeriods").order("desc").collect()
+    ).filter((p) => {
+      const institutionId = p.institutionId ?? primaryId;
+      if (!institutionId) return false;
+      return scope === "all" || scope.has(institutionId);
+    });
     return rows.map((p) => ({
       _id: p._id,
       label: p.label,
@@ -5454,6 +4935,7 @@ export const aideUpdateBlock = internalMutation({
     const block = await ctx.db.get(args.blockId);
     if (block) {
       await requireScheduleScopeAccessible(ctx, caller, block);
+      await requireBellScheduleAdmin(ctx, caller, block.periodId);
     }
     return coreUpdateBlock(ctx, args);
   },
@@ -5467,6 +4949,7 @@ export const aideRemoveBlock = internalMutation({
     const block = await ctx.db.get(blockId);
     if (block) {
       await requireScheduleScopeAccessible(ctx, caller, block);
+      await requireBellScheduleAdmin(ctx, caller, block.periodId);
     }
     return coreRemoveBlock(ctx, blockId);
   },

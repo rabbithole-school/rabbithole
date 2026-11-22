@@ -313,6 +313,15 @@ export const SLIDES_COPY = {
   addSlideAfter: "Add after",
   slideTitle: (slideNumber: number) => `Slide ${slideNumber}`,
   deleteSlide: "Delete slide",
+  duplicateSlide: "Duplicate slide",
+  copySlide: "Copy slide",
+  copyAllSlides: "Copy all slides",
+  pasteSlidesAfter: (count: number) =>
+    count === 1 ? "Paste 1 slide after" : `Paste ${count} slides after`,
+  copiedSlides: (count: number) =>
+    `Copied ${count === 1 ? "1 slide" : `${count} slides`}. Paste from any slide's menu.`,
+  pasteNoRoom: "There isn't room for that many slides here.",
+  slideMenu: (slideNumber: number) => `Slide ${slideNumber} options`,
   deleteElement: "Delete",
   speakerNotes: "Speaker notes",
   textStyle: "Text style",
@@ -972,14 +981,21 @@ export function validateDeckLenient(raw: unknown): Deck | null {
  *  • `addSlide.slide` — full slide content to restore (background, elements,
  *    order, notes). Absent = a blank slide (unchanged). Normalized strictly:
  *    if any of it would be dropped the whole op fails, so a restore is exact.
+ *  • `addSlide.uniqueElementIds` — set by a PASTE (`shared/slideClipboard.ts`),
+ *    never by a restore: element ids in `slide` that the deck already uses get
+ *    new ones (see `withFreeElementIds`). A restore must keep its ids exactly,
+ *    because older history entries still name them, and a deck can legally
+ *    hold the same element id on two slides. Redo keeps the flag (the op is
+ *    copied), so a re-done paste lands with the ids the paste first made.
  */
 export type SlideOp =
   | { op: "addElement"; slideId: string; afterId?: string | null; id?: string; element: unknown }
   | { op: "patchElement"; slideId: string; id: string; frame?: Partial<Frame>; text?: string; style?: Record<string, unknown> }
   | { op: "removeElement"; slideId: string; id: string }
   | { op: "moveElement"; slideId: string; id: string; afterId?: string | null }
-  | { op: "addSlide"; afterSlideId?: string | null; id?: string; slide?: unknown }
+  | { op: "addSlide"; afterSlideId?: string | null; id?: string; slide?: unknown; uniqueElementIds?: boolean }
   | { op: "removeSlide"; slideId: string }
+  | { op: "moveSlide"; slideId: string; afterSlideId?: string | null }
   | { op: "setBackground"; slideId: string; color: string }
   | { op: "setSpeakerNotes"; slideId: string; notes: string }
   | { op: "setTitle"; title: string };
@@ -1065,6 +1081,46 @@ function idExists(deck: Deck, id: string): boolean {
     if (Object.prototype.hasOwnProperty.call(s.elements, id)) return true;
   }
   return false;
+}
+
+/**
+ * For a PASTED slide (`addSlide.uniqueElementIds`): the factory treats every
+ * slide's element ids as taken, but pasted content arrives with ids from
+ * wherever it was copied. A slide pasted from another deck, or a second copy of
+ * one already in this deck, would otherwise put the same element id on two
+ * slides, so each id already used anywhere in `deck`, or by the slide itself,
+ * is replaced. An undo restore never asks for this: it must bring its ids back
+ * exactly, even where an older deck already reuses one on another slide.
+ *
+ * The replacement is derived from the new slide's id (`sl7-e1`), NOT minted
+ * from the batch's id factory, for two reasons:
+ *  - `invertOps` replays every op with a one-shot factory that can only hand
+ *    back that op's created slide id. Asking it for an element id returned the
+ *    slide id, which is always taken, and the probe spun forever: the editor
+ *    froze on the first paste whose ids collided, while building its undo step.
+ *  - A derived id depends only on the slide id and the deck it lands in, so the
+ *    replay, redo, and the server all arrive at the same ids. Its shape is not
+ *    `el<N>`, so a later mint in the same batch can never produce it either.
+ */
+function withFreeElementIds(deck: Deck, slide: Slide): Slide {
+  const used = new Set<string>([slide.id]);
+  const isTaken = (id: string) => used.has(id) || idExists(deck, id);
+  const elementIds: string[] = [];
+  const elements: Record<string, SlideElement> = Object.create(null);
+  let changed = false;
+  slide.elementIds.forEach((eid, i) => {
+    let id = eid;
+    if (isTaken(id)) {
+      const base = `${slide.id}-e${i + 1}`;
+      id = base;
+      for (let n = 2; isTaken(id); n += 1) id = `${base}-${n}`;
+      changed = true;
+    }
+    used.add(id);
+    elementIds.push(id);
+    elements[id] = id === eid ? slide.elements[eid] : { ...slide.elements[eid], id };
+  });
+  return changed ? { ...slide, elementIds, elements } : slide;
 }
 
 /**
@@ -1215,7 +1271,9 @@ export function applySlideOps(deck: Deck, ops: SlideOp[], mintId: IdFactory): Ap
           if (built.errors.length > 0) {
             return { ok: false, error: `addSlide: slide content invalid (${built.errors[0]})` };
           }
-          slide = built.slide;
+          slide = op.uniqueElementIds === true
+            ? withFreeElementIds(next, built.slide)
+            : built.slide;
         } else {
           slide = emptySlide(id);
         }
@@ -1238,6 +1296,26 @@ export function applySlideOps(deck: Deck, ops: SlideOp[], mintId: IdFactory): Ap
         const at = next.slides.findIndex((s) => s.id === op.slideId);
         if (at === -1) return { ok: false, error: `unknown slide "${op.slideId}"` };
         next.slides.splice(at, 1);
+        break;
+      }
+      case "moveSlide": {
+        // Reorders slides; content and ids are untouched. afterSlideId matches
+        // addSlide: undefined → end, null → front, string → right after it.
+        const at = next.slides.findIndex((s) => s.id === op.slideId);
+        if (at === -1) return { ok: false, error: `unknown slide "${op.slideId}"` };
+        if (op.afterSlideId === op.slideId) {
+          return { ok: false, error: "moveSlide: a slide can't move after itself" };
+        }
+        const [moving] = next.slides.splice(at, 1);
+        if (op.afterSlideId === null) {
+          next.slides.unshift(moving);
+        } else if (op.afterSlideId === undefined) {
+          next.slides.push(moving);
+        } else {
+          const to = next.slides.findIndex((s) => s.id === op.afterSlideId);
+          if (to === -1) return { ok: false, error: `unknown afterSlideId "${op.afterSlideId}"` };
+          next.slides.splice(to + 1, 0, moving);
+        }
         break;
       }
       case "setBackground": {
@@ -1274,12 +1352,62 @@ export function applySlideOps(deck: Deck, ops: SlideOp[], mintId: IdFactory): Ap
  * id, without the full style payload eating the context window. This is what
  * `read_deck` returns.
  */
+/**
+ * Whitespace-collapsed preview, capped at `maxLength`. A cut preview SAYS it was
+ * cut: an unmarked fragment reads to the model as the whole box, so a tutor
+ * reading one told scholars their newly added sentences were not there (TRA-702).
+ */
 function summaryPreview(value: string, maxLength: number): string {
-  return value.replace(/\s+/g, " ").slice(0, maxLength);
+  const flat = value.replace(/\s+/g, " ");
+  if (flat.length <= maxLength) return flat;
+  return `${flat.slice(0, maxLength)}… [+${flat.length - maxLength} more characters not shown]`;
 }
 
 function normalizedSlideText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The slide an editor last showed: its id and the position it had then. The
+ * tutor can reorder slides (`moveSlide`) while a scholar is editing, so an
+ * editor that remembered only a position would land on a different slide, and
+ * the draft in its text box would save onto that stranger.
+ */
+export type SlideCursor = { slideId: string; index: number };
+
+/**
+ * Which slide index an editor should show. A changed `requestedIndex` means
+ * the scholar (or the host) navigated, so it wins. An unchanged one means only
+ * the deck changed, so the editor stays with the slide it was showing, wherever
+ * that slide now sits. A slide that is gone falls back to the clamped position.
+ */
+export function resolveSlideCursor(
+  slides: readonly Pick<Slide, "id">[],
+  requestedIndex: number,
+  last: SlideCursor | null,
+): number {
+  const clamped = Math.max(0, Math.min(requestedIndex, slides.length - 1));
+  if (!last || requestedIndex !== last.index) return clamped;
+  const at = slides.findIndex((s) => s.id === last.slideId);
+  return at === -1 ? clamped : at;
+}
+
+/**
+ * The slide and text element a text draft belongs to, found by the ids the edit
+ * started on rather than by position. Null when either is gone or the element
+ * is no longer text, so a draft never lands on a different slide's box that
+ * happens to share its element id.
+ */
+export function textDraftTarget(
+  deck: Deck,
+  slideId: string | null,
+  elementId: string | null,
+): { slide: Slide; element: Extract<SlideElement, { type: "text" }> } | null {
+  if (!slideId || !elementId) return null;
+  const slide = deck.slides.find((s) => s.id === slideId);
+  const element = slide?.elements[elementId];
+  if (!slide || element?.type !== "text") return null;
+  return { slide, element };
 }
 
 /** A text box with nothing but whitespace in it paints nothing at all. */
@@ -1407,8 +1535,13 @@ function slideDiagnostics(slide: Slide): string {
  * Compact, id-addressed projection of a deck for the model. `textCap` bounds
  * each text element's preview: the default (60) suits the `edit_slides op:"read"`
  * lookup, which only needs enough to disambiguate ids before patching. The
- * prompt's live DECK section passes a much larger cap so the tutor actually
- * READS the scholar's slide copy each turn rather than a 60-char stub.
+ * prompt's live DECK section passes `MAX_TEXT_LENGTH`, so the tutor reads every
+ * text box in full each turn. A cap below that hid the end of long boxes, and
+ * scholars who added a sentence there were told it was missing (TRA-702).
+ * Alt text and speaker notes keep their short floors (80/120) but widen with
+ * `textCap`, so a full-text summary carries no cut and no "not shown" marker —
+ * it is also the scholar's submitted slides text that teachers read and
+ * download (`deliverables.textContent`).
  */
 export function summarizeDeckForModel(deck: Deck, textCap = 60): string {
   const lines: string[] = [
@@ -1429,12 +1562,14 @@ export function summarizeDeckForModel(deck: Deck, textCap = 60): string {
           `  ${eid} text ${geom} fontSize=${el.style.fontSize} bold=${el.style.bold} italic=${el.style.italic} "${preview}"`,
         );
       } else if (el.type === "image" || el.type === "video") {
-        lines.push(`  ${eid} ${el.type} ${geom} alt="${summaryPreview(el.alt, 80)}"`);
+        lines.push(`  ${eid} ${el.type} ${geom} alt="${summaryPreview(el.alt, Math.max(80, textCap))}"`);
       } else {
         lines.push(`  ${eid} ${el.type} ${geom} fill=${el.style.fill ?? "none"}`);
       }
     }
-    if (s.speakerNotes) lines.push(`  notes: ${summaryPreview(s.speakerNotes, 120)}`);
+    if (s.speakerNotes) {
+      lines.push(`  notes: ${summaryPreview(s.speakerNotes, Math.max(120, textCap))}`);
+    }
   });
   return lines.join("\n");
 }
@@ -1553,6 +1688,14 @@ function invertOne(before: Deck, op: SlideOp, createdId: string | undefined): Sl
         { op: "moveElement", slideId: op.slideId, id: op.id, afterId: priorNeighbour(slide.elementIds, idx) },
       ];
     }
+    case "moveSlide": {
+      // Move it back after the slide that preceded it before the move.
+      const idx = before.slides.findIndex((s) => s.id === op.slideId);
+      if (idx === -1) return null;
+      return [
+        { op: "moveSlide", slideId: op.slideId, afterSlideId: idx <= 0 ? null : before.slides[idx - 1].id },
+      ];
+    }
     case "setBackground": {
       const slide = findSlide(before, op.slideId);
       if (!slide) return null;
@@ -1591,7 +1734,7 @@ function invertOne(before: Deck, op: SlideOp, createdId: string | undefined): Sl
  * state) or when `createdIds` don't line up with the add-ops.
  *
  * INVERTIBILITY: with the id/position/content restore fields on
- * addElement/addSlide, and empty≡absent speaker notes, all nine ops are
+ * addElement/addSlide, and empty≡absent speaker notes, all ten ops are
  * exactly invertible. The only lossy thing is `revision`, which is server-owned
  * and intentionally monotonic; nothing else about a deck is unrecoverable.
  */

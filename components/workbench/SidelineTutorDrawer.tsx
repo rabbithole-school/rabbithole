@@ -19,6 +19,7 @@ import { Square, X } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { convexSiteUrl } from "@/lib/convexUrls";
+import { useComposeKeyTarget } from "@/hooks/useComposeKey";
 import { useAgentStream } from "@/hooks/useAgentStream";
 import { useCachedQuery } from "@/hooks/useCachedQuery";
 import { MarkdownBlock, StreamingMarkdown } from "@/components/StreamingMarkdown";
@@ -82,6 +83,8 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
   const sendMsg = useMutation(api.sessions.sendMessage);
   const requestStop = useMutation(api.sessions.requestStop);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  useComposeKeyTarget(() => composerRef.current?.focus(), open);
 
   const sessionData = useCachedQuery(
     api.sessions.getWithMessages,
@@ -206,6 +209,7 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
 
       <HStack p={2} borderTop="1px solid" borderColor="gray.200" gap={2}>
         <Textarea
+          ref={composerRef}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
@@ -214,7 +218,7 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
               void handleSend();
             }
           }}
-          placeholder="reply to the tutor…"
+          placeholder="Reply to the tutor…"
           rows={1}
           size="sm"
           resize="none"

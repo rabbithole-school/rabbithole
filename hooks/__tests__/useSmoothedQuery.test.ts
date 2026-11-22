@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { nextRetained, resolveSmoothed } from "@/hooks/useSmoothedQuery";
+import { nextHeld, nextRetained, resolveSmoothed } from "@/hooks/useSmoothedQuery";
 
 // The React hook itself can't be rendered here (edge-runtime, no DOM), so the
 // keep-previous transition is tested through its pure core. This is exactly the
@@ -61,5 +61,56 @@ describe("nextRetained", () => {
   it("re-enabling after a skip starts from nothing, not the old scholar", () => {
     const afterSkip = nextRetained(undefined, "scholarA", true);
     expect(nextRetained(undefined, afterSkip, false)).toBeUndefined();
+  });
+});
+
+// The reset key (TRA-424): a minute re-arm may keep the previous result, but a
+// SUBJECT change (institution lens, assignment) must not show the previous
+// subject's data while the new one loads.
+describe("nextHeld", () => {
+  it("retains across a clock-only re-arm while the key is unchanged", () => {
+    const held = { key: "schoolA", value: "schoolA-devices" };
+    expect(nextHeld(undefined, held, "schoolA", false)).toEqual(held);
+  });
+
+  it("drops the held value on the render the key changes", () => {
+    const held = { key: "schoolA", value: "schoolA-devices" };
+    const next = nextHeld<string>(undefined, held, "schoolB", false);
+    expect(next).toEqual({ key: "schoolB", value: undefined });
+    // ...so the hook shows nothing (a fresh load), and nothing is "pending".
+    expect(resolveSmoothed(undefined, next.value)).toEqual({
+      data: undefined,
+      isPending: false,
+    });
+  });
+
+  it("holds the new subject's data once it arrives, and retains it after", () => {
+    const afterSwitch = { key: "schoolB", value: undefined };
+    const loaded = nextHeld("schoolB-devices", afterSwitch, "schoolB", false);
+    expect(loaded).toEqual({ key: "schoolB", value: "schoolB-devices" });
+    expect(nextHeld(undefined, loaded, "schoolB", false)).toEqual(loaded);
+  });
+
+  it("takes a live value straight through even on the render the key changes", () => {
+    // A cached subscription for the new key can resolve synchronously.
+    const held = { key: "a1", value: "a1-readout" };
+    expect(nextHeld("a2-readout", held, "a2", false)).toEqual({
+      key: "a2",
+      value: "a2-readout",
+    });
+  });
+
+  it("a scholar switch with the new scholar still loading shows nothing, not the old scholar's evidence", () => {
+    // ScholarProfile keys levelEvidence by scholarId; a minute re-arm for the
+    // same scholar still retains.
+    const held = { key: "scholarA", value: "A-evidence" };
+    expect(nextHeld(undefined, held, "scholarB", false).value).toBeUndefined();
+    expect(nextHeld(undefined, held, "scholarA", false).value).toBe("A-evidence");
+  });
+
+  it("an omitted key behaves exactly like the keyless hook", () => {
+    const held = { key: undefined, value: "previous" };
+    expect(nextHeld(undefined, held, undefined, false).value).toBe("previous");
+    expect(nextHeld(undefined, held, undefined, true).value).toBeUndefined();
   });
 });

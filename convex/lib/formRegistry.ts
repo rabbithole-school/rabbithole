@@ -107,7 +107,7 @@ export const REQUIRED_FORMS: FormRegistryEntry[] = [
     id: "molii_gardens_field_trip_permission_slip",
     label: "Mōliʻi Gardens Field Trip Permission Slip",
     description:
-      "A signed parent or guardian permission slip, transportation choice, and Kualoa Ranch release for the Mōliʻi Gardens field trip.",
+      "A signed parent or guardian permission slip and transportation choice for the Mōliʻi Gardens field trip.",
     formPath: "/parent/forms/molii-gardens-field-trip-permission-slip",
     applicabilityKey: "always",
     // Open through the day after the Nov 17 trip, then off families' lists.

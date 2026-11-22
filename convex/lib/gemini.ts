@@ -38,6 +38,10 @@ export type GeminiPart =
  *
  * `opts.aspectRatio` (e.g. "1:1") pins the output shape via imageConfig; omit
  * it to keep the model's default framing (tutor illustrations / Magic edits).
+ *
+ * `opts.onFailure` receives a short reason for each failed request (HTTP
+ * status, thrown error, or why a 200 carried no image), for callers that keep
+ * a durable record: Convex log history only reaches back about an hour.
  */
 export async function geminiGenerateImage(
   parts: GeminiPart[],
@@ -45,6 +49,7 @@ export async function geminiGenerateImage(
     aspectRatio?: string;
     model?: GeminiImageModel;
     quotaFallbackModel?: GeminiImageModel;
+    onFailure?: (reason: string) => void;
   },
 ): Promise<{ bytes: Uint8Array; mimeType: string; model: GeminiImageModel } | null> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -74,7 +79,7 @@ export async function geminiGenerateImage(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Accept-Encoding": "identity" },
           body: JSON.stringify({
             contents: [{ parts }],
             generationConfig,
@@ -85,6 +90,7 @@ export async function geminiGenerateImage(
       if (!res.ok) {
         const body = await res.text();
         console.error("[gemini] generateContent error:", model, res.status, body);
+        opts?.onFailure?.(`${model} HTTP ${res.status}: ${body.slice(0, 200)}`);
         return {
           image: null,
           quotaExhausted:
@@ -100,7 +106,14 @@ export async function geminiGenerateImage(
         (p: { inlineData?: { mimeType?: string; data?: string } }) =>
           p.inlineData?.mimeType?.startsWith("image/"),
       );
-      if (!img?.inlineData?.data) return { image: null, quotaExhausted: false };
+      if (!img?.inlineData?.data) {
+        // A 200 with no image is a safety block, a text-only reply, or an
+        // empty candidate. Say which, or the failure is undiagnosable later.
+        const reason = describeMissingImage(data);
+        console.error("[gemini] generateContent returned no image:", model, reason);
+        opts?.onFailure?.(`${model} returned no image: ${reason}`);
+        return { image: null, quotaExhausted: false };
+      }
       return {
         image: {
           bytes: base64ToBytes(img.inlineData.data),
@@ -111,6 +124,9 @@ export async function geminiGenerateImage(
       };
     } catch (err) {
       console.error("[gemini] generateContent failed:", model, err);
+      opts?.onFailure?.(
+        `${model} request failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return { image: null, quotaExhausted: false };
     } finally {
       clearTimeout(timeout);
@@ -129,4 +145,36 @@ export async function geminiGenerateImage(
     `[gemini] ${primaryModel} quota exhausted; retrying with ${fallbackModel}`,
   );
   return (await request(fallbackModel)).image;
+}
+
+/**
+ * Why a successful generateContent response carried no image: the prompt's
+ * block reason, the candidate's finish reason, and the start of any text the
+ * model returned instead.
+ */
+export function describeMissingImage(data: unknown): string {
+  // Untrusted JSON: check every field's type so a malformed body still yields
+  // a reason instead of a TypeError from the formatter.
+  const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+  const obj = (v: unknown) =>
+    v && typeof v === "object" ? (v as Record<string, unknown>) : undefined;
+  const d = obj(data);
+  const bits: string[] = [];
+  const block = str(obj(d?.promptFeedback)?.blockReason);
+  if (block) bits.push(`blockReason=${block}`);
+  const candidates = Array.isArray(d?.candidates) ? d.candidates : [];
+  const candidate = obj(candidates[0]);
+  if (!candidate) bits.push("no candidates");
+  const finish = str(candidate?.finishReason);
+  if (finish) bits.push(`finishReason=${finish}`);
+  const finishMessage = str(candidate?.finishMessage);
+  if (finishMessage) bits.push(`finishMessage=${finishMessage.slice(0, 160)}`);
+  const parts = obj(candidate?.content)?.parts;
+  const text = (Array.isArray(parts) ? parts : [])
+    .map((p) => str(obj(p)?.text))
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  if (text) bits.push(`text="${text.slice(0, 160)}"`);
+  return bits.length > 0 ? bits.join(", ") : "empty response";
 }

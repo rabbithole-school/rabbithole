@@ -15,9 +15,14 @@
  *
  * A session WITHOUT a deliverable activity (open exploration, unit-level
  * planning, a deliverable-less activity) still gets this panel once it holds a
- * text/code artifact — the tutor can create documents in any session — showing
- * just the document switcher + editor, with none of the deliverable-only parts
- * (1–3, 5). See `workSurfaceFor` (TRA-463).
+ * text/code artifact or a slide deck — the tutor can create both in any
+ * session — showing just the document switcher + editor, with none of the
+ * deliverable-only parts (1–3, 5). See `workSurfaceFor` (TRA-463).
+ *
+ * A deck that is not the activity's deliverable (the tutor's `edit_slides`
+ * works everywhere) shows through the same `SlidesDeliverable` the slides
+ * deliverable uses — in the document switcher, or after a photo/audio/map
+ * deliverable's work (`sideDeckPlacement`).
  */
 import {
   useCallback,
@@ -48,6 +53,10 @@ import Animated from "react-native-reanimated";
 import { useImageAttachment } from "@/hooks/useImageAttachment";
 import { useStreamingDictation } from "@/hooks/useStreamingDictation";
 import { isTextArtifact } from "../../vendor/shared/textArtifacts";
+import {
+  splitWritingItalics,
+  toggleWritingItalics,
+} from "../../vendor/shared/writingItalics";
 import { createDraftSaveDrain } from "../../vendor/shared/draftSaveDrain";
 import {
   clearAllArtifactDrafts,
@@ -77,8 +86,10 @@ import { ArtifactChipStrip } from "./ArtifactChipStrip";
 import {
   artifactIdForDeliverableLookup,
   dedicatedDeliverableArtifact,
+  isWorkSurfaceArtifact,
   nextAutoSelect,
   pickDefaultArtifact,
+  sideDeckPlacement,
   workSurfaceFor,
 } from "@/lib/deliverableArtifactSelection";
 
@@ -272,14 +283,25 @@ export function DeliverablePanel({
     snapshotStatus: snapshot?.status,
   });
 
+  // Where a deck that is not this activity's deliverable goes. `switcher`
+  // lists it beside the documents (web's ArtifactPanel does the same);
+  // `below` renders it after a photo/audio/map deliverable's work.
+  const deckPlacement = sideDeckPlacement(activity?.deliverable?.kind);
   const artifacts = useMemo(
     () =>
       [...(artifactsResult ?? [])]
-        .filter(isTextArtifact)
+        .filter((artifact) =>
+          artifact.type === "slides"
+            ? deckPlacement === "switcher"
+            : isTextArtifact(artifact),
+        )
         .filter((artifact) => !hideCode || artifact.type !== "code")
         .sort((a, b) => a._creationTime - b._creationTime),
-    [artifactsResult, hideCode],
+    [artifactsResult, hideCode, deckPlacement],
   );
+  const deckBelow =
+    deckPlacement === "below" &&
+    (artifactsResult ?? []).some((artifact) => artifact.type === "slides");
 
   // Auto-select an artifact that APPEARS after the panel's first loaded render
   // — a tutor-made code app, a second doc the scholar asked for — so it opens
@@ -335,7 +357,10 @@ export function DeliverablePanel({
   const surface = workSurfaceFor({
     hasActivity: !!activityId,
     activity,
-    textArtifactCount: artifactsResult === undefined ? undefined : artifacts.length,
+    workArtifactCount:
+      artifactsResult === undefined
+        ? undefined
+        : artifactsResult.filter(isWorkSurfaceArtifact).length,
   });
   const deliverable = useQuery(
     api.deliverables.getForSessionActivity,
@@ -408,7 +433,9 @@ export function DeliverablePanel({
   // The map IS the work: it takes whatever height the prompt leaves, and the
   // panel doesn't scroll. Beside another kind of work it gets a fixed band so
   // the photo/editor below stays reachable.
-  const mapFillsPanel = !!map && isMap;
+  // A side deck below the map needs the panel to scroll, so the map takes the
+  // fixed band instead.
+  const mapFillsPanel = !!map && isMap && !deckBelow;
 
   const criteria = spec ? criteriaFor(spec, snapshot ?? null) : [];
   const criteriaPending =
@@ -503,6 +530,27 @@ export function DeliverablePanel({
       setBusy(false);
     }
   };
+
+  const startWorkEmpty = (
+    <View style={styles.emptyWork}>
+      <SymbolView name="doc.badge.plus" size={28} tintColor={colors.violet} />
+      <Text style={styles.emptyTitle}>Nothing written yet</Text>
+      <Text style={styles.emptyHint}>
+        Start a document, then ask Rabbithole to check it against the goal.
+      </Text>
+      <Pressable
+        onPress={busy ? undefined : handleCreateArtifact}
+        style={({ pressed }) => [styles.startBtn, pressed && styles.startBtnPressed]}
+      >
+        {busy ? (
+          <ActivityIndicator color={colors.white} />
+        ) : (
+          <SymbolView name="plus.circle.fill" size={16} tintColor={colors.white} />
+        )}
+        <Text style={styles.startBtnText}>{busy ? "Starting…" : "Start writing"}</Text>
+      </Pressable>
+    </View>
+  );
 
   return (
     // Animated.View with paddingBottom = keyboard.height drives the panel shrink
@@ -633,7 +681,18 @@ export function DeliverablePanel({
               </View>
             )
           ) : activeArtifact ? (
-            activeArtifact.type === "code" ? (
+            activeArtifact.type === "slides" ? (
+              // The tutor's deck, in a session whose deliverable is not slides.
+              // Same host as the slides deliverable: one deck view (T1). If the
+              // activity's own work has not been started, the deck is the only
+              // entry (no switcher), so the way to start it stays below.
+              <>
+                <SlidesDeliverable key={activeArtifact._id} sessionId={sessionId} />
+                {spec && artifacts.every((artifact) => artifact.type === "slides")
+                  ? startWorkEmpty
+                  : null}
+              </>
+            ) : activeArtifact.type === "code" ? (
               <AppCard
                 key={activeArtifact._id}
                 sessionId={sessionId}
@@ -659,27 +718,16 @@ export function DeliverablePanel({
               />
             )
           ) : (
-            <View style={styles.emptyWork}>
-              <SymbolView name="doc.badge.plus" size={28} tintColor={colors.violet} />
-              <Text style={styles.emptyTitle}>Nothing written yet</Text>
-              <Text style={styles.emptyHint}>
-                Start a document, then ask Rabbithole to check it against the goal.
-              </Text>
-              <Pressable
-                onPress={busy ? undefined : handleCreateArtifact}
-                style={({ pressed }) => [styles.startBtn, pressed && styles.startBtnPressed]}
-              >
-                {busy ? (
-                  <ActivityIndicator color={colors.white} />
-                ) : (
-                  <SymbolView name="plus.circle.fill" size={16} tintColor={colors.white} />
-                )}
-                <Text style={styles.startBtnText}>{busy ? "Starting…" : "Start writing"}</Text>
-              </Pressable>
-            </View>
+            startWorkEmpty
           )}
           </View>
         )}
+
+        {deckBelow ? (
+          <View style={styles.editorSection}>
+            <SlidesDeliverable sessionId={sessionId} />
+          </View>
+        ) : null}
       </ScrollView>
 
       {/* ── Footer: Check my work (deliverables only) ── */}
@@ -690,6 +738,7 @@ export function DeliverablePanel({
               kind="photo"
               mode={spec.mode}
               flairKey={activeArtifact?._id ?? activityId ?? ""}
+              sessionId={sessionId}
               flairEarned={deliverable?.flairEarned}
               criteria={criteria}
               deliverableId={deliverable?._id}
@@ -706,11 +755,15 @@ export function DeliverablePanel({
           // A side app is not the deliverable: Check my work belongs to the
           // writing, so it is not offered while the app's chip is selected
           // (web hides it on the app card the same way).
-          !(activeArtifact.type === "code" && spec.kind !== "artifact") && (
+          !(activeArtifact.type === "code" && spec.kind !== "artifact") &&
+          // Nor does a side deck: the tutor made it, the activity asked for
+          // something else.
+          activeArtifact.type !== "slides" && (
             <DeliverableFooter
               kind="text"
               mode={spec.mode}
               flairKey={activeArtifact._id}
+              sessionId={sessionId}
               flairEarned={deliverable?.flairEarned}
               criteria={criteria}
               deliverableId={deliverable?._id}
@@ -855,6 +908,7 @@ function WritingToolbar({
   localContentRef,
   selectionRef,
   onInsert,
+  onItalic,
 }: {
   title: string;
   saveState: SaveState;
@@ -862,6 +916,8 @@ function WritingToolbar({
   localContentRef: { current: string };
   selectionRef: { current: { start: number; end: number } };
   onInsert: (text: string) => void;
+  /** Wraps (or unwraps) the selection in `*…*` — see writingItalics. */
+  onItalic: () => void;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -874,8 +930,9 @@ function WritingToolbar({
         spoken,
       );
       if (next === localContentRef.current) return;
-      selectionRef.current = { start: caret, end: caret };
+      // After onInsert: its change handler re-estimates the caret.
       onInsert(next);
+      selectionRef.current = { start: caret, end: caret };
     },
     [localContentRef, selectionRef, onInsert],
   );
@@ -918,6 +975,16 @@ function WritingToolbar({
 
   return (
     <EditorToolbarRow title={title} saveState={saveState}>
+      <Pressable
+        onPress={onItalic}
+        hitSlop={8}
+        style={styles.editorItalicBtn}
+        accessibilityRole="button"
+        accessibilityLabel="Italic"
+        accessibilityHint="Makes the selected words italic, or plain again"
+      >
+        <SymbolView name="italic" size={20} tintColor={colors.violet} />
+      </Pressable>
       <Pressable
         onPress={onDictateStart}
         disabled={micOwnedElsewhere}
@@ -976,6 +1043,19 @@ export function ArtifactEditor({
   // where they're typing. Lives here (above the incoming-content effect) so an
   // adopted server update can reset it and never overwrite the wrong range.
   const selectionRef = useRef({ start: localContent.length, end: localContent.length });
+  // Set for one render after the Italic button rewrites the text, so the
+  // selection follows the words it styled; released on the next selection
+  // event so the field goes back to owning its caret.
+  const [forcedSelection, setForcedSelection] = useState<
+    { start: number; end: number } | undefined
+  >(undefined);
+  // Hand the caret back once the new text and selection have landed, even
+  // if iOS fires no selection event (a toggle that changed nothing).
+  useEffect(() => {
+    if (!forcedSelection) return;
+    const frame = requestAnimationFrame(() => setForcedSelection(undefined));
+    return () => cancelAnimationFrame(frame);
+  }, [forcedSelection]);
 
   useEffect(() => {
     localContentRef.current = localContent;
@@ -1105,6 +1185,24 @@ export function ArtifactEditor({
 
   const handleChange = useCallback(
     (text: string) => {
+      // Keep the caret estimate in step with the text. iOS reports the new
+      // selection in a separate, later event; until it lands, the caret sits
+      // just after the edit, which is what this works out (shared prefix and
+      // suffix of the old and new text). The Italic button and dictation read
+      // it, so a press right after typing never acts on a stale caret.
+      const prev = localContentRef.current;
+      if (text !== prev) {
+        let suffix = 0;
+        while (
+          suffix < text.length &&
+          suffix < prev.length &&
+          text[text.length - 1 - suffix] === prev[prev.length - 1 - suffix]
+        ) {
+          suffix++;
+        }
+        const caret = text.length - suffix;
+        selectionRef.current = { start: caret, end: caret };
+      }
       localContentRef.current = text;
       setLocalContent(text);
       setSaveState("saving");
@@ -1150,6 +1248,41 @@ export function ArtifactEditor({
   // it: the code-source editor never passes one, so it never mounts a recorder.
   const dictationEnabled = sessionId !== undefined;
 
+  const handleItalic = useCallback(() => {
+    const { content: next, selection } = toggleWritingItalics(
+      localContentRef.current,
+      selectionRef.current,
+    );
+    if (next !== localContentRef.current) handleChange(next);
+    // After handleChange, which re-estimates the caret from the edit.
+    selectionRef.current = selection;
+    setForcedSelection(selection);
+  }, [handleChange]);
+
+  // Prose shows its italic spans in italics; the `*` markers stay in the text
+  // (they are what is saved) but fade back. The field takes styled children
+  // instead of `value` — same string, so the caret never moves.
+  const styledProse = useMemo(
+    () =>
+      code ? null : (
+        <Text>
+          {splitWritingItalics(localContent).map((seg, i) =>
+            seg.kind === "text" ? (
+              seg.text
+            ) : (
+              <Text
+                key={i}
+                style={seg.kind === "italic" ? styles.editorItalic : styles.editorItalicMarker}
+              >
+                {seg.text}
+              </Text>
+            ),
+          )}
+        </Text>
+      ),
+    [code, localContent, styles],
+  );
+
   return (
     <View style={styles.editorWrap}>
       {sessionId !== undefined ? (
@@ -1160,6 +1293,7 @@ export function ArtifactEditor({
           localContentRef={localContentRef}
           selectionRef={selectionRef}
           onInsert={handleChange}
+          onItalic={handleItalic}
         />
       ) : (
         <EditorToolbarRow title={artifact.title} saveState={saveState} />
@@ -1181,8 +1315,9 @@ export function ArtifactEditor({
       )}
       <AppTextInput
         style={[styles.editorInput, code && styles.editorInputCode]}
-        value={localContent}
+        value={styledProse ? undefined : localContent}
         onChangeText={handleChange}
+        selection={forcedSelection}
         onSelectionChange={
           dictationEnabled
             ? (event) => {
@@ -1203,7 +1338,9 @@ export function ArtifactEditor({
         // enough for the AutoFill callout to be the problem it is in the composer.
         scrollEnabled={false}
         accessibilityLabel={`Editor for ${artifact.title}`}
-      />
+      >
+        {styledProse}
+      </AppTextInput>
     </View>
   );
 }
@@ -1404,6 +1541,17 @@ function makeStyles(c: ReturnType<typeof useColors>) {
   editorMicBtn: {
     marginLeft: 10,
     marginVertical: -4,
+  },
+  editorItalicBtn: {
+    marginLeft: 10,
+    marginVertical: -4,
+    padding: 3,
+  },
+  editorItalic: {
+    fontFamily: fonts.italic,
+  },
+  editorItalicMarker: {
+    color: c.charcoalSubtle,
   },
   editorDictationBar: {
     paddingHorizontal: 8,

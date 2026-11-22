@@ -193,4 +193,77 @@ describe("practice templates — Wave A coverage", () => {
     expect(stems.some((stem) => stem.includes("÷"))).toBe(true);
     expect(stems.some((stem) => /\([^()]+ \+ \([^()]+ × [^()]+\)\)/.test(stem))).toBe(true);
   });
+
+  describe("order_of_operations precedence form", () => {
+    const shapes = {
+      telling: /^\d+ \+ \d+ × \d+ = \?$/,
+      parenSum: /^\(\d+ \+ \d+\) × \d+ = \?$/,
+      productMinus: /^\d+ × \d+ − \d+ = \?$/,
+      quotientPlus: /^\d+ ÷ \d+ \+ \d+ = \?$/,
+      nested: /^\(\d+ \+ \(\d+ × \d+\)\) − \d+ = \?$/,
+    };
+    type Shape = keyof typeof shapes;
+    const shapeOf = (stem: string): Shape[] =>
+      (Object.keys(shapes) as Shape[]).filter((k) => shapes[k].test(stem));
+
+    test("the precedence form always serves a + b × c, answered a + b×c", () => {
+      for (let seed = 1; seed <= 200; seed++) {
+        const item = generateItem("order_of_operations", seed, "precedence")!;
+        const m = /^(\d+) \+ (\d+) × (\d+) = \?$/.exec(item.stem);
+        expect(m, item.stem).not.toBeNull();
+        const [a, b, c] = m!.slice(1).map(Number);
+        expect(item.answer).toEqual({ type: "integer", value: a + b * c });
+        expect(item.form).toBe("precedence");
+        expect(item.workedSteps?.length).toBeGreaterThan(0);
+      }
+    });
+
+    test("an un-formed draw keeps the legacy uniform five-shape spread", () => {
+      const counts: Record<Shape, number> = {
+        telling: 0, parenSum: 0, productMinus: 0, quotientPlus: 0, nested: 0,
+      };
+      const seeds = 400;
+      for (let seed = 1; seed <= seeds; seed++) {
+        const item = generateItem("order_of_operations", seed)!;
+        expect(item.form).toBeUndefined();
+        const hit = shapeOf(item.stem);
+        expect(hit, item.stem).toHaveLength(1);
+        counts[hit[0]]++;
+      }
+      // Seeds 1..400 give 67 / 90 / 84 / 77 / 82.
+      for (const [shape, n] of Object.entries(counts)) {
+        expect(n / seeds, shape).toBeGreaterThanOrEqual(0.12);
+        expect(n / seeds, shape).toBeLessThanOrEqual(0.28);
+      }
+    });
+
+    // DO NOT "fix" these to match a new draw. A template item id is
+    // `skillKey#seed[#form]` and is regenerated from that id at grade time, on
+    // resume, from the offline outbox, and in teacher/placement reads of old
+    // attempts, so an existing `order_of_operations#<seed>` must keep producing
+    // exactly this problem. To change what scholars see, issue a new FORM
+    // (as "precedence" does) instead of changing the un-formed draw.
+    test.each([
+      [1, "(7 + 2) × 6 = ?", 54],
+      [2, "54 ÷ 6 + 4 = ?", 13],
+      [3, "7 × 2 − 5 = ?", 9],
+      [6, "6 + 2 × 7 = ?", 20],
+      [21, "(5 + (5 × 4)) − 8 = ?", 17],
+    ])("legacy id order_of_operations#%i still serves %s", (seed, stem, value) => {
+      const item = generateItem("order_of_operations", seed)!;
+      expect(item.stem).toBe(stem);
+      expect(item.answer).toEqual({ type: "integer", value });
+    });
+
+    test("an unknown form, or precedence on another skill, is the direct item", () => {
+      for (const seed of [1, 2, 3, 99]) {
+        const direct = generateItem("order_of_operations", seed);
+        expect(generateItem("order_of_operations", seed, "missing")).toEqual(direct);
+        expect(generateItem("order_of_operations", seed, "bogus")).toEqual(direct);
+        expect(generateItem("mult_facts_7_8_9", seed, "precedence")).toEqual(
+          generateItem("mult_facts_7_8_9", seed),
+        );
+      }
+    });
+  });
 });

@@ -35,6 +35,7 @@ import type { AideEmit } from "./aideStream";
 import {
   checkSlideDeckLayoutOnly,
   checkSlideOpsLayoutOnly,
+  SLIDES_WRITING_REFUSAL,
 } from "./tutorWriteBoundary";
 import {
   imageBytesToContentPart,
@@ -112,7 +113,6 @@ import {
   MAX_APP_ASSET_BYTES,
 } from "../../shared/appAssets";
 import { appCharmThemeLabel } from "./themeIconArt";
-import { parseBuildContractArg } from "./buildContract";
 import {
   MAX_CHARACTER_REPLY_CHARS,
   MAX_DIRECTION_CHARS,
@@ -129,6 +129,7 @@ import {
   CODE_EDITOR_TOOL_TYPE,
   codeArtifactPath,
   createRefusalMessage,
+  emptyAppRefusalMessage,
   editExcerpt,
   formatAppDirectory,
   formatAppView,
@@ -145,6 +146,22 @@ import {
   VIEW_LINE_NUMBER_NOTE,
   type CodeEditorCommand,
 } from "./tutorCodeEditor";
+import {
+  BENCH_IS_THE_APP_REFUSAL,
+  FIXED_APP_WRITE_REFUSAL,
+  OPEN_PYTHON_BENCH_TOOL_NAME,
+  isFixedApp,
+  pythonBenchOpenedMessage,
+  pythonBenchRefusalMessage,
+} from "./pythonBench";
+import {
+  QUEST_PROPOSAL_CARD_NOT_HERE,
+  QUEST_PROPOSAL_CARD_SHOWN,
+  QUEST_PROPOSAL_CARD_TOOL,
+  QUEST_PROPOSAL_CARD_TOOL_NAME,
+  checkQuestProposalCard,
+  type QuestProposalCardInput,
+} from "./questProposalCard";
 
 /**
  * The tutor's director tools. They act on the app's character behind the
@@ -221,6 +238,10 @@ export interface TutorToolSessionState {
   rubricPreToolClosingIsValid: boolean;
   suppressCompletionFollowUp: boolean;
   activityCompletedThisStream: boolean;
+  /** The app's "activity is done" note, queued when a completion tool records
+   *  a NEW completion tool-first and appended at the end of the turn, after
+   *  the tutor's reply to the scholar's latest message (TRA-703). */
+  pendingCompletionNote: string | null;
   /** create_code ran this turn (TRA-519): the turn built an app even if the
    *  session had none when it started, so its version is recorded. */
   createdCodeArtifact: boolean;
@@ -256,6 +277,59 @@ function simulatorVocabulary(message: string): string {
  * six always-on tools, then each conditionally-offered tool/group in the
  * same order its `tools.push(...)` used to run.
  */
+/** The tool result the model reads after save_follow_up (TRA-682). */
+export function saveFollowUpResultText(
+  kind: "saved" | "duplicate" | "empty" | "notHere" | "alreadySaved",
+): string {
+  switch (kind) {
+    case "saved":
+      return "Saved. It waits in Things to wonder about on their Quests tab.";
+    case "duplicate":
+      return "Already saved; nothing changed.";
+    case "alreadySaved":
+      return "This chat already saved its one follow-up; nothing changed.";
+    case "notHere":
+      return "Nothing was saved: follow-ups are saved only in the scholar's own Quest.";
+    default:
+      return "Nothing was saved: the follow-up was empty.";
+  }
+}
+
+/**
+ * End of a tutor turn: if a completion tool queued the app's "activity is
+ * done" note, put it after whatever the tutor wrote in reply, in its own
+ * bubble, so the reply is never replaced (TRA-703).
+ */
+export async function appendPendingCompletionNote(
+  state: Pick<
+    TutorToolSessionState,
+    "fullContent" | "lastPersistLength" | "pendingCompletionNote"
+  >,
+  splitAfterTool: (toolAction: string) => Promise<void>,
+  emit: AideEmit,
+): Promise<void> {
+  const note = state.pendingCompletionNote;
+  if (!note) return;
+  state.pendingCompletionNote = null;
+  if (state.fullContent.trim()) await splitAfterTool("");
+  state.fullContent = note;
+  state.lastPersistLength = note.length;
+  emit({ text: note });
+}
+
+/**
+ * The error path's version of appendPendingCompletionNote: the turn failed
+ * after a completion was recorded, so the note is written into the same
+ * bubble, after whatever partial reply streamed.
+ */
+export function withPendingCompletionNote(
+  content: string,
+  note: string | null,
+): string {
+  if (!note) return content;
+  return content.trim() ? `${content.trimEnd()}\n\n${note}` : note;
+}
+
 export async function makeTutorSessionTools(
   ctx: ActionCtx,
   emit: AideEmit,
@@ -289,6 +363,12 @@ export async function makeTutorSessionTools(
     instructionPlatform: ChatInstructionPlatform;
     chatPracticeOn: boolean;
     teachBackOn: boolean;
+    /** The client's app host inlines /app-assets/ scripts; gates charm_model
+     *  so older iPad builds, whose CSP would block the script, never get it. */
+    supportsAppScripts?: boolean;
+    /** offer_quest_proposal (TRA-690): the session allows it, the client
+     *  draws the card, and the scholar is the caller (http.ts). */
+    offersQuestProposal?: boolean;
   },
 ) {
   const {
@@ -312,6 +392,8 @@ export async function makeTutorSessionTools(
     instructionPlatform,
     chatPracticeOn,
     teachBackOn,
+    supportsAppScripts = false,
+    offersQuestProposal = false,
   } = opts;
 
   const { betaTool } = await import(
@@ -369,22 +451,23 @@ export async function makeTutorSessionTools(
     };
   };
 
-  const emitCompletionClosing = (key: string) => {
-    const closing = selectCompletionClosing(
+  // The completing turn no longer ends at the tool: the tutor may still answer
+  // the scholar's latest message, and the note is appended after that reply
+  // (appendPendingCompletionNote, called by http.ts before finalizing).
+  const queueCompletionNote = (key: string) => {
+    state.pendingCompletionNote = selectCompletionClosing(
       session.readingLevel,
       key,
       session.readLevel,
     );
-    state.fullContent = closing;
-    state.lastPersistLength = closing.length;
-    state.suppressCompletionFollowUp = true;
     state.activityCompletedThisStream = true;
-    emit({ text: closing });
   };
   const completionAlreadyHandledGuidance = () =>
     state.suppressCompletionFollowUp
       ? "This activity was already completed earlier in this turn. Do not call a completion tool or emit more text."
-      : "This activity was already complete. Do not announce completion again; respond naturally to the scholar's current message.";
+      : state.activityCompletedThisStream
+        ? "This activity was already completed earlier in this turn. Do not call a completion tool again or announce completion; answer the scholar's latest message only if it still needs an answer."
+        : "This activity was already complete. Do not announce completion again; respond naturally to the scholar's current message.";
 
   // ── Define tools with run callbacks ──────────────────────────
 
@@ -1137,7 +1220,7 @@ export async function makeTutorSessionTools(
           state.activityCompletedThisStream = true;
           return RUBRIC_SCORE_COMPLETE_SUPPRESS_FOLLOWUP_GUIDANCE;
         }
-        emitCompletionClosing(
+        queueCompletionNote(
           `${projId}:rubric:${JSON.stringify(verdicts)}`,
         );
         return RUBRIC_SCORE_COMPLETE_GUIDANCE;
@@ -1233,7 +1316,7 @@ export async function makeTutorSessionTools(
             state.suppressCompletionFollowUp = true;
             state.activityCompletedThisStream = true;
           } else {
-            emitCompletionClosing(
+            queueCompletionNote(
               input.summary?.trim() || `${projId}:completion`,
             );
           }
@@ -1313,131 +1396,97 @@ export async function makeTutorSessionTools(
     },
   });
 
-  // ── IS Unit co-design tools (planning tutor) ──────────────
-  // Active only when the project's unit is the scholar's own
-  // Independent Study unit (project.unitContext.isOwnIsUnit).
-  // Gated server-side by requireUnitEditAccess in each wrapped
-  // mutation, so a malicious caller can't use these against
-  // someone else's unit even if they slipped past the gate
-  // here. See review/scholar-IS-codesign.md.
+  // ── The scholar's own Quest (IS unit) tools ──────────────
+  // Active only when the session's unit is the scholar's own Independent
+  // Study unit (session.unitContext.isOwnIsUnit). The unit-shaping ones are
+  // gated server-side by requireUnitEditAccess in each wrapped mutation, so a
+  // malicious caller can't use them against someone else's unit even if they
+  // slipped past the gate here. See review/scholar-IS-codesign.md.
+  //
+  // The tutor no longer plans more lessons and activities inside the Quest
+  // (TRA-682, review/quests-rebuilt-proposal.html "One activity per
+  // Quest"): create_lesson / create_activity are gone from this set. A next
+  // question or thing to try branches out as a starter instead
+  // (save_follow_up), which the scholar finds in "Things to wonder about".
 
-  const createLessonTool = betaTool({
-    name: "create_lesson",
+  const saveFollowUpTool = betaTool({
+    name: "save_follow_up",
     description:
-      "Create a new lesson in this Independent Study unit. Use after the scholar verbally approves the planned structure. One lesson per call.",
+      "Save ONE next question or thing to try that grew out of this Quest, for the scholar to pick up later. It waits in \"Things to wonder about\" on their Quests tab, marked as from this Quest. Use it at a natural pause, when a real next step has come up, in place of planning more parts of the Quest. Write it as one short question or suggestion the scholar would want to read back (a next thing to find out or try, never \"learn about X\"), in plain words a nine-year-old reads easily. One per chat. Then tell them in one sentence that it is saved on their Quests tab.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        title: {
+        text: {
           type: "string" as const,
-          description: "Short lesson title (e.g. 'Reading a sectional chart').",
-        },
-        strand: {
-          type: "string" as const,
-          enum: ["core", "connections", "practice", "identity"] as const,
-          description: "Optional PCM strand — leave off if unsure.",
+          description: "The follow-up, as one question or suggestion. Under 200 characters.",
         },
       },
-      required: ["title"] as const,
+      required: ["text"] as const,
+      additionalProperties: false,
     },
-    run: async (input: { title: string; strand?: "core" | "connections" | "practice" | "identity" }) => {
-      if (!ownIsUnitId) return "Not allowed: not in an IS unit.";
-      try {
-        const lessonId = await ctx.runMutation(internal.lessons.aiCreateForIsUnit, {
-          unitId: ownIsUnitId,
-          scholarId: session.scholarId,
-          title: input.title,
-          strand: input.strand,
-          sessionId: projId,
-        });
-        emit({ toolComplete: { name: "create_lesson", result: `Created lesson "${input.title}"` } });
-        return `Created lesson "${input.title}" (lessonId: ${lessonId}). Now create its activities with create_activity using this lessonId.`;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return `Failed to create lesson: ${message}`;
+    run: async (input: { text: string }) => {
+      if (!ownIsUnitId) return "Not allowed: not in the scholar's own Quest.";
+      const kind = await ctx.runMutation(internal.sessions.saveStarterFromSession, {
+        sessionId: projId,
+        origin: "follow_up",
+        text: input.text,
+      });
+      if (kind === "saved") {
+        emit({ toolComplete: { name: "save_follow_up", result: "Follow-up saved" } });
       }
+      return saveFollowUpResultText(kind);
     },
   });
 
-  const createActivityTool = betaTool({
-    name: "create_activity",
-    description:
-      "Create an activity inside a lesson you just created. Use after the scholar approves what should be in each lesson. The systemPrompt is what a future tutor session will read when the scholar opens this activity — write 2-4 sentences specifying the learning goal, what to ask, and what scaffolds to use. Online activities earn rubric stars: pass a `deliverable` describing what the scholar produces (an AI-generated, per-scholar rubric grades it) so the scholar's own quest can pay out stars like any assigned activity.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        lessonId: {
-          type: "string" as const,
-          description: "The lessonId returned from create_lesson.",
-        },
-        title: {
-          type: "string" as const,
-          description: "Activity title (e.g. 'Plot a flight path').",
-        },
-        kind: {
-          type: "string" as const,
-          enum: ["online", "offline", "app"] as const,
-          description: "'online' = scholar works with the AI tutor; 'offline' = real-world task; 'app' = the scholar builds an interactive app or simulation with you (the systemPrompt is the build brief). Almost always 'online' for a scholar-authored unit. An 'app' activity always comes AFTER at least one 'online' activity with a deliverable where they figure out how the thing works — learn before you build; it is refused as the Quest's first step.",
-        },
-        systemPrompt: {
-          type: "string" as const,
-          description: "Instructions for the future tutor session opening this activity. 2-4 sentences. Concrete learning goal + what to ask + scaffolds.",
-        },
-        deliverable: {
-          type: "object" as const,
-          description: "What the scholar produces in this online activity, so it can earn rubric stars. Strongly recommended for every online activity — a per-scholar rubric is generated automatically from this. Omit only for a pure open-ended discussion with nothing to produce; if omitted, a sensible default is used. Ignored for offline activities.",
-          properties: {
-            prompt: {
-              type: "string" as const,
-              description: "What the scholar writes/makes to show their learning (e.g. 'Write up your redesign and why each change helps.').",
-            },
-            notes: {
-              type: "string" as const,
-              description: "Optional: the quality bar / intent, so the AI can calibrate the rubric criteria to what 'great' looks like here.",
-            },
-          },
-          required: ["prompt"] as const,
-        },
-        mission: {
-          type: "object" as const,
-          description: "Optional, for an 'online' or 'app' activity: the step's mission. `gate` = the first thing the scholar must make before side ideas get built (usually 'a first draft of X exists'; for an app, 'the mechanism runs once with default settings'). `freedoms` = what the scholar owns (topic choice, characters, look). `invariants` = ONLY for 'app': 1-5 things that must be true in the app, the mechanism stated as testable cause→effect.",
-          properties: {
-            gate: { type: "string" as const },
-            freedoms: { type: "array" as const, items: { type: "string" as const } },
-            invariants: { type: "array" as const, items: { type: "string" as const } },
-          },
-        },
-      },
-      required: ["lessonId", "title", "kind", "systemPrompt"] as const,
-    },
-    run: async (input: {
-      lessonId: string;
-      title: string;
-      kind: "online" | "offline" | "app";
-      systemPrompt: string;
-      deliverable?: { prompt: string; notes?: string };
-      mission?: { gate?: string; freedoms?: string[]; invariants?: string[] };
-    }) => {
-      if (!ownIsUnitId) return "Not allowed: not in an IS unit.";
+  // ── The proposal card (TRA-690, lib/questProposalCard.ts) ──────────
+  // Offered in a scholar's own chat with no activity, on a client that draws
+  // the card, with the scholar at the keyboard (http.ts). It only SHOWS the
+  // card: the scholar's Propose tap is what calls questProposals.propose.
+  const offerQuestProposalTool = betaTool({
+    name: QUEST_PROPOSAL_CARD_TOOL.name,
+    description: QUEST_PROPOSAL_CARD_TOOL.description,
+    inputSchema: QUEST_PROPOSAL_CARD_TOOL.inputSchema,
+    run: async (input) => {
+      const name = QUEST_PROPOSAL_CARD_TOOL_NAME;
+      if (!offersQuestProposal) return QUEST_PROPOSAL_CARD_NOT_HERE;
+      // The scholar's own messages in this chat (a staff member typing for
+      // them is not their words).
+      const scholarMessages = session.chatHistory
+        .filter((m) => m.sourceRole === "user" && !m.byStaff)
+        .map((m) => m.content);
+      const check = checkQuestProposalCard(
+        input as QuestProposalCardInput,
+        scholarMessages,
+      );
+      if (!check.ok) {
+        emit({ toolComplete: { name, result: "Not shown" } });
+        return check.reason;
+      }
       try {
-        const contract = parseBuildContractArg(input.mission);
-        await ctx.runMutation(internal.activities.aiCreateForIsUnit, {
-          lessonId: input.lessonId as Id<"lessons">,
-          scholarId: session.scholarId,
-          unitId: ownIsUnitId,
-          title: input.title,
-          kind: input.kind === "app" ? "online" : input.kind,
-          ...(input.kind === "app" ? { appActivity: true } : {}),
-          systemPrompt: input.systemPrompt,
-          deliverable: input.deliverable,
-          ...(contract ? { mission: contract } : {}),
-          sessionId: projId,
+        const { newMessageId, cardMessageId } = await ctx.runMutation(
+          internal.sessionHelpers.showQuestProposalCard,
+          {
+            currentMessageId: state.assistantMsgId as Id<"messages">,
+            sessionId: projId,
+            contentSoFar: state.fullContent,
+            card: check.card,
+          },
+        );
+        state.assistantMsgId = newMessageId;
+        state.fullContent = "";
+        state.lastPersistLength = 0;
+        // The card itself, for a client to draw at once; the tool row it names
+        // is what a reload reads.
+        emit({
+          questProposalCard: { messageId: String(cardMessageId), ...check.card },
         });
-        emit({ toolComplete: { name: "create_activity", result: `Created activity "${input.title}"` } });
-        return `Created activity "${input.title}".`;
+        emit({ toolComplete: { name, result: "Proposal card shown" } });
+        emit({ newAssistantMsg: String(newMessageId) });
+        return QUEST_PROPOSAL_CARD_SHOWN;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return `Failed to create activity: ${message}`;
+        emit({ toolComplete: { name, result: `Failed: ${message}` } });
+        return `NOT_SHOWN: the card could not be shown (${message}). Don't mention a card; carry on with the conversation.`;
       }
     },
   });
@@ -1672,6 +1721,10 @@ export async function makeTutorSessionTools(
               artifactId: docId,
             });
             if (!artifact || Array.isArray(artifact)) return "Error: Document not found.";
+            // The Python bench: its source is not the tutor's to read.
+            if (isFixedApp(artifact)) {
+              return `[${String(artifact._id)}] "${artifact.title}" is the Python bench, a fixed app: its code is not shown, and no tool reads or changes it. The scholar's own program is in LIVE APP STATE.`;
+            }
             if (artifact.type === "code") {
               seenAppRevisions.see(String(artifact._id), artifact.revision);
             }
@@ -1692,8 +1745,9 @@ export async function makeTutorSessionTools(
             sessionId: projId,
           });
           // Maps aren't documents — keep them out of the doc listing.
+          // ...and the Python bench is not a document to read (fixed app).
           const docList = (Array.isArray(allDocs) ? allDocs : allDocs ? [allDocs] : [])
-            .filter(isTextArtifact);
+            .filter((doc) => isTextArtifact(doc) && !isFixedApp(doc));
           if (docList.length === 0) {
             return "No documents exist yet. Use create to make one.";
           }
@@ -1764,6 +1818,12 @@ export async function makeTutorSessionTools(
       required: ["title", "code"] as const,
     },
     run: async (input) => {
+      // The Python bench is the session's one app: no second app beside it
+      // (its LIVE APP STATE would stop being the one the tutor reads).
+      if (input.new_app === true && session.pythonBench?.open === true) {
+        emit({ toolComplete: { name: "create_code", result: "Not built" } });
+        return editorFailure(BENCH_IS_THE_APP_REFUSAL);
+      }
       // TRA-519 one app surface: a session's app is ONE artifact whose past
       // lives in History. A rewrite of the app the builder has open is its
       // next version, not a second same-titled app beside it.
@@ -1783,6 +1843,8 @@ export async function makeTutorSessionTools(
           emit({ toolComplete: { name: "create_code", result: "Not rebuilt" } });
           return editorFailure(message);
         };
+        // The Python bench is fixed: no rewrite of it, and no app beside it.
+        if (existing.fixed) return fail(FIXED_APP_WRITE_REFUSAL);
         if (baseRevision === undefined) {
           return fail(`${readRequiredMessage(path)} Then call create_code again to rewrite it.`);
         }
@@ -1804,13 +1866,24 @@ export async function makeTutorSessionTools(
         await splitAfterTool("Rebuilt code artifact");
         return `Rewrote "${result.artifact.title}" as its next version (revision ${result.artifact.revision}); the previous version stays in the scholar's History. Its title is unchanged; rename it with edit_document only if the scholar asks. Document ID: ${String(existing._id)}. Path: ${path}. Change it with ${CODE_EDITOR_TOOL_NAME} (str_replace or insert) on that path.`;
       }
-      const newArtifactId = await ctx.runMutation(internal.artifacts.aiCreate, {
-        sessionId: projId,
-        title: input.title,
-        content: input.code,
-        type: "code",
-        language: "html",
-      });
+      let newArtifactId: Id<"artifacts">;
+      try {
+        newArtifactId = await ctx.runMutation(internal.artifacts.aiCreate, {
+          sessionId: projId,
+          title: input.title,
+          content: input.code,
+          type: "code",
+          language: "html",
+        });
+      } catch (err) {
+        // aiCreate refuses a second app beside the Python bench, even one
+        // opened earlier in this same turn (the context above is stale).
+        if (err instanceof Error && err.message.includes("BENCH_OPEN")) {
+          emit({ toolComplete: { name: "create_code", result: "Not built" } });
+          return editorFailure(BENCH_IS_THE_APP_REFUSAL);
+        }
+        throw err;
+      }
       state.createdCodeArtifact = true;
       emit({ artifactUpdate: true, newArtifactId: String(newArtifactId) });
       emit({ toolComplete: { name: "create_code", result: `Created "${input.title}"` } });
@@ -1827,6 +1900,35 @@ export async function makeTutorSessionTools(
       // Revision 0 is the code the model just wrote, so it may edit it next.
       seenAppRevisions.see(String(newArtifactId), 0);
       return `Code artifact created successfully. Document ID: ${String(newArtifactId)}. Path: ${codeArtifactPath(String(newArtifactId))}. The scholar can now see the live preview. Change it with ${CODE_EDITOR_TOOL_NAME} (str_replace or insert) on that path.`;
+    },
+  });
+
+  // ── open_python_bench (lib/pythonBench.ts) ──
+  // Attaches the canonical bench as this session's app. NO input: the tutor
+  // cannot preload or write the scholar's code, and the bench's code is fixed
+  // (artifacts.fixedApp refuses every AI write).
+  const openPythonBenchTool = betaTool({
+    name: OPEN_PYTHON_BENCH_TOOL_NAME,
+    description:
+      "Open the Python bench beside the chat: a fixed app where the scholar writes and runs real Python (CPython 3.14), steps through a run line by line, and plots with matplotlib. It takes no input: you cannot put code into it, and nothing you write appears in it. The scholar types or pastes every line. A session holds one app, so this refuses when the session already has one.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      additionalProperties: false,
+    },
+    run: async () => {
+      const result = await ctx.runMutation(internal.artifacts.aiOpenPythonBench, {
+        sessionId: projId,
+      });
+      if (result.kind === "refused") {
+        emit({ toolComplete: { name: OPEN_PYTHON_BENCH_TOOL_NAME, result: "Not opened" } });
+        return pythonBenchRefusalMessage(result.reason);
+      }
+      state.createdCodeArtifact = true;
+      emit({ artifactUpdate: true, newArtifactId: String(result.artifactId) });
+      emit({ toolComplete: { name: OPEN_PYTHON_BENCH_TOOL_NAME, result: "Opened the Python bench" } });
+      await splitAfterTool("Opened the Python bench");
+      return pythonBenchOpenedMessage(String(result.artifactId));
     },
   });
 
@@ -1857,7 +1959,8 @@ export async function makeTutorSessionTools(
           sessionId: projId,
         });
         const apps = (Array.isArray(all) ? all : all ? [all] : [])
-          .filter((doc) => doc.type === "code")
+          // The Python bench is not a file the tutor reads or edits.
+          .filter((doc) => doc.type === "code" && !isFixedApp(doc))
           .map((doc) => ({
             id: String(doc._id),
             title: doc.title,
@@ -1902,6 +2005,10 @@ export async function makeTutorSessionTools(
         );
       }
 
+      // The Python bench: its source is not the tutor's to read or change.
+      if (isFixedApp(artifact) && input.command !== "create") {
+        return editorFailure(FIXED_APP_WRITE_REFUSAL);
+      }
       switch (input.command) {
         case "view": {
           const view = formatAppView({
@@ -1921,6 +2028,12 @@ export async function makeTutorSessionTools(
           return editorFailure(createRefusalMessage(path));
         case "str_replace":
         case "insert": {
+          if (
+            session.appCreationAllowed === false &&
+            artifact.content.trim() === ""
+          ) {
+            return editorFailure(emptyAppRefusalMessage(path));
+          }
           const baseRevision = seenAppRevisions.get(String(artifact._id));
           if (baseRevision === undefined) {
             return editorFailure(readRequiredMessage(path));
@@ -1974,6 +2087,8 @@ export async function makeTutorSessionTools(
                 return editorFailure("No replacement was performed: old_str must not be empty.");
               case "scholar_writing":
                 return editorFailure(SCHOLAR_WRITING_REFUSAL);
+              case "fixed_app":
+                return editorFailure(FIXED_APP_WRITE_REFUSAL);
               default:
                 return editorFailure(result.error);
             }
@@ -2266,7 +2381,7 @@ export async function makeTutorSessionTools(
   const editSlidesTool = betaTool({
     name: "edit_slides",
     description:
-      "Arrange the scholar's Rabbit Slides deck (NOT Google Slides, NOT a generated image). You may move, resize, restyle, add empty text boxes, or move words already in the deck, but never write words, a deck title, alt text, or speaker notes. One deck lives per session. Three ops:\n" +
+      "Arrange the scholar's Rabbit Slides deck (NOT Google Slides, NOT a generated image). You may move, resize, restyle, reorder slides, add empty text boxes, or move words already in the deck, but never write words, a deck title, alt text, or speaker notes. The words are the scholar's to write by design; when they ask you to write them, say that part is theirs and offer the layout work you can do, never that you can't. One deck lives per session. Three ops:\n" +
       "• op:\"create\" — pass the WHOLE empty-text layout scaffold as `deck` (JSON). Use ONCE to start a deck; focuses the panel on it.\n" +
       "• op:\"read\" — returns a compact, id-addressed summary of the current deck. You MUST call read before patch to learn the slide + element ids you will address.\n" +
       "• op:\"patch\" — pass layout-only `ops` and the `baseRevision` you last read. NEVER re-send a whole deck to make a small change — patch the specific elements.\n\n" +
@@ -2278,6 +2393,7 @@ export async function makeTutorSessionTools(
       "Ops (patch) — each addressed by a STABLE id and applied ALL-OR-NOTHING (one bad op fails the whole batch and the deck is left unchanged):\n" +
       "  addElement{slideId,afterId?,element}  patchElement{slideId,id,frame?,style?}  removeElement{slideId,id}\n" +
       "  moveElement{slideId,id,afterId?}  addSlide{afterSlideId?}  removeSlide{slideId}\n" +
+      "  moveSlide{slideId,afterSlideId?}  (reorder: afterSlideId null = first, omitted = last)\n" +
       "  setBackground{slideId,color}\n" +
       "Text addElement is only for an empty box or for moving text already present in the deck. setSpeakerNotes, setTitle, and patchElement.text are refused.\n" +
       "The server mints ids, so after create you do NOT know them — always op:\"read\" first. If a patch reports your view is stale, read again and retry.",
@@ -2311,8 +2427,7 @@ export async function makeTutorSessionTools(
     },
     run: async (input) => {
       const op = (input as { op?: string }).op;
-      const slidesWritingRefusal =
-        "You can arrange the scholar's slides — move, resize, restyle, add an empty text box, or move their existing words — but you can't write the words. They type those themselves.";
+      const slidesWritingRefusal = SLIDES_WRITING_REFUSAL;
 
       // read: hand the model the id-addressed summary. Emits nothing — it is
       // a silent lookup the model does before patching.
@@ -2609,6 +2724,11 @@ export async function makeTutorSessionTools(
   let generateImageAttempts = 0;
   const CHARM_ICON_MAX_GENERATIONS_PER_TURN = 4;
   let charmIconGenerations = 0;
+  // A new 3D model is a ~$0.13, 30-60 s GPT-6 Astra call (cache hits are
+  // free). Three covers a one-scene ask ("a chimp, a freezer and a crate")
+  // in one parallel batch, so the latency is one model's, not three.
+  const CHARM_MODEL_MAX_GENERATIONS_PER_TURN = 3;
+  let charmModelGenerations = 0;
 
   const generateImageTool = betaTool({
     name: "generate_image",
@@ -3037,6 +3157,85 @@ export async function makeTutorSessionTools(
     },
   });
 
+  const charmModelTool = betaTool({
+    name: "charm_model",
+    description: `Create or reuse small 3D CHARM-style models for a three.js app: chunky, friendly, low-poly, flat-shaded. Each returns an /app-assets/... script that adds a build function to window.charmModels; load it exactly as given. Each model counts toward the app's limit of 8 assets. Each model is ONE object or creature, not a scene, ground, or terrain; build those yourself. Subjects other apps already made come back at once; each NEW model takes 30-60 seconds, and all models in one call are made at the same time, so ask for every model the scene needs in ONE call, and first tell the scholar in one short sentence that you are building them. You may check with the scholar before making new models if you judge it worth the wait; that is your call, not a required step. At most ${CHARM_MODEL_MAX_GENERATIONS_PER_TURN} new models per turn. "change" remixes a model (for example "wearing a white lab coat"); a remix always starts from the original, so put the whole change in one sentence.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        models: {
+          type: "array" as const,
+          minItems: 1,
+          maxItems: 6,
+          items: {
+            type: "object" as const,
+            properties: {
+              name: {
+                type: "string" as const,
+                description:
+                  "A short concrete noun for one object or creature, such as 'chimpanzee', 'lab freezer', or 'wooden crate'.",
+              },
+              change: {
+                type: "string" as const,
+                description:
+                  "Optional: one sentence remixing that model for this app only.",
+              },
+            },
+            required: ["name"] as const,
+          },
+        },
+      },
+      required: ["models"] as const,
+    },
+    run: async (input) => {
+      emit({ toolStart: { name: "charm_model" } });
+      try {
+        const requests = input.models.map((model) => ({
+          name: model.name,
+          ...(model.change?.trim() ? { change: model.change } : {}),
+        }));
+        const { outcomes, generationsUsed } = await ctx.runAction(
+          internal.charmModelActions.prepareForSession,
+          {
+            sessionId: projId,
+            requests,
+            maxNewGenerations:
+              CHARM_MODEL_MAX_GENERATIONS_PER_TURN - charmModelGenerations,
+            createdBy: callerUserId,
+            role: session.isTestDrive ? (callerRole ?? "scholar") : "scholar",
+            usageSource: session.isTestDrive ? "tutor-test-drive" : "charm-model",
+          },
+        );
+        charmModelGenerations += generationsUsed;
+        const ready = outcomes.filter((o) => o.status === "ready");
+        const lines = outcomes.map((o) =>
+          o.status === "ready"
+            ? `- ${o.name}${o.remixed ? " (remixed)" : ""}: <script src="${o.reference}"></script> then charmModels[${JSON.stringify(o.key)}](THREE)${o.parts.length ? `. Named parts: ${o.parts.join(", ")}` : ""}`
+            : `- ${o.name}: not made. ${o.message}`,
+        );
+        emit({
+          toolComplete: {
+            name: "charm_model",
+            result: ready.length > 0 ? "3D models ready" : "Failed: no 3D model made",
+          },
+        });
+        const usage =
+          ready.length > 0
+            ? `\nPut <script src="/app-kit/v2/three.iife.min.js"></script> first, then each model script tag exactly as written. Each charmModels[...] call returns a new THREE.Group that stands on y = 0, is about 1 unit across, faces +Z, and uses lit MeshStandardMaterial, so the scene needs lights. Scale, position, or clone it freely; animate parts with group.getObjectByName(part). Never hot-link models from the web.`
+            : "";
+        return `${lines.join("\n")}${usage}`;
+      } catch (error) {
+        console.error("Charm model error:", error);
+        // The action may have paid for generations before it threw, and it
+        // reports spend only on success, so close the turn's budget rather
+        // than let a retry spend it again.
+        charmModelGenerations = CHARM_MODEL_MAX_GENERATIONS_PER_TURN;
+        emit({ toolComplete: { name: "charm_model", result: "Failed: no 3D model made" } });
+        return "The 3D models could not be made right now. Build the scene from simple three.js shapes instead, and say so plainly.";
+      }
+    },
+  });
+
   // ── Authored instruction in chat ──────────────────────────────
   const offerInstructionTool = betaTool({
     name: OFFER_INSTRUCTION_TOOL.name,
@@ -3259,12 +3458,22 @@ export async function makeTutorSessionTools(
   //     analyzeSession, which already short-circuits on isTestDrive
   return [
     updateDossierTool, // Always enabled
-    // Scholars can build interactive code — except in a step of their own
-    // Quest while its build step is still locked (TRA-519 B6 hard lock): the
-    // app waits for the build step. Editing an existing app stays possible.
-    ...(session.unitContext?.questBuildLocked || session.unitContext?.questBuildOpen
+    // Scholars can build interactive code — only where a new app may be made
+    // (lib/mission.ts mayCreateAppInSession: a teacher's activity, not a Quest
+    // step or an open chat), and not in a step of their own Quest while its
+    // build step is still locked (TRA-519 B6 hard lock): the app waits for
+    // the build step. Editing an existing app stays possible.
+    ...(session.appCreationAllowed === false ||
+    session.unitContext?.questBuildLocked ||
+    session.unitContext?.questBuildOpen
       ? []
       : [createCodeTool]),
+    // The Python bench: any chat session (lib/pythonBench.ts
+    // mayOpenPythonBench), Quests and open chats included. Deliberately NOT
+    // behind SCHOLAR_LED_APP_BUILDING or the Quest build lock: the bench is a
+    // fixed, reviewed tool where the scholar writes every line, not a new app
+    // (Andy, 2026-11-10). Safe in test drives: one artifact write.
+    ...(session.pythonBench?.offered === true ? [openPythonBenchTool] : []),
     showMapTool, // Always enabled — real cartography (governed); safe in test drives (writes no learning record)
     showManipulativeTool, // Always enabled — ad-hoc poke-able manipulative; safe in test drives (writes no learning record)
     editSlidesTool, // Always enabled — Rabbit Slides; safe in test drives (writes no learning record)
@@ -3275,6 +3484,7 @@ export async function makeTutorSessionTools(
     generateImageTool, // Always enabled — AI image generation
     searchImageTool, // Always enabled — real images for real subjects (see CHOOSING_AN_IMAGE_TOOL)
     ...(appBuild ? [charmIconTool] : []),
+    ...(appBuild && supportsAppScripts ? [charmModelTool] : []),
     // Build-time app AI, teacher builds only for now: a character's script is
     // authored by staff. Play drops both (WORKSHOP_CODE_TOOL_NAMES).
     ...((session.appContext?.builderPrimary ??
@@ -3295,7 +3505,7 @@ export async function makeTutorSessionTools(
     ...(hasPhysicalEnv ? [suggestPhysicalTaskTool] : []),
     ...(isAngleKickoff ? [setActivityAngleTool] : []),
     ...(isOwnIsUnit
-      ? [createLessonTool, createActivityTool, updateUnitMetadataTool, setQuestMissionTool, setBadgeTool]
+      ? [updateUnitMetadataTool, setQuestMissionTool, setBadgeTool, saveFollowUpTool]
       : []),
     offerInstructionTool,
     // Problems-in-chat (⑮) — GATED: only offered when the kill-switch is
@@ -3313,5 +3523,9 @@ export async function makeTutorSessionTools(
     // TEACH_BACK_ENABLED is on. Default OFF → the tutor never sees these
     // tools. See teachBackEnabled() + the prompt-section gate in http.ts.
     ...(teachBackOn ? [startTeachBackTool, finishTeachBackTool] : []),
+    // The proposal card (TRA-690): last, so every session without it keeps
+    // its tool list, and its cached prefix, unchanged. Writes only the card's
+    // tool row; the scholar's Propose tap makes the proposal.
+    ...(offersQuestProposal ? [offerQuestProposalTool] : []),
   ];
 }

@@ -412,8 +412,13 @@ export const resolveStaticAppForCoachedActivity = internalQuery({
     const allowed = args.allowedScholarIds
       ? new Set(args.allowedScholarIds)
       : undefined;
+    // A published scholar app (publishedFrom) is the builder's work shown to
+    // classmates; making it a starter would let a rehearsal overwrite it and
+    // let Publish latest delete pictures the cloned sessions still use.
     const named = (await ctx.db.query("customApps").collect()).filter(
-      (app) => app.name.trim().toLowerCase() === name.toLowerCase(),
+      (app) =>
+        !app.publishedFrom &&
+        app.name.trim().toLowerCase() === name.toLowerCase(),
     );
     const matches: Doc<"customApps">[] = [];
     for (const app of named) {
@@ -483,6 +488,8 @@ export const updateStaticApp = internalMutation({
     const named = (await ctx.db.query("customApps").collect()).filter(
       (app) =>
         app.origin !== "starter" &&
+        // Published scholar apps change only through Publish latest.
+        !app.publishedFrom &&
         app.name.trim().toLowerCase() === name.toLowerCase(),
     );
     // Restrict to apps the caller's lens can see BEFORE the count checks, so a

@@ -71,7 +71,10 @@ export function MultiStepSequenceNative({ spec, onComplete }: MultiStepSequenceN
   const onStateChange = useCallback((s: unknown) => setState(s), []);
 
   const check = () => {
-    const solved = step ? isSolved(step, state) : liveSolved;
+    // A kind that reports no state until the scholar acts (the Function
+    // Machine's empty prediction box) is simply not solved yet. Grading a null
+    // state would throw from an event handler, which crashes a Release build.
+    const solved = step ? state != null && isSolved(step, state) : liveSolved;
     setVerdict(solved ? "correct" : "incorrect");
   };
 

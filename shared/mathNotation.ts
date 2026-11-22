@@ -10,9 +10,10 @@
  * surface that displays the text runs it through `superscriptExponents` so a kid
  * always sees `5²`.
  *
- * This module imports nothing so it vendors cleanly into the native app
- * (native/vendor/shared/mathNotation.ts, via native/scripts/sync-vendor.js) and
- * runs identically on web and native.
+ * The code lives in the keypad package (packages/react-native-math-keypad/
+ * src/model/flatPad.ts), whose pad superscripts unit exponents the same way.
+ * The native vendor sync (native/scripts/sync-vendor.js) rewrites this import
+ * for the iPad app's copy, so web and native still run one implementation.
  *
  * Behavior (deliberate, and documented for the edge cases):
  *   - Converts a caret to a Unicode superscript ONLY when it directly follows a
@@ -31,25 +32,4 @@
  *     behaves exactly as `{item?.stem}` did).
  */
 
-const SUPERSCRIPT_DIGITS = ["⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"] as const;
-
-// A base token (digit | letter | `)` | `]`), a caret, then ≥1 digits. The base is
-// captured so it survives; only the `^<digits>` run becomes a superscript.
-const EXPONENT_RE = /([0-9A-Za-z)\]])\^(\d+)/g;
-
-function toSuperscriptDigits(digits: string): string {
-  let out = "";
-  for (let i = 0; i < digits.length; i++) {
-    out += SUPERSCRIPT_DIGITS[digits.charCodeAt(i) - 48];
-  }
-  return out;
-}
-
-export function superscriptExponents(text: string): string;
-export function superscriptExponents(text: string | null | undefined): string | null | undefined;
-export function superscriptExponents(
-  text: string | null | undefined,
-): string | null | undefined {
-  if (typeof text !== "string" || text.indexOf("^") === -1) return text;
-  return text.replace(EXPONENT_RE, (_full, base: string, digits: string) => base + toSuperscriptDigits(digits));
-}
+export { superscriptExponents } from "../packages/react-native-math-keypad/src/model/flatPad";

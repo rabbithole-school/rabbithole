@@ -58,24 +58,11 @@ export function nextTileSelection<Card extends PlaylistChoiceCard>(
 /**
  * The scholar's EFFECTIVE domain set today — a teacher's mixed pin (≥2
  * domains), a single pin, or (no pin at all) the auto-blend of every domain
- * the scholar has STARTED. Both platforms need this to answer one question
- * honestly before building the Start link: "is the tile the scholar just
- * picked actually inside what would otherwise be served?" A picked domain
- * OUTSIDE this set (a not-yet-started "new territory" domain, or ANY tile
- * whose domain a standing pin doesn't cover — e.g. `choiceSetForSelf`
- * rounds across every registered domain, not just the pinned one) must carry
- * an EXPLICIT domain override on the Start link, or the practice screen falls
- * through to its OWN standing/auto-blend resolution — which wins over an
- * unmatched choice hint (practiceSession's own `choiceHint.domain === domain`
- * gate) — silently serving a DIFFERENT territory than the one just previewed.
- * A pick INSIDE this set needs no override; the practice screen's own
- * resolution already serves it correctly (blend included).
+ * the scholar has STARTED. Both platforms launch the plain "Today's blend"
+ * Start against this set (≥2 → a mixed playlist, one → that domain).
  *
- * FOCUS MODE deliberately keeps this started/pin-based reading: without a
- * `?domain=` override the practice screen resolves the scholar's PRIMARY
- * focus domain, so an active-but-unstarted domain's tile must still be
- * flagged outside-set (an "active focus domains" reading here would drop the
- * override and silently serve the primary instead of the picked domain).
+ * A strand PICK never launches against this set — see
+ * `strandPickStartParams` below.
  */
 export function effectiveDomainSet(inputs: {
   standingDomains?: string[];
@@ -87,14 +74,32 @@ export function effectiveDomainSet(inputs: {
   return inputs.startedDomains;
 }
 
-/** True when `domain` is NOT in the scholar's effective domain set — the tile
- *  pick needs an explicit domain override on its Start link (see
- *  `effectiveDomainSet` above). */
-export function isDomainOutsideEffectiveSet(
-  domain: string,
-  domainSet: string[],
-): boolean {
-  return !domainSet.includes(domain);
+/**
+ * The practice-route params for Start with a strand tile picked ("Start with
+ * Chance & Likelihood →"). BOTH platforms build the Start link from this, so
+ * web (`/scholar/practice?…`) and native (`/practice` params) cannot drift.
+ *
+ * The picked domain ALWAYS travels as an explicit `domain`, whether or not it
+ * is already inside the scholar's blend. The Home preview for a pick is
+ * `playlistForScholar` scoped to the PICKED domain alone, so Start must serve
+ * that same single-domain run. The old rule only pinned `domain` for a pick
+ * OUTSIDE the effective set; an IN-SET pick rode the mixed daily blend, where
+ * `choiceHint` merely double-weights the strand inside its own domain's queue
+ * and the cross-domain merge leads with every domain's reviews and
+ * round-robins the frontier. A scholar who picked "Chance & Likelihood" while
+ * blending whole-number arithmetic + probability therefore started on
+ * whole-number problems — the picker looked broken.
+ *
+ * `choiceDomain === domain` is also what makes each practice screen fold the
+ * picked domain's `· mapping` band (web `includeMapping`, native
+ * `foldsMappingBand`), matching the preview's `includeMapping: true`.
+ */
+export function strandPickStartParams(pick: PlaylistChoiceCard): {
+  choiceDomain: string;
+  choiceStrand: string;
+  domain: string;
+} {
+  return { choiceDomain: pick.domain, choiceStrand: pick.strand, domain: pick.domain };
 }
 
 /**
@@ -276,6 +281,9 @@ const DOMAIN_ICON_NAMES: Record<string, string> = {
   "integers-coordinates": "GridFour",
   "early-algebra": "Function",
   "algebra-1": "BracketsCurly",
+  // Reuses the glyph the retired Stretch tile used (both clients still map
+  // it), so no new icon component: the course one rung above Algebra 1.
+  "algebra-2": "ArrowLineUp",
 };
 
 /** Fallback for a domain not yet in `DOMAIN_ICON_NAMES` (e.g. a newly

@@ -159,16 +159,25 @@ export const record = internalMutation({
       if (resolved.length > 0) standardIds = resolved;
     }
 
-    // Handle observer-directed supersession
+    // Handle observer-directed supersession. The id comes from the model, so
+    // it can be malformed, from another table, or another scholar's row. Keep
+    // it only when it names one of THIS scholar's observations; otherwise drop
+    // it and record the observation as new. A foreign-table id used to reach
+    // the insert below and fail the `supersedesId` validator, which aborted
+    // the observer's whole write loop for the session.
+    let supersedesId: Id<"masteryObservations"> | undefined;
     if (args.supersedesObservationId) {
-      try {
-        const obsId = args.supersedesObservationId as Id<"masteryObservations">;
-        const existing = await ctx.db.get(obsId);
-        if (existing && !existing.isSuperseded) {
+      const obsId = ctx.db.normalizeId("masteryObservations", args.supersedesObservationId);
+      const existing = obsId ? await ctx.db.get(obsId) : null;
+      if (obsId && existing && existing.scholarId === args.scholarId) {
+        supersedesId = obsId;
+        if (!existing.isSuperseded) {
           await ctx.db.patch(obsId, { isSuperseded: true });
         }
-      } catch {
-        // Invalid ID — observer hallucinated. No-op.
+      } else {
+        console.warn(
+          `[observer] ignoring supersedesObservationId "${args.supersedesObservationId}": not one of this scholar's observations`,
+        );
       }
     }
 
@@ -188,9 +197,7 @@ export const record = internalMutation({
       attemptContext: args.attemptContext,
       studentInitiated: args.studentInitiated,
       standardIds,
-      supersedesId: args.supersedesObservationId
-        ? (args.supersedesObservationId as Id<"masteryObservations">)
-        : undefined,
+      supersedesId,
       isSuperseded: false,
       pcmDimension: args.pcmDimension,
       // Automaticity, only when the observer actually saw speed/ease (most

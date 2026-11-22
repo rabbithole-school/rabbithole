@@ -2,19 +2,26 @@
  * Native App Launcher — scholar home grid of standing External Apps
  * (external practice apps & friends). Mirrors the web AppLauncher squircle grid
  * but native-shaped: large tap targets, landscape-friendly, no WebView
- * dependency. Tapping opens the root-mounted keep-alive WebView host.
+ * dependency. Tapping opens the root-mounted keep-alive WebView host, or,
+ * for a first-party tile that opens as a session (`opensAsSession`,
+ * convex/lib/tileSessions.ts), the scholar's latest session of it in the
+ * Workshop (falling back to the host if that call fails).
  *
  * Query: api.scholarApps.listForLauncher — identical to the web launcher.
  */
 
 import { isUnlockManagedApp } from "@/lib/asam/managedAppSchemes";
+import { useState } from "react";
 import {
+  ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import * as Haptics from "expo-haptics";
+import { useRouter } from "expo-router";
+import { useMutation } from "convex/react";
 
 import { api, type Id } from "@/lib/convex";
 import { openExternalApp } from "@/lib/externalAppHost";
@@ -44,6 +51,8 @@ type LauncherTile = {
   // and then hands off to the Home Screen. Falling through to the webview here
   // would open the app's marketing page instead of the app.
   nativeBundleId: string | null;
+  /** A tap opens the scholar's session of this app in the Workshop. */
+  opensAsSession: boolean;
 };
 
 // Landscape iPad: 6 columns fits comfortably at the default tile width.
@@ -92,9 +101,37 @@ export function AppLauncher({
 
 function AppTile({ app }: { app: LauncherTile }) {
   const launchNativeApp = useNativeAppLauncher();
+  const router = useRouter();
+  const openTile = useMutation(api.vibecode.openTileForSelf);
+  const [launching, setLaunching] = useState(false);
+
+  const openHost = () =>
+    openExternalApp({
+      appId: app.appId,
+      name: app.name,
+      url: app.webUrl,
+      webAllowedHosts: app.webAllowedHosts,
+    });
 
   const open = () => {
+    if (launching) return;
     Haptics.selectionAsync();
+    if (app.opensAsSession) {
+      setLaunching(true);
+      openTile({ externalAppId: app.appId })
+        .then(({ sessionId }) => {
+          router.push({
+            pathname: "/session/[id]",
+            params: { id: sessionId, title: app.name },
+          });
+        })
+        .catch((err: unknown) => {
+          console.warn("[app-launcher] tile session open failed", err);
+          openHost();
+        })
+        .finally(() => setLaunching(false));
+      return;
+    }
     // A catalog app with a native URL scheme opens the INSTALLED native app
     // (releasing ASAM for the switch, re-arming on return); otherwise it opens
     // the keep-alive locked webview overlay (state survives reopen).
@@ -119,20 +156,19 @@ function AppTile({ app }: { app: LauncherTile }) {
       });
       return;
     }
-    openExternalApp({
-      appId: app.appId,
-      name: app.name,
-      url: app.webUrl,
-      webAllowedHosts: app.webAllowedHosts,
-    });
+    openHost();
   };
 
   return (
     <Pressable
       onPress={open}
-      style={({ pressed }) => [styles.tile, pressed && styles.tilePressed]}
+      style={({ pressed }) => [
+        styles.tile,
+        (pressed || launching) && styles.tilePressed,
+      ]}
       accessibilityRole="button"
       accessibilityLabel={`Open ${app.name}`}
+      accessibilityState={{ busy: launching }}
     >
       {/* One chain, shared with web: image → emoji → initial, on the app's
           tint — including when a remote logo fails to load here. The Pressable
@@ -146,6 +182,11 @@ function AppTile({ app }: { app: LauncherTile }) {
         decorative
         style={styles.icon}
       />
+      {launching && (
+        <View style={styles.launching} pointerEvents="none">
+          <ActivityIndicator color="#fff" />
+        </View>
+      )}
       <Text style={styles.label} numberOfLines={2}>
         {app.name}
       </Text>
@@ -194,6 +235,17 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: "rgba(20,24,55,0.08)",
     overflow: "visible",
+  },
+  launching: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: TILE_SIZE,
+    height: TILE_SIZE,
+    borderRadius: TILE_RADIUS,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(20,24,55,0.35)",
   },
   label: {
     fontSize: 12,

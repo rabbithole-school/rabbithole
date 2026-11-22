@@ -2,7 +2,8 @@
 
 // The parent portal's Calendar tab: this child's school's upcoming no-school
 // days, and the one thing a parent actually wants to do with them — put them in
-// the calendar app they already live in.
+// the calendar app they already live in. Below them, this child's upcoming
+// field trips (TRA-601).
 //
 // Every link here carries `?school=<slug>` for THIS child's school. The bare
 // /calendar.ics resolves to the primary institution, so a second school's
@@ -26,6 +27,7 @@ import { CalendarPlus, Check, Copy } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { convexSiteUrl } from "@/lib/convexUrls";
+import { tripTimeRange } from "@/shared/fieldTrips";
 
 /** "2026-12-21" → "Mon, Dec 21". Parsed as UTC so the label never slips a day
  *  in a west-of-UTC browser — a day key is a calendar date, not an instant. */
@@ -39,7 +41,7 @@ function dayLabel(dayKey: string): string {
   });
 }
 
-function rangeLabel(startDayKey: string, endDayKey: string): string {
+export function rangeLabel(startDayKey: string, endDayKey: string): string {
   return startDayKey === endDayKey
     ? dayLabel(startDayKey)
     : `${dayLabel(startDayKey)} – ${dayLabel(endDayKey)}`;
@@ -218,6 +220,43 @@ export function ParentCalendarTab({
           </VStack>
         )}
       </Box>
+
+      {/* This child's field trips (TRA-601). School is open on a trip day, so
+          trips are their own list rather than a "no school" row, and they are
+          not in the subscription feed above (that feed is school-wide and
+          public). Shown only when there is one. */}
+      {calendar.trips.length > 0 && (
+        <Box
+          p={4}
+          borderWidth="1px"
+          borderColor="gray.200"
+          borderRadius="xl"
+          bg="white"
+        >
+          <Heading as="h2" size="sm" fontFamily="heading" mb={3}>
+            Field trips coming up
+          </Heading>
+          <VStack align="stretch" gap={0}>
+            {calendar.trips.map((trip, index) => (
+              <HStack
+                key={`${trip.dayKey}:${trip.startLocal}:${trip.destination}`}
+                justify="space-between"
+                gap={3}
+                py={2}
+                borderTopWidth={index === 0 ? 0 : "1px"}
+                borderColor="gray.100"
+              >
+                <Text fontSize="sm" color="charcoal.700">
+                  {trip.destination}
+                </Text>
+                <Text fontSize="sm" color="charcoal.500" flexShrink={0} textAlign="right">
+                  {dayLabel(trip.dayKey)} · {tripTimeRange(trip)}
+                </Text>
+              </HStack>
+            ))}
+          </VStack>
+        </Box>
+      )}
     </VStack>
   );
 }

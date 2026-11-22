@@ -64,6 +64,7 @@ import {
   nextTileSelection,
   playlistTileIconName,
   practiceCtaAccessibleLabel,
+  strandPickStartParams,
 } from "../../../vendor/shared/practiceChoiceSelection";
 import {
   STRETCH_TILE_ARIA_LABEL,
@@ -74,6 +75,7 @@ import {
   PRACTICE_SCOPE_BLOCKED_DETAIL,
   PRACTICE_SCOPE_BLOCKED_HEADLINE,
   practiceScopeSentence,
+  previewPlanDomain,
   scopeAllowsChoice,
   scopeAllowsDomain,
   type ScholarMathPlan,
@@ -127,8 +129,10 @@ export function pendingHighlightMatch<T extends { domain: string }>(
   highlightDomain: string | undefined,
   consumedHighlight: string | null,
   choices: readonly T[],
+  /** Identifies one highlight request; defaults to the domain. */
+  requestKey: string | undefined = highlightDomain,
 ): T | undefined {
-  if (!highlightDomain || consumedHighlight === highlightDomain) return undefined;
+  if (!highlightDomain || consumedHighlight === requestKey) return undefined;
   return choices.find((choice) => choice.domain === highlightDomain);
 }
 
@@ -195,7 +199,14 @@ export function PracticePlaylistCard({
   // straight into practice. Read from the HOME screen's own route params
   // (expo-router resolves `useLocalSearchParams` from the nearest Screen
   // regardless of which nested component calls it).
-  const { highlightDomain } = useLocalSearchParams<{ highlightDomain?: string }>();
+  const { highlightDomain, highlightAt } = useLocalSearchParams<{
+    highlightDomain?: string;
+    highlightAt?: string;
+  }>();
+  // Home stays mounted across a summit hand-off (it pops back with
+  // `dismissTo`), so the same domain can be requested twice. `highlightAt`
+  // tells the requests apart; a link without it keys on the domain alone.
+  const highlightKey = highlightDomain ? `${highlightDomain}@${highlightAt ?? ""}` : undefined;
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const [expanded, setExpanded] = useState(false);
@@ -267,12 +278,18 @@ export function PracticePlaylistCard({
     hasExplicitMathPlan && mathPlan.practiceScope.kind === "limited"
       ? mathPlan.practiceScope.domains.map((entry) => entry.domain)
       : startedDomains;
-  const effectiveDomain = selectedDomain ?? effectiveStanding?.domain ?? planDomains[0];
+  // The preview names one domain: the first STARTED plan domain, not
+  // the slug-first one (see previewPlanDomain).
+  const previewDomain = previewPlanDomain(planDomains, startedDomains);
+  const effectiveDomain = selectedDomain ?? effectiveStanding?.domain ?? previewDomain;
   const playlist = useQuery(
     api.practiceSkills.playlistForScholar,
     isAuthenticated &&
     mathPlan !== undefined &&
     (hasExplicitMathPlan || standing !== undefined) &&
+    // The preview domain prefers a started plan domain, so wait for the
+    // started set rather than subscribing once to the slug-first domain.
+    (!hasExplicitMathPlan || domainsInfo !== undefined) &&
     institutionDay
       ? effectiveDomain
         ? {
@@ -355,7 +372,7 @@ export function PracticePlaylistCard({
   // challenge lane's standing home. Purely local state (native owns its own
   // queries; no lift needed).
   const [stretchSelected, setStretchSelected] = useState(false);
-  // Apply the deep-link highlight AT MOST ONCE per `highlightDomain` value.
+  // Apply the deep-link highlight AT MOST ONCE per request (`highlightKey`).
   // The dep is the card set's CONTENTS (not its `.length`), so a later rotation
   // that swaps the requested card in while keeping N cards still fires a match —
   // the old `.length` proxy silently missed that and stranded the scholar on
@@ -370,20 +387,21 @@ export function PracticePlaylistCard({
     // A manual chooser decision owns the card from this point on. Marking the
     // pending value consumed prevents a late subscription update from replacing
     // that decision when the requested tile finally arrives.
-    if (highlightDomain) consumedHighlightRef.current = highlightDomain;
+    if (highlightKey) consumedHighlightRef.current = highlightKey;
   };
   useEffect(() => {
     const match = pendingHighlightMatch(
       highlightDomain,
       consumedHighlightRef.current,
       allChoiceCards,
+      highlightKey,
     );
-    if (match && highlightDomain) {
-      consumedHighlightRef.current = highlightDomain;
+    if (match && highlightKey) {
+      consumedHighlightRef.current = highlightKey;
       setStoredChoice(match);
       setStretchSelected(false);
     }
-  }, [highlightDomain, allChoiceCards]);
+  }, [highlightDomain, highlightKey, allChoiceCards]);
   // The RECOMPOSED preview for the selected strand — the SAME playlistForScholar
   // query as `playlist` above, scoped to the SELECTED card's own domain (never
   // the home's default effective domain — a cross-domain or "new territory"
@@ -712,32 +730,17 @@ export function PracticePlaylistCard({
         // Best-effort — the scholar still gets to practice their pick even if
         // the observation log fails to write.
       });
-      // The picked domain must ALSO travel as `domain`/`domains` — passing
-      // ONLY `choiceDomain`/`choiceStrand` would silently collapse the
-      // session to practice.tsx's single hardcoded default (discarding the
-      // scholar's actual blend), since the choiceHint is layered on TOP of
-      // whatever domain/domains those params separately resolve, never
-      // derived from choiceDomain itself. A pick OUTSIDE the scholar's
-      // started/blended set (a "new territory" tile — the fold-in of the old
-      // "Explore a new territory" pills, f7) gets its OWN single-domain entry,
-      // exactly like the old pill's `?domain=<slug>` link did.
-      const inSet = selectedDomainSet.includes(selectedChoice.domain);
+      // A pick launches the PICKED domain alone (`domain` === `choiceDomain`,
+      // via the shared `strandPickStartParams`, identical to web) — exactly
+      // the single-domain run the preview above shows. Riding the mixed daily
+      // blend for an in-set pick made `choiceHint` a mere ×2 weight inside one
+      // domain's queue, so a "Chance & Likelihood" pick opened on whole-number
+      // problems. `choiceDomain === domain` also folds the picked domain's
+      // `· mapping` band (practiceDeepLinkParams `foldsMappingBand`), matching
+      // the preview's `includeMapping: true`.
       router.push({
         pathname: "/practice",
-        params: {
-          choiceDomain: selectedChoice.domain,
-          choiceStrand: selectedChoice.strand,
-          // An in-set pick rides the DAILY BLEND (so it keeps the `· mapping`
-          // band via ?blend=1); an out-of-set pick gets its own single-domain
-          // entry, which folds mapping because choiceDomain === domain.
-          ...(inSet
-            ? isMixed
-              ? { domains: selectedDomainSet, blend: "1" }
-              : selectedDomainSet[0]
-                ? { domain: selectedDomainSet[0], blend: "1" }
-                : {}
-            : { domain: selectedChoice.domain }),
-        },
+        params: strandPickStartParams(selectedChoice),
       });
       return;
     }
@@ -770,24 +773,17 @@ export function PracticePlaylistCard({
     label: string;
     kind: "next" | "queued" | "done";
     tag: string;
-    /** What this row reads once it is NO LONGER next — see `withLaunchpadRow`.
-     *  A doorway that leads the list demotes the skill behind it, and the tag
-     *  has to move with the dot or the receipt names two next things. */
-    queuedTag: string;
     muted: boolean;
     domain?: string;
   }[] = [];
   if (nextUp && !nextInSet) {
     const nextUpDomain =
       "domain" in nextUp && typeof nextUp.domain === "string" ? nextUp.domain : undefined;
-    // Unreachable as a demotion target: the doorway is spliced at `at + 1` or
-    // later whenever this row exists, so it is never the row behind it.
     rows.push({
       key: nextUp.key,
       label: nextUp.label,
       kind: "next",
       tag: nextUpTag(nextUp.reason),
-      queuedTag: nextUpTag(nextUp.reason),
       muted: false,
       domain: nextUpDomain,
     });
@@ -811,7 +807,6 @@ export function PracticePlaylistCard({
       label: row.label,
       kind,
       tag,
-      queuedTag: row.doneToday ? "Done this block" : reasonTag(row.reason),
       muted: row.doneToday,
       domain: rowDomain,
     });
@@ -974,6 +969,7 @@ export function PracticePlaylistCard({
         }))}
         practiceScope={mathPlan?.practiceScope}
         onSelect={(domain) => {
+          disarmPendingHighlight();
           setSelectedDomain(domain);
           setStoredChoice(null);
           setStretchSelected(false);

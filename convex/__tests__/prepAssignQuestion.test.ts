@@ -284,7 +284,9 @@ describe("teacher Prep row (forVisibleScholarsAsTeacher)", () => {
     expect(row?.assigned).toHaveLength(1);
     expect(row?.later ?? []).toEqual([]);
 
-    // Beyond it (Mon 19): not under Due, but the row still shows it, dated.
+    // Further out (Mon 19): there is no Due window any more (the scholar's
+    // Your list shows every live item), so it is listed once, dated, in
+    // `assigned`, and `later` stays empty.
     const far = await asTeacher.mutation(api.assignments.assignQuestionAsHomework, {
       scholarId: scholar.id,
       seedId,
@@ -292,9 +294,11 @@ describe("teacher Prep row (forVisibleScholarsAsTeacher)", () => {
     });
     row = await teacherRow(world, 0, scholar.id);
     expect(row?.bestNext).toBeNull();
-    expect(row?.assigned).toHaveLength(1);
-    expect(row?.later).toHaveLength(1);
-    expect(row?.later[0]).toMatchObject({
+    expect(row?.assigned).toHaveLength(2);
+    expect(row?.later ?? []).toEqual([]);
+    expect(
+      row?.assigned.find((item) => item.activityId === far.activityId),
+    ).toMatchObject({
       activityId: far.activityId,
       label: question.prompt,
       dueAt: schoolDayEndAt("2026-10-19", TIME_ZONE),
@@ -303,6 +307,7 @@ describe("teacher Prep row (forVisibleScholarsAsTeacher)", () => {
     // Archived homework is not live: it leaves the row.
     await asTeacher.mutation(api.assignments.archive, { assignmentId: far.assignmentId });
     row = await teacherRow(world, 0, scholar.id);
+    expect(row?.assigned).toHaveLength(1);
     expect(row?.later ?? []).toEqual([]);
   });
 

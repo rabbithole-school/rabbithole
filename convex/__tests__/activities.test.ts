@@ -699,7 +699,6 @@ describe("getSessionContext cascade ordering", () => {
     const prompt = buildSystemPrompt(
       null,
       null,
-      null,
       c.unitContext,
       null,
       null,
@@ -898,7 +897,6 @@ describe("problem-set tutor quest context", () => {
 describe("buildSystemPrompt with no soft selection set", () => {
   test("does not leak unit/lesson/activity sections when project has no anchors", async () => {
     const prompt = buildSystemPrompt(
-      null, // teacherWhisper
       null, // readingLevel
       "Kai", // scholarName
       null, // unitContext
@@ -927,6 +925,63 @@ describe("buildSystemPrompt with no soft selection set", () => {
     expect(prompt).not.toContain("COMPLETED EARLIER IN THIS UNIT");
     expect(prompt).not.toContain("PERSONA:");
     expect(prompt).not.toContain("PERSPECTIVE LENS:");
+  });
+});
+
+describe("activities.reorder", () => {
+  async function seedOwnAndForeign(t: ReturnType<typeof convexTest>) {
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await t.run(async (ctx) =>
+      ctx.db.insert("users", { name: "Scholar A", username: "scholara", role: "scholar" }),
+    );
+    return await t.run(async (ctx) => {
+      const mine = await ctx.db.insert("units", {
+        teacherId: scholarId, authorScholarId: scholarId, title: "Mine", isActive: true,
+      });
+      const myLesson = await ctx.db.insert("lessons", { unitId: mine, title: "L", order: 0 });
+      const theirs = await ctx.db.insert("units", { teacherId, title: "Theirs", isActive: true });
+      const theirLesson = await ctx.db.insert("lessons", { unitId: theirs, title: "L", order: 0 });
+      const act = (lessonId: Id<"lessons">, title: string, order: number) =>
+        ctx.db.insert("activities", { lessonId, title, kind: "online" as const, order });
+      return {
+        scholarId,
+        m1: await act(myLesson, "M1", 0),
+        m2: await act(myLesson, "M2", 1),
+        f1: await act(theirLesson, "F1", 0),
+        f2: await act(theirLesson, "F2", 1),
+      };
+    });
+  }
+  const orders = (t: ReturnType<typeof convexTest>, ids: Id<"activities">[]) =>
+    t.run(async (ctx) => Promise.all(ids.map(async (id) => (await ctx.db.get(id))?.order)));
+
+  test("refuses a list that mixes in activities from a lesson the caller can't edit", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seedOwnAndForeign(t);
+    const as = await withScholar(t, s.scholarId);
+    await expect(
+      as.mutation(api.activities.reorder, { activityIds: [s.m1, s.f2, s.f1] }),
+    ).rejects.toThrow();
+    expect(await orders(t, [s.m1, s.f1, s.f2])).toEqual([0, 0, 1]);
+  });
+
+  test("refuses a list that spans two lessons even when the caller owns both", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const a = await seedUnitWithLesson(t, teacherId);
+    const b = await seedUnitWithLesson(t, teacherId);
+    const as = await withScholar(t, teacherId);
+    await expect(
+      as.mutation(api.activities.reorder, { activityIds: [a.activityId, b.activityId] }),
+    ).rejects.toThrow();
+  });
+
+  test("reorders within one editable lesson", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seedOwnAndForeign(t);
+    const as = await withScholar(t, s.scholarId);
+    await as.mutation(api.activities.reorder, { activityIds: [s.m2, s.m1] });
+    expect(await orders(t, [s.m2, s.m1])).toEqual([0, 1]);
   });
 });
 
@@ -1004,21 +1059,52 @@ async function seedVibecodeBuild(
   });
 }
 
-describe("App designer autosave (setVibecodeStarterFromArtifact) idempotency", () => {
+async function autosaveAndReadStarter(
+  t: ReturnType<typeof convexTest>,
+  args: {
+    sessionId: Id<"sessions">;
+    callerUserId: Id<"users">;
+    activityId: Id<"activities">;
+    artifactId: Id<"artifacts">;
+  },
+) {
+  await t.action(
+    internal.vibecodeStarterActions.autosaveStarterFromArtifact,
+    args,
+  );
+  return await t.run(async (ctx) => {
+    const session = await ctx.db.get(args.sessionId);
+    expect(session?.appAutosaveFailedAt).toBeUndefined();
+    const activity = await ctx.db.get(args.activityId);
+    const app = activity?.starterAppId
+      ? await ctx.db.get(activity.starterAppId)
+      : null;
+    if (!app) throw new Error("Expected autosave to promote a starter");
+    return { id: app._id, updatedAt: app.updatedAt };
+  });
+}
+
+describe("App designer autosave (autosaveStarterFromArtifact) idempotency", () => {
   test("re-promoting the same artifact revision is a no-op", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
-    const asTeacher = await withScholar(t, teacherId);
-    const { activityId, artifactId } = await seedVibecodeBuild(t, teacherId);
+    const { activityId, sessionId, artifactId } = await seedVibecodeBuild(
+      t,
+      teacherId,
+    );
 
-    const first = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
-    const second = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const first = await autosaveAndReadStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
+    const second = await autosaveAndReadStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
 
     expect(second.id).toBe(first.id);
     expect(second.updatedAt).toBe(first.updatedAt);
@@ -1032,14 +1118,13 @@ describe("App designer autosave (setVibecodeStarterFromArtifact) idempotency", (
   test("re-promoting with app assets does not leak copied storage blobs (F6)", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
-    const asTeacher = await withScholar(t, teacherId);
     const assetBytes = new Uint8Array([
       0xff, 0xd8, 0xff, 0xe0, 0, 1, 2, 3, 4, 5, 6, 7,
     ]);
     const storageId = await t.run(async (ctx) =>
       ctx.storage.store(new Blob([assetBytes], { type: "image/jpeg" })),
     );
-    const { activityId, artifactId } = await t.run(async (ctx) => {
+    const { activityId, sessionId, artifactId } = await t.run(async (ctx) => {
       const unitId = await ctx.db.insert("units", {
         teacherId,
         title: "Asset unit",
@@ -1075,25 +1160,29 @@ describe("App designer autosave (setVibecodeStarterFromArtifact) idempotency", (
         type: "code",
         language: "html",
       });
-      return { activityId, artifactId };
+      return { activityId, sessionId, artifactId };
     });
 
     const storageCount = async () =>
       (await t.run((ctx) => ctx.db.system.query("_storage").collect())).length;
 
     const before = await storageCount();
-    const first = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const first = await autosaveAndReadStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
     const afterFirst = await storageCount();
     // The first promotion copied the one referenced asset into new storage.
     expect(afterFirst).toBe(before + 1);
 
-    const second = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const second = await autosaveAndReadStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
     const afterSecond = await storageCount();
     expect(second.id).toBe(first.id);
     expect(second.updatedAt).toBe(first.updatedAt);
@@ -1104,13 +1193,17 @@ describe("App designer autosave (setVibecodeStarterFromArtifact) idempotency", (
   test("a new revision promotes again into the same starter", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
-    const asTeacher = await withScholar(t, teacherId);
-    const { activityId, artifactId } = await seedVibecodeBuild(t, teacherId);
-
-    const first = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
+    const { activityId, sessionId, artifactId } = await seedVibecodeBuild(
+      t,
+      teacherId,
     );
+
+    const first = await autosaveAndReadStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
 
     await t.run((ctx) =>
       ctx.db.patch(artifactId, {
@@ -1119,10 +1212,12 @@ describe("App designer autosave (setVibecodeStarterFromArtifact) idempotency", (
       }),
     );
 
-    const second = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const second = await autosaveAndReadStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
 
     expect(second.id).toBe(first.id);
     const apps = await t.run((ctx) => ctx.db.query("customApps").collect());

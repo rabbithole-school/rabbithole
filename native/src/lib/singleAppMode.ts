@@ -7,5 +7,4 @@ export {
   isSingleAppModeActive,
   enterSingleAppMode,
   exitSingleAppMode,
-  setManagedMaximumBrightness,
 } from "../../modules/single-app-mode";

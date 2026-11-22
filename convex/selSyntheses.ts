@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { isWithdrawn } from "./lib/enrollmentStanding";
 import { internal } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import {
@@ -249,7 +250,10 @@ export const eligibleScholarsForWeek = internalQuery({
       )
       .collect();
     return scholars
-      .filter((scholar) => scholar.enrollmentStanding !== "program_guest")
+      .filter(
+        (scholar) =>
+          scholar.enrollmentStanding !== "program_guest" && !isWithdrawn(scholar),
+      )
       .sort(
         (a, b) =>
           (a.name ?? a.username ?? "").localeCompare(

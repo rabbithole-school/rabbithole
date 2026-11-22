@@ -13,8 +13,8 @@
 // details remain server-side. A future per-scholar setting may opt a family
 // back into separate guardian threads.
 //
-// OTHER KINDS. The same tables also carry scholar ↔ staff conversations
-// (`kind` "mentor" / "workshop", scholarMessages.ts). Every public entry point
+// OTHER KINDS. The same tables also carry scholar conversations (`kind`
+// "scholar", in three flavors; scholarMessages.ts). Every public entry point
 // here is FAMILY-ONLY: it refuses a non-family thread, and every family listing
 // ignores non-family threads and non-family participant sides (a staffer who is
 // also a guardian must never see a mentor thread on their parent surface). The
@@ -33,6 +33,7 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import {
   whatsAppOptInLink,
   isStopKeyword,
+  rowCarriesTeacherMessages,
   parseOptInToken,
 } from "./lib/parentMessageChannels";
 import { resolveInstitutionLens } from "./lib/institutionLens";
@@ -45,6 +46,8 @@ import {
   emailMailboxesMatch,
   emailTaggedMailboxesMatch,
 } from "./lib/resendInbound";
+import { parseThreadReplyAddress } from "./lib/parentMessageEmail";
+import { staffReplyTokenMatches } from "./lib/staffReplyToken";
 import {
   MESSAGE_ATTACHMENT_MAX_BYTES,
   MESSAGE_ATTACHMENT_MAX_COUNT,
@@ -54,6 +57,12 @@ import {
 } from "../shared/messageAttachments";
 import { messagePlainText, previewableMessageLink } from "../lib/messageLinks";
 import { slackTextToMessageBody } from "./lib/slackText";
+// Cyclic (scholarMessages imports this module): used only inside a handler.
+import { recordScholarSlackReply } from "./scholarMessages";
+import {
+  relevantTeacherIds,
+  relevantTeacherSlackIds,
+} from "./lib/slackTeacherMentions";
 import {
   editWindowOpen,
   messageEditableUntil,
@@ -63,8 +72,11 @@ import {
   isFamilyThread,
   markStaffRead,
   scholarForThread,
+  scholarThreadKindFields,
   staffCanReachScholar,
+  threadFlavor,
   threadKind,
+  type ScholarThreadFlavor,
 } from "./lib/scholarThreadAccess";
 import {
   attributedScholarIds,
@@ -80,6 +92,7 @@ import {
   UPLOAD_RESERVATION_TTL_MS,
   attachmentOwnsBlob,
 } from "./lib/parentMessageAttachmentStorage";
+import { storageReferencedByAnotherOwner } from "./lib/storageReferences";
 import type { Id, Doc } from "./_generated/dataModel";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 
@@ -189,7 +202,8 @@ async function legacyParentThreadInstitutionId(
   );
 }
 
-async function threadInstitutionId(
+/** The school a thread belongs to (its stamp, or a legacy thread's unambiguous one). */
+export async function threadInstitutionId(
   ctx: QueryCtx | MutationCtx,
   thread: Doc<"parentThreads">,
 ): Promise<Id<"institutions"> | null> {
@@ -361,6 +375,108 @@ export async function prepareAttachments(
   }
   if (totalStorageBytes > MESSAGE_ATTACHMENT_MAX_TOTAL_BYTES) {
     throw new Error("Attachments must total 30 MB or smaller");
+  }
+  return rows;
+}
+
+/** A file the SERVER downloaded and stored itself (a Slack upload), ready to
+ *  become a staged attachment. */
+export type ServerStoredAttachment = {
+  storageId: Id<"_storage">;
+  fileName: string;
+  /** Decided by the server from the bytes, so it outranks whatever content
+   *  type storage recorded. */
+  mimeType: string;
+};
+
+/**
+ * Stage files the server stored itself, under the same rules as a composer
+ * upload, so `appendMessage` can claim them like any other staged row.
+ *
+ * Callers MUST have created every blob themselves in this request (a Slack
+ * reply's files, downloaded by `slackBot.handleWorkshopIdeaThreadReply`). The
+ * storage ids never came from a client, which is what lets the row vouch for
+ * the blob: `uploadReservedAt` sits just before the blob's creation, so
+ * `attachmentOwnsBlob` lets a later retraction delete it, as it would an
+ * in-app upload's. Because that vouch would also hand a child someone else's
+ * file, it is refused for any blob that is not fresh, already attached, or
+ * held by another feature, whoever the caller.
+ *
+ * Call it only once the message will be written, in the same mutation: a
+ * staged row left behind has no abandoned-upload sweep scheduled.
+ */
+export async function stageServerStoredAttachments(
+  ctx: MutationCtx,
+  uploaderId: Id<"users">,
+  files: readonly ServerStoredAttachment[],
+): Promise<PreparedAttachment[]> {
+  if (files.length > MESSAGE_ATTACHMENT_MAX_COUNT) {
+    throw new Error(
+      `Attach no more than ${MESSAGE_ATTACHMENT_MAX_COUNT} files to one message`,
+    );
+  }
+  // Every file is checked before any row is written, so a refusal leaves
+  // nothing behind for a caller that catches it.
+  const checked: Array<{
+    file: ServerStoredAttachment;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+    blobCreatedAt: number;
+  }> = [];
+  let totalStorageBytes = 0;
+  for (const file of files) {
+    const storage = await ctx.db.system.get("_storage", file.storageId);
+    if (!storage) throw new Error("Attachment file is missing");
+    const fileName = safeMessageAttachmentFileName(file.fileName);
+    const mimeType = file.mimeType || storage.contentType || "";
+    if (
+      !fileName ||
+      storage.size <= 0 ||
+      storage.size > MESSAGE_ATTACHMENT_MAX_BYTES ||
+      !isSupportedMessageAttachment(mimeType, fileName)
+    ) {
+      throw new Error("Choose a supported, non-empty attachment");
+    }
+    const alreadyAttached = await ctx.db
+      .query("parentMessageAttachments")
+      .withIndex("by_storage", (q) => q.eq("storageId", file.storageId))
+      .first();
+    if (
+      storage._creationTime < Date.now() - UPLOAD_RESERVATION_TTL_MS ||
+      alreadyAttached ||
+      (await storageReferencedByAnotherOwner(ctx, file.storageId, {
+        table: "parentMessageAttachments",
+      }))
+    ) {
+      throw new Error("Attachment is not available");
+    }
+    totalStorageBytes += storage.size;
+    checked.push({
+      file,
+      fileName,
+      mimeType,
+      sizeBytes: storage.size,
+      blobCreatedAt: storage._creationTime,
+    });
+  }
+  if (totalStorageBytes > MESSAGE_ATTACHMENT_MAX_TOTAL_BYTES) {
+    throw new Error("Attachments must total 30 MB or smaller");
+  }
+
+  const rows: PreparedAttachment[] = [];
+  for (const { file, fileName, mimeType, sizeBytes, blobCreatedAt } of checked) {
+    const attachmentId = await ctx.db.insert("parentMessageAttachments", {
+      storageId: file.storageId,
+      uploaderId,
+      fileName,
+      mimeType: mimeType || "application/octet-stream",
+      sizeBytes,
+      source: "upload",
+      uploadReservedAt: blobCreatedAt - 1,
+    });
+    const row = await ctx.db.get(attachmentId);
+    if (row) rows.push(row as PreparedAttachment);
   }
   return rows;
 }
@@ -574,7 +690,7 @@ async function optedInChannels(
     .collect();
   const set = new Set<"sms" | "whatsapp">();
   for (const r of rows) {
-    if (r.optInAt && r.stopState !== true) set.add(r.channel);
+    if (rowCarriesTeacherMessages(r)) set.add(r.channel);
   }
   return [...set];
 }
@@ -949,17 +1065,23 @@ export async function createThread(
     institutionId?: Id<"institutions">;
     broadcastId?: string;
     now: number;
-    // Scholar ↔ staff threads (scholarMessages.ts): `parentUserIds` is then
-    // just the scholar (side "scholar"); named mentors are added separately.
-    kind?: "mentor" | "workshop";
+    // A scholar conversation of this flavor (scholarMessages.ts):
+    // `parentUserIds` is then just the scholar (side "scholar"); named adults
+    // are added separately. Absent = a family conversation.
+    flavor?: ScholarThreadFlavor;
     suggestionId?: Id<"scholarSuggestions">;
+    // Required for (and only for) flavor "about": the Quest or wonder.
+    about?: Doc<"parentThreads">["about"];
   },
 ): Promise<Id<"parentThreads">> {
   const parentUserIds = [...new Set(opts.parentUserIds)];
   if (parentUserIds.length === 0) throw new Error("Thread needs a guardian");
-  if (opts.kind && (!opts.scholarId || parentUserIds.length !== 1 ||
+  if (opts.flavor && (!opts.scholarId || parentUserIds.length !== 1 ||
       parentUserIds[0] !== opts.scholarId)) {
     throw new Error("A scholar thread's only initial participant is its scholar");
+  }
+  if ((opts.flavor === "about") !== (opts.about !== undefined)) {
+    throw new Error("An about thread, and only an about thread, says what it is about");
   }
   const institutionId =
     opts.institutionId ??
@@ -974,14 +1096,15 @@ export async function createThread(
     institutionId,
     broadcastId: opts.broadcastId,
     lastMessageAt: opts.now,
-    ...(opts.kind ? { kind: opts.kind } : {}),
+    ...(opts.flavor ? scholarThreadKindFields(opts.flavor) : {}),
     ...(opts.suggestionId ? { suggestionId: opts.suggestionId } : {}),
+    ...(opts.about ? { about: opts.about } : {}),
   });
   await ensureThreadParticipants(
     ctx,
     threadId,
     parentUserIds,
-    opts.kind ? "scholar" : undefined,
+    opts.flavor ? "scholar" : undefined,
   );
   return threadId;
 }
@@ -1157,7 +1280,13 @@ export async function appendMessage(
     patch.lastToParentAt = Math.max(thread.lastToParentAt ?? 0, stampAt);
   }
   await ctx.db.patch(opts.threadId, patch);
-  if (family && opts.authorType === "parent") {
+  // Both sides of a family conversation reach the staff Slack channel; a
+  // staff reply typed in Slack is already there.
+  if (
+    family &&
+    (opts.authorType === "parent" || opts.authorType === "teacher") &&
+    opts.source !== "slack"
+  ) {
     await ctx.scheduler.runAfter(
       0,
       internal.parentMessageSlack.notifyParentMessageChannel,
@@ -1165,6 +1294,18 @@ export async function appendMessage(
         messageId,
       },
     );
+  }
+  // ...and the conversation's teachers' inboxes, where they can answer by
+  // replying. Not a broadcast: one staff message to many families would
+  // otherwise land in a co-teacher's inbox once per family.
+  if (
+    family &&
+    (opts.authorType === "parent" || opts.authorType === "teacher") &&
+    !opts.broadcastId
+  ) {
+    await ctx.scheduler.runAfter(0, internal.parentMessageStaffEmail.send, {
+      messageId,
+    });
   }
   return messageId;
 }
@@ -2018,7 +2159,22 @@ export async function editMessageBody(
   }
   if (body.length > MAX_BODY) throw new Error("Message is too long");
 
-  const now = Date.now();
+  await replaceMessageBodyKeepingHistory(ctx, message, body, Date.now());
+}
+
+/**
+ * The one write that changes a message's body: the new text, stamped edited,
+ * with the earlier wording kept in `editHistory`. `editMessageBody` calls it
+ * after the author's own checks; a Quest proposal (questProposals.ts
+ * editProposal) calls it to keep its thread's proposal message in step with
+ * the proposal while it waits, past the ordinary edit window.
+ */
+export async function replaceMessageBodyKeepingHistory(
+  ctx: MutationCtx,
+  message: Doc<"parentMessages">,
+  body: string,
+  now: number,
+): Promise<void> {
   await ctx.db.patch(message._id, {
     body,
     editedAt: now,
@@ -2334,13 +2490,83 @@ function newestParentSlackThread(
   }, null);
 }
 
+/** The children a family conversation is about: its subject scholar, else
+ *  every child its guardians are linked to. */
+async function familyThreadScholarIds(
+  ctx: QueryCtx,
+  thread: Doc<"parentThreads">,
+): Promise<Id<"users">[]> {
+  if (thread.scholarId) return [thread.scholarId];
+  const children = new Set<Id<"users">>();
+  for (const parentUserId of await threadParticipantIds(ctx, thread)) {
+    const links = await ctx.db
+      .query("guardianships")
+      .withIndex("by_parent", (q) => q.eq("parentUserId", parentUserId))
+      .collect();
+    for (const link of links) children.add(link.scholarUserId);
+  }
+  return [...children];
+}
+
+/** The staff who opened or wrote in a conversation (any kind). */
+export async function threadStaffWriterIds(
+  ctx: QueryCtx,
+  thread: Doc<"parentThreads">,
+): Promise<Id<"users">[]> {
+  const writers = new Set<Id<"users">>(thread.teacherId ? [thread.teacherId] : []);
+  const messages = await ctx.db
+    .query("parentMessages")
+    .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
+    .collect();
+  for (const message of messages) {
+    if (message.authorType === "teacher" && message.authorUserId) {
+      writers.add(message.authorUserId);
+    }
+  }
+  return [...writers];
+}
+
+/**
+ * The teachers who can be emailed a family conversation and answer it by
+ * email: the staff who wrote in it and the owners of its scholars' classes
+ * (the Slack mention set), who are also on the thread's own school's staff
+ * side (`userCanOperateThread`) — never a guardian on the thread and never
+ * `excludeUserId` (the message's author). Empty for a non-family thread or a
+ * transferred scholar's history.
+ */
+export async function familyThreadTeachers(
+  ctx: QueryCtx | MutationCtx,
+  thread: Doc<"parentThreads">,
+  excludeUserId?: Id<"users">,
+): Promise<{ institutionId: Id<"institutions"> | null; teachers: Doc<"users">[] }> {
+  if (!isFamilyThread(thread)) return { institutionId: null, teachers: [] };
+  const institutionId = await threadInstitutionId(ctx, thread);
+  if (!institutionId) return { institutionId: null, teachers: [] };
+  const familySide = new Set(await threadParticipantIds(ctx, thread));
+  const candidates = await relevantTeacherIds(ctx, {
+    institutionId,
+    scholarIds: await familyThreadScholarIds(ctx, thread),
+    staffWriterIds: await threadStaffWriterIds(ctx, thread),
+    authorUserId: excludeUserId,
+  });
+  const teachers: Doc<"users">[] = [];
+  for (const user of candidates) {
+    if (user.role === ROLES.SCHOLAR || familySide.has(user._id)) continue;
+    if (await userCanOperateThread(ctx, user, thread)) teachers.push(user);
+  }
+  return { institutionId, teachers };
+}
+
 export const getSlackNotificationContext = internalQuery({
   args: { messageId: v.id("parentMessages") },
   handler: async (ctx, { messageId }) => {
     const message = await ctx.db.get(messageId);
+    // A guardian's message, or one staff wrote in the app. A staff reply
+    // typed in this Slack thread (source "slack") is already there.
     if (
       !message ||
-      message.authorType !== "parent" ||
+      (message.authorType !== "parent" && message.authorType !== "teacher") ||
+      message.source === "slack" ||
       isRetractedMessage(message)
     ) {
       return null;
@@ -2364,16 +2590,37 @@ export const getSlackNotificationContext = internalQuery({
     }
     const channel = await ctx.db.query("parentMessageChannel").first();
     if (!channel) return null;
-    const parent = message.authorUserId
+    const author = message.authorUserId
       ? await ctx.db.get(message.authorUserId)
       : null;
+    const fromStaff = message.authorType === "teacher";
+
+    // The relevant teachers hear about the conversation's first post in the
+    // channel and about every guardian message — what someone has to answer.
+    const opensSlackThread = !(
+      await ctx.db
+        .query("parentSlackThreads")
+        .withIndex("by_parent_thread", (q) => q.eq("parentThreadId", thread._id))
+        .collect()
+    ).some((row) => row.channelId === channel.slackChannelId);
+    const mentions =
+      opensSlackThread || !fromStaff
+        ? await relevantTeacherSlackIds(ctx, {
+            institutionId: institution._id,
+            scholarIds: await familyThreadScholarIds(ctx, thread),
+            staffWriterIds: await threadStaffWriterIds(ctx, thread),
+            authorUserId: message.authorUserId,
+          })
+        : [];
 
     return {
       messageId,
       threadId: thread._id,
       institutionSlug: institution.slug ?? null,
       channelId: channel.slackChannelId,
-      parentName: userDisplayName(parent, "Parent"),
+      authorName: userDisplayName(author, fromStaff ? "Teacher" : "Parent"),
+      fromStaff,
+      mentions,
       childName: await childNameForThread(ctx, thread),
       body: message.body,
       attachments: await Promise.all(
@@ -2461,6 +2708,8 @@ export const ingestInboundSlackReply = internalMutation({
     body: v.string(),
     eventId: v.optional(v.string()),
     messageTs: v.optional(v.string()),
+    /** The reply @-mentions the bot: a question for the aide, not the child. */
+    mentionsBot: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const providerMessageId =
@@ -2500,10 +2749,15 @@ export const ingestInboundSlackReply = internalMutation({
     if (!thread) {
       return { handled: true as const, ok: false as const, reason: "no-thread" as const };
     }
-    // A Workshop idea's #workshop root is recorded in this same table (the
-    // durable Slack ↔ thread binding). Its replies are NOT family replies:
-    // hand them back so slackBot routes them to the Workshop path.
-    if (!isFamilyThread(thread)) {
+    // A scholar ↔ teacher conversation's root in the scholar-messages channel
+    // is recorded here too, and a reply there reaches the scholar. A Workshop
+    // idea's #workshop root is also in this table, but its replies take the
+    // Workshop path (attachments, ✅): hand those back to slackBot.
+    const scholarConversation =
+      threadKind(thread) === "scholar" && threadFlavor(thread) === "general";
+    // An @-mention in a scholar conversation's thread is a question for the
+    // aide (its app_mention runs it), never words to the child.
+    if (!isFamilyThread(thread) && (!scholarConversation || args.mentionsBot)) {
       return {
         handled: false as const,
         ok: false as const,
@@ -2517,6 +2771,32 @@ export const ingestInboundSlackReply = internalMutation({
     if (!teacher) {
       return { handled: true as const, ok: false as const, reason: "unlinked" as const };
     }
+    const body = slackTextToMessageBody(args.body).trim();
+    if (!body) return { handled: true as const, ok: false as const, reason: "empty" as const };
+    if (body.length > MAX_BODY) {
+      return { handled: true as const, ok: false as const, reason: "too-long" as const };
+    }
+    if (scholarConversation) {
+      const now = Date.now();
+      const posted = await recordScholarSlackReply(ctx, {
+        thread,
+        author: teacher,
+        body,
+        providerMessageId: providerKey,
+        now,
+      });
+      if (!posted.ok) {
+        return { handled: true as const, ok: false as const, reason: posted.reason };
+      }
+      await ctx.db.patch(mapping._id, { lastTeacherReplyAt: now });
+      return {
+        handled: true as const,
+        ok: true as const,
+        action: "message" as const,
+        threadId: thread._id,
+        messageId: posted.messageId,
+      };
+    }
     // The same rule as an in-app staff reply (TRA-401): live school:operations
     // at the thread's OWN institution — for every family thread, with or
     // without a subject scholar, never the scholar's current school.
@@ -2524,11 +2804,6 @@ export const ingestInboundSlackReply = internalMutation({
       return { handled: true as const, ok: false as const, reason: "unlinked" as const };
     }
     const parentUserIds = await threadParticipantIds(ctx, thread);
-    const body = slackTextToMessageBody(args.body).trim();
-    if (!body) return { handled: true as const, ok: false as const, reason: "empty" as const };
-    if (body.length > MAX_BODY) {
-      return { handled: true as const, ok: false as const, reason: "too-long" as const };
-    }
 
     const now = Date.now();
     const messageId = await appendMessage(ctx, {
@@ -2561,10 +2836,11 @@ export const ingestInboundSlackReply = internalMutation({
 });
 
 // ── Inbound email (reply-by-email → a chat message) ─────────────────────
-// A parent replies to a message email; the provider (Resend inbound) POSTs it
-// to /parent-message-inbound, which calls this. We parse the thread token from
+// A parent replies to a message email, or a teacher replies to the staff copy
+// (parentMessageStaffEmail.ts); the provider (Resend inbound) POSTs it to
+// /parent-message-inbound, which calls this. We parse the thread token from
 // the routed recipient (reply+<threadId>@…) and FAIL CLOSED unless the From
-// uniquely matches a participant's email. Resend webhooks are at-least-once, so
+// uniquely matches a participant's email or a teacher who can operate it. Resend webhooks are at-least-once, so
 // providerMessageId deduplicates retries before they can append downstream work.
 
 export const ingestInboundEmail = internalMutation({
@@ -2575,23 +2851,23 @@ export const ingestInboundEmail = internalMutation({
     providerMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const m = /reply\+([a-z0-9]+)@/i.exec(args.toAddress);
-    if (!m) return { ok: false, reason: "no-thread-token" as const };
+    const address = parseThreadReplyAddress(args.toAddress);
+    if (!address) return { ok: false, reason: "no-thread-token" as const };
 
     let thread: Doc<"parentThreads"> | null = null;
     try {
-      thread = await ctx.db.get(m[1] as Id<"parentThreads">);
+      thread = await ctx.db.get(address.threadId as Id<"parentThreads">);
     } catch {
       thread = null;
     }
     if (!thread) return { ok: false, reason: "no-thread" as const };
-    const kind = threadKind(thread);
-    if (kind === "workshop") {
-      // Workshop threads never email anyone, so no reply address was issued.
-      return { ok: false, reason: "not-accepted" as const };
-    }
-    if (kind === "mentor") {
-      return await ingestMentorEmailReply(ctx, thread, args);
+    if (threadKind(thread) === "scholar") {
+      // Only a general scholar thread emails anyone (its named adults).
+      // Workshop and about threads were never issued a reply address, and a
+      // guessed one must not fall through to the family path below.
+      return threadFlavor(thread) === "general"
+        ? await ingestMentorEmailReply(ctx, thread, args)
+        : { ok: false, reason: "not-accepted" as const };
     }
 
     const parentUserIds = await threadParticipantIds(ctx, thread);
@@ -2621,7 +2897,11 @@ export const ingestInboundEmail = internalMutation({
           ? aliasSenders[0]
           : null;
     if (!sender) {
-      return { ok: false, reason: "sender-mismatch" as const }; // FAIL CLOSED
+      // Not a guardian: a teacher answering the staff copy of this thread.
+      return await ingestStaffEmailReply(ctx, thread, parentUserIds, {
+        ...args,
+        staffToken: address.staffToken,
+      });
     }
     if (args.providerMessageId) {
       const duplicate = await ctx.db
@@ -2658,6 +2938,101 @@ export const ingestInboundEmail = internalMutation({
     return { ok: true as const, action: "message" as const, threadId: thread._id };
   },
 });
+
+/**
+ * A teacher answering the staff copy of a family conversation
+ * (parentMessageStaffEmail.ts). FAIL CLOSED unless the sender is exactly one
+ * user on the thread's own school's staff side (`userCanOperateThread`, the
+ * same rule as an in-app or Slack reply), matched by their exact address, or
+ * as a mailbox alias of one of the thread's teachers — AND the reply came back
+ * to the address carrying that user's own token (lib/staffReplyToken.ts). The
+ * thread's plain address is in every guardian's inbox, so a From header alone
+ * proves nothing. Posts as that teacher and sends it on to the family like any
+ * staff reply.
+ */
+async function ingestStaffEmailReply(
+  ctx: MutationCtx,
+  thread: Doc<"parentThreads">,
+  parentUserIds: Id<"users">[],
+  args: {
+    fromEmail: string;
+    body: string;
+    providerMessageId?: string;
+    staffToken?: string;
+  },
+) {
+  if (!args.staffToken) return { ok: false, reason: "sender-mismatch" as const };
+  const familySide = new Set(parentUserIds);
+  const from = args.fromEmail.trim();
+  const exactCandidates = new Map<Id<"users">, Doc<"users">>();
+  for (const address of new Set([from, from.toLowerCase()])) {
+    const matches = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", address))
+      .collect();
+    for (const user of matches) exactCandidates.set(user._id, user);
+  }
+  const eligible = async (user: Doc<"users">) =>
+    user.role !== ROLES.SCHOLAR &&
+    !familySide.has(user._id) &&
+    (await userCanOperateThread(ctx, user, thread));
+  const exact: Doc<"users">[] = [];
+  for (const user of exactCandidates.values()) {
+    if (await eligible(user)) exact.push(user);
+  }
+  const alias =
+    exact.length === 0
+      ? (await familyThreadTeachers(ctx, thread)).teachers.filter(
+          (user) =>
+            !!user.email &&
+            (emailMailboxesMatch(user.email, from) ||
+              emailTaggedMailboxesMatch(user.email, from)),
+        )
+      : [];
+  const teacher =
+    exact.length === 1 ? exact[0] : alias.length === 1 ? alias[0] : null;
+  if (
+    !teacher ||
+    !(await staffReplyTokenMatches(thread._id, teacher._id, args.staffToken))
+  ) {
+    return { ok: false, reason: "sender-mismatch" as const };
+  }
+
+  if (args.providerMessageId) {
+    const duplicate = await ctx.db
+      .query("parentMessages")
+      .withIndex("by_provider_message", (q) =>
+        q.eq("providerMessageId", args.providerMessageId),
+      )
+      .first();
+    if (duplicate) {
+      return { ok: true as const, action: "duplicate" as const, threadId: thread._id };
+    }
+  }
+  const body = args.body.trim();
+  if (!body) return { ok: false, reason: "empty" as const };
+  if (body.length > MAX_BODY) return { ok: false, reason: "too-long" as const };
+
+  const now = Date.now();
+  const messageId = await appendMessage(ctx, {
+    threadId: thread._id,
+    parentUserIds,
+    authorType: "teacher",
+    authorUserId: teacher._id,
+    body,
+    now,
+    queueOffPortal: true,
+    providerMessageId: args.providerMessageId,
+  });
+  await ctx.db.patch(thread._id, {
+    lastReadByTeacherAt: now,
+    ...(thread.teacherId ? {} : { teacherId: teacher._id }),
+  });
+  await ctx.scheduler.runAfter(0, internal.parentMessageSend.dispatch, {
+    messageIds: [messageId],
+  });
+  return { ok: true as const, action: "message" as const, threadId: thread._id };
+}
 
 /**
  * A mentor answering a "a scholar wrote" email. The reply address names the
@@ -2703,7 +3078,7 @@ async function ingestMentorEmailReply(
   const sender =
     exact.length === 1 ? exact[0] : alias.length === 1 ? alias[0] : null;
   if (!sender) return { ok: false, reason: "sender-mismatch" as const };
-  if (!(await staffCanReachScholar(ctx, sender.user, scholar, "mentor")).ok) {
+  if (!(await staffCanReachScholar(ctx, sender.user, scholar, "general")).ok) {
     return { ok: false, reason: "sender-mismatch" as const };
   }
   if (args.providerMessageId) {
@@ -2779,6 +3154,13 @@ export const setMyChannelStopped = authedMutation({
     const row = await ctx.db.get(args.channelId);
     if (!row || row.parentUserId !== ctx.user._id) {
       throw new Error("Channel not found");
+    }
+    // SMS consent is recorded by staff, so a self-serve resume would be a
+    // re-consent nobody recorded. A parent opts out of SMS by texting STOP.
+    if (row.channel === "sms") {
+      throw new Error(
+        "Text messages are set up by the school office. To stop them, text STOP to the school's number.",
+      );
     }
     await ctx.db.patch(args.channelId, {
       stopState: args.stopped,

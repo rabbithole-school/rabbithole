@@ -339,7 +339,6 @@ describe("expired guidance and the tutor prompt", () => {
     const build = (directives: { label: string; content: string }[] | null) =>
       buildSystemPrompt(
         null,
-        null,
         "Ada",
         null,
         null,

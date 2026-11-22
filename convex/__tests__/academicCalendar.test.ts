@@ -365,4 +365,48 @@ describe("parent calendar read (upcomingForScholar)", () => {
     expect(labels).not.toContain("Ancient history");
     expect(labels).toContain("The long break");
   });
+
+  test("lists the child's upcoming field trips only, without notes (TRA-601)", async () => {
+    const t = convexTest(schema, modules);
+    const { parent, child } = await seedFamily(t);
+    await t.run(async (ctx) => {
+      const scholar = await ctx.db.get(child);
+      const institutionId = scholar!.institutionId!;
+      const going = await ctx.db.insert("scholarGroups", {
+        teacherId: parent, institutionId, name: "Honu", scholarIds: [child],
+      });
+      const staying = await ctx.db.insert("scholarGroups", {
+        teacherId: parent, institutionId, name: "Manu", scholarIds: [],
+      });
+      const trip = {
+        institutionId,
+        startLocal: "09:00",
+        endLocal: "12:00",
+        notes: "Staff only: bus 3",
+        createdBy: parent,
+        updatedAt: Date.now(),
+      };
+      await ctx.db.insert("fieldTrips", {
+        ...trip, groupIds: [going], dayKey: "2099-03-03", destination: "Kualoa Ranch",
+      });
+      await ctx.db.insert("fieldTrips", {
+        ...trip, groupIds: [staying], dayKey: "2099-03-03", destination: "Bishop Museum",
+      });
+      await ctx.db.insert("fieldTrips", {
+        ...trip, groupIds: [going], dayKey: "2099-03-04", destination: "Waimānalo Farms",
+        canceledAt: Date.now(),
+      });
+      await ctx.db.insert("fieldTrips", {
+        ...trip, groupIds: [going], dayKey: "1999-03-03", destination: "Long ago",
+      });
+    });
+
+    const calendar = await (
+      await withUser(t, parent)
+    ).query(api.academicCalendar.upcomingForScholar, { scholarId: child });
+
+    expect(calendar!.trips).toEqual([
+      { dayKey: "2099-03-03", startLocal: "09:00", endLocal: "12:00", destination: "Kualoa Ranch" },
+    ]);
+  });
 });

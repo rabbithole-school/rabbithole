@@ -15,6 +15,7 @@
  * in-app aide and the parent portal read. One policy, one data layer,
  * N transports.
  */
+import { resolveToolWithLegacyGive } from "./lib/assignmentTools";
 import { v } from "convex/values";
 import { getAuthUserId, getAuthSessionId } from "@convex-dev/auth/server";
 import { action, internalQuery } from "./_generated/server";
@@ -29,8 +30,11 @@ import {
   type Role,
 } from "./lib/roles";
 import { accessibleScholarIds } from "./lib/access";
+import { gatherMathPortrait } from "./mathPortrait";
+import { staffMathLevel } from "./lib/scholarReadTools";
 import type { ScholarSchoolCalendar } from "./academicCalendar";
 import {
+  isReadOnlyToolName,
   isScholarReadToolAllowed,
   SCHOLAR_READ_TOOLS,
   type ScholarReadToolName,
@@ -45,6 +49,7 @@ import {
   readScholarDossier,
   readScholarInterests,
   readScholarSessions,
+  readScholarAppPlay,
   readSessionTranscript,
   readScholarWebActivity,
   readScholarDocuments,
@@ -60,8 +65,13 @@ import { siteUrl, withBase } from "./lib/channels";
 import type { AideEmit } from "./lib/aideStream";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx, ActionCtx } from "./_generated/server";
-import { requireUnitEditAccessForUser, assertWritableAction } from "./lib/auth";
+import {
+  requireUnitEditAccessForUser,
+  assertWritableAction,
+  getSessionOwner,
+} from "./lib/auth";
 import { schoolOperationsInstitutionIds } from "./lib/staffCapabilities";
+import { redactCustomAppTokens } from "./lib/readOnlyRedaction";
 
 /** Server-side mirror of the route's tool filtering. Throws on off-role calls. */
 async function requireTool(
@@ -234,6 +244,10 @@ export const whoami = authedQuery({
       // A per-institution MCP service account (convex/mcpServiceAccounts.ts)
       // — a machine identity, not a person; clients may say so.
       isServiceAccount: ctx.user.isSystem === true,
+      // A read-only identity (users.readOnly on the session owner: a
+      // read-only MCP service token, or the claude-readonly account). The
+      // /api/mcp route serves it the read-only tool set whatever the URL.
+      readOnly: (await getSessionOwner(ctx))?.readOnly === true,
     };
   },
 });
@@ -352,7 +366,13 @@ export const getScholarSeeds = authedQuery({
     if (!scholar) return null;
     return {
       scholar: scholar.name ?? "Scholar",
-      seeds: await readScholarSeeds(ctx, scholar._id),
+      // Caller-tiered: a scholar or parent gets the scholar-facing seed text
+      // in place of the teacher-private rationale.
+      seeds: await readScholarSeeds(
+        ctx,
+        scholar._id,
+        ctx.user.role as Role | undefined,
+      ),
     };
   },
 });
@@ -380,6 +400,7 @@ export const getScholarSessions = authedQuery({
       scholar: scholar.name ?? "Scholar",
       scholarId: scholar._id,
       sessions: await readScholarSessions(ctx, scholar._id),
+      appPlay: await readScholarAppPlay(ctx, scholar._id),
     };
   },
 });
@@ -423,12 +444,19 @@ export const getScholarPractice = authedQuery({
     const scholar = await resolveScholarForUser(ctx, ctx.user, args.scholarName);
     if (!scholar) return null;
     const practice = await readScholarPractice(ctx, scholar._id);
+    const role = ctx.user.role as Role | undefined;
+    // Teacher/admin also get the overall math level and learned pace, shaped
+    // by the same function as the in-app staff aide. Never parents or scholars.
+    const mathLevel = isTeacherRole(role)
+      ? staffMathLevel(await gatherMathPortrait(ctx.db, scholar._id, { withOverall: true }))
+      : null;
     // REDACTION (centralized, role-tiered): parents get trend altitude (no due
     // backlog, no misconceptions); scholars keep due-for-review but not
     // misconceptions; teacher/admin get everything.
     return {
       scholar: scholar.name ?? "Scholar",
-      ...redactScholarPractice(practice, ctx.user.role as Role | undefined),
+      ...redactScholarPractice(practice, role),
+      ...(mathLevel ? { mathLevel } : {}),
     };
   },
 });
@@ -844,11 +872,25 @@ export const callCurriculumTool = action({
   args: { name: v.string(), input: v.optional(v.any()) },
   handler: async (ctx, { name, input }): Promise<string> => {
     const { userId, role, surface } = await resolveMcpCaller(ctx);
-    await assertWritableAction(ctx);
+    // A read-only identity may still run the curriculum tools that only read
+    // (the same audited isReadOnlyToolName set /api/mcp/read serves; mcp.test
+    // pins every get_/list_ name against it). Anything else refuses it here,
+    // because the tools write through internal mutations that never see the
+    // caller's session.
+    // Both the requested and the resolved name must read, so a legacy alias
+    // that resolves to `give` can never pass as a read.
+    if (!isReadOnlyToolName(name)) await assertWritableAction(ctx);
     const tools = await mcpCurriculumTools(ctx, role, userId, surface);
-    const tool = tools.find((t) => t.name === name);
-    if (!tool) throw new Error(`Forbidden: ${name}`);
-    return await tool.run(input ?? {});
+    // A folded give verb runs `give` (compatibility for long-lived MCP clients; remove after 2026-12-01).
+    const found = resolveToolWithLegacyGive(tools, name, input ?? {});
+    if (!found) throw new Error(`Forbidden: ${name}`);
+    if (!isReadOnlyToolName(found.tool.name)) await assertWritableAction(ctx);
+    const result = await found.tool.run(found.input as never);
+    // Tool text is built from internal reads the query-wrapper redaction never
+    // sees, so withhold custom-app bearer tokens here too (readOnlyRedaction).
+    return (await ctx.runQuery(internal.users.isSessionOwnerReadOnly, {}))
+      ? redactCustomAppTokens(result)
+      : result;
   },
 });
 
@@ -891,10 +933,11 @@ export const callUnitDesignerTool = action({
     const tools = await mcpUnitDesignerTools(ctx, role, userId, unitId);
     if (!name.startsWith("unit_")) throw new Error(`Forbidden: ${name}`);
     const toolName = name.slice("unit_".length);
-    const tool = tools.find((candidate) => candidate.name === toolName);
-    if (!tool) throw new Error(`Forbidden: ${name}`);
     const { unitId: _unitId, ...toolInput } =
       (input ?? {}) as Record<string, unknown>;
-    return await tool.run(toolInput);
+    // A folded give verb runs `give` (compatibility for long-lived MCP clients; remove after 2026-12-01).
+    const found = resolveToolWithLegacyGive(tools, toolName, toolInput);
+    if (!found) throw new Error(`Forbidden: ${name}`);
+    return await found.tool.run(found.input as never);
   },
 });

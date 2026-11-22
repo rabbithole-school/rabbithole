@@ -34,7 +34,6 @@ type LessonStrand = NonNullable<Doc<"lessons">["strand"]>;
 type Deliverable = Doc<"activities">["deliverable"];
 type AdvanceRubric = Doc<"activities">["advanceRubric"];
 type ConversationRecipe = NonNullable<Doc<"activities">["recipe"]>;
-type DefaultMode = NonNullable<Doc<"activities">["defaultMode"]>;
 type BloomLevel = NonNullable<Doc<"units">["targetBloomLevel"]>;
 
 // A thinking routine referenced by online activities. Resolved by slug in the
@@ -62,7 +61,6 @@ type ActivityDef = {
   deliverable?: Deliverable; // online only
   advanceRubric?: AdvanceRubric; // online only, when there's no artifact
   recipe?: ConversationRecipe; // online only: baseline / exitTicket conversation
-  defaultMode?: DefaultMode; // e.g. "homework" for take-home activities
   durationMinutes?: number;
 };
 
@@ -248,7 +246,6 @@ const GRADE_2_UNIT: UnitDef = {
         {
           title: "Struggle a Little at Home",
           kind: "offline",
-          defaultMode: "homework",
           durationMinutes: 10,
           description:
             "Take-home. Scholars try one thing that's a little hard (a puzzle, a hard word, tying shoes, a tricky drawing) and stick with it a bit before asking for help. They draw \"my brain workout\" and bring it back. Grown-up prompt at the bottom of the page: ask your child what was hard and what they tried before asking.",
@@ -472,7 +469,6 @@ const GRADE_3_5_UNIT: UnitDef = {
         {
           title: "Confidence vs. Correct at Home",
           kind: "offline",
-          defaultMode: "homework",
           durationMinutes: 10,
           description:
             "Take-home. Scholars find one confident claim in the wild (an ad, a video, a game, something a person says, or an AI answer) and check it. They record: what was claimed, how sure it sounded, whether it was true, and how they checked. Bring the Gotcha Log entry back to share.",
@@ -692,7 +688,6 @@ export async function insertAiLiteracyUnits(
           deliverable: a.deliverable,
           advanceRubric: a.advanceRubric,
           recipe: a.recipe,
-          defaultMode: a.defaultMode,
           durationMinutes: a.durationMinutes,
           processId: a.processSlug ? slugToProcess.get(a.processSlug) : undefined,
         });

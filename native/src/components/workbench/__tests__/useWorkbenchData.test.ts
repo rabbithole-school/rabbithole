@@ -156,7 +156,7 @@ describe("useWorkbenchBench lazy open", () => {
     await mount();
     expect(latest().ensureError).toBe("first failure");
 
-    // In flight → no error, so the screen shows "opening the bench…" rather than
+    // In flight → no error, so the screen shows "Opening the bench…" rather than
     // a stale failure the scholar already acted on.
     await act(async () => {
       latest().retry();

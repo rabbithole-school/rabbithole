@@ -19,6 +19,11 @@ export type ExternalAppKind = "web" | "custom" | "native";
  * pair, so a route/query change can't silently drift them apart. Lives in
  * shared/ because Convex may import shared/ but not vice-versa. */
 export const CUSTOM_APP_URL_PREFIX = "/custom-apps?token=";
+/** Added to a custom-app URL that a web assignment opens: the assignment's
+ *  own session already records the visit, so the page's launcher tracking
+ *  stands down (hooks/useWebAssignment.ts → app/custom-apps). */
+export const CUSTOM_APP_FROM_PARAM = "from";
+export const CUSTOM_APP_FROM_ASSIGNMENT = "assignment";
 
 /** The domain-agnostic launcher PATH a custom-app token resolves to — this is
  * what's stored as the catalog `webUrl`. The web launcher opens it relative to

@@ -76,14 +76,12 @@ export type MaturityStageId =
   | "draft"
   | "reviewed"
   | "rehearsed"
-  | "assigned"
   | "debriefed";
 
 export const MATURITY_STAGE_ORDER: MaturityStageId[] = [
   "draft",
   "reviewed",
   "rehearsed",
-  "assigned",
   "debriefed",
 ];
 
@@ -104,15 +102,6 @@ export interface MaturityInput {
    * or above REHEARSE_PASS_FITNESS.
    */
   rehearsal: { onlineCount: number; passing: number } | null;
-  /**
-   * Whether the unit is live with real scholars — `activeCount` = active
-   * (non-archived) assignments. The **bridge** between the sim-world rungs
-   * and Debrief: Debrief compares sims to real scholars, and real-scholar
-   * data only exists once the unit's been assigned. Lights **independently**
-   * (you can ship at any maturity — it's an execution fact, not a design
-   * grade), unlike the strictly-sequential confidence rungs.
-   */
-  assignment: { activeCount: number } | null;
   /** Sim-vs-real calibration for the unit's rehearsed activities. */
   grounding: { groundedCount: number; trustworthyCount: number } | null;
 }
@@ -140,7 +129,6 @@ const STAGE_LABEL: Record<MaturityStageId, string> = {
   // is a "Heuristic review", the expensive sim pass is a "Scholar-bot rehearsal".
   reviewed: "Heuristic review",
   rehearsed: "Scholar-bot rehearsal",
-  assigned: "Assigned",
   debriefed: "Debriefed",
 };
 
@@ -160,16 +148,14 @@ export function computeUnitMaturity(input: MaturityInput): UnitMaturity {
   const passing = input.rehearsal?.passing ?? 0;
   const rehearsedDone = reviewedDone && onlineCount > 0 && passing === onlineCount;
 
-  // Assigned is the bridge to the real world — lit by an active
-  // assignment, INDEPENDENT of the confidence rungs (you can ship a draft).
-  const activeAssignments = input.assignment?.activeCount ?? 0;
-  const assignedDone = activeAssignments > 0;
-
+  // Whether a unit was taught is not a rung: the Sessions record
+  // (lib/activitySessions.ts) counts every real session, including those under
+  // archived runs, and the Assign tab lists past runs.
   const grounded = input.grounding?.groundedCount ?? 0;
   const trustworthy = input.grounding?.trustworthyCount ?? 0;
   // Debriefed needs the real-scholar grounding data (which only exists once
-  // the unit's been assigned + worked). NOT gated on assignedDone being
-  // CURRENTLY true — you might debrief, then archive the assignment.
+  // the unit's been assigned + worked). Never gated on a run still being
+  // active — you might debrief, then archive the assignment.
   const debriefedDone =
     rehearsedDone && grounded > 0 && trustworthy === grounded;
 
@@ -199,14 +185,6 @@ export function computeUnitMaturity(input: MaturityInput): UnitMaturity {
         onlineCount === 0
           ? "No online activities"
           : `${passing}/${onlineCount} activities`,
-    },
-    {
-      id: "assigned",
-      label: STAGE_LABEL.assigned,
-      done: assignedDone,
-      detail: assignedDone
-        ? `Assigned to ${activeAssignments} cohort${activeAssignments === 1 ? "" : "s"}`
-        : "Not yet assigned",
     },
     {
       id: "debriefed",
@@ -399,12 +377,10 @@ export function unitReadinessInput(
   };
 }
 
-// ─── Per-node status (the outline dot + the vertical Summary timeline) ──
+// ─── Per-node status (lessons + activities) ───────────────────────────
 //
-// The maturity rail rolls up to the WHOLE unit, but rehearsal/debrief are
-// activity-grained — so each node carries its OWN coarse status, shown as
-// a dot in the outline (replacing the duration tag) and as a fuller
-// vertical timeline on that node's Summary tab. See
+// Rehearsal/debrief are activity-grained, so each lesson and activity carries
+// its OWN coarse status, rolled up from its activities. See
 // review/curriculum-rehearse-and-maturity.md.
 //
 //   built       non-rehearsable activity (offline/web/share-back) — its
@@ -450,18 +426,4 @@ export function rollupNodeStatus(children: NodeStatus[]): NodeStatus {
   if (ladder.every((s) => s === "matured")) return "matured";
   if (ladder.some((s) => s === "matured" || s === "inProgress")) return "inProgress";
   return "draft";
-}
-
-/** The unit's dot, from its furthest-earned maturity stage. */
-export function unitNodeStatus(stageId: MaturityStageId): NodeStatus {
-  switch (stageId) {
-    case "debriefed":
-      return "matured";
-    case "assigned":
-    case "rehearsed":
-    case "reviewed":
-      return "inProgress";
-    default:
-      return "draft";
-  }
 }

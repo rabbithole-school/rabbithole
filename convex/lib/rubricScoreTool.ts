@@ -1,4 +1,7 @@
-import { AUTOMATED_COMPLETION_CLOSING_GUIDANCE } from "./tutorClosingGuidance";
+import {
+  AUTOMATED_COMPLETION_CLOSING_GUIDANCE,
+  COMPLETION_RECORDED_FOLLOW_UP_GUIDANCE,
+} from "./tutorClosingGuidance";
 
 // The `update_rubric_score` tool contract — name + judgment guidance,
 // extracted so the live tutor session (convex/lib/tutorSessionTools.ts) and
@@ -34,11 +37,11 @@ export const RUBRIC_SCORE_BELOW_FULL_GUIDANCE =
 /**
  * Guidance fed back after every criterion in a conversation
  * ready-to-advance rubric scores `full` for the first time (no pre-tool text
- * this turn) — the activity completes and the tutor must not add model text
- * after the app-authored close.
+ * this turn) — the activity completes; the tutor answers whatever the
+ * scholar's latest message left open, and the app's status note follows.
  */
 export const RUBRIC_SCORE_COMPLETE_GUIDANCE =
-  `Every criterion is full, so the activity is now complete, and the app has already written its closing sentence. Do not emit any text now. If the scholar messages later, continue the conversation normally.`;
+  `Every criterion is full. ${COMPLETION_RECORDED_FOLLOW_UP_GUIDANCE}`;
 
 /**
  * Fed back when the model wrote non-empty text BEFORE calling the tool (a

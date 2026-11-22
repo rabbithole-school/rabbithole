@@ -19,8 +19,6 @@ import { openWebActivity } from "@/lib/externalAppHost";
 import { openGameActivity } from "@/lib/gameHost";
 import { webEmbedUrlError } from "@/lib/webEmbedConfig";
 import { serverRefusal } from "../../vendor/shared/serverErrorMessage";
-import { questBuildLockLabel } from "../../vendor/shared/missionCopy";
-import { headerLockLine, questLockOf } from "@/lib/missionApi";
 import {
   parseActivityNavPosition,
   type ActivityNavPosition,
@@ -136,22 +134,8 @@ export function SessionActivityNav({
       ? flatActivities[currentIdx + 1]
       : null;
   const showUpNext = currentItem.isCompleted && !!progress.nextIncompleteOnlineActivity;
-  // B6: a locked Quest build step is never a tap target here; its unlock line
-  // shows instead (the same words as the Quest page's locked row).
-  const prevLock = prevItem
-    ? questLockOf(progress.unit, String(prevItem.activity._id))
-    : null;
-  const nextLock = nextItem
-    ? questLockOf(progress.unit, String(nextItem.activity._id))
-    : null;
-  // No line when the lock waits on the step the scholar is in (see
-  // headerLockLine); the greyed arrow carries "not yet".
-  const lockLine = headerLockLine(nextLock ?? prevLock, {
-    id: String(currentItem.activity._id),
-    title: currentItem.activity.title,
-  });
-  const prevOpen = !!prevItem && !prevLock;
-  const nextOpen = !!nextItem && !nextLock;
+  const prevOpen = !!prevItem;
+  const nextOpen = !!nextItem;
 
   const goTo = async (
     targetActivity: (typeof flatActivities)[number]["activity"],
@@ -299,12 +283,7 @@ export function SessionActivityNav({
         )}
       </Pressable>
       </View>
-      {lockLine ? (
-        <Text style={styles.lockLine} numberOfLines={2}>
-          {questBuildLockLabel(lockLine.prerequisiteTitle)}
-        </Text>
-      ) : null}
-      {showUpNext && !nextLock && progress.nextIncompleteOnlineActivity ? (
+      {showUpNext && progress.nextIncompleteOnlineActivity ? (
         <View style={styles.upNextRow}>
           <View style={styles.upNextInfo}>
             <Text style={styles.upNextLabel}>UP NEXT</Text>
@@ -397,13 +376,5 @@ const styles = StyleSheet.create({
     fontFamily: fonts.semibold,
     color: colors.charcoal,
     letterSpacing: 0.1,
-  },
-  lockLine: {
-    fontSize: 13,
-    fontFamily: fonts.regular,
-    color: colors.fgMuted,
-    textAlign: "center",
-    paddingHorizontal: 16,
-    paddingBottom: 8,
   },
 });

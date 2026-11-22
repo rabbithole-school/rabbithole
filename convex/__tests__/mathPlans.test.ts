@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -75,7 +76,7 @@ describe("Math plans", () => {
     const scholarId = await seedScholarInInstitution(t, { institutionId, name: "Scholar", username: "scholar" });
     await t.run(async (ctx) => {
       await ctx.db.insert("knowledgeNodes", { nodeKey: "fraction_compare", label: "Compare", domain: "fraction_arithmetic", strand: "comparison", grade: "4" });
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId, scholarIds: [scholarId], practiceMode: "standing",
         practiceConfig: { domain: "fraction_arithmetic" }, startedAt: 1, activitySchedule: [],
       });

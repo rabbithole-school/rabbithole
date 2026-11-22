@@ -268,8 +268,8 @@ export async function requireScholarAccess(
 // Resolve the membership (context) a request is acting in. Until the context
 // switcher passes an explicit hint (?inst / membership id), we pick a stable
 // DEFAULT: the user's single membership, or — for a multi-membership user —
-// one matching their legacy `users.role`, preferring an institution-scoped
-// one, falling back to the oldest. The switcher will later pass the chosen
+// one matching their legacy `users.role`, preferring the primary school, then
+// any institution-scoped one, falling back to the oldest. The switcher will later pass the chosen
 // membership id, which MUST still be validated to belong to the user (M1).
 export async function resolveActiveMembership(
   ctx: QueryCtx | MutationCtx,
@@ -284,13 +284,24 @@ export async function resolveActiveMembership(
 
   const sameRole = memberships.filter((m) => m.role === user.role);
   const pool = sameRole.length > 0 ? sameRole : memberships;
-  // Prefer an institution-scoped membership, then the oldest for determinism.
-  const sorted = [...pool].sort((a, b) => {
-    const ai = a.institutionId ? 0 : 1;
-    const bi = b.institutionId ? 0 : 1;
-    return ai - bi || a._creationTime - b._creationTime;
-  });
-  return sorted[0];
+  // Prefer the primary school, then any institution-scoped membership, then
+  // the oldest for determinism. The primary preference matches the home that
+  // resolveInstitutionLens picks, so a staffer who also holds a guest-school
+  // row (an event at Albatross) keeps their home school here too. Age alone
+  // was not enough: users.updateRole recreates a staffer's rows, which makes
+  // a guest-school row the oldest one (TRA-247).
+  const rank = async (m: Doc<"memberships">) => {
+    if (!m.institutionId) return 2;
+    const institution = await ctx.db.get(m.institutionId);
+    return institution?.isPrimary ? 0 : 1;
+  };
+  const ranked = await Promise.all(
+    pool.map(async (m) => ({ m, rank: await rank(m) })),
+  );
+  ranked.sort(
+    (a, b) => a.rank - b.rank || a.m._creationTime - b.m._creationTime,
+  );
+  return ranked[0].m;
 }
 
 /**
@@ -611,6 +622,25 @@ export async function requireAssignmentAccessible(
 //   not in a scoped set (even for a staffer whose other school keeps them
 //   working), and not in a curriculum designer's global set.
 
+/**
+ * The legacy staffing fallback: an institution-scoped staffer (teacher /
+ * school_admin / operations staff by `users.role`) who holds no staff
+ * membership at any school yet belongs to the primary school. The one
+ * definition, shared by `curatableInstitutionIds` and the bell-schedule gate
+ * (masterSchedule.leadsTermSchool) so the two can't disagree.
+ */
+export function usesLegacyPrimaryStaffing(
+  user: Pick<Doc<"users">, "role">,
+  memberships: Pick<Doc<"memberships">, "role" | "institutionId">[],
+): boolean {
+  const isInstitutionStaffRole = (role: string | undefined) =>
+    role === ROLES.TEACHER || role === ROLES.SCHOOL_ADMIN || role === ROLES.STAFF;
+  return (
+    isInstitutionStaffRole(user.role) &&
+    !memberships.some((m) => m.institutionId && isInstitutionStaffRole(m.role))
+  );
+}
+
 /** The set of institutions the staffer may curate, or "all" for a platform admin. */
 export async function curatableInstitutionIds(
   ctx: QueryCtx,
@@ -653,12 +683,7 @@ export async function curatableInstitutionIds(
       ids.add(m.institutionId);
     }
   }
-  if (
-    ids.size === 0 &&
-    (user.role === ROLES.TEACHER ||
-      user.role === ROLES.SCHOOL_ADMIN ||
-      user.role === ROLES.STAFF)
-  ) {
+  if (usesLegacyPrimaryStaffing(user, memberships)) {
     const primary = (await ctx.db.query("institutions").collect()).find(
       (i) => i.isPrimary,
     );

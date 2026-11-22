@@ -1,10 +1,12 @@
 "use node";
 
 import { v } from "convex/values";
-import { internalAction } from "./_generated/server";
+import { internalAction, type ActionCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { toStorageBlob, sniffImageMime } from "./lib/imageBytes";
 import {
+  MAX_APP_ASSETS,
   MAX_APP_ASSET_BYTES,
   MAX_APP_ASSET_DIMENSION,
 } from "../shared/appAssets";
@@ -21,10 +23,19 @@ type NormalizedImage = {
   height: number;
 };
 
-export const normalizeStoredImage = internalAction({
-  args: { storageId: v.id("_storage") },
-  handler: async (ctx, { storageId }): Promise<NormalizedImage | null> => {
-    let keepSource = false;
+/**
+ * Re-encode a stored image within the app-asset caps (shared/appAssets.ts).
+ * `keepSourceArg` leaves the source blob in place even when a copy is stored
+ * (a chat photo the message still shows); by default a re-encoded source is
+ * a temporary upload and is deleted. Shared by the two actions below so a
+ * caller in this file never nests an action call.
+ */
+async function normalizeStoredImageBlob(
+  ctx: Pick<ActionCtx, "storage">,
+  storageId: Id<"_storage">,
+  keepSourceArg: boolean,
+): Promise<NormalizedImage | null> {
+    let keepSource = keepSourceArg;
     try {
       const blob = await ctx.storage.get(storageId);
       if (!blob) return null;
@@ -131,5 +142,84 @@ export const normalizeStoredImage = internalAction({
         }
       }
     }
+}
+
+export const normalizeStoredImage = internalAction({
+  args: {
+    storageId: v.id("_storage"),
+    /** Leave the source blob in place even when a re-encoded copy is stored
+     *  (a chat photo the message still shows). Default: a source that was
+     *  re-encoded is a temporary upload and is deleted. */
+    keepSource: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<NormalizedImage | null> =>
+    normalizeStoredImageBlob(ctx, args.storageId, args.keepSource === true),
+});
+
+/**
+ * Give each of a builder session's chat photos an app-usable copy
+ * (`messages.appAssetId`). A chat photo is capped at the tutor model's size
+ * (1568 px long edge, often 400-800 KB), while the app host refuses anything
+ * over MAX_APP_ASSET_BYTES, so an app that showed the raw `imageId` came up
+ * blank on the BunnyPad (two scholars' civilization-map apps, 2026-11-04).
+ * Runs before each builder turn (newest photos first, bounded) and from the
+ * CLI to repair an existing session. Idempotent: a photo with an
+ * `appAssetId`, or marked unpreparable, is skipped. Returns the ids it set
+ * this run.
+ */
+export const prepareSessionPhotoAssets = internalAction({
+  args: {
+    sessionId: v.id("sessions"),
+    /** Photos to prepare this run, newest first. */
+    limit: v.optional(v.number()),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<Array<{ messageId: Id<"messages">; appAssetId: Id<"_storage"> }>> => {
+    const pending: Array<{
+      messageId: Id<"messages">;
+      imageId: Id<"_storage">;
+    }> = await ctx.runQuery(
+      internal.sessionHelpers.listPhotosNeedingAppAsset,
+      { sessionId: args.sessionId, limit: args.limit ?? MAX_APP_ASSETS },
+    );
+    const prepared: Array<{
+      messageId: Id<"messages">;
+      appAssetId: Id<"_storage">;
+    }> = [];
+    for (const photo of pending) {
+      const normalized = await normalizeStoredImageBlob(
+        ctx,
+        photo.imageId,
+        true,
+      );
+      if (!normalized) {
+        // A GIF, a corrupt upload, or one over the source cap: record it so
+        // the next turn does not download and decode it again.
+        await ctx.runMutation(internal.sessionHelpers.setMessageAppAsset, {
+          messageId: photo.messageId,
+          unavailable: true,
+        });
+        continue;
+      }
+      const applied = await ctx.runMutation(
+        internal.sessionHelpers.setMessageAppAsset,
+        { messageId: photo.messageId, appAssetId: normalized.storageId },
+      );
+      if (!applied) {
+        // A concurrent turn prepared it first; drop this run's copy rather
+        // than orphan it (the source is the photo itself when it already fit).
+        if (normalized.storageId !== photo.imageId) {
+          await ctx.storage.delete(normalized.storageId);
+        }
+        continue;
+      }
+      prepared.push({
+        messageId: photo.messageId,
+        appAssetId: normalized.storageId,
+      });
+    }
+    return prepared;
   },
 });

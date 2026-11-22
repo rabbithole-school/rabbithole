@@ -49,6 +49,7 @@ import { ClockManipulative } from "./kinds/ClockManipulative";
 import { LiquidManipulative } from "./kinds/LiquidManipulative";
 import { MoneyManipulative } from "./kinds/MoneyManipulative";
 import { MoleculeManipulative } from "./kinds/MoleculeManipulative";
+import { FunctionGraphManipulative } from "./kinds/FunctionGraphManipulative";
 
 export interface KindProps<S extends ManipulativeSpec = ManipulativeSpec> {
   spec: S;
@@ -125,6 +126,8 @@ export function ManipulativeStage({ spec, onSolvedChange, onStateChange, typedAn
       return <MoneyManipulative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
     case "molecule":
       return <MoleculeManipulative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
+    case "functionGraph":
+      return <FunctionGraphManipulative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
   }
 }
 

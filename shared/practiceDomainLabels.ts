@@ -27,6 +27,7 @@ export const PRACTICE_DOMAIN_LABELS: Record<string, string> = {
   "integers-coordinates": "Integers & the coordinate plane",
   "early-algebra": "Early algebra",
   "algebra-1": "Algebra 1",
+  "algebra-2": "Algebra 2",
   "discrete-math": "Discrete math",
 };
 
@@ -80,10 +81,18 @@ const PRACTICE_DOMAIN_ALIASES: Record<string, string> = {
   algebra1: "algebra-1",
   "algebra-one": "algebra-1",
   quadratics: "algebra-1",
+  algebra2: "algebra-2",
+  "algebra-two": "algebra-2",
+  alg2: "algebra-2",
+  "alg-2": "algebra-2",
+  logarithms: "algebra-2",
+  "complex-numbers": "algebra-2",
   discrete: "discrete-math",
   combinatorics: "discrete-math",
   logic: "discrete-math",
   "graph-theory": "discrete-math",
+  algorithms: "discrete-math",
+  "big-o": "discrete-math",
   "whole-number": "whole-number-arithmetic",
   "whole-numbers": "whole-number-arithmetic",
   arithmetic: "whole-number-arithmetic",
@@ -165,10 +174,19 @@ const STRAND_HEADLINES: Record<string, string> = {
   "exponents-exponential": "Exponents & Exponential Growth",
   "polynomials-factoring": "Polynomials & Factoring",
   quadratics: "Quadratics",
+  // Algebra 2 strands.
+  functions: "Functions & Transformations",
+  "complex-quadratics": "Complex Numbers & Quadratics",
+  polynomials: "Polynomial Functions",
+  rational: "Rational Functions",
+  "radicals-rational-exponents": "Radicals & Rational Exponents",
+  "exponential-logarithmic": "Exponentials & Logarithms",
+  "sequences-series": "Sequences & Series",
   // Discrete-math strands are curated in DOMAIN_STRAND_HEADLINE_OVERRIDES when
   // their slugs overlap with another domain.
   "graph-theory": "Networks & Paths",
   logic: "Logic & Deduction",
+  algorithms: "Algorithms & Big-O",
 };
 
 export function strandHeadline(strand: string): string {
@@ -267,6 +285,30 @@ export const PRACTICE_PREREQ_CONCEPTS: Record<string, string> = {
   prime_or_composite: "primes and composites",
   square_cube_numbers: "square numbers",
   gcf: "greatest common factor",
+  // algebra-2's foreign prerequisites (the ones not already named above).
+  fn_notation_evaluate: "function notation",
+  slope_two_points: "slope",
+  quad_graph_features: "graphs of parabolas",
+  lin_eq_literal: "rearranging formulas",
+  roots_simplify_radicals: "simplifying radicals",
+  poly_multiply_binomials: "multiplying binomials",
+  quad_formula: "the quadratic formula",
+  quad_solve_factoring: "solving quadratics by factoring",
+  lin_ineq_compound: "compound inequalities",
+  sys_substitution: "solving systems by substitution",
+  poly_classify: "polynomial degree",
+  quad_zero_product: "the zero-product property",
+  factor_special_forms: "special factoring patterns",
+  factor_gcf: "factoring out a common factor",
+  factor_trinomial_general: "factoring trinomials",
+  factor_trinomial_simple: "factoring trinomials",
+  poly_special_products: "special products",
+  lin_eq_clear_fractions: "equations with fractions",
+  exp_power_rule: "exponent rules",
+  exp_zero_negative: "zero and negative exponents",
+  exp_fn_evaluate: "exponential functions",
+  exp_growth_decay: "exponential growth and decay",
+  pattern_arithmetic_sequence: "arithmetic sequences",
 };
 
 /** The short concept noun for a cross-domain prerequisite skill (by `nodeKey`),

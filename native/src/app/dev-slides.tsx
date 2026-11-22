@@ -16,7 +16,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { Stack } from "expo-router";
-import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Modal, StyleSheet, View } from "react-native";
 
 import {
   applySlideOps,
@@ -28,12 +28,21 @@ import {
   SlidesEditorNative,
   type SlidesEditorNativeHandle,
 } from "@/components/slides/SlidesEditorNative";
-import { SlidesPresentationNative } from "@/components/slides/SlidesPresentationNative";
+import { HeaderPillButton } from "@/components/HeaderPillButton";
+import { SlidesTalkNative } from "@/components/slides/SlidesTalkNative";
+import { TakeReviewNative } from "@/components/talk/TakeReviewNative";
+import {
+  chooseHowToPresent,
+  type PresentChoice,
+} from "@/components/talk/presentChoice";
+import { METER_FRAME_MS } from "@/lib/micLevel";
+import type { RehearsalTake, SlideShowing } from "@/lib/rehearsalTake";
+import type { StoredTake } from "@/lib/rehearsalStore";
 import {
   SlidesViewToggleNative,
   type SlidesViewMode,
 } from "@/components/slides/SlidesViewToggleNative";
-import { fonts, useColors } from "@/theme";
+import { useColors } from "@/theme";
 
 const FIXTURE: Deck = {
   schemaVersion: 1,
@@ -116,6 +125,53 @@ const FIXTURE: Deck = {
   ],
 };
 
+// Two made-up rehearsals of the fixture deck, for "Sample rehearsal": the
+// review screen without recording anything (a simulator with no microphone
+// can't), so it can be checked and screenshotted anywhere. No audio, so Play
+// is off; the timeline and table still scrub.
+function sampleTake(
+  id: string,
+  recordedAt: number,
+  segments: { seconds: number; base: number; loudFrom?: number }[],
+): StoredTake {
+  const levels: number[] = [];
+  const slides: SlideShowing[] = [];
+  segments.forEach((segment, index) => {
+    slides.push({ atMs: levels.length * METER_FRAME_MS, index, slideId: `sl${index + 1}` });
+    const frames = Math.round((segment.seconds * 1000) / METER_FRAME_MS);
+    for (let k = 0; k < frames; k++) {
+      const pause = k % 38 >= 30; // ~2.4 s phrases, ~0.6 s breaths
+      const loud = segment.loudFrom !== undefined && k >= segment.loudFrom && k < segment.loudFrom + 36;
+      const base = loud ? 0.9 : segment.base;
+      levels.push(pause ? 0.12 : Math.round((base + 0.05 * Math.sin(k * 1.1)) * 1000) / 1000);
+    }
+  });
+  const take: RehearsalTake = {
+    version: 1,
+    id,
+    recordedAt,
+    durationMs: levels.length * METER_FRAME_MS,
+    frameMs: METER_FRAME_MS,
+    levels,
+    slides,
+    audioFile: "",
+  };
+  return { ...take, audioUri: null };
+}
+
+const SAMPLE_TAKES: StoredTake[] = [
+  sampleTake("sample-1", Date.UTC(2026, 10, 16, 20, 12), [
+    { seconds: 20, base: 0.64 },
+    { seconds: 30, base: 0.5 },
+    { seconds: 20, base: 0.62 },
+  ]),
+  sampleTake("sample-2", Date.UTC(2026, 10, 17, 18, 5), [
+    { seconds: 15, base: 0.68 },
+    { seconds: 25, base: 0.6, loudFrom: 150 },
+    { seconds: 18, base: 0.68 },
+  ]),
+];
+
 function resolveFixtureAsset(assetId: string) {
   // This closed localhost port deterministically reaches expo-image's native
   // error path without relying on network availability.
@@ -133,7 +189,8 @@ export default function DevSlidesHarness() {
 function DevSlidesHarnessInner() {
   const colors = useColors();
   const [deck, setDeck] = useState<Deck>(FIXTURE);
-  const [presenting, setPresenting] = useState(false);
+  const [presenting, setPresenting] = useState<PresentChoice | "sample" | null>(null);
+  const [sampleSelected, setSampleSelected] = useState(SAMPLE_TAKES.length - 1);
   const [viewMode, setViewMode] = useState<SlidesViewMode>("slide");
 
   // Mirror the server's PER-KIND id minting so ids read the same here as in prod.
@@ -197,13 +254,26 @@ function DevSlidesHarnessInner() {
   // the same ref the real surface uses. Committing the in-flight edit before
   // leaving editing chrome mirrors `SlidesDeliverable.presentDeck`, which is
   // what keeps this harness faithful to what a scholar actually gets.
+  const openPresenter = useCallback(async (choice: PresentChoice) => {
+    const saved = (await editorRef.current?.commitPendingEdit()) ?? true;
+    if (!saved) return;
+    setPresenting(choice);
+  }, []);
+
   const presentDeck = useCallback(() => {
     void (async () => {
-      const saved = (await editorRef.current?.commitPendingEdit()) ?? true;
-      if (!saved) return;
-      setPresenting(true);
+      const choice = await chooseHowToPresent("Present slides", SLIDES_COPY.present);
+      if (choice) await openPresenter(choice);
     })();
-  }, []);
+  }, [openPresenter]);
+
+  // Straight into a rehearsal, skipping the Present/Rehearse sheet. Mini's
+  // iOS smoke runs Appium with autoAcceptAlerts, which taps an action sheet's
+  // first button (Present) before a scenario can choose Rehearse, so the
+  // rehearsal scenario comes in here. The sheet itself is checked by hand.
+  const rehearseDeck = useCallback(() => {
+    void openPresenter("rehearse");
+  }, [openPresenter]);
 
   return (
     <>
@@ -212,22 +282,37 @@ function DevSlidesHarnessInner() {
           headerTitle: () => (
             <SlidesViewToggleNative value={viewMode} onChange={setViewMode} />
           ),
-          headerRight: () => (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={SLIDES_COPY.present}
-              onPress={presentDeck}
-              testID="dev-slides-present"
-              style={({ pressed }) => [
-                styles.presentButton,
-                { borderColor: colors.border, opacity: pressed ? 0.65 : 1 },
-              ]}
-            >
-              <Text style={{ fontFamily: fonts.medium, color: colors.fg }}>
-                {SLIDES_COPY.present}
-              </Text>
-            </Pressable>
-          ),
+          // The app's header pills, as one custom item with iOS 26's shared
+          // glass capsule hidden (see HeaderPillButton): hand-rolled buttons
+          // in headerRight sat inside that capsule and drew two outlines.
+          unstable_headerRightItems: () => [
+            {
+              type: "custom" as const,
+              hidesSharedBackground: true,
+              element: (
+                <View style={styles.headerButtons}>
+                  <HeaderPillButton
+                    icon="mic"
+                    label="Rehearse"
+                    onPress={rehearseDeck}
+                    testID="dev-slides-rehearse"
+                  />
+                  <HeaderPillButton
+                    icon="play.rectangle"
+                    label="Sample rehearsal"
+                    onPress={() => setPresenting("sample")}
+                    testID="dev-slides-sample-rehearsal"
+                  />
+                  <HeaderPillButton
+                    icon="rectangle.on.rectangle"
+                    label={SLIDES_COPY.present}
+                    onPress={presentDeck}
+                    testID="dev-slides-present"
+                  />
+                </View>
+              ),
+            },
+          ],
         }}
       />
       <View style={{ flex: 1, backgroundColor: colors.bg }}>
@@ -243,12 +328,32 @@ function DevSlidesHarnessInner() {
         />
         <Modal
           animationType="fade"
-          onRequestClose={() => setPresenting(false)}
+          onRequestClose={() => setPresenting(null)}
           presentationStyle="fullScreen"
           supportedOrientations={["landscape", "landscape-left", "landscape-right"]}
-          visible={presenting}
+          visible={presenting !== null}
         >
-          <SlidesPresentationNative deck={deck} onExit={() => setPresenting(false)} />
+          {presenting === "sample" ? (
+            <TakeReviewNative
+              title={deck.title || "Your slides"}
+              deck={deck}
+              takes={SAMPLE_TAKES}
+              selected={sampleSelected}
+              onSelect={setSampleSelected}
+              againLabel="Rehearse again"
+              onAgain={() => setPresenting("rehearse")}
+              onDone={() => setPresenting(null)}
+              resolveAsset={resolveFixtureAsset}
+            />
+          ) : presenting ? (
+            <SlidesTalkNative
+              deck={deck}
+              deckKey="dev-slides-fixture"
+              mode={presenting}
+              onExit={() => setPresenting(null)}
+              resolveAsset={resolveFixtureAsset}
+            />
+          ) : null}
         </Modal>
       </View>
     </>
@@ -256,10 +361,6 @@ function DevSlidesHarnessInner() {
 }
 
 const styles = StyleSheet.create({
-  presentButton: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
+  // The app builder's header spacing (VibecodeScreen styles.headerRight).
+  headerButtons: { flexDirection: "row", alignItems: "center", gap: 10 },
 });

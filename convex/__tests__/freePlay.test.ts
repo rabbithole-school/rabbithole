@@ -1,15 +1,18 @@
-// FREE PLAY (TRA-489): the scholar's own, contract-free version of a vibecode
-// app after the assignment version is done. Eligibility (lib/freePlay.ts, as
-// getWithMessages.freePlayEligible and the startFreePlay gate), the copy
-// (app + parking lot, idempotent), the prompt's structure (no contract, the
-// opener, the shared weapons definition), the designer-tool gate, and that
-// free-play work never records a completion or becomes "the" activity session.
+// "Build it now" after an app activity is done: eligibility (lib/freePlay.ts,
+// as getWithMessages.freePlayEligible and the startFreePlay gate), carrying on
+// in the SAME session (no copy is made any more), and the prompt of a finished
+// session (the contract stays, the gate counts as met, the scholar makes the
+// rules). Free-play COPIES made before one-session building (TRA-489) still
+// exist in prod, so their prompt (no contract, the opener, the shared weapons
+// definition), the designer-tool gate, and that they never record a completion
+// or become "the" activity session stay covered, on rows inserted directly.
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import {
+  SCHOLAR_RULES_STEERING,
   WEAPON_DEFINITION,
   buildFreePlayOpenerSection,
   type DesignerBuildContract,
@@ -18,7 +21,6 @@ import { buildTutorSystemPromptParts } from "../sessionStreamHelpers";
 import {
   PARK_IDEA_TOOL_NAME,
   UNPARK_IDEA_TOOL_NAME,
-  STAY_SILENT_TOOL_NAME,
   missionToolOffer,
 } from "../lib/designerTools";
 import { reconcileActivityCompletion } from "../lib/activityCompletionCore";
@@ -110,8 +112,43 @@ async function seed(
         sessionId,
         completedAt: Date.now(),
       });
+      await ctx.db.patch(sessionId, { activityCompletedAt: Date.now() });
     }
     return { scholarId, activityId, sessionId, unitId };
+  });
+}
+
+/** A free-play COPY as startFreePlay made them before one-session building
+ *  (TRA-489): prod still holds these rows, and they must keep working. */
+async function insertLegacyCopy(
+  t: ReturnType<typeof convexTest>,
+  s: Seed,
+): Promise<Id<"sessions">> {
+  return await t.run(async (ctx) => {
+    const source = await ctx.db.get(s.sessionId);
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: s.scholarId,
+      ...(source?.institutionId ? { institutionId: source.institutionId } : {}),
+      unitId: s.unitId,
+      lessonId: source?.lessonId,
+      activityId: s.activityId,
+      sessionMode: "vibecode",
+      title: "Build a pond: Free play",
+      isArchived: false,
+      freePlay: true,
+      freePlayOf: s.sessionId,
+      parkingLot: source?.parkingLot,
+    });
+    await ctx.db.insert("artifacts", {
+      sessionId,
+      title: "Pond",
+      content: APP_HTML,
+      lastEditedBy: "ai",
+      revision: 0,
+      type: "code",
+      language: "html",
+    });
+    return sessionId;
   });
 }
 
@@ -187,67 +224,48 @@ describe("free play eligibility", () => {
 });
 
 describe("sessions.startFreePlay", () => {
-  test("copies the app and the parking lot into a free-play session", async () => {
+  test("carries on in the same session: no copy, the app stays where it is", async () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
     const as = await asUser(t, s.scholarId);
     const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
       sessionId: s.sessionId,
     });
-    expect(sessionId).not.toBe(s.sessionId);
-    const created = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(created).toMatchObject({
-      userId: s.scholarId,
-      activityId: s.activityId,
-      unitId: s.unitId,
-      sessionMode: "vibecode",
-      freePlay: true,
-      freePlayOf: s.sessionId,
-      title: "Build a pond: Free play",
-    });
-    expect(created?.assignmentId).toBeUndefined();
-    expect(created?.parkingLot).toEqual(LOT);
-    const artifacts = await t.run((ctx) =>
-      ctx.db
-        .query("artifacts")
-        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-        .collect(),
-    );
+    expect(sessionId).toBe(s.sessionId);
+    const rows = await t.run((ctx) => ctx.db.query("sessions").collect());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].freePlay).toBeUndefined();
+    const artifacts = await t.run((ctx) => ctx.db.query("artifacts").collect());
     expect(artifacts).toHaveLength(1);
-    expect(artifacts[0]).toMatchObject({
-      content: APP_HTML,
-      type: "code",
-      revision: 0,
-    });
-    // The free-play session is not itself a source for another free play.
-    const view = await as.query(api.sessions.getWithMessages, { id: sessionId });
-    expect(view.session.freePlayEligible).toBe(false);
+    // Still eligible: Build it now keeps working for the next idea.
+    expect(await eligible(t, s)).toBe(true);
   });
 
-  test("idempotent: a second call returns the same session", async () => {
+  test("a scholar with an older free-play copy is taken to that copy", async () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
+    const copyId = await insertLegacyCopy(t, s);
     const as = await asUser(t, s.scholarId);
-    const first = await as.mutation(api.sessions.startFreePlay, {
+    const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
       sessionId: s.sessionId,
     });
-    const second = await as.mutation(api.sessions.startFreePlay, {
-      sessionId: s.sessionId,
-    });
-    expect(second.sessionId).toBe(first.sessionId);
-    const freePlays = await t.run(async (ctx) =>
+    expect(sessionId).toBe(copyId);
+    const copies = await t.run(async (ctx) =>
       (await ctx.db.query("sessions").collect()).filter(
         (row) => row.freePlayOf === s.sessionId,
       ),
     );
-    expect(freePlays).toHaveLength(1);
+    expect(copies).toHaveLength(1);
+    // The copy is not itself a source for Build it now.
+    const view = await as.query(api.sessions.getWithMessages, { id: copyId });
+    expect(view.session.freePlayEligible).toBe(false);
   });
 
-  test("launching the activity again resumes the assignment session, never free play", async () => {
+  test("launching the activity again resumes the assignment session, never an old copy", async () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
+    await insertLegacyCopy(t, s);
     const as = await asUser(t, s.scholarId);
-    await as.mutation(api.sessions.startFreePlay, { sessionId: s.sessionId });
     const launched = await as.mutation(api.sessions.create, {
       activityId: s.activityId,
     });
@@ -255,17 +273,40 @@ describe("sessions.startFreePlay", () => {
   });
 });
 
+describe("one answer to \"is the activity done?\"", () => {
+  test("a teacher's class-wide mark (ledger only, no session stamp) counts as done", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seed(t);
+    // The class-wide mark writes the completions ledger, never the session.
+    await t.run((ctx) => ctx.db.patch(s.sessionId, { activityCompletedAt: undefined }));
+    const as = await asUser(t, s.scholarId);
+    const view = await as.query(api.sessions.getWithMessages, { id: s.sessionId });
+    expect(view.session.activityDone).toBe(true);
+    expect(view.session.freePlayEligible).toBe(true);
+    const context = await t.run((ctx) =>
+      ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId: s.sessionId }),
+    );
+    expect(context?.activityComplete).toBe(true);
+  });
+
+  test("an unfinished activity is not done", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seed(t, { complete: false });
+    const as = await asUser(t, s.scholarId);
+    const view = await as.query(api.sessions.getWithMessages, { id: s.sessionId });
+    expect(view.session.activityDone).toBe(false);
+    const context = await t.run((ctx) =>
+      ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId: s.sessionId }),
+    );
+    expect(context?.activityComplete).toBe(false);
+  });
+});
+
 describe("free play in the prompt", () => {
   async function promptParts(freePlay: boolean) {
     const t = convexTest(schema, modules);
     const s = await seed(t);
-    let sessionId = s.sessionId;
-    if (freePlay) {
-      const as = await asUser(t, s.scholarId);
-      sessionId = (
-        await as.mutation(api.sessions.startFreePlay, { sessionId: s.sessionId })
-      ).sessionId;
-    }
+    const sessionId = freePlay ? await insertLegacyCopy(t, s) : s.sessionId;
     const context = await t.run((ctx) =>
       ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
     );
@@ -282,20 +323,23 @@ describe("free play in the prompt", () => {
     }
     expect(prompt).not.toContain(PARK_IDEA_TOOL_NAME);
     expect(prompt).not.toContain(UNPARK_IDEA_TOOL_NAME);
-    expect(prompt).not.toContain(STAY_SILENT_TOOL_NAME);
     // The opener (per-turn session state, never the cached prefix) lists the ideas.
     expect(parts.stable).not.toContain("IDEA-rainbow-fish");
     expect(parts.turnSystem).toContain(buildFreePlayOpenerSection(LOT)!.trim());
     // The weapons rule survives the contract's absence.
     expect(parts.stable).toContain(WEAPON_DEFINITION);
+    // With no contract, the scholar makes the world's rules.
+    expect(parts.stable).toContain(SCHOLAR_RULES_STEERING.trim());
   });
 
-  test("the assignment session keeps its contract and parking lot", async () => {
+  test("the finished assignment session keeps its contract and parking lot, and the scholar makes the rules", async () => {
     const { context, parts } = await promptParts(false);
     expect(context.freePlay).toBe(false);
+    expect(context.activityComplete).toBe(true);
     expect(context.lessonActivityContext?.buildContract).toEqual(CONTRACT);
     expect(parts.stable).toContain(CONTRACT.gate!);
     expect(parts.stable).toContain(WEAPON_DEFINITION);
+    expect(parts.stable).toContain(SCHOLAR_RULES_STEERING.trim());
     expect(parts.turnSystem).not.toContain(buildFreePlayOpenerSection(LOT)!.trim());
     expect(parts.turnSystem).toContain("IDEA-rainbow-fish");
   });
@@ -311,15 +355,11 @@ describe("free play in the prompt", () => {
     expect(
       missionToolOffer({
         hasMission: true,
-        builderStance: true,
         workshopMode: "edit",
         teacherBuild: false,
-        appActivity: true,
-        allowSilence: true,
-        callerIsSessionOwner: true,
         freePlay: true,
       }),
-    ).toEqual({ parkIdea: false, staySilent: false });
+    ).toEqual({ parkIdea: false });
   });
 });
 
@@ -327,10 +367,7 @@ describe("free play counts toward nothing", () => {
   test("no completion is recorded from a free-play session", async () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
-    const as = await asUser(t, s.scholarId);
-    const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
-      sessionId: s.sessionId,
-    });
+    const sessionId = await insertLegacyCopy(t, s);
     const before = await t.run((ctx) =>
       ctx.db.query("activityCompletions").collect(),
     );
@@ -360,10 +397,7 @@ describe("free play counts toward nothing", () => {
         },
       }),
     );
-    const as = await asUser(t, s.scholarId);
-    const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
-      sessionId: s.sessionId,
-    });
+    const sessionId = await insertLegacyCopy(t, s);
     const context = await t.run((ctx) =>
       ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
     );
@@ -509,52 +543,47 @@ describe("Build it now is for app activities only", () => {
     const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
       sessionId: s.sessionId,
     });
-    const created = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(created?.activityId).toBe(s.activityId);
-    expect(created?.freePlay).toBe(true);
+    expect(sessionId).toBe(s.sessionId);
   });
 });
 
 describe("startFreePlay idea", () => {
-  test("idea puts that entry first, on a new free play and on the existing one", async () => {
+  test("idea puts that entry first in the session it opens", async () => {
     const t = convexTest(schema, modules);
     const s = await seed(t);
     const as = await asUser(t, s.scholarId);
-    const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
+    const lotOf = async (id: Id<"sessions">) =>
+      (await t.run((ctx) => ctx.db.get(id)))?.parkingLot?.map((e) => e.text);
+    await as.mutation(api.sessions.startFreePlay, {
       sessionId: s.sessionId,
       idea: "IDEA-night-mode",
     });
-    const first = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(first?.parkingLot?.map((e) => e.text)).toEqual([
-      "IDEA-night-mode",
-      "IDEA-rainbow-fish",
-    ]);
-    // The source's own lot keeps its order.
-    const source = await t.run((ctx) => ctx.db.get(s.sessionId));
-    expect(source?.parkingLot?.map((e) => e.text)).toEqual([
-      "IDEA-rainbow-fish",
-      "IDEA-night-mode",
-    ]);
-    // Idempotent per source; a second pick re-orders the existing session.
-    const again = await as.mutation(api.sessions.startFreePlay, {
+    expect(await lotOf(s.sessionId)).toEqual(["IDEA-night-mode", "IDEA-rainbow-fish"]);
+    // Matching ignores case; an idea that is not in the lot changes nothing.
+    await as.mutation(api.sessions.startFreePlay, {
       sessionId: s.sessionId,
       idea: "idea-rainbow-fish",
     });
-    expect(again.sessionId).toBe(sessionId);
-    const reordered = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(reordered?.parkingLot?.map((e) => e.text)).toEqual([
-      "IDEA-rainbow-fish",
-      "IDEA-night-mode",
-    ]);
-    // An idea that is not in the lot leaves the order alone.
+    expect(await lotOf(s.sessionId)).toEqual(["IDEA-rainbow-fish", "IDEA-night-mode"]);
     await as.mutation(api.sessions.startFreePlay, {
       sessionId: s.sessionId,
       idea: "not parked",
     });
-    const same = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(same?.parkingLot?.map((e) => e.text)).toEqual([
-      "IDEA-rainbow-fish",
-      "IDEA-night-mode",
-    ]);
+    expect(await lotOf(s.sessionId)).toEqual(["IDEA-rainbow-fish", "IDEA-night-mode"]);
+  });
+
+  test("with an older free-play copy, the copy's lot is the one reordered", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seed(t);
+    const copyId = await insertLegacyCopy(t, s);
+    const as = await asUser(t, s.scholarId);
+    await as.mutation(api.sessions.startFreePlay, {
+      sessionId: s.sessionId,
+      idea: "IDEA-night-mode",
+    });
+    const copy = await t.run((ctx) => ctx.db.get(copyId));
+    expect(copy?.parkingLot?.map((e) => e.text)).toEqual(["IDEA-night-mode", "IDEA-rainbow-fish"]);
+    const source = await t.run((ctx) => ctx.db.get(s.sessionId));
+    expect(source?.parkingLot?.map((e) => e.text)).toEqual(["IDEA-rainbow-fish", "IDEA-night-mode"]);
   });
 });

@@ -37,6 +37,11 @@ import type {
 } from "./types";
 import { formatMoney, MONEY_PIECES, moneyPieceCents, type MoneyDenomination } from "./currency";
 import { isSolved as geoTaskSolved, type RegionResolver } from "../geomap/grade";
+import {
+  functionGraphDescribeState,
+  functionGraphGoalText,
+  functionGraphSolved,
+} from "./functionGraph";
 import type { GeoTaskState } from "../geomap/types";
 
 // ── small utilities ──────────────────────────────────────────────────────────
@@ -1332,6 +1337,17 @@ export function diceSolved(spec: DiceSpec, s: DiceState): boolean {
 }
 
 /**
+ * The state a dice widget reports to its host for Done. A dice CHALLENGE (a
+ * spec with a `prediction`) reports nothing until the scholar commits a
+ * prediction, so the host keeps Done blocked: rolling alone is not an answer,
+ * and a `{predicted: null}` submission can only ever grade wrong. A sandbox
+ * (no prediction) reports every state, as before.
+ */
+export function diceSubmittableState(spec: DiceSpec, s: DiceState): DiceState | null {
+  return spec.prediction && !s.predicted ? null : s;
+}
+
+/**
  * Parse a keypad-typed prediction into a committed fraction — the same number
  * pad ("1", "/", "2") the practice surface uses for every other fraction item.
  * A probability is typed as "num/den" (e.g. "1/2"); a count / most-likely-total
@@ -1420,6 +1436,8 @@ export function isSolved(
       return moneySolved(spec, state as MoneyState);
     case "molecule":
       return false;
+    case "functionGraph":
+      return functionGraphSolved(spec, state);
   }
 }
 
@@ -1748,6 +1766,8 @@ export function goalText(spec: ManipulativeSpec): string {
     }
     case "molecule":
       return `Explore the structure of ${spec.resolvedName}.`;
+    case "functionGraph":
+      return functionGraphGoalText(spec);
     default: {
       const _exhaustive: never = spec;
       return _exhaustive;
@@ -1938,6 +1958,8 @@ function describeStateInner(spec: ManipulativeSpec, state: unknown): string {
     }
     case "molecule":
       return `The structure shown is ${spec.resolvedName} (${spec.formula}).`;
+    case "functionGraph":
+      return functionGraphDescribeState(spec, state);
     default: {
       const _exhaustive: never = spec;
       return _exhaustive;

@@ -1,4 +1,5 @@
 import { crc32, deflateRawSync } from "node:zlib";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { convexTest } from "convex-test";
 import { describe, expect, test, beforeAll, afterAll, vi } from "vitest";
 import schema from "../schema";
@@ -11,7 +12,7 @@ import {
   collectThreadImages,
   collectThreadDocuments,
   collectThreadTextDocuments,
-  buildToolContext,
+  buildToolTasks,
   settleRunningToolActivity,
   UNREPORTED_TOOL_RESULT,
   messageSurface,
@@ -30,6 +31,7 @@ import type { SlackMessage } from "../lib/slackApi";
 import type { ToolActivity } from "../lib/toolActivityGroups";
 import { fetchConversationKind, fetchConversationShape } from "../lib/slackApi";
 import { checkinDayKey } from "../lib/eodCheckin";
+import { CLAUDE_TAG_SLACK_USER_ID } from "../lib/slackPeerBots";
 import {
   buildSlackTranscript,
   type TranscriptContent,
@@ -560,10 +562,12 @@ describe("react_only lead-in retraction", () => {
       }
       if (method === "chat.appendStream") {
         const ts = String(body.ts);
-        messages.set(
-          ts,
-          `${messages.get(ts) ?? ""}${String(body.markdown_text ?? "")}`,
-        );
+        const chunks = (body.chunks ?? []) as Array<{ type: string; text?: string }>;
+        const text = chunks
+          .filter((c) => c.type === "markdown_text")
+          .map((c) => c.text ?? "")
+          .join("");
+        messages.set(ts, `${messages.get(ts) ?? ""}${text}`);
         return Response.json({ ok: true });
       }
       if (method === "chat.delete") {
@@ -613,6 +617,410 @@ describe("react_only lead-in retraction", () => {
     );
     expect(stored.at(-1)?.content).toContain(forcedReply);
     expect(stored.at(-1)?.content).not.toContain(leadIn);
+  });
+});
+
+describe("tool activity as task cards in one streamed reply", () => {
+  async function runToolTurn(opts: { streamOk: boolean }) {
+    const stream = (
+      events: Array<Record<string, unknown>>,
+    ): AsyncIterable<Record<string, unknown>> => ({
+      async *[Symbol.asyncIterator]() {
+        yield* events;
+      },
+    });
+    const start = {
+      type: "message_start",
+      message: { model: "claude-test", usage: { input_tokens: 1, output_tokens: 0 } },
+    };
+    slackToolRunner.mockImplementationOnce(
+      (config: { tools: Array<{ name: string; run: (input: object) => Promise<string> }> }) => ({
+        async *[Symbol.asyncIterator]() {
+          yield stream([
+            start,
+            { type: "content_block_delta", delta: { type: "text_delta", text: "Let me check." } },
+            { type: "content_block_start", content_block: { type: "tool_use", name: "list_units" } },
+          ]);
+          const listUnits = config.tools.find((tool) => tool.name === "list_units");
+          if (!listUnits) throw new Error("list_units was not registered");
+          await listUnits.run({});
+          yield stream([
+            start,
+            { type: "content_block_delta", delta: { type: "text_delta", text: "\n\nNo units yet." } },
+          ]);
+        },
+      }),
+    );
+
+    const t = convexTest(schema, modules);
+    const institutionId = await seedInstitution(t, "moli-task-cards");
+    const teacherId = await seedUser(t, "teacher", {
+      username: "lehua-task-cards",
+      slackUserId: "U_LEHUA",
+      institutionId,
+    });
+    await grantMembership(t, teacherId, "teacher", institutionId);
+
+    const previousToken = process.env.SLACK_BOT_TOKEN;
+    const previousApiKey = process.env.ANTHROPIC_API_KEY;
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(url).split("/api/")[1] ?? String(url);
+      const raw = String(init?.body ?? "");
+      const body = raw.startsWith("{")
+        ? (JSON.parse(raw) as Record<string, unknown>)
+        : Object.fromEntries(new URLSearchParams(raw));
+      calls.push({ method, body });
+      if (method === "conversations.info") {
+        return Response.json({ ok: true, channel: { id: "C_BUGS", is_channel: true } });
+      }
+      if (method === "conversations.replies") {
+        return Response.json({
+          ok: true,
+          messages: [{ ts: "100.1", user: "U_LEHUA", text: "<@B_BOT> any units?" }],
+        });
+      }
+      if (method === "users.info") {
+        return Response.json({ ok: true, user: { id: "U_LEHUA", real_name: "Lehua Torres" } });
+      }
+      if (method === "chat.startStream") {
+        return opts.streamOk
+          ? Response.json({ ok: true, ts: "stream-1" })
+          : Response.json({ ok: false, error: "not_allowed" });
+      }
+      return Response.json({ ok: true, ts: "post-1" });
+    }) as typeof fetch;
+
+    try {
+      await t.action(internal.slackBot.handleEvent, {
+        payload: {
+          team_id: "T1",
+          event_id: "EvTaskCards",
+          authorizations: [{ user_id: "B_BOT", is_bot: true }],
+          event: {
+            type: "app_mention",
+            user: "U_LEHUA",
+            text: "<@B_BOT> any units?",
+            channel: "C_BUGS",
+            ts: "100.1",
+          },
+        },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      if (previousToken === undefined) delete process.env.SLACK_BOT_TOKEN;
+      else process.env.SLACK_BOT_TOKEN = previousToken;
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousApiKey;
+    }
+
+    return calls;
+  }
+
+  test("narration, a tool and the answer stream as ONE message: text · card · text", async () => {
+    const calls = await runToolTurn({ streamOk: true });
+    // One message for the whole turn.
+    expect(calls.filter((c) => c.method === "chat.startStream")).toHaveLength(1);
+    // No separate gray tool-activity message.
+    expect(
+      calls.some(
+        (c) =>
+          c.method === "chat.postMessage" &&
+          JSON.stringify(c.body.blocks ?? "").includes('"context"'),
+      ),
+    ).toBe(false);
+    // Text and cards arrive in the order they happened; text only as chunks.
+    const chunks = calls
+      .filter((c) => c.method === "chat.appendStream")
+      .flatMap((c) => {
+        expect(c.body.markdown_text).toBeUndefined();
+        return c.body.chunks as Array<Record<string, unknown>>;
+      });
+    const kinds = chunks
+      .map((c) => String(c.type))
+      .filter((kind, i, all) => kind !== "task_update" || all[i - 1] !== "task_update");
+    expect(kinds).toEqual(["markdown_text", "task_update", "markdown_text"]);
+    const text = chunks.filter((c) => c.type === "markdown_text").map((c) => c.text);
+    // Text resuming after the card keeps its paragraph separator.
+    expect(text).toEqual(["Let me check.", "\n\nNo units yet."]);
+    expect(chunks.filter((c) => c.type === "task_update").at(-1)).toMatchObject({
+      id: "run0-0",
+      title: "Found 0 units",
+      status: "complete",
+    });
+  });
+
+  test("without streaming, the one posted reply keeps its paragraphs", async () => {
+    const calls = await runToolTurn({ streamOk: false });
+    const posts = calls.filter((c) => c.method === "chat.postMessage");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body.markdown_text).toBe("Let me check.\n\nNo units yet.");
+  });
+});
+
+describe("Slack's Stop button", () => {
+  type Event = Record<string, unknown>;
+  type Step = Event | (() => Promise<void>);
+  const start: Event = {
+    type: "message_start",
+    message: { model: "claude-test", usage: { input_tokens: 1, output_tokens: 0 } },
+  };
+  const say = (text: string): Event => ({
+    type: "content_block_delta",
+    delta: { type: "text_delta", text },
+  });
+  const listUnits: Event = {
+    type: "content_block_start",
+    content_block: { type: "tool_use", name: "list_units" },
+  };
+  const CHANNEL = "C_BUGS";
+  const THREAD = "100.1";
+
+  async function seedTeacher(t: TypedTestConvex) {
+    const institutionId = await seedInstitution(t, "moli-stop");
+    const teacherId = await seedUser(t, "teacher", {
+      username: "lehua-stop",
+      slackUserId: "U_LEHUA",
+      institutionId,
+    });
+    await grantMembership(t, teacherId, "teacher", institutionId);
+  }
+
+  const pressStop = (t: TypedTestConvex) => () =>
+    t
+      .mutation(internal.slackBot.requestThreadStop, {
+        channelId: CHANNEL,
+        threadTs: THREAD,
+      })
+      .then(() => {});
+
+  // One @-mention turn. `messages` are the model's messages, each a list of
+  // stream events and side effects run between them (a Stop click). The fake
+  // runs list_units between messages, as the SDK does, and records it.
+  async function runTurn(
+    t: TypedTestConvex,
+    messages: Step[][],
+    slack: {
+      appendStream?: (
+        body: Record<string, unknown>,
+        n: number,
+      ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+      /** Runs before the model's first message, e.g. a click during the
+       * model's silent first pause. */
+      beforeFirstMessage?: () => Promise<void>;
+    } = {},
+  ) {
+    const seen = { toolRan: false, aborted: 0 };
+    slackToolRunner.mockImplementationOnce(() => ({
+      async *[Symbol.asyncIterator]() {
+        await slack.beforeFirstMessage?.();
+        for (let i = 0; i < messages.length; i++) {
+          if (i > 0) seen.toolRan = true;
+          const steps = messages[i];
+          yield {
+            abort: () => {
+              seen.aborted++;
+            },
+            async *[Symbol.asyncIterator]() {
+              for (const step of steps) {
+                if (typeof step === "function") await step();
+                else yield step;
+              }
+            },
+          };
+        }
+      },
+    }));
+
+    const previousToken = process.env.SLACK_BOT_TOKEN;
+    const previousApiKey = process.env.ANTHROPIC_API_KEY;
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let appends = 0;
+
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(url).split("/api/")[1] ?? String(url);
+      const raw = String(init?.body ?? "");
+      const body = raw.startsWith("{")
+        ? (JSON.parse(raw) as Record<string, unknown>)
+        : Object.fromEntries(new URLSearchParams(raw));
+      calls.push({ method, body });
+      if (method === "conversations.info") {
+        return Response.json({ ok: true, channel: { id: CHANNEL, is_channel: true } });
+      }
+      if (method === "conversations.replies") {
+        return Response.json({
+          ok: true,
+          messages: [{ ts: THREAD, user: "U_LEHUA", text: "<@B_BOT> any units?" }],
+        });
+      }
+      if (method === "users.info") {
+        return Response.json({ ok: true, user: { id: "U_LEHUA", real_name: "Lehua Torres" } });
+      }
+      if (method === "chat.startStream") {
+        return Response.json({ ok: true, ts: "stream-1" });
+      }
+      if (method === "chat.appendStream" && slack.appendStream) {
+        return Response.json(await slack.appendStream(body, appends++));
+      }
+      return Response.json({ ok: true, ts: "post-1" });
+    }) as typeof fetch;
+
+    try {
+      await t.action(internal.slackBot.handleEvent, {
+        payload: {
+          team_id: "T1",
+          event_id: `EvStop${Math.random()}`,
+          authorizations: [{ user_id: "B_BOT", is_bot: true }],
+          event: {
+            type: "app_mention",
+            user: "U_LEHUA",
+            text: "<@B_BOT> any units?",
+            channel: CHANNEL,
+            ts: THREAD,
+          },
+        },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      if (previousToken === undefined) delete process.env.SLACK_BOT_TOKEN;
+      else process.env.SLACK_BOT_TOKEN = previousToken;
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousApiKey;
+    }
+
+    const stored = await t.run(async (ctx) =>
+      ctx.db.query("curriculumMessages").collect(),
+    );
+    return { calls, seen, stored };
+  }
+
+  const statusCalls = (calls: Array<{ method: string; body: Record<string, unknown> }>) =>
+    calls
+      .filter((c) => c.method === "agents.sessions.setStatus")
+      .map((c) => c.body.status);
+  const update = (calls: Array<{ method: string; body: Record<string, unknown> }>) =>
+    calls.find((c) => c.method === "chat.update")?.body;
+
+  test("agent_session_stopped stamps the thread; a thread the bot never answered is ignored", async () => {
+    const t = convexTest(schema, modules);
+    const userId = await seedUser(t, "teacher");
+    await t.mutation(internal.slackBot.ensureThreadSession, {
+      channelId: CHANNEL,
+      threadTs: THREAD,
+      userId,
+    });
+    const stop = (threadTs: string) =>
+      t.action(internal.slackBot.handleEvent, {
+        payload: {
+          team_id: "T1",
+          event_id: `EvStopped-${threadTs}`,
+          event: {
+            type: "agent_session_stopped",
+            channel: CHANNEL,
+            thread_ts: threadTs,
+            streaming_message_ts: ["100.2"],
+            user: "U_LEHUA",
+          },
+        },
+      });
+    await stop(THREAD);
+    await stop("999.9");
+    const threads = await t.run(async (ctx) => ctx.db.query("slackThreads").collect());
+    expect(threads).toHaveLength(1);
+    expect(threads[0].stopRequestedAt).toEqual(expect.any(Number));
+    expect(
+      await t.query(internal.slackBot.threadStopRequestedSince, {
+        channelId: CHANNEL,
+        threadTs: THREAD,
+        since: threads[0].stopRequestedAt! + 1,
+      }),
+    ).toBe(false);
+  });
+
+  test("a normal turn holds the session processing, then hands it back", async () => {
+    const t = convexTest(schema, modules);
+    await seedTeacher(t);
+    const { calls } = await runTurn(t, [[start, say("No units yet.")]]);
+    expect(statusCalls(calls)).toEqual(["processing", "active"]);
+    expect(update(calls)).toBeUndefined();
+  });
+
+  test("Stop mid-reply ends the turn before its tool runs and closes the stream", async () => {
+    const t = convexTest(schema, modules);
+    await seedTeacher(t);
+    const { calls, seen, stored } = await runTurn(t, [
+      [start, say("Let me look."), pressStop(t), listUnits, say("never shown")],
+      [start, say("Found none.")],
+    ]);
+
+    expect(seen.toolRan).toBe(false);
+    // Aborting a reply still arriving kills a Convex action (dev rig,
+    // 2026-11-08), so the loop reads the rest of the message unseen instead.
+    expect(seen.aborted).toBe(0);
+    // The stream is closed, which is what ends Slack's "Stopping…" and has it
+    // mark the reply "(stopped)". Nothing after the stop is ever sent.
+    const sent = calls.filter((c) => c.method.startsWith("chat."));
+    expect(sent.map((c) => c.method)).toEqual([
+      "chat.startStream",
+      "chat.appendStream",
+      "chat.stopStream",
+    ]);
+    expect(sent[1].body.chunks).toEqual([{ type: "markdown_text", text: "Let me look." }]);
+    expect(JSON.stringify(calls)).not.toContain("never shown");
+    expect(statusCalls(calls)).toEqual(["processing", "active"]);
+    // The Chat tab keeps the partial reply as stopped, as an in-app Stop does.
+    expect(stored.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "Let me look.",
+      stopRequestedAt: expect.any(Number),
+    });
+  });
+
+  test("words queued behind a slow send never go out, and aren't stored either", async () => {
+    const t = convexTest(schema, modules);
+    await seedTeacher(t);
+    const { calls, stored } = await runTurn(
+      t,
+      [[start, say("Let me look."), say(" Kai has three"), pressStop(t), listUnits]],
+      {
+        // The first send is still in flight when the next words arrive, so
+        // they wait in the queue behind it while Stop lands.
+        appendStream: async (_body, n) => {
+          if (n === 0) await new Promise((resolve) => setTimeout(resolve, 100));
+          return { ok: true };
+        },
+      },
+    );
+    const text = calls
+      .filter((c) => c.method === "chat.appendStream")
+      .flatMap((c) => c.body.chunks as Array<{ type: string; text?: string }>)
+      .filter((c) => c.type === "markdown_text")
+      .map((c) => c.text);
+    expect(text).toEqual(["Let me look."]);
+    expect(stored.at(-1)).toMatchObject({ role: "assistant", content: "Let me look." });
+  });
+
+  test("Stop before anything showed posts nothing and hands the session back", async () => {
+    const t = convexTest(schema, modules);
+    await seedTeacher(t);
+    const { calls, stored } = await runTurn(t, [[start, say("Hello")]], {
+      beforeFirstMessage: pressStop(t),
+    });
+    // No message and no error notice: the person asked for nothing more.
+    expect(calls.filter((c) => c.method.startsWith("chat."))).toEqual([]);
+    expect(statusCalls(calls)).toEqual(["processing", "active"]);
+    expect(stored.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "",
+      stopRequestedAt: expect.any(Number),
+    });
   });
 });
 
@@ -852,6 +1260,41 @@ describe("parent-message Slack channel routing", () => {
     });
   });
 
+  test("a reply also sent to the channel never reaches the family", async () => {
+    // Ticking "Also send to #channel" makes the reply a `thread_broadcast`.
+    // Only Workshop threads take those; the bridge keeps ignoring them, so a
+    // staffer's broadcast here is never delivered to a parent. The test above
+    // is the control: the same reply, sent plainly, is delivered.
+    const t = convexTest(schema, modules);
+    const { threadId } = await seedMappedParentSlackThread(t);
+
+    await t.action(internal.slackBot.handleEvent, {
+      payload: {
+        team_id: "T1",
+        event_id: "EvParentChannelBroadcast",
+        authorizations: [{ user_id: "B_BOT", is_bot: true }],
+        event: {
+          type: "message",
+          subtype: "thread_broadcast",
+          user: "U_TEACHER",
+          text: "Happy to talk tomorrow.",
+          channel: "C_PARENT_STAFF",
+          channel_type: "channel",
+          ts: "111.333",
+          thread_ts: "111.222",
+        },
+      },
+    });
+
+    const messages = await t.run(async (ctx) =>
+      ctx.db
+        .query("parentMessages")
+        .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+        .collect(),
+    );
+    expect(messages).toEqual([]);
+  });
+
   test("a mentioned parent-thread reply is still ingested on the message event", async () => {
     const t = convexTest(schema, modules);
     const { threadId } = await seedMappedParentSlackThread(t);
@@ -929,7 +1372,7 @@ describe("parent-message Slack channel routing", () => {
       channel: "C_PARENT_STAFF",
       thread_ts: "111.222",
     });
-    expect(String(posts[0].text)).toContain("Couldn't send to the parent");
+    expect(String(posts[0].text)).toContain("Couldn't send your reply");
 
     const messages = await t.run(async (ctx) =>
       ctx.db
@@ -1397,6 +1840,7 @@ describe("group DM (mpim) routing", () => {
         stub.restore();
       }
     });
+
   });
 
   // A private channel used to read, to the model, only as "an open
@@ -1450,6 +1894,8 @@ describe("group DM (mpim) routing", () => {
           expect(await fetchConversationShape("xoxb-test", "C1")).toEqual({
             kind: "channel",
             privacy: expected,
+            externallyShared: false,
+            sharingKnown: false,
           });
         } finally {
           stub.restore();
@@ -1463,9 +1909,28 @@ describe("group DM (mpim) routing", () => {
         expect(await fetchConversationShape("xoxb-test", "C_GROUP_DM")).toEqual({
           kind: "mpim",
           privacy: null,
+          externallyShared: false,
+          sharingKnown: false,
         });
       } finally {
         mpim.restore();
+      }
+      // Slack Connect: shared, or invited and pending, with another organization.
+      for (const flag of ["is_ext_shared", "is_pending_ext_shared"] as const) {
+        const shared = stubInfo({
+          ok: true,
+          channel: { id: "C_SHARED", is_channel: true, is_private: true, [flag]: true },
+        });
+        try {
+          expect(await fetchConversationShape("xoxb-test", "C_SHARED")).toEqual({
+            kind: "channel",
+            privacy: "private",
+            externallyShared: true,
+            sharingKnown: flag === "is_ext_shared",
+          });
+        } finally {
+          shared.restore();
+        }
       }
     });
 
@@ -2423,7 +2888,7 @@ describe("notification producers (Phase 3)", () => {
         kind: "online",
         order: 0,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [kai],
@@ -3242,6 +3707,44 @@ describe("Slack oversized-image downscaling", () => {
     expect(res.bytesUsed).toBe(Math.floor((SHRUNK.length * 3) / 4));
   });
 
+  test("a photo too large to decode is downscaled from Slack's rendition, not the original", async () => {
+    // A 24 MP iPhone JPEG: decoding the original ran the 512 MiB node action out
+    // of memory, so the bot reported the photo missing (2026-10-19).
+    const normalize = vi.fn(async () => ({
+      mediaType: "image/jpeg" as const,
+      dataBase64: SHRUNK,
+    }));
+    const photo = {
+      name: "IMG_5113.jpeg",
+      mimetype: "image/jpeg",
+      size: 6.6 * MB,
+      url_private_download: "https://files.slack/original",
+      thumb_960: "https://files.slack/thumb960",
+      thumb_1024: "https://files.slack/thumb1024",
+    };
+    const thread: SlackMessage[] = [
+      {
+        ts: "1",
+        user: "U1",
+        subtype: "file_share",
+        files: [
+          { id: "BIG", ...photo, original_w: 5712, original_h: 4284 },
+          // A 12 MP photo still decodes fine, at full quality.
+          { id: "OK", ...photo, original_w: 4032, original_h: 3024 },
+        ],
+      },
+    ];
+    const res = await collectThreadImages(
+      TOKEN,
+      thread,
+      MAX_TOTAL_ATTACHMENT_BYTES,
+      normalize,
+    );
+    expect(normalize).toHaveBeenCalledWith({ url: "https://files.slack/thumb1024" });
+    expect(normalize).toHaveBeenCalledWith({ url: "https://files.slack/original" });
+    expect(res.images.size).toBe(2);
+  });
+
   test("an under-cap JPEG with an EXIF rotation tag is uprighted through the normalizer", async () => {
     // SOI + APP1 Exif (big-endian, Orientation = 6) + EOI: a phone photo's
     // metadata shape, which is all the routing decision reads.
@@ -3987,128 +4490,171 @@ describe("collectThreadTextDocuments", () => {
 // #marketing-studio the bot showed NOTHING for a full minute — the "✓ …" row
 // only appeared after the run finished, so it looked hung. `setStatus` is
 // DM-only, so in a channel this context block is the only live signal there is.
-describe("buildToolContext live progress", () => {
-  test("renders a running group as ⋯ + the running label", () => {
-    const text = buildToolContext([
-      { name: "create_event_draft", status: "running" },
-      { name: "create_event_draft", status: "running" },
-    ]);
-    expect(text.startsWith("⋯")).toBe(true);
-    expect(text).toContain("Creating");
-    expect(text).toContain("(2)");
+describe("buildToolTasks live progress", () => {
+  test("renders a running group as an in-progress card with the running label", () => {
+    const [card] = buildToolTasks(
+      [
+        { name: "create_event_draft", status: "running" },
+        { name: "create_event_draft", status: "running" },
+      ],
+      "run0",
+    );
+    expect(card.status).toBe("in_progress");
+    expect(card.title).toContain("Creating");
+    expect(card.title).toContain("(2)");
   });
 
-  test("settles to ✓ + the done label once every call completes", () => {
-    const text = buildToolContext([
-      { name: "create_event_draft", status: "complete", result: "ok" },
-      { name: "create_event_draft", status: "complete", result: "ok" },
-    ]);
-    expect(text.startsWith("✓")).toBe(true);
-    expect(text).toContain("Created");
-    expect(text).toContain("2");
+  test("settles to a complete card with the done label once every call completes", () => {
+    const [card] = buildToolTasks(
+      [
+        { name: "create_event_draft", status: "complete", result: "ok" },
+        { name: "create_event_draft", status: "complete", result: "ok" },
+      ],
+      "run0",
+    );
+    expect(card.status).toBe("complete");
+    expect(card.title).toContain("Created");
+    expect(card.title).toContain("2");
   });
 
-  test("preserves a full plain Google Docs URL in a completed tool row", () => {
+  test("card ids are the run id plus the group index, stable as the run grows", () => {
+    const first = buildToolTasks([{ name: "list_events", status: "running" }], "run3");
+    const later = buildToolTasks(
+      [
+        { name: "list_events", status: "complete", result: "ok" },
+        { name: "create_event_draft", status: "running" },
+      ],
+      "run3",
+    );
+    expect(first.map((c) => c.id)).toEqual(["run3-0"]);
+    expect(later.map((c) => c.id)).toEqual(["run3-0", "run3-1"]);
+  });
+
+  test("preserves a full plain Google Docs URL in a completed card", () => {
     const url =
       "https://docs.google.com/document/d/1pmWxLw3gMjopx98lPeS-PTTOX5yTlVv7nFrOhceJtn4/edit";
-    const text = buildToolContext([
-      {
-        name: "create_shared_doc",
-        status: "complete",
-        result: `Created "Unit plan" — ${url}`,
-      },
-    ]);
-    expect(text).toContain(url);
+    const [card] = buildToolTasks(
+      [
+        {
+          name: "create_shared_doc",
+          status: "complete",
+          result: `Created "Unit plan" — ${url}`,
+        },
+      ],
+      "run0",
+    );
+    expect(card.title).toContain(url);
   });
 
-  test("a still-running group stays ⋯ while earlier finished groups show ✓", () => {
-    const lines = buildToolContext([
-      { name: "list_events", status: "complete", result: "ok" },
-      { name: "create_event_draft", status: "running" },
-    ]).split("\n");
-    expect(lines).toHaveLength(2);
-    expect(lines[0].startsWith("✓")).toBe(true);
-    expect(lines[1].startsWith("⋯")).toBe(true);
+  test("a still-running group stays in progress while earlier finished groups complete", () => {
+    const cards = buildToolTasks(
+      [
+        { name: "list_events", status: "complete", result: "ok" },
+        { name: "create_event_draft", status: "running" },
+      ],
+      "run0",
+    );
+    expect(cards.map((c) => c.status)).toEqual(["complete", "in_progress"]);
   });
 
-  test("no tools renders nothing (never posts an empty block)", () => {
-    expect(buildToolContext([])).toBe("");
+  test("no tools renders no cards", () => {
+    expect(buildToolTasks([], "run0")).toEqual([]);
   });
 
-  test("a single failing call renders ⚠, names the tool, and shows the stripped reason", () => {
-    const text = buildToolContext([
-      {
-        name: "dispatch_implementation",
-        status: "complete",
-        result: "Failed: daily dispatch cap reached",
-      },
-    ]);
-    expect(text.startsWith("⚠")).toBe(true);
-    // Friendly tool name (friendlyToolName lowercases unmapped ids), not the raw
-    // id, and the reason with `Failed:` stripped.
-    expect(text).toContain("dispatch implementation");
-    expect(text).toContain("daily dispatch cap reached");
-    expect(text).not.toContain("Failed:");
-    // Two-space gap after the mark, matching the ✓/⋯ lines.
-    expect(text.startsWith("⚠  ")).toBe(true);
+  test("a single failing call is an error card titled with the tool and the reason", () => {
+    const [card] = buildToolTasks(
+      [
+        {
+          name: "dispatch_implementation",
+          status: "complete",
+          result: "Failed: daily dispatch cap reached",
+        },
+      ],
+      "run0",
+    );
+    expect(card.status).toBe("error");
+    // Friendly tool name, not the raw id, and the reason with `Failed:`
+    // stripped, in the title Slack shows without opening the card (TRA-609).
+    expect(card.title).toBe("Dispatching implementation — daily dispatch cap reached");
+    // The whole reason is already in the title; the collapsed details would
+    // only repeat it.
+    expect(card.details).toBeUndefined();
   });
 
-  test("an 'Error: …' result is classified as a failure too", () => {
-    const text = buildToolContext([
-      { name: "read_repo_file", status: "complete", result: "Error: file not found" },
-    ]);
-    expect(text.startsWith("⚠")).toBe(true);
-    expect(text).toContain("file not found");
-    expect(text).not.toContain("Error:");
+  test("a Convex server error is titled with its message; the full text stays in the details", () => {
+    const raw = [
+      "Failed: [CONVEX M(lessons:create)] [Request ID: 5c0ffee5c0ffee50] Server Error",
+      "Uncaught Error: Lesson k57a1b2c3d4e5f6g7h8j9k0m1n2p3q4r not found",
+      "    at handler (../convex/lessons.ts:42:11)",
+    ].join("\n");
+    const [card] = buildToolTasks(
+      [{ name: "create_scholar_activity", status: "complete", result: raw }],
+      "run0",
+    );
+    expect(card.status).toBe("error");
+    expect(card.title).toBe("Adding activity — Lesson … not found");
+    // No stack trace, request id or document id in the title.
+    expect(card.title).not.toMatch(/Request ID|CONVEX|at handler|k57a1b2c3/);
+    expect(card.details).toBe(raw.replace(/^Failed:\s*/, ""));
+  });
+
+  test("an 'Error: …' or 'Refused: …' result is classified as a failure too", () => {
+    const [errored] = buildToolTasks(
+      [{ name: "read_repo_file", status: "complete", result: "Error: file not found" }],
+      "run0",
+    );
+    expect(errored.status).toBe("error");
+    expect(errored.title).toBe("Reading a repo file — file not found");
+    const [refused] = buildToolTasks(
+      [{ name: "create_scholar_activity", status: "complete", result: "Refused: lesson not found" }],
+      "run0",
+    );
+    expect(refused.status).toBe("error");
+    expect(refused.title).toBe("Adding activity — lesson not found");
   });
 
   test("a partly-failed group keeps its done label and says how many failed", () => {
-    const text = buildToolContext([
-      { name: "create_lesson", status: "complete", result: "Created lesson A" },
-      { name: "create_lesson", status: "complete", result: "Failed: boom" },
-      { name: "create_lesson", status: "complete", result: "Created lesson C" },
-    ]);
-    expect(text.startsWith("⚠")).toBe(true);
-    expect(text).toContain("(1 of 3 failed)");
+    const [card] = buildToolTasks(
+      [
+        { name: "create_lesson", status: "complete", result: "Created lesson A" },
+        { name: "create_lesson", status: "complete", result: "Failed: boom" },
+        { name: "create_lesson", status: "complete", result: "Created lesson C" },
+      ],
+      "run0",
+    );
+    expect(card.status).toBe("error");
+    expect(card.title).toContain("(1 of 3 failed)");
     // Keeps the counted-noun done label rather than discarding the count — the
     // two calls that landed really did create lessons.
-    expect(text).toContain("3 lessons");
+    expect(card.title).toContain("3 lessons");
+    expect(card.title).toBe("Created 3 lessons (1 of 3 failed) — boom");
   });
 
   test("a wholly-failed group never asserts the work happened", () => {
-    const text = buildToolContext([
-      { name: "create_lesson", status: "complete", result: "Failed: boom" },
-      { name: "create_lesson", status: "complete", result: "Failed: boom" },
-    ]);
-    expect(text.startsWith("⚠")).toBe(true);
+    const [card] = buildToolTasks(
+      [
+        { name: "create_lesson", status: "complete", result: "Failed: boom" },
+        { name: "create_lesson", status: "complete", result: "Failed: boom" },
+      ],
+      "run0",
+    );
+    expect(card.status).toBe("error");
     // "Created 2 lessons" would be a lie when both calls failed.
-    expect(text).not.toContain("Created");
-    expect(text).toContain("(2)");
-    expect(text).toContain("boom");
+    expect(card.title).not.toContain("Created");
+    expect(card.title).toBe("Creating lesson (2) — boom");
   });
 
-  test("an all-success group still renders ✓ and a still-running group still renders ⋯", () => {
-    expect(
-      buildToolContext([
-        { name: "create_lesson", status: "complete", result: "Created lesson A" },
-      ]).startsWith("✓"),
-    ).toBe(true);
-    expect(
-      buildToolContext([{ name: "create_lesson", status: "running" }]).startsWith("⋯"),
-    ).toBe(true);
-  });
-
-  test("the exact prod symptom settles instead of sticking on ⋯", () => {
+  test("the exact prod symptom settles instead of spinning forever", () => {
     // A dispatch_implementation that never emitted toolComplete: left `running`,
-    // the block would freeze on "⋯ dispatch implementation…" forever.
+    // its card would spin until Slack timed the stream out.
     const log: ToolActivity[] = [
       { name: "dispatch_implementation", status: "running" },
     ];
-    expect(buildToolContext(log).startsWith("⋯")).toBe(true);
+    expect(buildToolTasks(log, "run0")[0].status).toBe("in_progress");
     settleRunningToolActivity(log);
-    const settled = buildToolContext(log);
-    expect(settled.startsWith("⚠")).toBe(true);
-    expect(settled).toContain("dispatch implementation");
+    const [settled] = buildToolTasks(log, "run0");
+    expect(settled.status).toBe("error");
+    expect(settled.title).toBe("Dispatching implementation — no result reported");
   });
 });
 
@@ -4335,6 +4881,34 @@ describe("workshop idea thread replies", () => {
       name: "white_check_mark",
     });
     expect(calls.some((c) => c.method === "chat.postMessage")).toBe(false);
+  });
+
+  // The requester answering Claude Tag in a Workshop thread is talking to
+  // Claude, not the child: nothing reaches the idea, no ✅, nothing posted.
+  test("a reply that mentions only Claude never reaches the scholar", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_WORKSHOP_CHANNEL_ID = WORKSHOP_CHANNEL;
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    globalThis.fetch = stubSlack(suggestionId, calls);
+
+    try {
+      await replyInThread(t, {
+        eventId: "EvWorkshopClaude",
+        user: "U_ANDY",
+        text: `<@${CLAUDE_TAG_SLACK_USER_ID}> make it a new column`,
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
+    }
+
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+    expect(calls.map((c) => c.method)).toEqual(["conversations.replies"]);
   });
 
   test("an unlinked replier is TOLD it didn't send, and nothing is written", async () => {
@@ -4584,6 +5158,561 @@ describe("workshop idea thread replies", () => {
 
     expect(await staffReplies(t, suggestionId)).toEqual([]);
     expect(calls.some((c) => c.method === "reactions.add")).toBe(false);
+  });
+
+  // ── "Also send to #workshop" ───────────────────────────────────────────
+  // Ticking that box makes the reply a `thread_broadcast`, which the subtype
+  // gate used to drop: no ✅, no notice, nothing to the child.
+
+  test("a reply also sent to the channel still reaches the scholar", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId, teacher } = await seedWorkshopIdea(t);
+
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_WORKSHOP_CHANNEL_ID = WORKSHOP_CHANNEL;
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    globalThis.fetch = stubSlack(suggestionId, calls);
+    try {
+      await t.action(internal.slackBot.handleEvent, {
+        payload: {
+          team_id: "T1",
+          event_id: "EvWorkshopBroadcast",
+          authorizations: [{ user_id: "B_BOT", is_bot: true }],
+          event: {
+            type: "message",
+            subtype: "thread_broadcast",
+            user: "U_ANDY",
+            text: "we're on it!",
+            channel: WORKSHOP_CHANNEL,
+            channel_type: "channel",
+            ts: "900.555",
+            thread_ts: "900.111",
+          },
+        },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
+    }
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      body: "we're on it!",
+      authorUserId: teacher,
+      source: "slack",
+    });
+    expect(calls.find((c) => c.method === "reactions.add")?.body).toMatchObject({
+      timestamp: "900.555",
+      name: "white_check_mark",
+    });
+  });
+
+  test("a broadcast anywhere else is still left alone", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId, teacher } = await seedWorkshopIdea(t);
+    // A thread the bot is already in, where a plain follow-up would be answered.
+    await t.run((ctx) =>
+      ctx.db.insert("slackThreads", {
+        channelId: "C_SOMEWHERE_ELSE",
+        threadTs: "900.111",
+        startedByUserId: teacher,
+        lastActivityAt: Date.now(),
+      }),
+    );
+
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_WORKSHOP_CHANNEL_ID = WORKSHOP_CHANNEL;
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    globalThis.fetch = stubSlack(suggestionId, calls);
+    try {
+      await t.action(internal.slackBot.handleEvent, {
+        payload: {
+          team_id: "T1",
+          event_id: "EvOtherBroadcast",
+          authorizations: [{ user_id: "B_BOT", is_bot: true }],
+          event: {
+            type: "message",
+            subtype: "thread_broadcast",
+            user: "U_ANDY",
+            text: "sharing with everyone",
+            channel: "C_SOMEWHERE_ELSE",
+            channel_type: "channel",
+            ts: "900.555",
+            thread_ts: "900.111",
+          },
+        },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
+    }
+
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+    // Not routed to the aide, the parent bridge, or anything that calls Slack.
+    expect(calls).toEqual([]);
+  });
+
+  // ── Photos and files in the reply ──────────────────────────────────────
+  // A reply's uploads become the message's attachments in the scholar's
+  // Messages. Before this, `body: event.text` was all that crossed: a photo
+  // with words lost the photo, and a photo alone sent nothing and said nothing.
+
+  const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const fileUrl = (name: string) =>
+    `https://files.slack.com/files-pri/T1-F1/download/${name}`;
+
+  /** `stubSlack`, plus file downloads answered from `downloads` by URL, and
+   *  optionally a reply message the thread read returns beside the root. */
+  function stubSlackWithFiles(
+    suggestionId: string,
+    calls: Array<{ method: string; body: Record<string, string> }>,
+    downloads: Record<string, () => Response>,
+    fetched: Array<{ url: string; auth: string | null }>,
+    threadReply?: Record<string, unknown>,
+  ) {
+    const slack = stubSlack(suggestionId, calls);
+    return (async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (threadReply && String(url).endsWith("/conversations.replies")) {
+        calls.push({ method: "conversations.replies", body: {} });
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            messages: [
+              {
+                ts: "900.111",
+                bot_id: "B_BOT",
+                text: "💡 idea",
+                metadata: {
+                  event_type: "rabbithole_workshop_idea",
+                  event_payload: { delivery_id: `workshop-idea:${suggestionId}` },
+                },
+              },
+              threadReply,
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      const download = downloads[String(url)];
+      if (download) {
+        fetched.push({
+          url: String(url),
+          auth: new Headers(init?.headers).get("Authorization"),
+        });
+        return download();
+      }
+      return slack(url, init);
+    }) as typeof fetch;
+  }
+
+  async function replyWithFiles(
+    t: ReturnType<typeof convexTest>,
+    args: {
+      eventId: string;
+      text: string;
+      files: Array<{ id: string; name?: string; mimetype?: string; size?: number }>;
+      user?: string;
+      attachments?: Array<Record<string, unknown>>;
+      /** Send the files as Slack's stubs, with no download link. */
+      stubFiles?: boolean;
+    },
+  ) {
+    await t.action(internal.slackBot.handleEvent, {
+      payload: {
+        team_id: "T1",
+        event_id: args.eventId,
+        authorizations: [{ user_id: "B_BOT", is_bot: true }],
+        event: {
+          type: "message",
+          subtype: "file_share",
+          user: args.user ?? "U_ANDY",
+          text: args.text,
+          channel: WORKSHOP_CHANNEL,
+          channel_type: "channel",
+          // Not in the stubbed thread read: the event's own files are used.
+          ts: "900.444",
+          thread_ts: "900.111",
+          files: args.files.map((file) =>
+            args.stubFiles
+              ? file
+              : { ...file, url_private_download: fileUrl(file.name ?? file.id) },
+          ),
+          ...(args.attachments ? { attachments: args.attachments } : {}),
+        },
+      },
+    });
+  }
+
+  async function runWithSlack<T>(fetchStub: typeof fetch, run: () => Promise<T>) {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_WORKSHOP_CHANNEL_ID = WORKSHOP_CHANNEL;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = fetchStub;
+    try {
+      return await run();
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
+    }
+  }
+
+  const pngResponse = () =>
+    new Response(PNG_BYTES, { status: 200, headers: { "Content-Type": "image/png" } });
+
+  async function attachmentsOf(t: TypedTestConvex, messageId: Id<"parentMessages">) {
+    return await t.run(async (ctx) =>
+      ctx.db
+        .query("parentMessageAttachments")
+        .withIndex("by_message", (q) => q.eq("messageId", messageId))
+        .collect(),
+    );
+  }
+
+  test("a photo in the reply reaches the scholar with the words", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId, teacher } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    const fetched: Array<{ url: string; auth: string | null }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(
+        suggestionId,
+        calls,
+        { [fileUrl("mockup.png")]: pngResponse },
+        fetched,
+      ),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopPhoto",
+          text: "here's what the button could look like",
+          files: [{ id: "F1", name: "mockup.png", mimetype: "image/png", size: 8 }],
+        }),
+    );
+
+    // Downloaded with the bot token, like every other Slack file read.
+    expect(fetched).toEqual([
+      { url: fileUrl("mockup.png"), auth: "Bearer xoxb-test" },
+    ]);
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0].body).toBe("here's what the button could look like");
+    const attachments = await attachmentsOf(t, replies[0]._id);
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({
+      uploaderId: teacher,
+      fileName: "mockup.png",
+      mimeType: "image/png",
+      sizeBytes: PNG_BYTES.length,
+    });
+    expect(calls.some((c) => c.method === "reactions.add")).toBe(true);
+    // Everything went, so nothing more is said.
+    expect(calls.some((c) => c.method === "chat.postMessage")).toBe(false);
+  });
+
+  test("a photo with no words is still sent", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(suggestionId, calls, { [fileUrl("idea.png")]: pngResponse }, []),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopPhotoOnly",
+          text: "",
+          files: [{ id: "F1", name: "idea.png", mimetype: "image/png", size: 8 }],
+        }),
+    );
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies.map((m) => m.body)).toEqual([""]);
+    expect(await attachmentsOf(t, replies[0]._id)).toHaveLength(1);
+    expect(calls.some((c) => c.method === "reactions.add")).toBe(true);
+  });
+
+  test("a file the app can't carry is named in the thread, never silently dropped", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    const fetched: Array<{ url: string; auth: string | null }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(suggestionId, calls, {}, fetched),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopVideoOnly",
+          text: "",
+          files: [{ id: "F1", name: "demo.mov", mimetype: "video/quicktime", size: 8 }],
+        }),
+    );
+
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+    // Refused before download, so nothing was fetched or stored.
+    expect(fetched).toEqual([]);
+    expect(
+      await t.run((ctx) => ctx.db.system.query("_storage").collect()),
+    ).toEqual([]);
+    const notice = calls.find((c) => c.method === "chat.postMessage");
+    expect(notice?.body.text).toContain("I didn't send that to the scholar");
+    expect(notice?.body.text).toContain("`demo.mov`");
+    expect(calls.some((c) => c.method === "reactions.add")).toBe(false);
+  });
+
+  test("words still go when Slack withholds the file, and the thread says which", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    // What Slack serves for a file the token may not read: its sign-in page.
+    const signInPage = () =>
+      new Response("<!DOCTYPE html><html></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+
+    await runWithSlack(
+      stubSlackWithFiles(suggestionId, calls, { [fileUrl("sketch.png")]: signInPage }, []),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopWithheld",
+          text: "great idea!",
+          files: [{ id: "F1", name: "sketch.png", mimetype: "image/png", size: 8 }],
+        }),
+    );
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies.map((m) => m.body)).toEqual(["great idea!"]);
+    expect(await attachmentsOf(t, replies[0]._id)).toEqual([]);
+    expect(calls.some((c) => c.method === "reactions.add")).toBe(true);
+    const notice = calls.find((c) => c.method === "chat.postMessage");
+    expect(notice?.body.text).toBe(
+      "⚠️ Your reply reached the scholar without `sketch.png` (Slack wouldn't let me download it).",
+    );
+  });
+
+  test("a non-teacher's files are never downloaded", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    // Linked to Slack, but not a teacher: the reply is refused.
+    await t.run((ctx) =>
+      ctx.db.insert("users", {
+        name: "Hoku Makani",
+        username: "hokuWT",
+        role: "parent",
+        slackUserId: "U_HOKU",
+      }),
+    );
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    const fetched: Array<{ url: string; auth: string | null }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(suggestionId, calls, { [fileUrl("x.png")]: pngResponse }, fetched),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopForbiddenFile",
+          user: "U_HOKU",
+          text: "",
+          files: [{ id: "F1", name: "x.png", mimetype: "image/png", size: 8 }],
+        }),
+    );
+
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+    expect(fetched).toEqual([]);
+    const notice = calls.find((c) => c.method === "chat.postMessage");
+    expect(notice?.body.text).toContain("needs a teacher or admin account");
+  });
+
+  test("a teacher's reply that isn't recorded leaves no stored file behind", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    // A teacher at another school: past the role check, refused by the lens.
+    await t.run(async (ctx) => {
+      const elsewhere = await ctx.db.insert("institutions", {
+        name: "Kai School",
+        slug: "kai-workshop-thread",
+        kind: "school",
+      });
+      const outsider = await ctx.db.insert("users", {
+        name: "Sloane Kahale",
+        username: "sloaneWT",
+        role: "teacher",
+        slackUserId: "U_SLOANE",
+      });
+      await ctx.db.insert("memberships", {
+        userId: outsider,
+        role: "teacher",
+        institutionId: elsewhere,
+      });
+    });
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    const fetched: Array<{ url: string; auth: string | null }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(suggestionId, calls, { [fileUrl("x.png")]: pngResponse }, fetched),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopOutOfLensFile",
+          user: "U_SLOANE",
+          text: "peeking",
+          files: [{ id: "F1", name: "x.png", mimetype: "image/png", size: 8 }],
+        }),
+    );
+
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+    // Downloaded and stored before the refusal, then deleted.
+    expect(fetched).toHaveLength(1);
+    expect(
+      await t.run((ctx) => ctx.db.system.query("_storage").collect()),
+    ).toEqual([]);
+    const notice = calls.find((c) => c.method === "chat.postMessage");
+    expect(notice?.body.text).toContain("couldn't match that reply");
+  });
+
+  test("a file the event names without a link is taken from the thread read", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(
+        suggestionId,
+        calls,
+        { [fileUrl("later.png")]: pngResponse },
+        [],
+        {
+          ts: "900.444",
+          user: "U_ANDY",
+          files: [
+            {
+              id: "F7",
+              name: "later.png",
+              mimetype: "image/png",
+              size: 8,
+              url_private_download: fileUrl("later.png"),
+            },
+          ],
+        },
+      ),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopStubFile",
+          text: "",
+          files: [{ id: "F7" }],
+          stubFiles: true,
+        }),
+    );
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies).toHaveLength(1);
+    const attachments = await attachmentsOf(t, replies[0]._id);
+    expect(attachments.map((a) => a.fileName)).toEqual(["later.png"]);
+  });
+
+  test("a forward's content is named in the thread, never passed on", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    const fetched: Array<{ url: string; auth: string | null }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(suggestionId, calls, { [fileUrl("staff.png")]: pngResponse }, fetched),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopForward",
+          text: "see below",
+          files: [],
+          attachments: [
+            {
+              is_share: true,
+              text: "a staff-room conversation",
+              files: [
+                {
+                  id: "F8",
+                  name: "staff.png",
+                  mimetype: "image/png",
+                  size: 8,
+                  url_private_download: fileUrl("staff.png"),
+                  file_access: "visible",
+                },
+              ],
+            },
+          ],
+        }),
+    );
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies.map((m) => m.body)).toEqual(["see below"]);
+    expect(await attachmentsOf(t, replies[0]._id)).toEqual([]);
+    expect(fetched).toEqual([]);
+    expect(calls.some((c) => c.method === "reactions.add")).toBe(true);
+    const notice = calls.find((c) => c.method === "chat.postMessage");
+    expect(notice?.body.text).toContain("without the forwarded message");
+  });
+
+  test("words, a good photo and an unsupported file: the photo goes, the thread names the rest", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+
+    await runWithSlack(
+      stubSlackWithFiles(suggestionId, calls, { [fileUrl("good.png")]: pngResponse }, []),
+      () =>
+        replyWithFiles(t, {
+          eventId: "EvWorkshopMixed",
+          text: "two things",
+          files: [
+            { id: "F1", name: "good.png", mimetype: "image/png", size: 8 },
+            { id: "F2", name: "demo.mov", mimetype: "video/quicktime", size: 8 },
+          ],
+        }),
+    );
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies.map((m) => m.body)).toEqual(["two things"]);
+    expect((await attachmentsOf(t, replies[0]._id)).map((a) => a.fileName)).toEqual([
+      "good.png",
+    ]);
+    expect(calls.some((c) => c.method === "reactions.add")).toBe(true);
+    const notices = calls.filter((c) => c.method === "chat.postMessage");
+    expect(notices).toHaveLength(1);
+    expect(notices[0].body.text).toContain("without `demo.mov`");
+  });
+
+  test("a file that fails to store costs that file, not the reply's words", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    // The first read of the downloaded bytes fails (a runtime hiccup).
+    const read = vi
+      .spyOn(Blob.prototype, "arrayBuffer")
+      .mockRejectedValueOnce(new Error("read failed"));
+
+    try {
+      await runWithSlack(
+        stubSlackWithFiles(suggestionId, calls, { [fileUrl("flaky.png")]: pngResponse }, []),
+        () =>
+          replyWithFiles(t, {
+            eventId: "EvWorkshopStoreFails",
+            text: "still here",
+            files: [{ id: "F1", name: "flaky.png", mimetype: "image/png", size: 8 }],
+          }),
+      );
+    } finally {
+      read.mockRestore();
+    }
+
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies.map((m) => m.body)).toEqual(["still here"]);
+    expect(await attachmentsOf(t, replies[0]._id)).toEqual([]);
+    const notice = calls.find((c) => c.method === "chat.postMessage");
+    expect(notice?.body.text).toBe(
+      "⚠️ Your reply reached the scholar without `flaky.png` (something went wrong saving it).",
+    );
   });
 });
 

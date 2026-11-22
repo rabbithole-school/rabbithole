@@ -17,6 +17,7 @@
  * (angles disabled / no submissions yet), so they don't add noise on
  * activities that aren't being worked on yet.
  */
+import { WritingWithItalics } from "@/components/WritingWithItalics";
 import Link from "next/link";
 import { useQuery } from "convex/react";
 import { Box, HStack, IconButton, Stack, Text } from "@chakra-ui/react";
@@ -202,7 +203,7 @@ export function DeliverableCollationPanel({
                         WebkitBoxOrient: "vertical",
                       }}
                     >
-                      {r.textContent.slice(0, 240)}
+                      <WritingWithItalics content={r.textContent} maxChars={240} />
                     </Text>
                   ) : r.contentKind === "portfolio" ? (
                     <Text fontSize="xs" color="charcoal.400" fontStyle="italic">

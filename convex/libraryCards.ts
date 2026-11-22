@@ -80,11 +80,17 @@ function requireExpectedRevision(
 
 export const getStatus = authedQuery({
   args: { scholarId: v.id("users") },
-  handler: async (ctx, args) => {
-    const scholar = await requireGuardianScholar(ctx, args.scholarId);
-    return statusForScholar(scholar);
-  },
+  handler: async (ctx, args) => libraryCardStatusFor(ctx, args.scholarId),
 });
+
+/** `getStatus`'s body, shared with `parents.recordsTab`: the masked status only. */
+export async function libraryCardStatusFor(
+  ctx: QueryCtx,
+  scholarId: Doc<"users">["_id"],
+): Promise<LibraryCardStatus> {
+  const scholar = await requireGuardianScholar(ctx, scholarId);
+  return statusForScholar(scholar);
+}
 
 export const replace = authedMutation({
   args: {

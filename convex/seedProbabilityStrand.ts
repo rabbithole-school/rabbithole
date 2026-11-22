@@ -79,7 +79,7 @@ export const PROBABILITY_STRAND: UnitDef[] = [
     title: "Chance & Likelihood",
     slug: "probability-chance-and-likelihood",
     emoji: "🎲",
-    gradeLevel: "Grade 5 enrichment",
+    gradeLevel: "5",
     targetBloomLevel: "understand",
     bigIdea:
       "Before anything happens, we can still reason precisely about chance — by placing an event on a 0-to-1 likelihood scale and by naming every possible outcome first.",
@@ -159,7 +159,7 @@ export const PROBABILITY_STRAND: UnitDef[] = [
     title: "Counting the Odds",
     slug: "probability-counting-the-odds",
     emoji: "🎯",
-    gradeLevel: "Grade 5 enrichment",
+    gradeLevel: "5",
     targetBloomLevel: "apply",
     bigIdea:
       "When outcomes are equally likely, probability is a fraction — favorable outcomes over total — that you can simplify, compare, and flip with its complement.",
@@ -263,7 +263,7 @@ export const PROBABILITY_STRAND: UnitDef[] = [
     title: "Rolling the Truth",
     slug: "probability-rolling-the-truth",
     emoji: "🎲",
-    gradeLevel: "Grade 5 enrichment",
+    gradeLevel: "5",
     targetBloomLevel: "analyze",
     bigIdea:
       "Real trials wobble around the theoretical answer — the more you roll, the closer you get — and two dice reveal why some totals are far more likely than others.",

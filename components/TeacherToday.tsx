@@ -25,6 +25,7 @@ import { api } from "@/convex/_generated/api";
 import { isWithinPrepWindow } from "@/convex/lib/metaBlocks";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { useNow } from "@/hooks/useNow";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { withInstitutionScope } from "@/lib/institutionLinks";
 import { formatTimeAgo } from "@/lib/relativeTime";
 import { teacherChatHref } from "@/lib/teacherChat";
@@ -55,11 +56,18 @@ export function TeacherToday() {
   const { scopeParam } = useActiveInstitution();
   // Minute-rounded clock — the reactive dependency that re-runs the query
   // across an institution-local midnight so time-derived lanes can't go stale.
-  const nowMs = useNow(60_000);
-  const today = useQuery(api.teacherToday.todayForTeacher, {
-    institutionScope: scopeParam,
-    now: nowMs,
-  });
+  // Rounded here because `useNow` also ticks on every window focus and
+  // visibility change, and each raw value would re-arm the subscription.
+  const nowMs = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  // Smoothed so the re-arm keeps the page mounted (a bare useQuery drops to
+  // undefined and the whole page flashes to the spinner, losing scroll and
+  // focus — TRA-424). Keyed on the lens: switching school loads fresh rather
+  // than showing the previous school's day.
+  const today = useSmoothedQuery(
+    api.teacherToday.todayForTeacher,
+    { institutionScope: scopeParam, now: nowMs },
+    { resetKey: scopeParam },
+  );
 
   if (today === undefined) {
     return (

@@ -2,21 +2,24 @@
 
 import { useState } from "react";
 import { IconButton } from "@chakra-ui/react";
-import { Archive, ArrowCounterClockwise } from "@phosphor-icons/react";
+import { ArrowCounterClockwise } from "@phosphor-icons/react";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
 import { serverRefusal } from "@/lib/serverErrorMessage";
 import { HOME_ARCHIVE_COPY } from "@/shared/homeArchive";
+import { DismissButton } from "@/components/ui/DismissButton";
 
 /**
  * The scholar Home's ONE archive control for a session-backed item: the plate
- * rows, the Now tab's homework rows, and the Archived list's own rows
- * (review/home-finished-filter.html). Web's equivalent of the iPad's long
- * press. Quiet until its card is hovered — the card (ActivityCard,
- * UnitGroupRow, or a row that sets `role="group"`) supplies the group — and
- * always shown on touch and to keyboard focus.
+ * rows and the Archived list's own rows (review/home-finished-filter.html).
+ *
+ * Archiving draws the same quiet × the wonder rows dismiss with
+ * (components/ui/DismissButton), always visible, after the row's verb. The
+ * iPad's Home rows carry the same ×. Unarchiving is a restore, so it keeps
+ * its own small icon, quiet until its card is hovered (the card supplies the
+ * group) and always shown on touch and to keyboard focus.
  *
  * Callers must not render it for a teacher-archived session: only a teacher
  * restores that (shared/teacherArchive.ts), and the server refuses anyway.
@@ -24,10 +27,13 @@ import { HOME_ARCHIVE_COPY } from "@/shared/homeArchive";
 export function HomeArchiveButton({
   sessionId,
   archived,
+  title,
 }: {
   sessionId: Id<"sessions">;
   /** True when the session is already archived: the control unarchives. */
   archived: boolean;
+  /** The row's title, for the accessible name ("Archive <title>"). */
+  title: string;
 }) {
   const archive = useMutation(api.sessions.archive);
   const unarchive = useMutation(api.sessions.unarchive);
@@ -36,9 +42,7 @@ export function HomeArchiveButton({
     ? HOME_ARCHIVE_COPY.unarchiveAction
     : HOME_ARCHIVE_COPY.archiveAction;
 
-  const handleClick = async (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const run = async () => {
     if (pending) return;
     setPending(true);
     try {
@@ -59,6 +63,17 @@ export function HomeArchiveButton({
     }
   };
 
+  if (!archived) {
+    return (
+      <DismissButton
+        action={HOME_ARCHIVE_COPY.archiveAction}
+        label={title}
+        disabled={pending}
+        onPress={() => void run()}
+      />
+    );
+  }
+
   return (
     <IconButton
       aria-label={label}
@@ -73,9 +88,13 @@ export function HomeArchiveButton({
       css={{ "@media (pointer: coarse)": { opacity: 1 } }}
       transition="opacity .15s"
       disabled={pending}
-      onClick={handleClick}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void run();
+      }}
     >
-      {archived ? <ArrowCounterClockwise size={14} /> : <Archive size={14} />}
+      <ArrowCounterClockwise size={14} />
     </IconButton>
   );
 }

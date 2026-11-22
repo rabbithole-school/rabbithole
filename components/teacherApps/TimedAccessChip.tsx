@@ -38,6 +38,11 @@ export function TimedAccessChip({
       fontSize="xs"
       fontWeight="600"
       whiteSpace="nowrap"
+      // A long audience ("All scholars at <school>") must not run past the
+      // reach column into the row's fixed action slots: cap at the column
+      // and ellipsize the label; the title keeps the whole line.
+      maxW="full"
+      minW={0}
       borderRadius="full"
       px={2.5}
       py={0.5}
@@ -50,7 +55,7 @@ export function TimedAccessChip({
         outlineColor: "violet.400",
         outlineOffset: "2px",
       }}
-      title={`${fullWindow(w)} · ${w.audience} · ${SOURCE_LINE[w.source]}`}
+      title={`${label}\n${fullWindow(w)} · ${w.audience} · ${SOURCE_LINE[w.source]}`}
       onClick={(e) => {
         e.stopPropagation();
         onClick?.();
@@ -66,7 +71,9 @@ export function TimedAccessChip({
           aria-hidden
         />
       )}
-      {label}
+      <chakra.span minW={0} overflow="hidden" textOverflow="ellipsis">
+        {label}
+      </chakra.span>
     </chakra.button>
   );
 }

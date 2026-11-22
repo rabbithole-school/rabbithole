@@ -1,6 +1,8 @@
 import { v } from "convex/values";
+import { sessionActivityDone } from "./lib/freePlay";
 import { momentAnswerContextForSeed, type MomentAnswerContext } from "./lib/moments/momentAnswerContext";
 import type { ActivityKind } from "../lib/activityKinds";
+import { withoutAppStateDefaults } from "../shared/appStateDefaults";
 import { internalQuery, internalMutation } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -11,15 +13,34 @@ import {
   type AppStateSnapshot,
 } from "./appStates";
 import { MAGIC_REDRAW_TOOL_ACTION } from "./lib/magicAnnotations";
+import { readSchedule } from "./lib/scheduleStore";
 import { renderCriteriaForRubricCheck } from "./lib/deliverable";
 import { writingMechanicsPolicy } from "./lib/writingMechanicsPolicy";
 import { firstIncompleteLaunchableActivityInUnit } from "./lib/scholarReads";
-import { resolveSessionMission, type SessionMission } from "./lib/mission";
+import {
+  mayCreateAppInSession,
+  resolveSessionMission,
+  type SessionMission,
+} from "./lib/mission";
+import {
+  PYTHON_BENCH_FIXED_APP,
+  mayOpenPythonBench,
+  pythonBenchSessionKind,
+  type PythonBenchContext,
+} from "./lib/pythonBench";
+import { hasDefaultTileTitle, isTileSession } from "./lib/tileSessions";
+import {
+  mayOfferQuestProposal,
+  questProposalCardMarker,
+  questProposalCardValidator,
+  type QuestProposalCard,
+} from "./lib/questProposalCard";
 import {
   lockedQuestBuildTitleFor,
   openQuestBuildTitleFor,
   scholarBuildKickoffFor,
 } from "./lib/questBuildLock";
+import { sessionAnchorsAgree } from "./lib/questStructure";
 import {
   deriveGranuleStatuses,
   normalizeGranules,
@@ -27,6 +48,7 @@ import {
 } from "./lib/granules";
 import type { Granule, GranuleKind, GranuleStatus } from "./lib/granules";
 import {
+  answerFirstWordBudget,
   buildBasePrompt,
   buildClockLine,
   buildSoulSection,
@@ -35,10 +57,12 @@ import {
   buildWhisperSection,
   buildToolsSection,
   buildSideAppSection,
+  buildPythonBenchSection,
   buildOpenExplorationWrapUpSection,
   buildVibecodeSection,
   buildTutorMissionSteering,
   buildParkingLotSection,
+  buildProvocationSection,
   buildFreePlayOpenerSection,
   buildWorkbenchSection,
   buildNonHumanIntroSection,
@@ -53,7 +77,11 @@ import {
   FIRST_DOCUMENT_TUTOR_SECTION,
   type TutorPromptSectionKey,
 } from "./prompts";
-import type { DocumentNote, PhysicalEnvironmentContext } from "./prompts";
+import type {
+  DocumentNote,
+  PhysicalEnvironmentContext,
+  TutorStance,
+} from "./prompts";
 import type { Interest } from "./lib/interests";
 import { isInstitutionInSchoolDay } from "./lib/schoolDay";
 import { effectiveInstitutionTimeZone } from "./lib/institutionTime";
@@ -106,6 +134,7 @@ import {
   mondayDayKeyForTimezone,
 } from "../shared/institutionDay";
 import { readInventoryTeams } from "./graphemeInventory";
+import { liveSeedsForScholar } from "./lib/seeds";
 import {
   resolveContextIdentity,
   resolveSessionHistory,
@@ -140,14 +169,23 @@ import {
 } from "./lib/practice/chatInstruction";
 import { isTextArtifact } from "../shared/textArtifacts";
 import { CODE_EDITOR_TOOL_NAME, codeArtifactPath } from "./lib/tutorCodeEditor";
-import { validateDeckLenient, summarizeDeckForModel } from "../shared/slidesScene";
+import { validateDeckLenient, summarizeDeckForModel, MAX_TEXT_LENGTH, SLIDES_COPY } from "../shared/slidesScene";
 import { resolveReachableActivityResources } from "./lib/activityResourceReachability";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
+import {
+  appendWhisper,
+  MAX_WAITING_WHISPER_CHARS,
+  MAX_WHISPER_CHARS,
+  slackWhisperRefusal,
+  whisperLeftAfterTurn,
+} from "./lib/teacherWhisper";
+import { deliverReadReceipts } from "./whisperReceipts";
 import {
   AUTOMATED_COMPLETION_CLOSING_GUIDANCE,
   SCHOLAR_OWNED_COMPLETION_CLOSING_GUIDANCE,
   TIME_LIMIT_WRAP_GUIDANCE,
 } from "./lib/tutorClosingGuidance";
+import { rehearsalBuildRequest } from "./lib/appActivity";
 
 /**
  * Lightweight owner lookup for the HTTP-endpoint auth gates
@@ -307,15 +345,21 @@ export async function resolveActivityScopedContext(
     }
   }
 
-  // Unit-level planning chat in the scholar's own IS unit: show the tutor
-  // what's already built so it hands off instead of re-planning (TRA-464).
-  if (unit && unitContext?.isOwnIsUnit && !activity && args.session) {
-    unitContext.isPlanningChat = true;
+  // Every session of the scholar's own Quest shows the tutor what the unit
+  // holds right now: its parts, which the tutor names and never re-plans
+  // (since TRA-682 it can no longer add lessons or activities).
+  if (unit && unitContext?.isOwnIsUnit && args.session) {
     unitContext.ownIsUnitOutline = await loadOwnIsUnitOutline(
       ctx,
       unit._id,
       args.session.userId,
     );
+  }
+
+  // Unit-level planning chat in the scholar's own IS unit: show the tutor
+  // what's already built so it hands off instead of re-planning (TRA-464).
+  if (unit && unitContext?.isOwnIsUnit && !activity && args.session) {
+    unitContext.isPlanningChat = true;
     unitContext.ownIsUnitBuiltInChat = !!args.session.unitBuiltInChatAt;
     unitContext.ownIsUnitNextActivityTitle =
       (
@@ -388,17 +432,19 @@ export async function resolveActivityScopedContext(
         processEmoji: activityProcess?.emoji ?? null,
         recipe: activity.recipe ?? null,
         starterAppId: activity.starterAppId ?? null,
-        appRequest: activity.appRequest ?? null,
+        // A teacher's rehearsal that is building a play-only app works from
+        // its brief (lib/appActivity.ts rehearsalBuildRequest).
+        appRequest:
+          args.session?.isTestDrive === true
+            ? await rehearsalBuildRequest(ctx, activity, args.session)
+            : (activity.appRequest ?? null),
         // A free-play session (TRA-489) runs with NO model contract: no
         // steering, no gate, no parking. The designer tools follow suit,
         // since the stream gates them on this same field.
         ...(isAppActivity(activity) &&
         activity.buildContract &&
         args.session?.freePlay !== true
-          ? {
-              buildContract: activity.buildContract,
-              allowSilence: activity.allowSilence === true,
-            }
+          ? { buildContract: activity.buildContract }
           : {}),
         problemSet,
       }
@@ -772,6 +818,15 @@ async function loadAppAiContext(
  * Get all context needed to call Claude for a project.
  * Called by the HTTP action before streaming.
  */
+/** The unit an activity belongs to, through its lesson; null without one. */
+async function unitOfActivity(
+  ctx: QueryCtx,
+  activity: Doc<"activities"> | null,
+): Promise<Doc<"units"> | null> {
+  const lesson = activity?.lessonId ? await ctx.db.get(activity.lessonId) : null;
+  return lesson?.unitId ? await ctx.db.get(lesson.unitId) : null;
+}
+
 export const getSessionContext = internalQuery({
   args: {
     sessionId: v.id("sessions"),
@@ -811,8 +866,16 @@ export const getSessionContext = internalQuery({
       )
       // Tool rows are normally NOT model-visible (whispers are injected
       // separately via pendingWhisper; other tool actions are UI-only). Generated
-      // images and compact authored-instruction markers are the two exceptions.
-      .filter((m) => m.role !== "tool" || !!m.imageId || !!m.instruction)
+      // images, compact authored-instruction markers and the proposal card's
+      // marker (TRA-690: so the tutor knows a card is already in the chat) are
+      // the exceptions.
+      .filter(
+        (m) =>
+          m.role !== "tool" ||
+          !!m.imageId ||
+          !!m.instruction ||
+          !!m.questProposalCard,
+      )
       // Drop content-empty rows that carry no image. These are streaming
       // placeholders: the in-flight assistant row for the current turn, plus
       // any ORPHANED placeholders left behind when a stream was interrupted
@@ -834,6 +897,7 @@ export const getSessionContext = internalQuery({
           m.content.trim() !== "" ||
           (m.role === "assistant" && m.stopRequestedAt !== undefined) ||
           !!m.instruction ||
+          !!m.questProposalCard ||
           isInstructionCompletionAction(m.toolAction) ||
           (!!m.imageId && (m.role === "user" || m.role === "tool")),
       );
@@ -853,6 +917,8 @@ export const getSessionContext = internalQuery({
         ) as "user" | "assistant",
         content: m.instruction
           ? instructionServedMarker(m.instruction.title)
+          : m.questProposalCard
+            ? questProposalCardMarker(m.questProposalCard)
           : isInstructionCompletionAction(m.toolAction)
             ? instructionCompletedMarker(
                 instructionTitleByMessageId.get(
@@ -868,6 +934,13 @@ export const getSessionContext = internalQuery({
                 )
               : m.content,
         imageId: m.imageId ?? null,
+        // The app-usable copy of a scholar photo (prepareSessionPhotoAssets);
+        // null until prepared, so the builder is never handed the raw upload.
+        // A photo no copy can be made from carries no value at all, so the
+        // stream handler does not retry it every turn.
+        ...(m.role === "user" && m.imageId && !m.appAssetUnavailable
+          ? { appAssetId: m.appAssetId ?? null }
+          : {}),
         generatedImage: m.role === "tool" && !!m.imageId,
         // A Magic Corners redraw is not the tutor's own illustration; the
         // tutor must be told so, or it confabulates when a scholar asks.
@@ -1414,24 +1487,16 @@ export const getSessionContext = internalQuery({
     }
 
     // Get active + pending seeds for this scholar (never dismissed). Skipped
-    // in synthetic mode.
-    const activeSeeds = isSyntheticView
+    // in synthetic mode. Read through liveSeedsForScholar, the one bounded,
+    // newest-first definition of a scholar's live seeds (the same read the seed
+    // list and the sky use), so the tutor never sees fewer than people do.
+    const liveSeeds = isSyntheticView
       ? []
-      : await ctx.db
-          .query("seeds")
-          .withIndex("by_scholar_status", (q) =>
-            q.eq("scholarId", contextUserId).eq("status", "active")
-          )
-          .collect();
-    const pendingSeeds = isSyntheticView
-      ? []
-      : await ctx.db
-          .query("seeds")
-          .withIndex("by_scholar_status", (q) =>
-            q.eq("scholarId", contextUserId).eq("status", "pending")
-          )
-          .collect();
-    // Active (teacher-approved) first, then pending (unreviewed). Exclude the
+      : await liveSeedsForScholar(ctx, contextUserId);
+    const activeSeeds = liveSeeds.filter((s) => s.status === "active");
+    const pendingSeeds = liveSeeds.filter((s) => s.status === "pending");
+    // Active first, then pending (unreviewed); only origin-teacher active seeds
+    // are labelled teacher-approved (mergeSeeds). Exclude the
     // session's own originating seed (when seed-spawned) — its topic is
     // surfaced separately as seedOriginContext below, so it shouldn't also
     // appear as a "suggestion" to explore. (DEC 3: the originating seed is no
@@ -1454,9 +1519,13 @@ export const getSessionContext = internalQuery({
     // telling the scholar it "can't see any materials".
     let seedOriginContext: SeedOriginContext | null = null;
     let storyThreadContext: StoryThreadContext | null = null;
+    // For the observer's origin line (lib/observerOrigin): a "wonder" seed is
+    // the scholar's own question, not a star they picked.
+    let seedForOrigin: { origin: Doc<"seeds">["origin"] } | null = null;
     if (session.seedId) {
       const originSeed = await ctx.db.get(session.seedId);
       if (originSeed) {
+        seedForOrigin = { origin: originSeed.origin };
         const storyFromKey = originSeed.storyFromKey;
         const storyToKey = originSeed.storyToKey;
         if (
@@ -1546,7 +1615,10 @@ export const getSessionContext = internalQuery({
     // Pick the soonest-ending active classFocus push targeting this project's
     // activity; fall back to the unit's soft duration; else no timing window.
     const timingContext = resolveTimingContext({
-      activitySchedule: assignment?.activitySchedule,
+      // Undefined when no assignment.
+      schedule: assignment
+        ? await readSchedule(ctx, assignment)
+        : undefined,
       sessionActivityId: session.activityId,
       sessionStartedAt: session._creationTime,
       unitDurationMinutes: unit?.durationMinutes,
@@ -1594,6 +1666,7 @@ export const getSessionContext = internalQuery({
           type: a.type,
           revision: a.revision ?? 0,
           ...(a._id === openAppId ? { openInBuilder: true as const } : {}),
+          ...(a.fixedApp ? { fixedApp: a.fixedApp } : {}),
         }))
       : null;
     // TRA-519: how this session relates to its app. Builder FEATURES follow
@@ -1602,7 +1675,11 @@ export const getSessionContext = internalQuery({
     const appContext = sessionAppContextFor({
       sessionMode: session.sessionMode ?? null,
       role: appRoleFor(activity),
-      hasApp: allArtifacts.some((a) => a.type === "code"),
+      // A fixed app (the Python bench, lib/pythonBench.ts) is not one the
+      // tutor builds or changes, so it brings no builder features: no app-
+      // building rules, no SIDE APP "build or fix it" steer. Its own PYTHON
+      // BENCH section speaks for it, and LIVE APP STATE still renders.
+      hasApp: allArtifacts.some((a) => a.type === "code" && !a.fixedApp),
     });
     const latestAppState = await readLatestSessionState(
       ctx,
@@ -1735,14 +1812,14 @@ export const getSessionContext = internalQuery({
     // guest / institution-less scholar, so the rendered prompt is byte-identical.
     const institutionProfile = institutionPromptProfile(institution);
 
-    // The scholar's own work from earlier sessions in this unit, for any
-    // session with an app (builder features) — without it the builder starts
-    // cold and re-asks what the scholar already wrote. Real scholar sessions
-    // only: a rehearsal has no prior work of its own. See convex/lib/priorUnitWork.ts.
+    // The scholar's own work from earlier sessions in this unit, for any unit
+    // activity — without it the tutor starts cold, re-asks what the scholar
+    // already wrote, and can't see that an activity's earlier notes are thin.
+    // Real scholar sessions only: a rehearsal has no prior work of its own.
+    // See convex/lib/priorUnitWork.ts.
     const priorUnitWork =
       unit &&
       session.activityId &&
-      appContext.builderFeatures &&
       !session.isTestDrive &&
       !isSyntheticView
         ? buildPriorUnitWorkSection(
@@ -1762,10 +1839,16 @@ export const getSessionContext = internalQuery({
       // buildSystemPromptParts renders it only where those tools are offered
       // (a session with a mission, or free play's opener).
       parkingLot: session.parkingLot ?? [],
+      // The builder's open question for the scholar (set_provocation), so the
+      // builder sees the question it set. Session-local, like the lot.
+      provocation: session.provocation ?? null,
       // The session's MISSION (lib/mission.ts); null for exploration.
       mission,
       scholarBuildKickoff,
       freePlay: appContext.builderStance && session.freePlay === true,
+      // A finished activity: the builder's MUST BE TRUE items become rules
+      // the scholar may change, and nothing in the parking lot waits.
+      activityComplete: await sessionActivityDone(ctx, session),
       isTestDrive: !!session.isTestDrive,
       sessionMode: session.sessionMode ?? null,
       appContext,
@@ -1783,7 +1866,6 @@ export const getSessionContext = internalQuery({
       // so it stays byte-identical across turns and doesn't bust the prompt
       // cache. Same source as timingContext.sessionStartedAt above.
       sessionCreatedAt: session._creationTime,
-      teacherWhisper: session.teacherWhisper ?? null,
       pendingWhisper: session.pendingWhisper ?? null,
       readingLevel,
       readLevel: levels.read,
@@ -1871,9 +1953,57 @@ export const getSessionContext = internalQuery({
       unitForOrigin: unit
         ? { authorScholarId: unit.authorScholarId ?? null }
         : null,
+      seedForOrigin,
       assignmentId: session.assignmentId ?? null,
       seedId: session.seedId ?? null,
       activityId: session.activityId ?? null,
+      // The Python bench (lib/pythonBench.ts): whether open_python_bench is
+      // offered (any chat session, Quests and open chats included; NOT gated
+      // by SCHOLAR_LED_APP_BUILDING, since the bench is a fixed app, not a new
+      // one), whether it is already this session's app, and which kind of
+      // chat it is in (the steer-back differs).
+      pythonBench: {
+        offered: mayOpenPythonBench({
+          sessionMode: session.sessionMode ?? null,
+          builderPrimary: appContext.builderPrimary,
+          freePlay: session.freePlay === true,
+          activity,
+        }),
+        open: allArtifacts.some((a) => a.fixedApp === PYTHON_BENCH_FIXED_APP),
+        // An app other than the bench (appContext.hasApp leaves the bench
+        // out): the tool would refuse, and the prompt says why up front.
+        otherApp: appContext.hasApp,
+        kind: pythonBenchSessionKind({
+          activity,
+          unit: unit ?? (await unitOfActivity(ctx, activity)),
+        }),
+        ...(isTileSession(session) ? { keepInPlay: true } : {}),
+      },
+      // Whether create_code is offered (lib/mission.ts mayCreateAppInSession):
+      // new apps come from a teacher's activity, not a Quest or an open chat.
+      appCreationAllowed: mayCreateAppInSession({
+        isTestDrive: session.isTestDrive,
+        builderPrimary: appContext.builderPrimary,
+        activity,
+        // A session row may carry an activity without its unit id; the
+        // activity's own unit decides (a Quest step must not read as a
+        // teacher's activity).
+        unit: unit ?? (await unitOfActivity(ctx, activity)),
+        anchorsAgree: await sessionAnchorsAgree(ctx, session, activity),
+        sessionUserId: session.userId,
+      }),
+      // The proposal card (lib/questProposalCard.ts, TRA-690): a scholar's own
+      // chat with no activity. The stream also needs the client's
+      // supportsQuestProposalCard and the owner at the keyboard.
+      questProposalOffered: mayOfferQuestProposal({
+        sessionMode: session.sessionMode ?? null,
+        builderPrimary: appContext.builderPrimary,
+        freePlay: session.freePlay === true,
+        isTestDrive: session.isTestDrive,
+        activity,
+        unit: unit ?? (await unitOfActivity(ctx, activity)),
+        sessionUserId: session.userId,
+      }),
       // Mirrors when the scholar's session screen renders the "Wrap up" button
       // (components/SessionInterface.tsx and native session/[id].tsx): an open
       // exploration with no activity, in the plain chat (workbench/vibecode
@@ -2002,6 +2132,48 @@ export const discardEmptyTurnPlaceholder = internalMutation({
 });
 
 /**
+ * Record why /session-stream turned a turn away before the tutor started
+ * (TRA-472; lib/streamRefusal.ts). The request must name the turn's streamId,
+ * which only someone who can read this session's messages knows, so it cannot
+ * reach any other session's rows. A placeholder the turn already filled,
+ * finalized or discarded is left alone. Touches nothing else, so a later retry
+ * or the orphan reap sees the row exactly as before. The stamp is not cleared
+ * when a retry later succeeds: count refusals that stranded a turn as stamped
+ * placeholders that are still empty.
+ */
+export const recordStreamRefusal = internalMutation({
+  args: {
+    sessionId: v.string(),
+    assistantMsgId: v.string(),
+    streamId: v.string(),
+    status: v.number(),
+    reason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const messageId = ctx.db.normalizeId("messages", args.assistantMsgId);
+    if (!messageId) return false;
+    const message = await ctx.db.get(messageId);
+    if (
+      !message ||
+      String(message.sessionId) !== args.sessionId ||
+      message.role !== "assistant" ||
+      message.streamId !== args.streamId ||
+      message.content.trim() !== ""
+    ) {
+      return false;
+    }
+    await ctx.db.patch(messageId, {
+      streamRefusal: {
+        status: args.status,
+        reason: args.reason.slice(0, 300),
+        at: Date.now(),
+      },
+    });
+    return true;
+  },
+});
+
+/**
  * Stamp the liveness heartbeat without touching content. Called from the HTTP
  * stream handler at message_start (and on each turn boundary) so a stream that
  * does a long tool call or model thinking-pause BEFORE any text still proves
@@ -2032,9 +2204,8 @@ export const finalizeStream = internalMutation({
     content: v.string(),
     model: v.optional(v.string()),
     tokensUsed: v.optional(v.number()),
-    // A turn that showed the scholar nothing: stay_silent (the app-update
-    // version in lib/staySilentTool.ts or the App designer's in
-    // lib/designerTools.ts), or an app update with no text and no tool row.
+    // A turn that showed the scholar nothing: stay_silent (lib/staySilentTool.ts),
+    // or an app update with no text and no tool row.
     // It leaves no trace: the placeholder goes, and the session's preview,
     // recency, observer and title are not touched — a silent director must
     // not look like a tutor turn on any dashboard.
@@ -2063,18 +2234,36 @@ export const finalizeStream = internalMutation({
       });
     }
 
-    // Denormalize last message info onto the project for efficient dashboard queries
-    await ctx.db.patch(args.sessionId, {
-      lastMessageAt: Date.now(),
-      lastMessageRole: "assistant",
-      lastMessagePreview: args.content.slice(0, 120) || undefined,
-    });
+    // Denormalize last message info onto the project for efficient dashboard
+    // queries — but only from the session's newest message. A stopped reply
+    // reads the rest of its model message out before it finalizes, and a Stop
+    // or a steering send has already let the scholar start the next turn, so
+    // this finalize can land after a newer one. Its row is still finished and
+    // billed above; it just must not put an older preview back on top.
+    const newest = await ctx.db
+      .query("messages")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .order("desc")
+      .first();
+    if (!newest || newest._creationTime <= placeholder._creationTime) {
+      await ctx.db.patch(args.sessionId, {
+        lastMessageAt: Date.now(),
+        lastMessageRole: "assistant",
+        lastMessagePreview: args.content.slice(0, 120) || undefined,
+      });
+    }
 
     // Update project title if first exchange
     const session = await ctx.db.get(args.sessionId);
     let isFirstExchange = false;
     let stopgapTitle: string | null = null;
-    if (session && session.title === "New Project") {
+    // A tile session's default title ("Python bench · Nov 10") is replaced
+    // the same way; a scholar's rename never is (lib/tileSessions.ts).
+    if (
+      session &&
+      (session.title === "New Project" ||
+        (await hasDefaultTileTitle(ctx, session)))
+    ) {
       // Count user messages to see if this is the first exchange
       const messages = await ctx.db
         .query("messages")
@@ -2268,12 +2457,120 @@ export const setGeneratedTitle = internalMutation({
 });
 
 /**
- * Clear pending whisper after it has been injected into the stream.
+ * Clear the whisper a turn just used, leaving anything that arrived mid-turn
+ * (lib/teacherWhisper.ts).
  */
 export const clearPendingWhisper = internalMutation({
-  args: { sessionId: v.id("sessions") },
+  args: {
+    sessionId: v.id("sessions"),
+    consumed: v.string(),
+    // When the turn read the slot, and its first reply message: for a Slack
+    // whisper's delivery receipt (whisperReceipts.ts).
+    readAt: v.optional(v.number()),
+    turnFirstMessageId: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
-    await ctx.db.patch(args.sessionId, { pendingWhisper: undefined });
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) return;
+    const left = whisperLeftAfterTurn(session.pendingWhisper, args.consumed);
+    if (left !== session.pendingWhisper) {
+      await ctx.db.patch(args.sessionId, { pendingWhisper: left });
+    }
+    await deliverReadReceipts(ctx, {
+      sessionId: args.sessionId,
+      consumed: args.consumed,
+      readAt: args.readAt,
+      turnFirstMessageId:
+        (args.turnFirstMessageId &&
+          ctx.db.normalizeId("messages", args.turnFirstMessageId)) ||
+        undefined,
+    });
+  },
+});
+
+/**
+ * Queue a teacher's whisper from Slack (the bot's whisper_to_session tool). It
+ * reaches the session's tutor or app builder with the scholar's next message,
+ * exactly like a whisper typed in remote mode, after any whisper already
+ * waiting. Who may: `slackWhisperRefusal`.
+ */
+export const queueTeacherWhisper = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    sessionId: v.string(),
+    text: v.string(),
+    // Where the teacher asked, so the delivery receipt lands there.
+    slack: v.optional(
+      v.object({
+        channelId: v.string(),
+        threadTs: v.string(),
+        quoteReply: v.boolean(),
+      }),
+    ),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<
+    | {
+        ok: true;
+        scholarName: string;
+        sessionTitle: string;
+        queuedAfterAnother: boolean;
+        lastMessageAt: number | null;
+        receiptQueued: boolean;
+      }
+    | { ok: false; reason: string }
+  > => {
+    const text = args.text.trim();
+    if (!text) return { ok: false, reason: "The whisper is empty." };
+    if (text.length > MAX_WHISPER_CHARS) {
+      return {
+        ok: false,
+        reason: `The whisper is ${text.length} characters; keep it under ${MAX_WHISPER_CHARS}.`,
+      };
+    }
+    const sessionId = ctx.db.normalizeId("sessions", args.sessionId);
+    const session = sessionId ? await ctx.db.get(sessionId) : null;
+    if (!session) return { ok: false, reason: "No session has that id." };
+    const refusal = await slackWhisperRefusal(
+      ctx,
+      await ctx.db.get(args.callerUserId),
+      session,
+    );
+    if (refusal) return { ok: false, reason: refusal };
+    const next = appendWhisper(session.pendingWhisper, text);
+    if (next.length > MAX_WAITING_WHISPER_CHARS) {
+      return {
+        ok: false,
+        reason:
+          "Too many whispers are already waiting on that session; they go with the scholar's next message.",
+      };
+    }
+    const scholar = await ctx.db.get(session.userId);
+    await ctx.db.patch(session._id, { pendingWhisper: next });
+    // The same words already waiting add nothing to the slot, and so no
+    // receipt: the bot must not promise a post for them.
+    const receiptQueued = !!args.slack && next !== session.pendingWhisper;
+    if (args.slack && receiptQueued) {
+      await ctx.db.insert("slackWhisperReceipts", {
+        sessionId: session._id,
+        text,
+        slackChannelId: args.slack.channelId,
+        slackThreadTs: args.slack.threadTs,
+        quoteReply: args.slack.quoteReply,
+        queuedBy: args.callerUserId,
+        queuedAt: Date.now(),
+      });
+    }
+    return {
+      ok: true,
+      scholarName: scholar?.name ?? scholar?.username ?? "the scholar",
+      sessionTitle: session.title,
+      queuedAfterAnother: next !== text,
+      lastMessageAt: session.lastMessageAt ?? null,
+      receiptQueued,
+    };
   },
 });
 
@@ -2292,10 +2589,11 @@ export type UnitContext = {
   isOwnIsUnit?: boolean;
   unitId?: Id<"units">;
   /** The lessons + activities already in the scholar's own Independent Study
-   *  unit, in order, with whether this scholar has completed each. Loaded only
-   *  for the unit-level planning chat (own IS unit, no activity), so the
-   *  planning tutor hands off to built activities instead of re-planning
-   *  (TRA-464). Empty/absent = the unit has no structure yet. */
+   *  unit, in order, with whether this scholar has completed each. Loaded for
+   *  every session of the scholar's own unit (each is offered the co-design
+   *  tools), so the tutor hands off to built activities instead of re-planning
+   *  (TRA-464) and can tell what it already built. Empty/absent = the unit has
+   *  no structure yet. */
   ownIsUnitOutline?: OwnIsUnitOutlineLesson[] | null;
   /** This planning chat's own tutor built (part of) that structure — the
    *  co-design flow is mid-stream, so keep co-designing rather than switching
@@ -2375,6 +2673,9 @@ export type ArtifactData = {
    *  only when the session holds more than one app and the builder named
    *  it, so the AI edits the app on screen rather than the newest. */
   openInBuilder?: true;
+  /** A fixed app no AI may change (the Python bench, lib/pythonBench.ts):
+   *  DOCUMENTS lists it without its code. */
+  fixedApp?: "python-bench";
 };
 
 export type SeedData = {
@@ -2496,6 +2797,14 @@ export type TutorAppSurface = {
   /** Role "side" with an app: the activity's deliverable kind, null for a
    *  discussion (advanceRubric). Null otherwise. */
   sideAppWork: { deliverableKind: string | null } | null;
+  /** create_code is offered (lib/mission.ts mayCreateAppInSession). Absent =
+   *  offered. */
+  canCreateApp?: boolean;
+  /** The Python bench (lib/pythonBench.ts). Absent = not offered. */
+  pythonBench?: PythonBenchContext | null;
+  /** offer_quest_proposal is offered this turn (lib/questProposalCard.ts,
+   *  TRA-690). Absent = not offered. */
+  questProposal?: boolean;
 };
 
 export type LessonActivityContext = {
@@ -2517,13 +2826,10 @@ export type LessonActivityContext = {
   // read only for the teacher build-partner prompt on a teacher test-drive.
   appRequest?: string | null;
   // vibecode-only: the activity's authored MODEL CONTRACT
-  // (activities.buildContract) and whether the designer may answer a
-  // non-answer with silence. Read by buildVibecodeSection (the teacher build,
-  // and the scholar builder verbatim when the mission is authored) and the
-  // stream's stay_silent gate. The session's MISSION (getSessionContext →
+  // (activities.buildContract). Read by buildVibecodeSection (the teacher
+  // build, and the scholar builder verbatim when the mission is authored). The session's MISSION (getSessionContext →
   // `mission`, TRA-519 B1) is what decides park_idea and the steering itself.
   buildContract?: NonNullable<Doc<"activities">["buildContract"]> | null;
-  allowSilence?: boolean;
   problemSet?: {
     domain: string;
     targetSkillKeys: string[];
@@ -2748,10 +3054,85 @@ const OWN_IS_ACTIVITY_LIST_HINT =
   "go back to Home, open the Quests tab, and tap the count of activities done at the top of this quest's card, which shows where they are in the unit and starts an activity from there";
 
 /**
+ * The tools the tutor has in the scholar's own Quest, and what replaced
+ * planning more of it (TRA-682): one follow-up, saved as a starter. Shared by
+ * every own-Quest variant below.
+ */
+function ownQuestToolsText(): string {
+  return `  - update_unit_metadata(bigIdea?, essentialQuestions?, description?)
+  - set_badge(title, icon?, description?)
+  - set_quest_mission(text, gate, scholarWords?)
+  - save_follow_up(text)
+
+You don't add lessons or activities to their Quest: its parts are the
+ones it has. When a real next question or thing to try comes up, save
+ONE with save_follow_up. It waits in "Things to wonder about" on their
+Quests tab, marked as from this Quest, and it never has to be done.`;
+}
+
+/** The own Quest has at least one activity (a bake landed, or a tutor built
+ *  one), so its activity-less chat keeps the co-design flow below. */
+function ownQuestHasActivities(outline: OwnIsUnitOutlineLesson[]): boolean {
+  return outline.some((lesson) => lesson.activities.length > 0);
+}
+
+/**
+ * The activity-less chat of the scholar's own Quest while the Quest has no
+ * activities yet (an "Endless chat" before any bake lands, TRA-661). The chat
+ * is theirs to wonder in and takes the ANSWER FIRST stance: the tutor keeps
+ * the tools and the outline, with no push to plan, structure the quest, write
+ * a mission or badge, or build anything.
+ */
+function buildOwnQuestWonderSection(
+  outlineText: string,
+  youngReader: boolean,
+  hasMission: boolean,
+): string {
+  return `
+YOUR OWN QUEST — THEIR CHAT TO WONDER IN:
+
+This is the scholar's OWN quest (an Independent Study unit they
+made), and this chat is theirs: they opened it to ask about what
+they're curious about. Answer them (ANSWER FIRST, above) and follow
+where they go. These tools can shape the quest:
+
+${ownQuestToolsText()}${outlineText}
+
+Don't plan their quest with them:
+  - Never propose lessons, activities, a structure, a mission line or
+    a badge, and never quiz them about what they want to learn so you
+    can plan it.
+  - Never steer the chat toward setting something up, and never ask
+    them to settle on anything before the chat ends. A chat with
+    nothing set up is fine.
+  - Use the quest tools only when the scholar asks for something:
+    say what you'll do, wait for a yes, and do it. Saving one
+    follow-up when a real next question comes up needs no yes.${
+      hasMission
+        ? `
+  - Their quest's mission line is above. Change it only when they ask
+    to; then quote what they said in scholarWords when you call
+    set_quest_mission.`
+        : ""
+    }
+  - When they send "<start>", open on their quest's title: it is what
+    they came to ask about. Never open on an exploration seed instead.${
+      youngReader
+        ? `
+
+FOR THIS YOUNG READER: never say "unit", "lesson", "activity" or
+"chapter" to them: it's "your quest" and its "parts".`
+        : ""
+    }`;
+}
+
+/**
  * The co-design block for the scholar's OWN Independent Study unit. When the
  * unit already has activities this chat did not build (the Custom Quest bake
  * behind an "Endless chat"), the tutor offers them once and otherwise follows
- * the scholar, instead of re-planning a built unit (TRA-464).
+ * the scholar, instead of re-planning a built unit (TRA-464). The
+ * activity-less chat of a Quest with no activities yet answers first instead
+ * (buildOwnQuestWonderSection, TRA-661).
  */
 function buildOwnIsUnitCoDesignSection(
   outline: OwnIsUnitOutlineLesson[],
@@ -2780,22 +3161,13 @@ drop the planning for the rest of this chat and just explore what
 they're curious about.`
     : "";
   const header = `
-INDEPENDENT STUDY CO-DESIGN — YOU CAN BUILD THIS UNIT WITH THEM:
+INDEPENDENT STUDY — THE SCHOLAR'S OWN QUEST:
 
 This is the scholar's OWN Independent Study unit. They authored it
-and they're the only learner. You have tools to actually shape the
-unit while you talk:
+and they're the only learner. You have tools to shape it while you
+talk:
 
-  - create_lesson(title, strand?)
-  - create_activity(lessonId, title, kind, systemPrompt, processId?)
-  - update_unit_metadata(bigIdea?, essentialQuestions?, description?)
-  - set_badge(title, icon?, description?)
-  - set_quest_mission(text, gate, scholarWords?)
-
-Learn before you build: an app or game step always comes after at least
-one step where they learn something and make something to show it (a
-piece of writing, slides, a map). Never make an app step the first
-activity.${
+${ownQuestToolsText()}${
     lockedBuild
       ? `
 
@@ -2812,6 +3184,8 @@ carry on with what is next. Never refuse the idea itself.`
     ? `
 
 WHAT'S ALREADY IN THIS UNIT (in order; ✓ = the scholar finished it):
+This list is read from the unit at the start of every turn: it is
+everything the Quest holds.
 ${outline
   .map(
     (l) =>
@@ -2826,15 +3200,21 @@ ${outline
   .join("\n")}`
     : "";
 
+  // Nothing built yet (an "Endless chat" before any bake lands): the chat is
+  // the scholar's to wonder in, with no planning push (TRA-661).
+  if (planningChat && !ownQuestHasActivities(outline)) {
+    return buildOwnQuestWonderSection(outlineText, youngReader, hasMission);
+  }
+
   // Structure that arrived from elsewhere (the Custom Quest bake behind an
   // "Endless chat"): offer it once, then follow the scholar. When this chat
   // built it, fall through to the co-design flow, which hands off itself.
-  if (activities.length > 0 && !builtInChat) {
+  if (activities.length > 0 && !builtInChat && planningChat) {
     const offer = nextActivityTitle
       ? `say once that their activities are ready, name the next one
      ("${nextActivityTitle}"), and how to start it: they ${OWN_IS_ACTIVITY_LIST_HINT}.`
-      : `say once that every activity they can open is done, celebrate it, and offer to
-     add a next lesson if they want to keep going.`;
+      : `say once that every activity they can open is done, celebrate it, and, if
+     they want to keep going, save one follow-up for them.`;
     return `${header}${outlineText}
 
 This unit already has activities, ready to go — each one opens its own
@@ -2845,8 +3225,8 @@ scholar's to use however they like:
   2. Then follow the scholar. If they'd rather keep talking here, keep
      going — don't steer them back to the activities or repeat the
      offer unless they ask what to do next.
-  3. Don't re-plan the unit as if nothing exists. To change or add to
-     it, propose it out loud, wait for a yes, then use the tools above.${
+  3. Don't plan more parts of the Quest. When a real next step comes
+     up, save it as one follow-up.${
        hasMission
          ? ""
          : `
@@ -2857,50 +3237,36 @@ scholar's to use however they like:
 
   return `${header}${outlineText}
 
-How co-design should go:
+How to help in their own Quest:
 
-  1. Probe what they want to learn AND why — keep it conversational,
-     get one specific thing they're curious about, not a vague topic.
-  2. Once you have a direction, propose a STRUCTURE out loud first:
-     "We could make 3 lessons — one on X, one on Y, one on Z. Each
-     lesson has 1-2 activities. Sound good?"${
-       outline.length
-         ? "\n     Build on the lessons already listed above rather than\n     starting over."
-         : ""
-     }
-  3. Wait for verbal approval. Don't call tools before they nod.
-  4. Once they approve, call create_lesson then create_activity for
-     each — one at a time, narrating as you go: "OK, made the first
-     lesson — now let's add the activities."
-  5. For each activity systemPrompt, write something that would make
-     a future you (a different tutor session) actually do good
-     teaching on that activity. Be specific about the learning goal,
-     what to ask, what scaffolds to use. 2-4 sentences.
+  1. Follow what they're curious about and do the work with them.
+     Never propose new lessons, activities or a structure: their
+     Quest's parts are the ones listed above.
   ${
     hasMission
-      ? `5b. Their Quest already has its MISSION (above). Never change it
+      ? `2. Their Quest already has its MISSION (above). Never change it
      unless they ask to change their mission; then quote what they said
      in scholarWords when you call set_quest_mission.
   `
       : planningChat
-        ? `5b. Before the hand-off, write the Quest's MISSION with them, in
-     their words: ONE line saying what they are making or finding out,
-     and the GATE, the first thing that has to exist. Read it back and
-     wait for a yes, then call set_quest_mission. It shows on their
-     Quest page. Never change it unless they ask to change their
-     mission; then quote what they said in scholarWords.
+        ? `2. Write the Quest's MISSION with them, in their words: ONE line
+     saying what they are making or finding out, and the GATE, the
+     first thing that has to exist. Read it back and wait for a yes,
+     then call set_quest_mission. It shows on their Quest page. Never
+     change it unless they ask to change their mission; then quote
+     what they said in scholarWords.
   `
         : ""
-  }6. When the structure is in place, offer a badge: "Want a 🏆 badge
-     for when you finish this whole unit? What should we call it?"
-     Use set_badge.
-  7. Hand off: when they're ready to start, they
+  }3. At a natural pause, when a real next question or thing to try has
+     come up, save ONE with save_follow_up, and say in one sentence
+     that it is on their Quests tab. Never push them to plan it.
+  4. Once, offer a badge for finishing the Quest: "Want a 🏆 badge for
+     when you finish it? What should we call it?" Use set_badge.
+  5. When they're ready to start a part, they
      ${OWN_IS_ACTIVITY_LIST_HINT}. You'll be there.
 
 Don't overwhelm. The kid is here to learn what THEY chose. Match
-their energy. If they want to dive into the topic instead of
-planning, that's fine too — but help them put something in place
-before you let the session end so they have a unit to come back to.${youngReaderNote}`;
+their energy.${youngReaderNote}`;
 }
 
 function buildUnitSection(
@@ -3157,7 +3523,7 @@ export function buildActivitySection(
     );
     lines.push(activityContext.systemPrompt);
     lines.push(
-      `Sequence the build so the SCHOLAR DISCOVERS the learning goal through predict → build → observe → name it; do not lecture the concept up front.`,
+      `The SCHOLAR DISCOVERS the learning goal by running and changing their own app; do not lecture the concept up front, and never hold a build back for a prediction or an answer.`,
     );
   } else if (
     activityContext.kind === "vibecode" &&
@@ -3284,7 +3650,7 @@ Guide the scholar naturally through the steps. You can move them back to revisit
   return lines.join("\n");
 }
 
-function buildArtifactSection(
+export function buildArtifactSection(
   artifactData: ArtifactData[] | null,
   hasUnit: boolean,
   playMode: boolean = false,
@@ -3299,6 +3665,14 @@ function buildArtifactSection(
   if (docs && docs.length > 0) {
     lines.push(`\n\nDOCUMENTS (${docs.length}):`);
     for (const doc of docs) {
+      // A fixed app (the Python bench) is listed without its source: its
+      // ~64 KB of HTML is not the scholar's work and not the tutor's to edit,
+      // and its starter example would read as the scholar's program. What
+      // they wrote arrives in LIVE APP STATE (PYTHON BENCH section).
+      if (doc.fixedApp) {
+        lines.push(`\n[Document ID: ${doc.id}] "${doc.title}" — LIVE APP — the Python bench, a fixed app (its code is not shown, and no tool may change it). The scholar's own program, output and stepping are in LIVE APP STATE.`);
+        continue;
+      }
       const docLines = doc.content.split("\n");
       const numberedContent = docLines.map((l, i) => `${i + 1}: ${l}`).join("\n");
       // Name the surface: a writing box and a live app look and behave
@@ -3340,7 +3714,7 @@ The same trust holds when the box is NOT empty but you cannot find the thing you
 
 The writing box is the scholar's. You cannot write in it, and you must never offer to. When a real piece of their thinking is sitting here in the chat, tell them once that it belongs in their box — if their box has a mic, saying it there is the quickest way in, and typing works too — then move on with the conversation. Don't repeat the same request a second and third time unchanged. And don't hand them a finished sentence to copy down: proposing the exact wording for their deliverable, even in chat, is the same offloading coming through another door. If they ask you to write it for them, tell them plainly that the words have to be theirs.
 
-You have a tool called "edit_document". For a text document you may only view it, rename it, or create a new EMPTY titled document for the scholar to write in — pass its document_id and the revision shown above as base_revision, and if a rename reports a conflict, re-view the document and retry only from its returned revision. It cannot put words into a text document, and no other tool can either. The scholar writes and renames their own documents directly.
+You have a tool called "edit_document". For a text document you may only view it, rename it, or create a new EMPTY titled document for the scholar to write in — pass its document_id and the revision shown above as base_revision, and if a rename reports a conflict, re-view the document and retry only from its returned revision. It cannot put words into a text document, and no other tool can either. The scholar writes and renames their own documents directly. When they ask you to write in it, say that part is theirs (never that you can't or that something is broken) and offer real help: read their notes from this chat back to them, or help them pick what goes first.
 
 WHAT A WRITING BOX IS, on the web and the iPad alike: a plain-text box, usually with a mic. It has no formatting toolbar, no fonts or font sizes, no bold, no headings, and it does not run code. Anything typed in it stays literal text: an HTML tag or a markdown symbol shows on the page exactly as typed and does nothing. So never give styling, HTML, or markdown tips for a writing box — they cannot work there. If a scholar calls their writing box a code or HTML editor, asks where their code is, or wants to make something they can play or click, the writing box is not that place: code lives only in a LIVE APP (see CODE ARTIFACTS).
 
@@ -3486,12 +3860,15 @@ export function buildSlidesSection(artifactData: ArtifactData[] | null): string 
   lines.push(
     `\n\nSLIDE DECK (the scholar's Rabbit Slides, live on screen right now — regenerated FRESH every turn from the live database, reflecting edits they made seconds ago):`,
   );
-  lines.push(summarizeDeckForModel(deck, 600));
+  // Full text, never a crop: a box's last lines are often what the scholar
+  // just added (TRA-702).
+  lines.push(summarizeDeckForModel(deck, MAX_TEXT_LENGTH));
   lines.push(
-    `\n**Treat the SLIDE DECK above as the absolute source of truth for what the deck currently contains.** A slide with real text elements is NOT blank — read their content before judging whether the scholar has done the work. If a prior message of yours called the deck empty or unfinished and this section now shows content, the scholar added it since — accept it and move on. NEVER tell the scholar their deck is blank, that "nothing saved," that you "see the same version," or to "check again" when this section shows their text. If they typed it and it appears here, it saved.`,
+    `\n**Treat the SLIDE DECK above as the absolute source of truth for what the deck currently contains.** A slide with real text elements is NOT blank — read their content before judging whether the scholar has done the work. If a prior message of yours called the deck empty or unfinished and this section now shows content, the scholar added it since — accept it and move on. NEVER tell the scholar their deck is blank, that "nothing saved," that you "see the same version," or to "check again" when this section shows their text. If they typed it and it appears here, it saved. Each text box above is shown in FULL, including any words past the slide's bottom edge, so read to the end of a box before saying something is missing. Never tell the scholar your view of the slide is cut off, and never ask them to paste slide text into the chat.`,
   );
   lines.push(
-    `To arrange the deck yourself, use edit_slides (op:"read" then op:"patch"): you can move, resize, or restyle elements, add an empty text box, and move the scholar's existing words from one slide to another — but you never write the words. The words on the slides are the scholar's to type, and they edit the deck directly too. In prose, point them at the deck rather than re-describing the whole thing.`,
+    `To arrange the deck yourself, use edit_slides (op:"read" then op:"patch"): you can move, resize, or restyle elements, reorder slides, add an empty text box, and move the scholar's existing words from one slide to another — but you never write the words. The words on the slides are the scholar's to type, and they edit the deck directly too. When they ask you to write them, treat it as their part of the work, never as something broken: say that part is theirs and offer the arranging you can do, or read their notes from this chat back to them to type from. In prose, point them at the deck rather than re-describing the whole thing.`,
+    `You can't open another session's deck. When the scholar needs slides from an earlier session (an earlier night's deck), they bring them over themselves: open that session, open a slide's menu (on the BunnyPad, press and hold the slide in the strip of slides; on the web, the "..." on the slide's thumbnail), choose "${SLIDES_COPY.copyAllSlides}" or "${SLIDES_COPY.copySlide}", come back here, and choose the paste item from a slide's menu ("${SLIDES_COPY.pasteSlidesAfter(1)}", or with the number they copied, such as "${SLIDES_COPY.pasteSlidesAfter(3)}"). Walk them through that instead of having them retype their work or wait to ask their teacher. You can then reorder the slides for them with moveSlide.`,
   );
   return lines.join("\n");
 }
@@ -3513,12 +3890,13 @@ export function buildAppStateSection(
   canRunAppActions: boolean = true,
 ): string {
   if (!appState) return "";
+  const visibleDoc = withoutAppStateDefaults(appState.doc);
   const hasDoc =
-    appState.doc !== null &&
-    appState.doc !== undefined &&
-    (typeof appState.doc !== "object" ||
-      Array.isArray(appState.doc) ||
-      Object.keys(appState.doc).length > 0);
+    visibleDoc !== null &&
+    visibleDoc !== undefined &&
+    (typeof visibleDoc !== "object" ||
+      Array.isArray(visibleDoc) ||
+      Object.keys(visibleDoc).length > 0);
   const actions = canRunAppActions ? (appState.actions ?? []) : [];
   if (!hasDoc && appState.log.length === 0 && actions.length === 0) return "";
 
@@ -3534,7 +3912,7 @@ export function buildAppStateSection(
   if (hasDoc) {
     try {
       prettyDoc = neutralizeDelimiter(
-        JSON.stringify(appState.doc, null, 2) ?? "",
+        JSON.stringify(visibleDoc, null, 2) ?? "",
       );
     } catch {
       prettyDoc = "";
@@ -3716,6 +4094,9 @@ function buildSeedsSection(seedsData: SeedData[] | null): string | null {
  */
 function buildSeedOriginSection(
   seedOrigin: SeedOriginContext | null,
+  // TRA-661: the session takes the ANSWER FIRST stance (tutorStanceFor), so
+  // the opener answers the topic instead of asking about it.
+  answerFirst = false,
 ): string | null {
   if (!seedOrigin) return null;
   // Upgrade-in-place: a background bake has attached a real activity to this
@@ -3755,8 +4136,13 @@ function buildSeedOriginSection(
     lines.push(`- Why it's worth exploring: ${seedOrigin.rationale}`);
   if (seedOrigin.approachHint) lines.push(`- A way in: ${seedOrigin.approachHint}`);
   if (seedOrigin.card) {
+    // The teaser is the scholar-facing copy (seedScholarText), so it can be
+    // empty; the card then showed only its title.
+    const shown = seedOrigin.card.teaser
+      ? `«${seedOrigin.card.title}» — «${seedOrigin.card.teaser}»`
+      : `«${seedOrigin.card.title}»`;
     lines.push(
-      `- The scholar was shown this card for it earlier: «${seedOrigin.card.title}» — «${seedOrigin.card.teaser}». If it fits, open from that surprise; keep its question open rather than explaining it.`,
+      `- The scholar was shown this card for it earlier: ${shown}. If it fits, open from that surprise; keep its question open rather than explaining it.`,
     );
   }
   if (seedOrigin.cardAnswer) {
@@ -3771,9 +4157,58 @@ function buildSeedOriginSection(
     );
   }
   lines.push(
-    `When the scholar sends "<start>", dive straight into THIS topic with a warm, specific opener and one engaging question about it. Do NOT ask what the context is, what they want to work on, or claim you can't see any materials — you already know what this session is about: the topic above. The "what sparked it / why / a way in" notes are private steering for you; they describe the scholar from the outside, so don't read them back to them verbatim.`,
+    answerFirst
+      ? `When the scholar sends "<start>", dive straight into THIS topic: when it is a question, answer it the ANSWER FIRST way; when it is a topic, open with one concrete, surprising thing about it in two or three sentences. Do NOT ask what the context is, what they want to work on, or claim you can't see any materials — you already know what this session is about: the topic above. The "what sparked it / why / a way in" notes are private steering for you; they describe the scholar from the outside, so don't read them back to them verbatim.`
+      : `When the scholar sends "<start>", dive straight into THIS topic with a warm, specific opener and one engaging question about it. Do NOT ask what the context is, what they want to work on, or claim you can't see any materials — you already know what this session is about: the topic above. The "what sparked it / why / a way in" notes are private steering for you; they describe the scholar from the outside, so don't read them back to them verbatim.`,
   );
   return lines.join("\n");
+}
+
+/**
+ * Which stance the tutor takes in this session (TRA-661). ANSWER FIRST for a
+ * chat the scholar started themselves with nothing assigned in it: the
+ * activity-less chat of their own Quest while the Quest has no activities yet
+ * (an "Endless chat" before any bake lands), or a seed chat they opened that
+ * has no activity. Once their Quest has activities, its chat keeps the
+ * co-design flow and the Socratic stance. Every other session stays Socratic,
+ * and so does a seed chat whose
+ * own text holds its question open for the scholar to work out: a Story
+ * thread, a cross-domain practice preview, and a question card they already
+ * answered. A question a teacher assigned as homework has an activity, so it
+ * stays Socratic too, like every activity session and every builder or
+ * Simulator session.
+ */
+export function tutorStanceFor(args: {
+  unitContext: UnitContext | null;
+  lessonActivityContext: LessonActivityContext | null;
+  seedOriginContext: SeedOriginContext | null;
+  builderStance: boolean;
+  isWorkbench: boolean;
+}): TutorStance {
+  if (args.builderStance || args.isWorkbench || args.lessonActivityContext) {
+    return "socratic";
+  }
+  // A unit chat: only the scholar's own Quest is theirs to wonder in; a
+  // teacher's unit keeps that unit's instructions and the Socratic stance.
+  if (args.unitContext) {
+    return args.unitContext.isOwnIsUnit &&
+      args.unitContext.isPlanningChat &&
+      !ownQuestHasActivities(args.unitContext.ownIsUnitOutline ?? [])
+      ? "answerFirst"
+      : "socratic";
+  }
+  const seed = args.seedOriginContext;
+  if (
+    !seed ||
+    seed.hasStructure ||
+    seed.assignedAsHomework ||
+    seed.storyThreadContext ||
+    seed.suggestionType === "cross_domain" ||
+    seed.cardAnswer
+  ) {
+    return "socratic";
+  }
+  return "answerFirst";
 }
 
 export function buildStoryThreadSection(
@@ -3963,7 +4398,7 @@ function buildCurrentVerdictsSection(
 // framing (strong, hard to skim past) but makes the CONTENT of the check
 // itself the conditional trigger, with an explicit escape hatch for criteria
 // never raised at all.
-const RUBRIC_UNANSWERED_PROBE_CLAUSE = `**Mandatory check before marking ANY criterion \`full\`: think back — did you ask the scholar something specific about this exact criterion earlier in the conversation, and if so, did they actually work through it in their own words?** HARD RULE: an explicitly dodged probe ("I don't know," "can you just tell me?") stays open through the scholar's next submission. The artifact alone cannot close it, even if it contains a polished matching answer. On that submission turn, the verdict MUST remain \`half\`/\`not\` and your reply must bring back the SAME unresolved question, not switch to another criterion. It may become \`full\` only after a later scholar turn works through that question in their own words. (If you never asked about a criterion, there's nothing to check — judge it normally from what they've written or said, same as always.)`;
+const RUBRIC_UNANSWERED_PROBE_CLAUSE = `**Mandatory check before marking ANY criterion \`full\`: think back — did you ask the scholar something specific about this exact criterion earlier in the conversation, and if so, did they actually work through it in their own words?** HARD RULE: an explicitly dodged probe ("I don't know," "can you just tell me?") stays open through the scholar's next submission. The artifact alone cannot close it, even if it contains a polished matching answer. On that submission turn, the verdict MUST remain \`half\`/\`not\` and your reply must bring back the SAME unresolved question, not switch to another criterion. It may become \`full\` only after a later scholar turn works through that question in their own words. The bar is the criterion, not your last question: once the scholar has met the criterion in their own words in chat, a deeper follow-up you asked afterward (one that goes past what the criterion asks) and that they have not taken up yet does not hold the verdict below \`full\`. Score it \`full\`, and if the follow-up still matters, offer it as a next step, not as a debt. (If you never asked about a criterion, there's nothing to check — judge it normally from what they've written or said, same as always.)`;
 
 // Shared system-prompt block describing when and how to call the
 // update_rubric_score tool. Used by both quest and standalone
@@ -4125,8 +4560,8 @@ This activity's completion is separate from any deliverable rubric: it's finishe
 - A deliverable rubric records quality (flair), not completion. You may close a finished arc even with rubric criteria still unearned — ending with 2 of 6 flair earned is a good ending. Unearned flair is NEVER a reason to hold the activity open or to imply the scholar owes more.
 - Once the scholar has already demonstrated the goal in their own words, do not manufacture another prerequisite by asking for a repeated summary, one more check, or a new extension. Close the finished arc now; they can always keep chatting afterward.
 - Never call it in the opening exchanges, and never to escape an awkward or stalled conversation.
-- Never call it on a turn where the scholar's latest message asks a real question or raises new confusion. The completion turn carries no text, so their question would go unanswered: answer it first, and close on a later turn once nothing is left open. (This is not the "one more check" the rule above forbids; it is the scholar's own question.)
-- On the turn when you decide the arc is complete, the API response content array must be exactly: one \`tool_use\` block for \`mark_activity_complete\`, with ZERO \`text\` blocks. Do not write an assessment sentence such as "[scholar] just demonstrated..." before the tool. Put that assessment only in the tool's \`summary\` JSON argument. The scholar-facing closing comes only after the tool result.
+- Never call it on a turn where the scholar's latest message asks a real question or raises new confusion: answer it first, and close on a later turn once nothing is left open. (This is not the "one more check" the rule above forbids; it is the scholar's own question.)
+- On the turn when you decide the arc is complete, call \`mark_activity_complete\` before any text: ZERO \`text\` blocks before the \`tool_use\` block. Do not write an assessment sentence such as "[scholar] just demonstrated..." before the tool. Put that assessment only in the tool's \`summary\` JSON argument.
 - After the tool succeeds, the app immediately offers the next available activity. ${AUTOMATED_COMPLETION_CLOSING_GUIDANCE} Do NOT say "next time," "when you come back," or otherwise imply they must wait before continuing.
 - Completion does not close the chat. If the scholar sends another message later, respond normally and keep exploring.`;
 }
@@ -4352,7 +4787,6 @@ const DOCUMENT_SECTIONS = TUTOR_PROMPT_SECTION_ORDER.indexOf(
  * rolling conversation breakpoint (sessionStreamHelpers.layoutTutorRequest).
  */
 export function buildSystemPromptParts(
-  teacherWhisper: string | null,
   readingLevel: string | null,
   scholarName: string | null,
   unitContext: UnitContext | null,
@@ -4426,18 +4860,13 @@ export function buildSystemPromptParts(
   // exploration: no activity, conversation mode, not a test drive). Computed by
   // getSessionContext as `offersWrapUp`; offline callers default to off.
   offersWrapUp: boolean = false,
-  // Vibecode only: the rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section
+  // Unit activities: the rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section
   // (getSessionContext → convex/lib/priorUnitWork.ts); null omits it.
   priorUnitWork: string | null = null,
   // The session's parking lot (sessions.parkingLot). Rendered only on the
   // turns offered park_idea / unpark_idea (a session with a MISSION, not a
   // teacher build or Play — lib/designerTools.ts missionToolOffer).
   parkingLot: ReadonlyArray<{ text: string; reason?: string }> | null = null,
-  // Whether the streaming caller owns the session. stay_silent is offered only
-  // to the owner (designerToolOffer), so the contract steering's silence
-  // branch renders only for the owner; anyone else (a teacher in remote view)
-  // gets the restate-in-one-line branch. Defaults to true for offline callers.
-  callerIsSessionOwner: boolean = true,
   // A FREE PLAY session (sessions.freePlay, TRA-489): the vibecode lead-in
   // takes the free-play stance and the parking-lot slot becomes the free-play
   // opener. The contract is already absent (resolveActivityScopedContext).
@@ -4464,6 +4893,17 @@ export function buildSystemPromptParts(
   // it through its contract. Null (offline callers, exploration) → neither;
   // the builder then steers by the authored contract alone, as before.
   mission: SessionMission | null = null,
+  // A Play turn: the caller's Edit verdict (http.ts turnPolicy), so the Play
+  // lead-in never sends a scholar to an Edit they cannot open.
+  playEditAccess: "allowed" | "locked" | "hidden" = "allowed",
+  // The scholar has finished this activity (sessions.activityCompletedAt):
+  // the builder's MUST BE TRUE items become rules the scholar may change.
+  activityComplete: boolean = false,
+  // The builder's "Something to figure out" question (sessions.provocation);
+  // rendered beside the parking lot on builder turns offered set_provocation.
+  provocation: string | null = null,
+  // Only turns offered set_provocation carry its steering; offline defaults to true.
+  offersProvocation: boolean = true,
 ): {
   stable: string;
   dynamic: string;
@@ -4476,6 +4916,15 @@ export function buildSystemPromptParts(
   const readLevel = readWrite?.read ?? readLevelOf({ readingLevel });
   const writeMode = readWrite?.write ?? "own";
   const talkLevel = talkLevelOf(readingLevel);
+  // TRA-661: a chat the scholar started themselves answers first.
+  const answerFirst =
+    tutorStanceFor({
+      unitContext,
+      lessonActivityContext,
+      seedOriginContext,
+      builderStance,
+      isWorkbench,
+    }) === "answerFirst";
   // The turns offered park_idea / unpark_idea (missionToolOffer): a mission,
   // not a teacher build or Play. Offline callers with no mission keep the old
   // rule (a builder-stance turn under an authored contract).
@@ -4496,7 +4945,13 @@ export function buildSystemPromptParts(
   const sections: Record<TutorPromptSectionKey, string | null> = {
     // ── STABLE prefix — nothing here may vary with isFirstTurn, the wall clock,
     // or observer output. See TUTOR_PROMPT_SECTION_ORDER for what qualifies.
-    base: buildBasePrompt(scholarName, institutionProfile),
+    base: buildBasePrompt(
+      scholarName,
+      institutionProfile,
+      answerFirst
+        ? { wordBudget: answerFirstWordBudget({ talk: talkLevel, read: readLevel }) }
+        : null,
+    ),
     soul: buildSoulSection(institutionProfile),
     sessionContext: buildSessionContextSection(
       isFirstSession,
@@ -4564,6 +5019,8 @@ export function buildSystemPromptParts(
       : buildToolsSection({
           builderFeatures,
           appActions: builderFeatures || isWorkbench,
+          canCreateApp: appSurface?.canCreateApp !== false,
+          offersQuestProposal: appSurface?.questProposal === true,
         }),
     sideApp:
       !builderStance && appSurface?.sideAppWork
@@ -4573,7 +5030,14 @@ export function buildSystemPromptParts(
             openBuild: unitContext?.questBuildOpen ?? null,
           })
         : null,
-    seedOrigin: buildSeedOriginSection(seedOriginContext),
+    // Play drops the bench rules (an app activity's own brief carries them),
+    // except in a tile session, where the bench brief is the only pedagogy
+    // and Play is the only mode (lib/tileSessions.ts).
+    pythonBench:
+      playMode && appSurface?.pythonBench?.keepInPlay !== true
+        ? null
+        : buildPythonBenchSection(appSurface?.pythonBench),
+    seedOrigin: buildSeedOriginSection(seedOriginContext, answerFirst),
     storyThread: buildStoryThreadSection(
       seedOriginContext?.storyThreadContext ?? null,
     ),
@@ -4592,11 +5056,25 @@ export function buildSystemPromptParts(
       sessionCreatedAt,
     ),
     priorUnitWork,
+    // The parking lot and, on builder turns (the only ones offered
+    // set_provocation, http.ts), the open question: both change mid-session.
     parkingLot:
       builderStance && freePlay && !playMode
         ? buildFreePlayOpenerSection(parkingLot)
         : missionTurn
-          ? buildParkingLotSection(parkingLot)
+          ? [
+              buildParkingLotSection(
+                parkingLot,
+                builderStance
+                  ? "builder"
+                  : activityComplete
+                    ? "finished"
+                    : "waiting",
+              ),
+              builderStance ? buildProvocationSection(provocation) : null,
+            ]
+              .filter((section): section is string => section !== null)
+              .join("") || null
           : null,
     // Minute-varying; renders in the per-turn context.
     clock: `\n\n${buildClockLine(institutionProfile)}`,
@@ -4637,7 +5115,7 @@ export function buildSystemPromptParts(
       builderFeatures || isWorkbench,
     ),
     seeds: buildSeedsSection(seedsData),
-    whisper: buildWhisperSection(teacherWhisper),
+    whisper: buildWhisperSection(),
     // One-time non-human introduction, only on the opening message of the
     // scholar's first-ever session. Placed LAST for recency weight, so it wins
     // over the seed-opener / greeting instructions earlier in the prompt.
@@ -4663,12 +5141,16 @@ export function buildSystemPromptParts(
               teacherBuild,
               appRequest,
               playMode,
+              playEditAccess,
+              // Seeded from the starter, or holding a code artifact.
+              hasApp:
+                vibecodeStarterUsedAt != null ||
+                (artifactData ?? []).some((doc) => doc.type === "code"),
               freePlay,
+              activityComplete,
               buildContract: lessonActivityContext?.buildContract ?? null,
               mission,
-              allowSilence:
-                lessonActivityContext?.allowSilence === true &&
-                callerIsSessionOwner,
+              offersProvocation,
             })
           : "") +
       render(TUTOR_PROMPT_SECTION_ORDER.slice(0, STABLE_LEADING_SECTIONS)),
@@ -4687,7 +5169,6 @@ export function buildSystemPromptParts(
  * see {@link buildSystemPromptParts} for the cache-split form.
  */
 export function buildSystemPrompt(
-  teacherWhisper: string | null,
   readingLevel: string | null,
   scholarName: string | null,
   unitContext: UnitContext | null,
@@ -4741,7 +5222,6 @@ export function buildSystemPrompt(
 ): string {
   const { stable, dynamic, documents, turnSystem, turnContext } =
     buildSystemPromptParts(
-    teacherWhisper,
     readingLevel,
     scholarName,
     unitContext,
@@ -4864,8 +5344,25 @@ export async function finalizeAndSplit(
       criterionId: string;
       label: string;
     }>;
+    // TRA-690: the tutor's proposal card (lib/questProposalCard.ts). Carried
+    // with a blank toolAction, so a client without the card renders nothing.
+    questProposalCard?: QuestProposalCard;
   },
 ): Promise<Id<"messages">> {
+  return (await splitWithToolRow(ctx, args)).newMessageId;
+}
+
+/**
+ * {@link finalizeAndSplit}, also returning the tool row it left (null when the
+ * split was silent). The proposal card's stream event names its row.
+ */
+export async function splitWithToolRow(
+  ctx: MutationCtx,
+  args: Parameters<typeof finalizeAndSplit>[1],
+): Promise<{
+  newMessageId: Id<"messages">;
+  toolRowId: Id<"messages"> | null;
+}> {
   // 1. Snapshot dimensions from the current message onto the new rows BEFORE
   //    we might delete it.
   const currentMsg = await ctx.db.get(args.currentMessageId);
@@ -4903,8 +5400,8 @@ export async function finalizeAndSplit(
   //    did, but no new placeholder is opened — the stream sees the vanished
   //    row as a stop and ends.
   if (!currentMsg) {
-    await insertSplitToolRow(ctx, args, dims);
-    return args.currentMessageId;
+    const toolRowId = await insertSplitToolRow(ctx, args, dims);
+    return { newMessageId: args.currentMessageId, toolRowId };
   }
   if (!args.contentSoFar.trim()) {
     await ctx.db.delete(args.currentMessageId);
@@ -4916,12 +5413,12 @@ export async function finalizeAndSplit(
   }
 
   // 3. Insert tool message (with the image, if any).
-  await insertSplitToolRow(ctx, args, dims);
+  const toolRowId = await insertSplitToolRow(ctx, args, dims);
 
   // 4. Insert new assistant placeholder. Seed the liveness heartbeat (see the
   //    reap in projects.sendMessage) so this post-split placeholder isn't
   //    treated as a dead orphan while the next stream segment is still running.
-  return await ctx.db.insert("messages", {
+  const newMessageId = await ctx.db.insert("messages", {
     sessionId: args.sessionId,
     role: "assistant",
     content: "",
@@ -4930,6 +5427,7 @@ export async function finalizeAndSplit(
     flagged: false,
     lastStreamActivityAt: Date.now(),
   });
+  return { newMessageId, toolRowId };
 }
 
 /**
@@ -4952,9 +5450,11 @@ async function insertSplitToolRow(
     | "promptVersion"
     | "thread"
   >,
-): Promise<void> {
-  if (!args.toolAction.trim() && !args.imageId) return;
-  await ctx.db.insert("messages", {
+): Promise<Id<"messages"> | null> {
+  if (!args.toolAction.trim() && !args.imageId && !args.questProposalCard) {
+    return null;
+  }
+  return await ctx.db.insert("messages", {
     sessionId: args.sessionId,
     role: "tool",
     content: args.imageId
@@ -4962,6 +5462,9 @@ async function insertSplitToolRow(
       : (args.toolContent ?? ""),
     toolAction: args.toolAction,
     ...(args.flairAwards ? { flairAwards: args.flairAwards } : {}),
+    ...(args.questProposalCard
+      ? { questProposalCard: args.questProposalCard }
+      : {}),
     ...dims,
     flagged: false,
     ...(args.imageId ? { imageId: args.imageId } : {}),
@@ -4976,6 +5479,60 @@ async function insertSplitToolRow(
       : {}),
   });
 }
+
+/** A builder session's scholar photos still lacking an app-usable copy
+ *  (`messages.appAssetId`), newest first. Tool/system image rows are the
+ *  tutor's own pictures, already within the app caps. */
+export const listPhotosNeedingAppAsset = internalQuery({
+  args: { sessionId: v.id("sessions"), limit: v.number() },
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query("messages")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .order("desc")
+      .collect();
+    const pending: Array<{
+      messageId: Id<"messages">;
+      imageId: Id<"_storage">;
+    }> = [];
+    for (const row of rows) {
+      if (
+        row.role !== "user" ||
+        !row.imageId ||
+        row.appAssetId ||
+        row.appAssetUnavailable
+      ) {
+        continue;
+      }
+      pending.push({ messageId: row._id, imageId: row.imageId });
+      if (pending.length >= args.limit) break;
+    }
+    return pending;
+  },
+});
+
+/** Record a chat photo's app-usable copy, or that none can be made. Returns
+ *  whether this call set it (false: already decided by an earlier call). */
+export const setMessageAppAsset = internalMutation({
+  args: {
+    messageId: v.id("messages"),
+    appAssetId: v.optional(v.id("_storage")),
+    unavailable: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<boolean> => {
+    const row = await ctx.db.get(args.messageId);
+    if (!row || row.appAssetId || row.appAssetUnavailable) return false;
+    if (args.appAssetId) {
+      await ctx.db.patch(args.messageId, { appAssetId: args.appAssetId });
+      return true;
+    }
+    if (args.unavailable) {
+      await ctx.db.patch(args.messageId, { appAssetUnavailable: true });
+      return true;
+    }
+    return false;
+  },
+});
 
 export const registerAppAsset = internalMutation({
   args: {
@@ -5031,6 +5588,35 @@ export const splitStream = internalMutation({
       });
     }
     return newMessageId;
+  },
+});
+
+/**
+ * offer_quest_proposal (TRA-690): split the stream at the tool call and leave
+ * the proposal card as its own tool row, so it sits after what the tutor wrote
+ * and survives a reload. Writes no proposal: the scholar's Propose tap does
+ * (questProposals.propose).
+ */
+export const showQuestProposalCard = internalMutation({
+  args: {
+    currentMessageId: v.id("messages"),
+    sessionId: v.id("sessions"),
+    contentSoFar: v.string(),
+    card: questProposalCardValidator,
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ newMessageId: Id<"messages">; cardMessageId: Id<"messages"> }> => {
+    const { newMessageId, toolRowId } = await splitWithToolRow(ctx, {
+      currentMessageId: args.currentMessageId,
+      sessionId: args.sessionId,
+      contentSoFar: args.contentSoFar,
+      toolAction: "",
+      questProposalCard: args.card,
+    });
+    if (!toolRowId) throw new Error("The proposal card was not written");
+    return { newMessageId, cardMessageId: toolRowId };
   },
 });
 

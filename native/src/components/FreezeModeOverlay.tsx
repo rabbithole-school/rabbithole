@@ -22,13 +22,19 @@ import { SnowflakeIcon } from "phosphor-react-native";
 import { useEffect, useMemo, useState } from "react";
 import { Keyboard, StyleSheet, Text, View } from "react-native";
 
-import { formatThawTime, isFrozenAt, msUntilThaw } from "@/lib/asam/freezeMode";
+import {
+  formatThawTime,
+  freezeCopy,
+  isFrozenAt,
+  msUntilThaw,
+  type FrozenBy,
+} from "@/lib/asam/freezeMode";
 import { fonts, type Colors, useColors } from "@/theme";
 
 /**
  * Re-renders at the thaw instant so the overlay lifts on time even when the
  * server's thaw write can't reach an offline iPad. setTimeout caps at ~24.8
- * days; a freeze is at most 8 hours.
+ * days; a freeze is at most 96 hours.
  */
 function useFrozen(frozenUntil: number | null | undefined): boolean {
   const [now, setNow] = useState(() => Date.now());
@@ -51,9 +57,12 @@ function useFrozen(frozenUntil: number | null | undefined): boolean {
 
 export function FreezeModeOverlay({
   frozenUntil,
+  frozenBy,
   teacherHint = "gesture",
 }: {
   frozenUntil: number | null | undefined;
+  /** Who set the freeze; absent on an older server (school wording). */
+  frozenBy?: FrozenBy;
   /**
    * "gesture" in the app's own tree, where the four-finger hold reaches
    * Device settings. "devices" inside a `<Modal>` window, which that gesture
@@ -72,6 +81,7 @@ export function FreezeModeOverlay({
   if (!frozen || typeof frozenUntil !== "number") return null;
 
   const until = formatThawTime(frozenUntil);
+  const copy = freezeCopy(frozenBy, until);
   return (
     <View
       style={styles.overlay}
@@ -79,12 +89,12 @@ export function FreezeModeOverlay({
       onStartShouldSetResponder={() => true}
       accessibilityViewIsModal
       accessible
-      accessibilityLabel={`This iPad is frozen until ${until}. Ask a teacher to unfreeze it.`}
+      accessibilityLabel={copy.label}
     >
       <View style={styles.card}>
         <SnowflakeIcon size={56} color={colors.navy} weight="duotone" />
-        <Text style={styles.title}>This iPad is frozen until {until}</Text>
-        <Text style={styles.body}>Ask a teacher to unfreeze it.</Text>
+        <Text style={styles.title}>{copy.title}</Text>
+        <Text style={styles.body}>{copy.body}</Text>
       </View>
       <Text style={styles.staffHint}>
         {teacherHint === "gesture"

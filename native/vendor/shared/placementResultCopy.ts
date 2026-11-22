@@ -28,10 +28,10 @@ export type FrontierSkill = {
   grade?: string | null;
 };
 
-// Soft K–9 band order — mirrors shared/treeMapLayout.ts GRADE_ORDER, inlined so
+// Soft K–11 band order — mirrors shared/treeMapLayout.ts GRADE_ORDER, inlined so
 // this module stays import-free (native-vendorable). Ranking-only; never shown.
 const GRADE_RANK: Record<string, number> = {
-  K: 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+  K: 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
 };
 
 function gradeRankOf(grade: string | null | undefined): number {

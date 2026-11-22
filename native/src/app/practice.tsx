@@ -46,6 +46,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 import type { StyleProp, TextStyle } from "react-native";
@@ -112,8 +113,7 @@ import {
   choiceSubmitValue,
   isPadAnswerType,
   DONT_KNOW_LABEL,
-  UNIT_MISSING_NUDGE,
-  UNIT_WRONG_NUDGE,
+  nearMissNudge,
   type PadAnswerType,
 } from "@/lib/practicePad";
 import {
@@ -200,6 +200,7 @@ import {
 import {
   hasUnitToken,
   rawAnswersEqual,
+  teachingBlankCorrect,
   type AnswerType as GradeAnswerType,
 } from "../../vendor/practice/answers";
 import { localFactVerdict } from "../../vendor/practice/factVerdict";
@@ -216,6 +217,8 @@ import { useNow } from "@/hooks/useNow";
 import { useOfferLedger } from "@/hooks/useOfferLedger";
 import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { hasPracticeMath } from "../../vendor/shared/fractions";
+import { formNudgeOf, usesAlgebraEditor, type AnswerPalette } from "../../vendor/shared/practiceAnswerForm";
+import { AnswerMath, isTypesetAnswer } from "@/components/practice/AnswerMath";
 import type { PracticePromptVisual } from "../../vendor/shared/practicePromptVisual";
 import { FractionText } from "@/components/FractionText";
 import { StemText } from "@/components/practice/StemText";
@@ -229,6 +232,7 @@ import { parsePracticeDeepLinkParams } from "@/lib/practiceDeepLinkParams";
 import { SymbolView } from "expo-symbols";
 import { RecordingBar } from "@/components/RecordingBar";
 import { useVoiceDictation } from "@/hooks/useVoiceDictation";
+import { useVoiceKeyTarget } from "@/lib/voiceKey";
 import {
   useImageAttachment,
   type ImageUploadTarget,
@@ -264,6 +268,10 @@ import {
 import type { OutboxAnswer } from "../../vendor/shared/practiceOutboxContract";
 
 const COLUMN_MAX_WIDTH = 480;
+// Below this width (portrait iPad, split view) an algebra item keeps the
+// single column; above it, question left and answer right.
+const TWO_COLUMN_MIN_WIDTH = 1000;
+const TWO_COLUMN_SIDE_WIDTH = 520;
 /** The help row (confidence + hint + honest don't-know) is allowed to run wider
  *  than the problem column / primary CTA — five controls crammed into 480px read
  *  as crowded (Andy, 2026-07-26). */
@@ -287,6 +295,7 @@ type AnswerType =
   | "decimal"
   | "fraction"
   | "expression"
+  | "solutionSet"
   | "multipleChoice"
   | "manipulative"
   | "dialogue";
@@ -334,6 +343,12 @@ type ServedItem = {
   // skill it's omitted (L3 — the scholar builds the shape unaided).
   answerShape?: "twoD";
   answerFormat?: string;
+  // Algebra answers (mirrors convex/lib/practice/session.ts): which extra keys
+  // the on-screen algebra pad shows (an item with a palette, and every
+  // `solutionSet` item, is typed on the algebra pad), and the answer form the
+  // item asks for, shown as one hint line under the box.
+  answerPalette?: AnswerPalette;
+  answerForm?: string;
   // "Fast math" fact-automaticity sprint markers (mirrors
   // convex/lib/practice/session.ts). `isFactSprint` groups contiguous items into
   // the "Fast math" beat and drives the tactile fact card (bigger numerals +
@@ -382,6 +397,12 @@ type SubmitResult = {
   // "missing" = no unit at all (the client gate should have caught it first).
   // Absent on a unit-free item and on any correct answer.
   unitOutcome?: "missing" | "wrong";
+  // The same "so close" for a required representation: the value was right but
+  // not in lowest terms / not written as a decimal. Still a miss.
+  formOutcome?: "notLowestTerms" | "notDecimal";
+  // Right value, not yet in the form asked: nothing was recorded and the item
+  // stays open for an edit (read through `formNudgeOf`, never directly).
+  formNudge?: { form: string; message: string };
   // P1e consolidation: this attempt turned the skill fluent; `comesBackAt` is
   // when it next returns as review ("comes back ~Thursday"). Absent otherwise.
   turnedFluent?: boolean;
@@ -649,6 +670,8 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // the rise-in enter motion. "Calm, not confetti" — real Reduce-Motion respect.
   const wrongAnswersRef = useRef<string[]>([]);
   const scrollRef = useRef<ScrollView>(null);
+  // Landscape iPad lays an algebra item out in two columns (stage below).
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const [reduceMotion, setReduceMotion] = useState(false);
   useEffect(() => {
     let mounted = true;
@@ -772,6 +795,11 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // the next input change. Never a graded outcome: the attempt was not spent.
   // Keyed by itemId (not a bare flag) so it cannot outlive its own item.
   const [unitNudgeItemId, setUnitNudgeItemId] = useState<string | null>(null);
+  // The grader's form nudge ("That's equal. Now write it in factored form."),
+  // keyed by item so it cannot outlive it; cleared by the next edit. The count
+  // goes back to the server as `formNudgesUsed` on every submit of the item.
+  const [formNudge, setFormNudge] = useState<{ itemId: string; message: string } | null>(null);
+  const formNudgesRef = useRef<{ itemId: string; count: number }>({ itemId: "", count: 0 });
   // "Confirm before you cap" (mapping band): a first typed miss shows the
   // two-way slip/concede choice on the freshly-served confirm item. Lane-local
   // to the mapping band — the machine has no notion of it (mirrors web's
@@ -1148,9 +1176,17 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // same dependency values unchanged, so without this the effect never
   // re-fires once the ScrollView actually mounts. H3 web twin:
   // components/practice/PracticeSession.tsx.
+  //
+  // ONLY the handoff chat is a growing transcript. The item stage holds one
+  // item, and scrolling it to the END hid the top of any item taller than the
+  // screen — the stem of a tall prompt visual, a 3-line stem, the algebra pad —
+  // and left a graded item scrolled so its feedback sat under the CTA lane
+  // (device review, 2026-11-20; behaviour since #760/#926). An item, and every
+  // phase of it, starts at the top: the question is what is being answered.
   useEffect(() => {
-    scrollRef.current?.scrollToEnd({ animated: !reduceMotion });
-  }, [idx, phase, current?.itemId, handoff?.messages.length, reduceMotion]);
+    if (handoff) scrollRef.current?.scrollToEnd({ animated: !reduceMotion });
+    else scrollRef.current?.scrollTo({ y: 0, animated: false });
+  }, [idx, phase, current?.itemId, handoff, handoff?.messages.length, reduceMotion]);
 
   const resetHostRun = useCallback(() => {
     provisionalEventRef.current = null;
@@ -1360,8 +1396,9 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         platform: "native" as const,
       };
       // `questionFraming`: this build renders the frame as the "Can you
-      // already do this?" pill (item_steps frames, no daily cap). An older
-      // backend rejects the unknown arg — retry once without it (web twin).
+      // already do this?" pill. The server no longer branches on the flag
+      // (TRA-475) but still accepts it. A backend older than the flag rejects
+      // the unknown arg — retry once without it (web twin).
       const res = await convex
         .query(api.practiceSkills.practiceSession, { ...serveArgs, questionFraming: true })
         .catch((error: unknown) => {
@@ -1748,10 +1785,14 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // Leave practice for the home screen ("My Sessions"). Practice can be reached
   // via a deep push chain (Home → Sky → NodeSheet → Practice), so pop the whole
   // stack back to its root rather than a single router.back() that could strand
-  // the scholar on an intermediate screen.
+  // the scholar on an intermediate screen. Every exit to Home goes through here.
+  // `dismissTo("/")` pops back to the Home already on the stack, or replaces
+  // Practice with one when a deep-link cold start left none beneath. A bare
+  // `router.replace("/")` stacked a SECOND Home each round (the 2026-11-06
+  // crash), and `dismissAll()` returned to whatever root a cold start chose
+  // (Sky, a session), which isn't always Home.
   const goHome = useCallback(() => {
-    if (router.canDismiss()) router.dismissAll();
-    else router.replace("/");
+    router.dismissTo("/");
   }, [router]);
 
   // Opt into the challenge round (P1e): swap the labeled challenge tail in as a
@@ -1846,6 +1887,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     Haptics.selectionAsync().catch(() => {});
     if (firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
     setUnitNudgeItemId(null);
+    setFormNudge(null);
     setInput((prev) => applyKey(prev, k));
   }, []);
 
@@ -1856,8 +1898,24 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   const onInput = useCallback((next: string) => {
     if (firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
     setUnitNudgeItemId(null);
+    setFormNudge((prev) => (prev ? null : prev));
     setInput(next);
   }, []);
+
+  /** Form nudges this item has already received (0 on its first submit). */
+  const formNudgesUsedFor = useCallback(
+    (itemId: string) => (formNudgesRef.current.itemId === itemId ? formNudgesRef.current.count : 0),
+    [],
+  );
+  /** Record a form nudge for an item and show its sentence; the item stays in
+   *  answering with the scholar's answer in the box. No haptic, no miss. */
+  const receiveFormNudge = useCallback(
+    (itemId: string, message: string) => {
+      formNudgesRef.current = { itemId, count: formNudgesUsedFor(itemId) + 1 };
+      setFormNudge({ itemId, message });
+    },
+    [formNudgesUsedFor],
+  );
 
   // Advance to the next item (or finish). Resets host render state; the
   // machine owns idx/missCount/hasRecorded/terminal via `ui:advance`.
@@ -1984,7 +2042,14 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
               itemId: current.itemId,
               seed: runSeed,
               answer,
+              formNudgesUsed: formNudgesUsedFor(current.itemId),
             });
+            const mappingNudge = formNudgeOf(graded);
+            if (mappingNudge) {
+              receiveFormNudge(current.itemId, mappingNudge);
+              machine.send({ type: "lane:exited" });
+              return;
+            }
             // A stale/unresolvable item means the current batch is no longer
             // useful; recompose immediately, still without presenting a verdict.
             if (graded.outcome === null || graded.alreadyMapped) {
@@ -2020,6 +2085,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
               accelerated: false,
               dontKnow: graded.outcome === "unknown",
               unitOutcome: graded.unitOutcome,
+              formOutcome: graded.formOutcome,
               turnedFluent: false,
               mapping: true,
               domainJustMapped: graded.domainJustMapped,
@@ -2077,6 +2143,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         answer,
         record: firstAttempt,
         predictedConfidence: firstAttempt ? predictedConfidence : null,
+        formNudgesUsed: formNudgesUsedFor(current.itemId),
         ...breakerSubmitContext,
       });
       const reusesClientEvent =
@@ -2098,6 +2165,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           : {}),
         ...(firstAttempt && predictedConfidence ? { predictedConfidence } : {}),
         ...breakerSubmitContext,
+        formNudgesUsed: formNudgesUsedFor(current.itemId),
         // Which list this item came from (TRA-250): the opt-in challenge tail
         // may record lane "challenge"; required work always counts.
         servedLane: current.lane === "challenge" ? "challenge" : "required",
@@ -2139,6 +2207,8 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       breaker,
       predictedConfidence,
       questionVoice,
+      formNudgesUsedFor,
+      receiveFormNudge,
     ],
   );
   const checkEnabled =
@@ -2911,6 +2981,14 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // clientEventId), never a second haptic or a second submit.
   const onGrade = useCallback(
     (raw: unknown, entry: OutboxAnswer) => {
+      // Right value, not yet in the form asked: nothing was recorded. Keep the
+      // answer in the box, show the sentence, no verdict (the machine returns
+      // the item to answering on the same result).
+      const nudge = formNudgeOf(raw);
+      if (nudge) {
+        receiveFormNudge(entry.itemId, nudge);
+        return;
+      }
       if (
         typeof raw !== "object" ||
         raw === null ||
@@ -2991,7 +3069,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         setDontKnowStepReady(false);
       }
     },
-    [current?.lane, accumulateDispatchCompleted],
+    [current?.lane, accumulateDispatchCompleted, receiveFormNudge],
   );
 
   // The manipulative-only counterpart to `onGrade`'s pending-promise
@@ -3343,8 +3421,6 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     (event: Parameters<typeof questionFrameWritesFor>[0]) => {
       if (!frameKey || !scholarId) return;
       for (const w of questionFrameWritesFor(event, { scholarId })) {
-        // `framing: "question"`: without it the server treats the caller as an
-        // older build and refuses writes for a key with no content row.
         const args = { scholarId, key: frameKey, framing: "question" as const };
         if (w.type === "recordChoice") void recordInstructionChoice({ ...args, choice: w.choice }).catch(() => {});
         else if (w.type === "recordViewed") void recordInstructionViewed(args).catch(() => {});
@@ -3354,8 +3430,8 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     [frameKey, recordInstructionChoice, recordInstructionCompleted, recordInstructionViewed, scholarId],
   );
   // Claim the impression when the framed item first renders (shownAt — the
-  // denominator). `framing: "question"` exempts it from the cross-key daily
-  // cap; a "suppressed" refusal (already engaged elsewhere) drops the frame.
+  // denominator). A "suppressed" refusal (already engaged elsewhere) drops the
+  // frame.
   const frameClaimedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!frameOnItem || !frameKey || !scholarId || frameStage !== "ask") return;
@@ -3436,7 +3512,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
             // f14: finishing the check-in goes HOME (the Tree reveal +
             // playlists chooser land there), not straight into more practice.
             setPlacementDone(true);
-            router.replace("/");
+            goHome();
           }}
         />
       </>
@@ -3461,7 +3537,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
             // f14: finishing placement goes HOME (the Tree reveal + playlists
             // chooser land there), not straight into more practice.
             setPlacementDone(true);
-            router.replace("/");
+            goHome();
           }}
         />
       </>
@@ -3788,7 +3864,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                 accessibilityLabel="Done"
                 styles={styles}
                 indicatorColor={colors.white}
-                onAction={() => router.replace("/")}
+                onAction={goHome}
               />
             )}
           </View>
@@ -4283,6 +4359,148 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     );
   }
 
+  // The item stage's two halves: the question and the answer. One column
+  // stacks them; iPad landscape sets them side by side for the pads that are
+  // too tall to sit under a question: the algebra pad, and the box editor with
+  // its fraction, power and root keys (stacked, its root keys fell below the
+  // fold once the stage stopped opening scrolled to its end).
+  const algebraTwoColumn =
+    windowWidth > windowHeight &&
+    windowWidth >= TWO_COLUMN_MIN_WIDTH &&
+    !!current &&
+    (usesAlgebraEditor(current) || current.answerShape === "twoD") &&
+    !frameMoveVisible &&
+    !showTeaching;
+  const stageQuestionEl = (
+    <>
+      {calibrationReveal ? (
+        <View style={styles.calibrationReveal}>
+          <Text style={styles.calibrationRevealText}>{calibrationReveal}</Text>
+        </View>
+      ) : null}
+
+      {current?.storyHook ? (
+        <Text style={styles.storyHook}>{current.storyHook}</Text>
+      ) : null}
+      {isManipulative ? null : framePillEl}
+      <StemCard
+        stem={current?.stem}
+        promptVisual={current?.promptVisual}
+        feedback={cardFeedback}
+        stampLabel={frameNoted ? DONT_KNOW_STAMP_LABEL : undefined}
+        stampAnnouncement={frameNoted ? DONT_KNOW_STAMP_ANNOUNCEMENT : undefined}
+        reduceMotion={reduceMotion}
+        styles={styles}
+        speakable={questionVoice !== "none"}
+        readAlong={questionVoice !== "none"}
+        // A listener hears the question as it appears (and again on a retry).
+        autoRead={questionVoice === "auto" && phase === "answering"}
+        big={!!current?.isFactSprint}
+      />
+
+      {/* Backward-faded worked-example scaffold — answering only. */}
+      {phase === "answering" && current?.workedSteps ? (
+        <WorkedSteps steps={current.workedSteps} />
+      ) : null}
+    </>
+  );
+  const stageAnswerEl = (
+    <>
+      {frameMoveVisible && launchpad ? (
+        // "Can you already do this?" → not yet / a miss: the entry's
+        // move, inline (the SAME atom renderer the example sheet
+        // uses), then "Got it, let me try one" in the CTA lane.
+        <View style={styles.frameMove}>
+          <LaunchpadAtoms atoms={compactMoveAtoms(launchpad.entry.atoms)} />
+        </View>
+      ) : showTeaching && current ? (
+        // Teach-as-action — after "I haven't learned this yet", ONE
+        // interactive faded step to finish (doing it IS the reading).
+        // Records nothing; degrades to reveal-only for a step-less item
+        // or a manipulative. Holds Continue until attempted (onReady).
+        <TeachingStep
+          key={current.itemId}
+          scholarId={scholarId}
+          itemId={current.itemId}
+          styles={styles}
+          colors={colors}
+          onReady={() => {
+            setDontKnowStepReady(true);
+            // The framed item's move was this step: attempting it
+            // completes the frame (idempotent server-side).
+            if (frameOnItem && frameStage === "move") runFrameWrites("answeredAfterMove");
+          }}
+          onEscalate={onTalkItThrough}
+        />
+      ) : (
+        <>
+          {current ? (
+            <AnswerArea
+              item={current}
+              phase={phase}
+              result={phase === "feedback" ? result : null}
+              input={input}
+              busy={busy}
+              error={error}
+              unitNudge={unitNudge}
+              formNudge={formNudge && formNudge.itemId === current.itemId ? formNudge.message : null}
+              styles={styles}
+              colors={colors}
+              onKey={onKey}
+              onInput={onInput}
+              onSubmit={onSubmit}
+              onCheck={onCheck}
+              onSkip={advance}
+              onRetryIntent={
+                phase === "feedback" &&
+                !!result &&
+                !result.correct &&
+                !result.dontKnow &&
+                !isMapping &&
+                onBreakerItem !== true &&
+                verdict === "retry" &&
+                !busy
+                  ? onRetry
+                  : undefined
+              }
+            />
+          ) : null}
+
+          {/* The honest don't-know for the framed item — a quiet
+              text link under the answer, not a competing button. */}
+          {frameAsking &&
+          phase === "answering" &&
+          online &&
+          isFirstAttempt(hasRecorded) &&
+          (isTypedItem || isMcItem) ? (
+            <Pressable
+              onPress={onNotYet}
+              disabled={busy}
+              style={styles.linkBtn}
+              accessibilityRole="button"
+            >
+              <Text style={styles.linkBtnText}>{QUESTION_FRAME_NOT_YET}</Text>
+            </Pressable>
+          ) : null}
+
+          {phase === "feedback" && result ? (
+            <View style={algebraTwoColumn ? styles.noteInFlow : styles.noteAnchor} pointerEvents="box-none">
+              <FeedbackNote
+                result={result}
+                verdict={verdict}
+                comesBackText={comesBackText}
+                stretchLane={current?.lane === "stretch"}
+                mappingReveal={isMapping}
+                styles={styles}
+                colors={colors}
+              />
+            </View>
+          ) : null}
+        </>
+      )}
+    </>
+  );
+
   return (
     <>
       {/* Custom header (native header hidden). We render our own bar so the
@@ -4494,141 +4712,46 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           // wrapper floats the full screen height off the top (FloatOffTop) while
           // the next problem rises in, staggered (FadeInDown.delay).
           <>
-            <ScrollView
-              ref={scrollRef}
-              style={styles.stageScrollFlex}
-              contentContainerStyle={styles.stageScroll}
-              keyboardShouldPersistTaps="handled"
-            >
+            {algebraTwoColumn ? (
+              // iPad landscape + the algebra pad: the question (stem, worked
+              // steps, prompt visual) on the left, scrolling on its own if it
+              // is tall; the answer box and pad on the right, centred and never
+              // scrolling. One column could not hold a worked-steps scaffold
+              // AND the pad above the help row (device review, 2026-11-20).
               <Reanimated.View
                 key={current?.itemId ?? "none"}
                 entering={reduceMotion ? undefined : FadeInDown.duration(420).delay(RISE_STAGGER_MS)}
                 exiting={reduceMotion ? undefined : FloatOffTop.duration(FLOAT_OFF_MS)}
-                style={styles.itemColumn}
+                style={styles.twoColStage}
               >
-                {calibrationReveal ? (
-                  <View style={styles.calibrationReveal}>
-                    <Text style={styles.calibrationRevealText}>{calibrationReveal}</Text>
-                  </View>
-                ) : null}
-
-                {current?.storyHook ? (
-                  <Text style={styles.storyHook}>{current.storyHook}</Text>
-                ) : null}
-                {isManipulative ? null : framePillEl}
-                <StemCard
-                  stem={current?.stem}
-                  promptVisual={current?.promptVisual}
-                  feedback={cardFeedback}
-                  stampLabel={frameNoted ? DONT_KNOW_STAMP_LABEL : undefined}
-                  stampAnnouncement={frameNoted ? DONT_KNOW_STAMP_ANNOUNCEMENT : undefined}
-                  reduceMotion={reduceMotion}
-                  styles={styles}
-                  speakable={questionVoice !== "none"}
-                  readAlong={questionVoice !== "none"}
-                  // A listener hears the question as it appears (and again on a retry).
-                  autoRead={questionVoice === "auto" && phase === "answering"}
-                  big={!!current?.isFactSprint}
-                />
-
-                {/* Backward-faded worked-example scaffold — answering only. */}
-                {phase === "answering" && current?.workedSteps ? (
-                  <WorkedSteps steps={current.workedSteps} />
-                ) : null}
-
-                {frameMoveVisible && launchpad ? (
-                  // "Can you already do this?" → not yet / a miss: the entry's
-                  // move, inline (the SAME atom renderer the example sheet
-                  // uses), then "Got it, let me try one" in the CTA lane.
-                  <View style={styles.frameMove}>
-                    <LaunchpadAtoms atoms={compactMoveAtoms(launchpad.entry.atoms)} />
-                  </View>
-                ) : showTeaching && current ? (
-                  // Teach-as-action — after "I haven't learned this yet", ONE
-                  // interactive faded step to finish (doing it IS the reading).
-                  // Records nothing; degrades to reveal-only for a step-less item
-                  // or a manipulative. Holds Continue until attempted (onReady).
-                  <TeachingStep
-                    key={current.itemId}
-                    scholarId={scholarId}
-                    itemId={current.itemId}
-                    styles={styles}
-                    colors={colors}
-                    onReady={() => {
-                      setDontKnowStepReady(true);
-                      // The framed item's move was this step: attempting it
-                      // completes the frame (idempotent server-side).
-                      if (frameOnItem && frameStage === "move") runFrameWrites("answeredAfterMove");
-                    }}
-                    onEscalate={onTalkItThrough}
-                  />
-                ) : (
-                  <>
-                    {current ? (
-                      <AnswerArea
-                        item={current}
-                        phase={phase}
-                        result={phase === "feedback" ? result : null}
-                        input={input}
-                        busy={busy}
-                        error={error}
-                        unitNudge={unitNudge}
-                        styles={styles}
-                        colors={colors}
-                        onKey={onKey}
-                        onInput={onInput}
-                        onSubmit={onSubmit}
-                        onCheck={onCheck}
-                        onSkip={advance}
-                        onRetryIntent={
-                          phase === "feedback" &&
-                          !!result &&
-                          !result.correct &&
-                          !result.dontKnow &&
-                          !isMapping &&
-                          onBreakerItem !== true &&
-                          verdict === "retry" &&
-                          !busy
-                            ? onRetry
-                            : undefined
-                        }
-                      />
-                    ) : null}
-
-                    {/* The honest don't-know for the framed item — a quiet
-                        text link under the answer, not a competing button. */}
-                    {frameAsking &&
-                    phase === "answering" &&
-                    online &&
-                    isFirstAttempt(hasRecorded) &&
-                    (isTypedItem || isMcItem) ? (
-                      <Pressable
-                        onPress={onNotYet}
-                        disabled={busy}
-                        style={styles.linkBtn}
-                        accessibilityRole="button"
-                      >
-                        <Text style={styles.linkBtnText}>{QUESTION_FRAME_NOT_YET}</Text>
-                      </Pressable>
-                    ) : null}
-
-                    {phase === "feedback" && result ? (
-                      <View style={styles.noteAnchor} pointerEvents="box-none">
-                        <FeedbackNote
-                          result={result}
-                          verdict={verdict}
-                          comesBackText={comesBackText}
-                          stretchLane={current?.lane === "stretch"}
-                          mappingReveal={isMapping}
-                          styles={styles}
-                          colors={colors}
-                        />
-                      </View>
-                    ) : null}
-                  </>
-                )}
+                <ScrollView
+                  ref={scrollRef}
+                  style={styles.twoColLeft}
+                  contentContainerStyle={styles.twoColLeftContent}
+                  keyboardShouldPersistTaps="handled"
+                >
+                  {stageQuestionEl}
+                </ScrollView>
+                <View style={styles.twoColRight}>{stageAnswerEl}</View>
               </Reanimated.View>
-            </ScrollView>
+            ) : (
+              <ScrollView
+                ref={scrollRef}
+                style={styles.stageScrollFlex}
+                contentContainerStyle={styles.stageScroll}
+                keyboardShouldPersistTaps="handled"
+              >
+                <Reanimated.View
+                  key={current?.itemId ?? "none"}
+                  entering={reduceMotion ? undefined : FadeInDown.duration(420).delay(RISE_STAGGER_MS)}
+                  exiting={reduceMotion ? undefined : FloatOffTop.duration(FLOAT_OFF_MS)}
+                  style={styles.itemColumn}
+                >
+                  {stageQuestionEl}
+                  {stageAnswerEl}
+                </Reanimated.View>
+              </ScrollView>
+            )}
 
             <PracticeHelpRow
               // Keyed on the item AND the phase so the hint collapses both on a
@@ -4760,6 +4883,8 @@ type ReprobeProbe = {
   choices?: string[];
   promptVisual?: PracticePromptVisual;
   answerShape?: "twoD";
+  answerPalette?: AnswerPalette;
+  answerForm?: string;
 };
 
 type ReprobeAnswer = { itemId: string; answer: string };
@@ -5025,8 +5150,10 @@ function NativeReprobeOffer({
               style={({ pressed }) => [styles.choice, pressed && styles.choicePressed]}
               accessibilityRole="button"
             >
-              {hasPracticeMath(choice) ? (
-                <FractionText value={choice} inline fontSize={18} align="center" />
+              {isTypesetAnswer(choice) ? (
+                <AnswerMath value={choice} fontSize={20} align="left" />
+              ) : hasPracticeMath(choice) ? (
+                <FractionText value={choice} inline fontSize={18} align="left" />
               ) : (
                 <Text style={styles.choiceText}>{choice}</Text>
               )}
@@ -5041,6 +5168,8 @@ function NativeReprobeOffer({
           <PracticePadAnswer
             answerType={padType}
             answerShape={probe?.answerShape}
+            answerPalette={probe?.answerPalette}
+            answerForm={probe?.answerForm}
             answerUnit={unitAnswerRequired ? probe?.answerUnit : undefined}
             unitNudge={unitNudge}
             value={input}
@@ -5087,7 +5216,8 @@ const TEACH_RESOLVE_WATCHDOG_MS = 8_000;
  *
  * Purely instructional: it records NOTHING. The one blank is graded CLIENT-SIDE
  * with the SAME pure `parseAnswer`/`answersEqual` the server grader uses (so
- * 6/8 ≡ 0.75 still matches), and no mutation is called — the step can never move
+ * 6/8 ≡ 0.75 still matches), plus the item's `answerForm` when it requires one
+ * (`teachingBlankCorrect`), and no mutation is called — the step can never move
  * mastery or placement scoring. Steps + reveal value come from the read-only
  * `api.practiceSkills.teachingStep` query.
  *
@@ -5212,7 +5342,12 @@ function TeachingStep({
   const onCheck = () => {
     if (attempt) return;
     const submittedInput = inputBuffer.current.trim();
-    const correct = rawAnswersEqual(submittedInput, answer, answerType as GradeAnswerType);
+    const correct = teachingBlankCorrect(
+      submittedInput,
+      answer,
+      answerType as GradeAnswerType,
+      step.answerForm,
+    );
     // Either way the scholar has now ATTEMPTED, so Next unlocks — a wrong guess
     // must never trap them, whatever the ladder does next.
     notifyReady();
@@ -5652,6 +5787,7 @@ function AnswerArea({
   busy,
   error,
   unitNudge,
+  formNudge,
   styles,
   colors,
   onKey,
@@ -5661,6 +5797,8 @@ function AnswerArea({
   onSkip,
   onRetryIntent,
 }: {
+  /** The grader's form-nudge sentence for this item, or null. */
+  formNudge: string | null;
   item: ServedItem;
   phase: Phase;
   result: SubmitResult | null;
@@ -5701,8 +5839,10 @@ function AnswerArea({
             style={({ pressed }) => [styles.choice, pressed && styles.choicePressed]}
             accessibilityRole="button"
           >
-            {hasPracticeMath(choice) ? (
-              <FractionText value={choice} inline fontSize={18} align="center" />
+            {isTypesetAnswer(choice) ? (
+                <AnswerMath value={choice} fontSize={20} align="left" />
+              ) : hasPracticeMath(choice) ? (
+              <FractionText value={choice} inline fontSize={18} align="left" />
             ) : (
               <Text style={styles.choiceText}>{choice}</Text>
             )}
@@ -5728,6 +5868,9 @@ function AnswerArea({
           answerType={padType}
           answerShape={item.answerShape}
           answerFormat={item.answerFormat}
+          answerPalette={item.answerPalette}
+          answerForm={item.answerForm}
+          formNudge={formNudge}
           answerUnit={item.answerUnit}
           unitNudge={unitNudge}
           value={input}
@@ -5858,17 +6001,12 @@ function FeedbackNote({
     overlearned: colors.cyan,
   };
 
-  // `unitOutcome` is only ever set when the VALUE was right and the unit wasn't
-  // (the grader checks the unit second), so it REPLACES the generic miss copy
-  // below rather than stacking on it — "take another look" would send the
+  // `unitOutcome` / `formOutcome` are only ever set when the VALUE was right and
+  // the unit or form wasn't (the grader checks those second), so the line
+  // REPLACES the generic miss copy below rather than stacking on it — "take another look" would send the
   // scholar back over work that was already correct. The mapping reveal is the
   // one exception: there the line joins the reveal, which models the full form.
-  const unitNote =
-    result.unitOutcome === "wrong"
-      ? UNIT_WRONG_NUDGE
-      : result.unitOutcome === "missing"
-        ? UNIT_MISSING_NUDGE
-        : null;
+  const nearMiss = nearMissNudge(result);
 
   // Option D: a `· mapping` item reveals + warm copy (no mastery/streak framing,
   // no retry nudge). The reassurance sentence lives on the segment beat header.
@@ -5887,18 +6025,22 @@ function FeedbackNote({
             }}
           >
             <Text style={[styles.noteMiss, { flexShrink: 1 }]}>The answer was </Text>
-            <FractionText
-              value={result.correctAnswer}
-              inline
-              fontSize={14}
-              color={colors.orange}
-              weight="regular"
-              align="center"
-            />
+            {isTypesetAnswer(result.correctAnswer) ? (
+              <AnswerMath value={result.correctAnswer} fontSize={16} color={colors.orange} />
+            ) : (
+              <FractionText
+                value={result.correctAnswer}
+                inline
+                fontSize={14}
+                color={colors.orange}
+                weight="regular"
+                align="center"
+              />
+            )}
             <Text style={[styles.noteMiss, { flexShrink: 1 }]}>.</Text>
           </View>
         ) : null}
-        {unitNote ? <Text style={styles.noteMiss}>{unitNote}</Text> : null}
+        {nearMiss ? <Text style={styles.noteMiss}>{nearMiss}</Text> : null}
         <Text style={result.correct ? styles.noteMappingCorrect : styles.noteMiss}>
           {result.correct
             ? "Nice — that helps us place you."
@@ -5941,7 +6083,7 @@ function FeedbackNote({
     return (
       <View style={styles.noteBlock}>
         <Text style={styles.noteMiss}>
-          {unitNote ??
+          {nearMiss ??
             (stretchLane
               ? "This one\u2019s meant to be hard — a miss here never touches your map. Take another look."
               : "Take another look — you\u2019ve got this.")}
@@ -5951,8 +6093,8 @@ function FeedbackNote({
   }
   return (
     <View style={styles.noteBlock}>
-      {unitNote ? (
-        <Text style={styles.noteMiss}>{unitNote}</Text>
+      {nearMiss ? (
+        <Text style={styles.noteMiss}>{nearMiss}</Text>
       ) : (
         <Text style={styles.noteStuck}>
           {stretchLane
@@ -6331,6 +6473,30 @@ function HandoffChat({
     return () => clearTimeout(t);
   }, [composerFocusable]);
 
+  // The voice key and ⌘/ (src/lib/voiceKey.ts): this composer's mic button,
+  // under its own gates, and the field itself — only while the composer shows.
+  const composerShown =
+    !!handoff &&
+    (handoff.mode === "dialogue" ? !dialogueVerdict : !handoff.ended);
+  useVoiceKeyTarget(
+    {
+      // Off while a reply loads or a photo waits to be sent. Typed text never
+      // holds it back: a voice turn replaces it (onHandoffSend clears the box).
+      state: voice.isRecording
+        ? "recording"
+        : voice.isTranscribing ||
+            !!handoff?.loading ||
+            (!!image.imageId && !image.uploading)
+          ? "busy"
+          : "idle",
+      start: onMicStart,
+      confirm: () => void onMicStop(),
+      cancel: onMicCancel,
+      compose: () => composerRef.current?.focus(),
+    },
+    composerShown,
+  );
+
   if (!handoff) return null;
 
   const isDialogue = handoff.mode === "dialogue";
@@ -6540,7 +6706,25 @@ function HandoffChat({
                 submitBehavior="submit"
               />
               {/* Mic when there's nothing to send; send button otherwise — the
-                  identical affordance as the tutor chat, so voice comes for free. */}
+                  identical affordance as the tutor chat, so voice comes for free.
+                  Over typed text a plain mic stays beside Send, and its take
+                  replaces the text (onHandoffSend clears the box). */}
+              {canSend && !image.imageId && (
+                <Pressable
+                  disabled={handoff.loading}
+                  onPress={onMicStart}
+                  hitSlop={8}
+                  style={styles.handoffMicBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Start recording — replaces what you typed"
+                >
+                  <SymbolView
+                    name="mic.fill"
+                    size={24}
+                    tintColor={handoff.loading ? colors.gray300 : colors.violet}
+                  />
+                </Pressable>
+              )}
               {canSend ? (
                 <Pressable
                   disabled={handoff.loading}
@@ -6759,6 +6943,13 @@ function makeStyles(c: ColorSet) {
       gap: 14,
     },
     itemColumn: { width: "100%", maxWidth: COLUMN_MAX_WIDTH, gap: 18, paddingTop: 8, position: "relative" },
+    // Two-column algebra stage (iPad landscape): question left, answer right.
+    twoColStage: { flex: 1, flexDirection: "row", justifyContent: "center", gap: 32, paddingHorizontal: 16 },
+    twoColLeft: { width: TWO_COLUMN_SIDE_WIDTH, flexGrow: 0 },
+    twoColLeftContent: { gap: 18, paddingTop: 20, paddingBottom: 24 },
+    twoColRight: { width: TWO_COLUMN_SIDE_WIDTH, justifyContent: "center", gap: 14, paddingVertical: 12 },
+    // The verdict note in the answer column: in the flow, under the answer box.
+    noteInFlow: { width: "100%", marginTop: 4 },
 
     // Socratic handoff (the inline teachable moment). The thread is a plain
     // vertical stack of chat turns — no bordered card — so it reads as the same
@@ -6797,6 +6988,8 @@ function makeStyles(c: ColorSet) {
     // Mic / send icon button — the SymbolView is its own filled circle (matching
     // the tutor-chat composer), so the button is just tap padding, no background.
     handoffIconBtn: { paddingBottom: 5, paddingLeft: 2 },
+    // A 24pt glyph centred on the 38pt circle beside it.
+    handoffMicBtn: { paddingBottom: 12, paddingHorizontal: 2 },
     handoffAttachBtn: { paddingBottom: 8 },
     handoffPreviewRow: { marginBottom: 8 },
     handoffPreviewChip: {

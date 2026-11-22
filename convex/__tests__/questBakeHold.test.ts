@@ -1,4 +1,5 @@
 import { convexTest, type TestConvex } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { seedTestInstitution } from "./institutionTestHelpers";
@@ -84,6 +85,11 @@ function activityId(t: TC, sessionId: Id<"sessions">) {
   return t.run(async (ctx) => (await ctx.db.get(sessionId))?.activityId ?? null);
 }
 
+/** A session an older bake left waiting, set directly (nothing sets it now). */
+function markPending(t: TC, sessionId: Id<"sessions">) {
+  return t.run((ctx) => ctx.db.patch(sessionId, { questBakeStatus: "pending" }));
+}
+
 /** What the path picker hands back when the scholar chooses a designed angle. */
 const CHOSEN_PATH = {
   title: "Be a bridge engineer",
@@ -91,36 +97,49 @@ const CHOSEN_PATH = {
 };
 
 describe("quest bake hold", () => {
-  test("scheduling a Custom Quest bake marks the session as waiting", async () => {
+  test("a scholar's Custom Quest schedules no bake and never marks the session as waiting", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const { unitId, sessionId } = await seedCustomQuestLaunch(t, scholarId);
     const asScholar = await withUser(t, scholarId);
 
+    // Old clients call this right after creating the unit + session, with a
+    // chosen path or (Endless chat) without one. Neither may bake or hold.
+    for (const bakePath of [CHOSEN_PATH, undefined]) {
+      const res = await asScholar.mutation(api.units.scheduleCustomQuestBake, {
+        unitId,
+        sessionId,
+        ...(bakePath ? { bakePath } : {}),
+      });
+      expect(res.scheduled).toBe(false);
+    }
+
     expect(await status(t, sessionId)).toBeNull();
+    const scheduled = await t.run((ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(scheduled.filter((f) => f.name.includes("bake"))).toHaveLength(0);
+  });
 
-    await asScholar.mutation(api.units.scheduleCustomQuestBake, {
-      unitId,
-      sessionId,
-      bakePath: CHOSEN_PATH,
-    });
+  test("the call is still owner-gated", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t);
+    const { unitId, sessionId } = await seedCustomQuestLaunch(t, scholarId);
+    const otherId = await t.run((ctx) =>
+      ctx.db.insert("users", { name: "Other", username: "other_scholar", role: "scholar" }),
+    );
+    const asOther = await withUser(t, otherId);
 
-    // The mark must land in the SAME mutation that schedules the bake — a
-    // client that observes the session in between opens the ad-lib turn this
-    // hold exists to prevent.
-    expect(await status(t, sessionId)).toBe("pending");
+    await expect(
+      asOther.mutation(api.units.scheduleCustomQuestBake, { unitId, sessionId }),
+    ).rejects.toThrow("Forbidden");
   });
 
   test("linking the baked activity clears the hold", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const { unitId, sessionId } = await seedCustomQuestLaunch(t, scholarId);
-    const asScholar = await withUser(t, scholarId);
-    await asScholar.mutation(api.units.scheduleCustomQuestBake, {
-      unitId,
-      sessionId,
-      bakePath: CHOSEN_PATH,
-    });
+    await markPending(t, sessionId);
 
     const { lessonId, activityId: bakedActivityId } = await t.run(async (ctx) => {
       const lessonId = await ctx.db.insert("lessons", {
@@ -151,13 +170,8 @@ describe("quest bake hold", () => {
   test("a bake that ends without linking releases the hold", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
-    const { unitId, sessionId } = await seedCustomQuestLaunch(t, scholarId);
-    const asScholar = await withUser(t, scholarId);
-    await asScholar.mutation(api.units.scheduleCustomQuestBake, {
-      unitId,
-      sessionId,
-      bakePath: CHOSEN_PATH,
-    });
+    const { sessionId } = await seedCustomQuestLaunch(t, scholarId);
+    await markPending(t, sessionId);
 
     await t.mutation(internal.bakeUnitFromSeed.releaseQuestBakeHold, {
       sessionId,
@@ -185,64 +199,6 @@ describe("quest bake hold", () => {
     await t.mutation(internal.bakeUnitFromSeed.releaseQuestBakeHold, {
       sessionId,
     });
-    expect(await status(t, sessionId)).toBeNull();
-  });
-
-  test('"Endless chat" bakes without holding — the scholar asked to talk now', async () => {
-    const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t);
-    const { unitId, sessionId } = await seedCustomQuestLaunch(t, scholarId);
-    const asScholar = await withUser(t, scholarId);
-
-    // Both Custom Quest dialogs omit bakePath for exactly one choice: the
-    // endless-chat card, whose promise is "No plan — just start talking".
-    await asScholar.mutation(api.units.scheduleCustomQuestBake, {
-      unitId,
-      sessionId,
-    });
-
-    // The bake still runs (the unit becomes a structured quest), but the
-    // session opens immediately rather than showing "building your quest".
-    expect(await status(t, sessionId)).toBeNull();
-
-    // …and the bake is handed no session, so it can never upgrade the open
-    // chat in place into the baked unit's first activity mid-conversation.
-    const scheduled = await t.run((ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
-    );
-    const bakes = scheduled.filter((f) => f.name.includes("bakeCustomQuestUnit"));
-    expect(bakes).toHaveLength(1);
-    expect(bakes[0].args[0]).toEqual({ unitId });
-  });
-
-  test("re-scheduling a bake for an already-structured session does not re-hold it", async () => {
-    const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t);
-    const { unitId, sessionId } = await seedCustomQuestLaunch(t, scholarId);
-
-    await t.run(async (ctx) => {
-      const lessonId = await ctx.db.insert("lessons", {
-        unitId,
-        title: "The arch that carries itself",
-        order: 0,
-      });
-      const activityId = await ctx.db.insert("activities", {
-        lessonId,
-        title: "Build a bridge from paper",
-        kind: "online",
-        order: 0,
-      });
-      await ctx.db.patch(sessionId, { lessonId, activityId });
-    });
-
-    const asScholar = await withUser(t, scholarId);
-    await asScholar.mutation(api.units.scheduleCustomQuestBake, {
-      unitId,
-      sessionId,
-      bakePath: CHOSEN_PATH,
-    });
-
-    // The session already has its task; holding it would blank a live chat.
     expect(await status(t, sessionId)).toBeNull();
   });
 
@@ -336,7 +292,7 @@ describe("quest bake hold", () => {
         kind: "online",
         order: 0,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         unitId,
         teacherId: scholarId,
         scholarIds: [scholarId],

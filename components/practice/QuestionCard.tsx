@@ -4,14 +4,21 @@
  * QuestionCard — the done-screen "Bonus question" that replaced the no-CTA
  * "Quest unlocked" reveal (StoryMomentCard). One tappable multiple-choice
  * question; on tap the question collapses to a one-line recap, the reveal and
- * its emoji appear, and "Why? →" opens a tutor session right there from the
- * moment's seed.
+ * its emoji appear, and "Done for today" closes the round.
+ *
+ * NO FOLLOW-UP BUTTON (TRA-472, 2026-11-17): the card used to end in "Why? →",
+ * which opened a tutor session on the moment's seed. In prod, 20 of the 24 taps
+ * led to a chat where the scholar never typed a word, and 3 of 76 cards led to
+ * a real conversation. A wrong answer goes to the top of the Quests list
+ * ("missed"), and a skipped card stays on it below the misses ("offered",
+ * convex/lib/questionQueue.ts); both rows keep their own follow-up. A right
+ * answer closes the question, and its story star stays in the Sky.
  *
  * FEEDBACK-ONLY: answering never touches mastery or spaced repetition (the
  * story-surface invariant, .claude/rules/rabbithole-practice-engine.md). The
  * verdict is shown instantly from the question's own `answerIndex`; the server
  * independently records the answer (`recordMomentAnswer`) for the ledger and
- * the tutor's opening.
+ * for the tutor's opening if the scholar later opens the thread from Quests.
  *
  * LEDGER: like StoryMomentCard, records the "offered" event on mount (which
  * also keeps the story's souvenir star) and exposes `markTried` for the parent
@@ -29,7 +36,6 @@ import {
   useState,
 } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useMutation } from "convex/react";
 import { Box, Button, Grid, Image, Text, VStack, chakra } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
@@ -79,20 +85,13 @@ export function QuestionCard({
   onAnswered?: () => void;
 }) {
   const { question } = moment;
-  const router = useRouter();
   const recordOffered = useMutation(api.practiceMoments.recordMomentOffered);
   const recordOutcome = useMutation(api.practiceMoments.recordMomentOutcome);
   const recordAnswer = useMutation(api.practiceMoments.recordMomentAnswer);
-  const createFromSeed = useMutation(api.sessions.createFromSeed);
   const clientEventId = useMemo(() => makeClientEventId("question-card"), []);
   const offerRef = useRef<Promise<OfferResult | null> | null>(null);
-  const [seedId, setSeedId] = useState<Id<"seeds"> | null>(
-    moment.kind === "seed" ? moment.seedId : null,
-  );
-  const [noSeed, setNoSeed] = useState(false);
   const [choice, setChoice] = useState<number | null>(null);
-  const [opening, setOpening] = useState(false);
-  const whyRef = useRef<HTMLButtonElement | null>(null);
+  const doneRef = useRef<HTMLAnchorElement | null>(null);
 
   useEffect(() => {
     const momentArgs =
@@ -103,16 +102,9 @@ export function QuestionCard({
             fromKey: moment.fromKey,
             toKey: moment.toKey,
           };
-    offerRef.current = recordOffered({ scholarId, clientEventId, ...momentArgs })
-      .then((res) => {
-        if (res.seedId) setSeedId(res.seedId);
-        else setNoSeed(true);
-        return res;
-      })
-      .catch(() => {
-        if (moment.kind === "story") setNoSeed(true);
-        return null;
-      });
+    offerRef.current = recordOffered({ scholarId, clientEventId, ...momentArgs }).catch(
+      () => null,
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -157,29 +149,10 @@ export function QuestionCard({
     [choice, onAnswered, recordAnswer],
   );
 
-  // After the collapse the choice buttons unmount; land focus on the follow-up.
+  // After the collapse the choice buttons unmount; land focus on Done.
   useEffect(() => {
-    if (answered) whyRef.current?.focus();
+    if (answered) doneRef.current?.focus();
   }, [answered]);
-
-  const why = useCallback(async () => {
-    if (opening) return;
-    setOpening(true);
-    try {
-      let id = seedId;
-      if (!id) id = (await offerRef.current)?.seedId ?? null;
-      if (!id) {
-        setOpening(false);
-        return;
-      }
-      // createSessionFromSeedCore advances the moment to "opened" server-side.
-      const res = await createFromSeed({ seedId: id });
-      if (res) router.push(`/scholar/${res.id}`);
-      else setOpening(false);
-    } catch {
-      setOpening(false);
-    }
-  }, [opening, seedId, createFromSeed, router]);
 
   const artUrl = moment.kind === "story" ? moment.artUrl : undefined;
   const emoji = moment.visualEmoji;
@@ -284,25 +257,13 @@ export function QuestionCard({
                 {question.reveal}
               </Text>
             </VStack>
-            <VStack gap={3} align="stretch" pt={1}>
-              {/* A legacy offer with no minted star has nothing to open, so the
-                  follow-up is omitted rather than shown dead. */}
-              {!noSeed && (
-                <Button
-                  ref={whyRef}
-                  colorPalette="teal"
-                  size="lg"
-                  w="100%"
-                  loading={opening}
-                  onClick={why}
-                >
-                  {question.whyLabel ?? QUESTION_CARD_COPY.why}
-                </Button>
-              )}
-              <Button asChild variant="outline" size="lg" w="100%">
-                <Link href="/scholar">{QUESTION_CARD_COPY.done}</Link>
+            <Box pt={1}>
+              <Button asChild colorPalette="teal" size="lg" w="100%">
+                <Link ref={doneRef} href="/scholar">
+                  {QUESTION_CARD_COPY.done}
+                </Link>
               </Button>
-            </VStack>
+            </Box>
           </VStack>
         )}
       </Box>

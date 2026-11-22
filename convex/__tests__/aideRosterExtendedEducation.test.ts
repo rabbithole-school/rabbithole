@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
@@ -80,7 +81,7 @@ async function seedAssignment(
   scholarIds: Id<"users">[],
 ) {
   return await t.run(async (ctx) =>
-    ctx.db.insert("assignments", {
+    insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds,

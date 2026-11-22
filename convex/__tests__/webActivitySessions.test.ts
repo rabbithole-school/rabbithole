@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, patchAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -46,7 +47,7 @@ async function seedWebActivity(
   teacherId: Id<"users">,
   overrides: Partial<{ webUrl: string | undefined }> = {},
 ) {
-  return await t.run(async (ctx) => {
+  const __mirrored = await t.run(async (ctx) => {
     const unitId = await ctx.db.insert("units", {
       teacherId,
       title: "Math",
@@ -74,6 +75,7 @@ async function seedWebActivity(
     });
     return { unitId, lessonId, activityId, assignmentId };
   });
+  return __mirrored;
 }
 
 describe("webActivitySessions.start", () => {
@@ -83,7 +85,7 @@ describe("webActivitySessions.start", () => {
     const scholarId = await seedUser(t, "scholar");
     const { activityId, assignmentId } = await seedWebActivity(t, teacherId);
     await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
+      await patchAssignmentWithSchedule(ctx, assignmentId, {
         scholarIds: [scholarId],
         activitySchedule: [
           { activityId, mode: "homework" as const, setAt: Date.now() },
@@ -109,7 +111,7 @@ describe("webActivitySessions.start", () => {
     const targetedScholarId = await seedUser(t, "scholar", "targeted");
     const { activityId, assignmentId } = await seedWebActivity(t, teacherId);
     await t.run((ctx) =>
-      ctx.db.patch(assignmentId, {
+      patchAssignmentWithSchedule(ctx, assignmentId, {
         scholarIds: [scholarId, targetedScholarId],
         activitySchedule: [
           {
@@ -140,7 +142,7 @@ describe("webActivitySessions.start", () => {
     const scholarId = await seedUser(t, "scholar");
     const { activityId, assignmentId } = await seedWebActivity(t, teacherId);
     await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
+      await patchAssignmentWithSchedule(ctx, assignmentId, {
         scholarIds: [scholarId],
         activitySchedule: [],
       });
@@ -155,7 +157,7 @@ describe("webActivitySessions.start", () => {
     ).rejects.toThrow("Assignment does not include activity");
 
     await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
+      await patchAssignmentWithSchedule(ctx, assignmentId, {
         archivedAt: Date.now(),
         activitySchedule: [],
       });
@@ -282,6 +284,40 @@ describe("recordProgress", () => {
     expect(session?.extracted?.taskSummaries?.length).toBe(30);
     expect(session!.extracted!.taskSummaries![0].length).toBeLessThanOrEqual(200);
   });
+
+  test("keeps the page that failed to open and shows it in the staff read", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { activityId } = await seedWebActivity(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+    const { sessionId } = await asScholar.mutation(
+      api.webActivitySessions.start,
+      { activityId },
+    );
+
+    await asScholar.mutation(api.webActivitySessions.recordProgress, {
+      sessionId,
+      loadError: {
+        url: "https://school.example.com/" + "x".repeat(600),
+        status: 500,
+        message: "The web page returned HTTP 500.",
+      },
+    });
+
+    const session = await t.run(async (ctx) => ctx.db.get(sessionId));
+    expect(session?.loadError?.status).toBe(500);
+    expect(session?.loadError?.url.length).toBe(500);
+    expect(typeof session?.loadError?.at).toBe("number");
+
+    const read = await t.run((ctx) =>
+      readScholarWebActivity(ctx, scholarId, 10, Date.now()),
+    );
+    expect(read.sessions[0].loadError).toMatchObject({
+      status: 500,
+      message: "The web page returned HTTP 500.",
+    });
+  });
 });
 
 describe("finalize", () => {
@@ -317,7 +353,7 @@ describe("finalize", () => {
       teacherId,
     );
     await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
+      await patchAssignmentWithSchedule(ctx, assignmentId, {
         scholarIds: [scholarId],
         activitySchedule: [
           { activityId, mode: "homework" as const, setAt: Date.now() },
@@ -361,14 +397,14 @@ describe("finalize", () => {
     const scholarId = await seedUser(t, "scholar");
     const { activityId, assignmentId } = await seedWebActivity(t, teacherId);
     const otherAssignment = await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
+      await patchAssignmentWithSchedule(ctx, assignmentId, {
         scholarIds: [scholarId],
         activitySchedule: [
           { activityId, mode: "homework" as const, setAt: Date.now() },
         ],
       });
       const base = await ctx.db.get(assignmentId);
-      return await ctx.db.insert("assignments", {
+      return await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId: base!.unitId,
         scholarIds: [scholarId],
@@ -412,7 +448,7 @@ describe("finalize", () => {
     const scholarId = await seedUser(t, "scholar");
     const { activityId, assignmentId } = await seedWebActivity(t, teacherId);
     await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
+      await patchAssignmentWithSchedule(ctx, assignmentId, {
         scholarIds: [scholarId],
         activitySchedule: [
           { activityId, mode: "classFocus" as const, setAt: Date.now() - 10_000 },
@@ -425,16 +461,14 @@ describe("finalize", () => {
       { activityId, assignmentId },
     );
     await t.run(async (ctx) => {
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: [
+      await setSchedule(ctx, assignmentId, [
           {
             activityId,
             mode: "classFocus" as const,
             setAt: Date.now() - 10_000,
             endsAt: Date.now() - 1,
           },
-        ],
-      });
+        ]);
     });
 
     const result = await asScholar.mutation(api.webActivitySessions.finalize, {

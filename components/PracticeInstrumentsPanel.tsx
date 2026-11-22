@@ -160,24 +160,26 @@ export function PracticeInstrumentsPanel() {
                 No classified errors in the last 14 days.
               </Text>
             ) : (
-              <Table.Root size="sm">
-                <Table.Header>
-                  <Table.Row>
-                    <Table.ColumnHeader fontFamily="heading">Pattern</Table.ColumnHeader>
-                    <Table.ColumnHeader fontFamily="heading" textAlign="end">Count</Table.ColumnHeader>
-                    <Table.ColumnHeader fontFamily="heading" textAlign="end">Scholars affected</Table.ColumnHeader>
-                  </Table.Row>
-                </Table.Header>
-                <Table.Body>
-                  {data.errorPatterns.map((row) => (
-                    <Table.Row key={row.pattern}>
-                      <Table.Cell fontFamily="body">{row.pattern}</Table.Cell>
-                      <Table.Cell textAlign="end">{row.count}</Table.Cell>
-                      <Table.Cell textAlign="end">{row.scholarCount}</Table.Cell>
+              <Box overflowX="auto">
+                <Table.Root size="sm">
+                  <Table.Header>
+                    <Table.Row>
+                      <Table.ColumnHeader fontFamily="heading">Pattern</Table.ColumnHeader>
+                      <Table.ColumnHeader fontFamily="heading" textAlign="end">Count</Table.ColumnHeader>
+                      <Table.ColumnHeader fontFamily="heading" textAlign="end">Scholars affected</Table.ColumnHeader>
                     </Table.Row>
-                  ))}
-                </Table.Body>
-              </Table.Root>
+                  </Table.Header>
+                  <Table.Body>
+                    {data.errorPatterns.map((row) => (
+                      <Table.Row key={row.pattern}>
+                        <Table.Cell fontFamily="body">{row.pattern}</Table.Cell>
+                        <Table.Cell textAlign="end">{row.count}</Table.Cell>
+                        <Table.Cell textAlign="end">{row.scholarCount}</Table.Cell>
+                      </Table.Row>
+                    ))}
+                  </Table.Body>
+                </Table.Root>
+              </Box>
             )}
           </SectionSurface>
 

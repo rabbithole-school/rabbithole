@@ -4,9 +4,8 @@ import { useState } from "react";
 import { Box, Flex, Spinner, Text, VStack } from "@chakra-ui/react";
 import { CaretRight, WarningCircle } from "@phosphor-icons/react";
 import {
-  completedGroupOutcome,
-  groupLabel,
   isScholarToolActivityVisible,
+  toolGroupStatus,
 } from "@/lib/toolLabels";
 import {
   coalesceToolActivity,
@@ -78,34 +77,39 @@ export function ToolGroupRow({
     scholarSafe && visibleItems.length > 0
       ? { ...displayGroup, items: visibleItems }
       : displayGroup;
-  const labels = groupLabel(labelGroup);
+  // Classify from labelGroup, not the raw group: on a scholar-safe surface
+  // failures are already redacted/filtered out of labelGroup, so a scholar keeps
+  // the plain checkmark and is never shown that a tool failed. The same status
+  // drives Slack's task cards (toolGroupStatus).
+  const status = toolGroupStatus(labelGroup);
 
-  if (displayGroup.status === "running") {
+  if (status.state === "running") {
     return (
       <Flex align="center" gap={2} py={1}>
         <Spinner size="xs" color="violet.400" />
         <Text fontSize="xs" fontFamily="heading" color="charcoal.400">
-          {labels.running}
+          {status.label}
         </Text>
       </Flex>
     );
   }
 
   // A multi-call group can expand to its individual per-call results.
-  const expandable = scholarSafe ? visibleItems.length > 1 : displayGroup.items.length > 1;
+  const multiCall = scholarSafe ? visibleItems.length > 1 : displayGroup.items.length > 1;
   if (displayGroup.status === "complete" && scholarSafe && visibleItems.length === 0) {
     return null;
   }
 
-  const results = visibleItems
-    .map((it) => it.result)
-    .filter((r): r is string => !!r);
+  // A single failed call whose label had to shorten its reason opens to the
+  // full one, as Slack's card does with its details.
+  const results = multiCall
+    ? visibleItems.map((it) => it.result).filter((r): r is string => !!r)
+    : status.detail
+      ? [status.detail]
+      : [];
+  const expandable = multiCall || results.length > 0;
 
-  // Classify from labelGroup, not the raw group: on a scholar-safe surface
-  // failures are already redacted/filtered out of labelGroup, so a scholar keeps
-  // the plain checkmark and is never shown that a tool failed.
-  const outcome = completedGroupOutcome(labelGroup);
-  const failed = outcome.failing > 0;
+  const failed = status.state === "failed";
 
   return (
     <Box>
@@ -121,8 +125,7 @@ export function ToolGroupRow({
       >
         {failed ? (
           // The row's own CaretRight sets the icon treatment here (bold, small).
-          // A partly-failed row keeps its counted label, so for a screen reader
-          // this glyph is the ONLY failure signal — hence the label.
+          // Labelled so a screen reader announces the failure before the text.
           <WarningCircle
             size={12}
             weight="bold"
@@ -135,9 +138,7 @@ export function ToolGroupRow({
           </Text>
         )}
         <Text fontSize="xs" fontFamily="heading" color="charcoal.300">
-          {failed && outcome.allFailed && outcome.failureDetail
-            ? `${outcome.done} — ${outcome.failureDetail}`
-            : outcome.done}
+          {status.label}
         </Text>
         {expandable && (
           <CaretRight

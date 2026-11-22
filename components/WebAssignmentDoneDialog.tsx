@@ -14,6 +14,7 @@
 import { Button, Dialog, Portal, Text } from "@chakra-ui/react";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import type { WebDonePrompt } from "@/hooks/useWebAssignment";
+import { HOMEWORK_DONE_LABEL, HOMEWORK_DONE_UNDO } from "@/shared/homeworkFraming";
 
 export function WebAssignmentDoneDialog({
   prompt,
@@ -51,7 +52,7 @@ export function WebAssignmentDoneDialog({
                 fontFamily="heading"
                 onClick={() => onResolve(false)}
               >
-                Not yet
+                {HOMEWORK_DONE_UNDO}
               </Button>
               <Button
                 size="sm"
@@ -61,7 +62,7 @@ export function WebAssignmentDoneDialog({
                 fontFamily="heading"
                 onClick={() => onResolve(true)}
               >
-                I&apos;m done
+                {HOMEWORK_DONE_LABEL}
               </Button>
             </Dialog.Footer>
           </StyledDialogContent>

@@ -36,6 +36,7 @@ import {
   type ServableItem,
 } from "./servable";
 import { isFluent, accessProven } from "./scheduler";
+import { PRECEDENCE_FORM_SKILLS } from "./templates";
 import {
   expressionAnswerSignals,
   expressionAnswerSignalsFromCanonical,
@@ -196,6 +197,10 @@ export function servedItemFromServable(item: ServableItem, stampDomain: boolean)
     // The required-unit echo (display form). Carried on every serve path so a
     // unit-bearing item renders its unit affordance wherever it's served.
     ...(item.prompt.answerUnit ? { answerUnit: item.prompt.answerUnit } : {}),
+    // Algebra-pad palette + required form (template-declared; see
+    // `templateInputHints`). A palette item gets no box-editor signals below.
+    ...(item.prompt.answerPalette ? { answerPalette: item.prompt.answerPalette } : {}),
+    ...(item.prompt.answerForm ? { answerForm: item.prompt.answerForm } : {}),
   };
   if (stampDomain) served.domain = item.domain;
   // 2-D expression-editor signals for a STORED item whose answer is a single
@@ -206,7 +211,9 @@ export function servedItemFromServable(item: ServableItem, stampDomain: boolean)
   // so it's left untagged (→ plain path, never reached for a manipulative).
   const v = item.verifier;
   if (v.kind === "template") {
-    Object.assign(served, expressionAnswerSignals(v.answerType, v.answer));
+    if (!item.prompt.answerPalette) {
+      Object.assign(served, expressionAnswerSignals(v.answerType, v.answer));
+    }
     if (item.kind === "template" && item.variant && isFactFamilySkill(item.skillKey)) {
       const { a, op, b } = item.variant;
       const factKey = factKeyFromOperands(a, op, b);
@@ -249,6 +256,7 @@ async function resolveStoredVariantsForSkill(
   stampDomain: boolean,
   recentIdentities?: ReadonlySet<string>,
   forceTeaching = false,
+  skillHistory?: readonly string[],
 ): Promise<StoredVariantResolution> {
   const generated: ServedItem[] = [];
   const manipulatives: ServedItem[] = [];
@@ -256,8 +264,10 @@ async function resolveStoredVariantsForSkill(
 
   // With recent-serve dedupe active, fetch a bounded SURPLUS beyond the usual
   // first two so `preferUnseenCandidates` has unseen rows to prefer; with no
-  // recent history the fetch stays at two so serving is byte-identical.
+  // recent history the fetch stays at two so serving is byte-identical. A
+  // review skill with per-skill history fetches the same surplus to rotate.
   const dedupe = recentIdentities !== undefined && recentIdentities.size > 0;
+  const rotate = skillHistory !== undefined && skillHistory.length > 0;
   // Core is exactly tier-absent: pool curation normalizes ""/"core" to absent
   // on write. Unknown tiers stay DARK by design; a new tier must be wired into
   // serving explicitly (the stretch tripwire tests guard this fail-closed rule).
@@ -265,7 +275,7 @@ async function resolveStoredVariantsForSkill(
     .query("practiceItems")
     .withIndex("by_skill", (qq) => qq.eq("skillKey", key))
     .filter((q) => q.eq(q.field("tier"), undefined))
-    .take(dedupe ? STORED_FETCH_LIMIT : 2);
+    .take(dedupe || rotate ? STORED_FETCH_LIMIT : 2);
   for (const g of rows) {
     const servable = buildStoredServable(
       `gen#${g._id}`,
@@ -291,29 +301,76 @@ async function resolveStoredVariantsForSkill(
   // an ORDERING: a skill whose only rows are bare still serves them bare (R3 —
   // serving never withholds a queued node). Manipulatives are untouched: they
   // have no worked-step contract to force.
-  const generatedForServe =
+  //
+  // Review rotation happens INSIDE that order: the pool order is the same on
+  // every serve, so a review that lands outside the recent-serve window would
+  // otherwise re-serve the first row every time — the row just missed included.
+  // Within a group, never-seen rows lead and seen rows follow, the one seen
+  // longest ago first. Stepped rows stay ahead of bare ones for a cold node, so
+  // rotation never trades the teaching away for novelty.
+  const order = (group: ServedItem[]) =>
+    rotate ? leastRecentlySeenFirst(group, skillHistory) : group;
+  const generatedOrdered =
     forceTeaching && generated.length > 1
       ? [
-          ...generated.filter((it) => (it.workedSteps?.revealed.length ?? 0) > 0),
-          ...generated.filter((it) => (it.workedSteps?.revealed.length ?? 0) === 0),
+          ...order(generated.filter((it) => (it.workedSteps?.revealed.length ?? 0) > 0)),
+          ...order(generated.filter((it) => (it.workedSteps?.revealed.length ?? 0) === 0)),
         ]
-      : generated;
+      : order(generated);
+  const manipulativesOrdered = rotate
+    ? leastRecentlySeenFirst(manipulatives, skillHistory)
+    : manipulatives;
   if (dedupe) {
     return {
       // Keep the same ≤2 word-problem budget, but prefer unseen rows.
-      generated: preferUnseenCandidates(generatedForServe, recentIdentities, 2),
+      generated: preferUnseenCandidates(generatedOrdered, recentIdentities, 2),
       // Prefer an unseen manipulative when several exist (order-preserving,
       // never dropped — the guarantee still serves one).
-      manipulatives: preferUnseenCandidates(manipulatives, recentIdentities, manipulatives.length),
+      manipulatives: preferUnseenCandidates(
+        manipulativesOrdered,
+        recentIdentities,
+        manipulativesOrdered.length,
+      ),
       sawManipulative,
     };
   }
-  return { generated: generatedForServe, manipulatives, sawManipulative };
+  if (rotate) {
+    return {
+      generated: generatedOrdered.slice(0, 2),
+      manipulatives: manipulativesOrdered,
+      sawManipulative,
+    };
+  }
+  return { generated: generatedOrdered, manipulatives, sawManipulative };
+}
+
+/**
+ * Order stored candidates for a review: rows absent from `historyNewestFirst`
+ * keep their order and lead; rows the scholar has seen follow, least recently
+ * seen first. The row seen LAST is left out whenever another exists, so a
+ * multi-item budget (two word problems, every manipulative) cannot carry the
+ * problem just answered back into the run. A one-row pool still serves its row.
+ */
+function leastRecentlySeenFirst<T extends { itemId: string }>(
+  candidates: readonly T[],
+  historyNewestFirst: readonly string[],
+): T[] {
+  const recency = new Map<string, number>();
+  historyNewestFirst.forEach((itemId, index) => {
+    if (!recency.has(itemId)) recency.set(itemId, index);
+  });
+  const neverSeen = candidates.filter((c) => !recency.has(c.itemId));
+  const seen = candidates
+    .filter((c) => recency.has(c.itemId))
+    .sort((a, b) => recency.get(b.itemId)! - recency.get(a.itemId)!);
+  const ordered = [...neverSeen, ...seen];
+  const latest = historyNewestFirst[0];
+  return ordered.length > 1 ? ordered.filter((c) => c.itemId !== latest) : ordered;
 }
 
 /** Bounded stored-item surplus fetched (beyond the usual first two) when recent-
  *  serve dedupe is active, so unseen rows can be preferred. */
-const STORED_FETCH_LIMIT = 8;
+export const STORED_FETCH_LIMIT = 8;
 
 /** The targeted second lookup behind the manipulative guarantee: a skill's
  *  curated manipulative is rare (1–2 rows) and can be crowded out of the
@@ -324,6 +381,8 @@ async function resolveGuaranteedManipulative(
   domain: string,
   labelByKey: Map<string, string>,
   stampDomain: boolean,
+  recentIdentities?: ReadonlySet<string>,
+  skillHistory?: readonly string[],
 ): Promise<ServedItem[]> {
   // Core is exactly tier-absent: pool curation normalizes ""/"core" to absent
   // on write. Unknown tiers stay DARK by design; a new tier must be wired into
@@ -332,7 +391,10 @@ async function resolveGuaranteedManipulative(
   // manipulative kind — unrenderable, so excluded rather than served blank)
   // would otherwise shadow a perfectly good sibling and silently void the
   // guarantee. Prod's `factors_and_multiples` is exactly that shape: two
-  // manipulatives, one a dead `factorGame`.
+  // manipulatives, one a dead `factorGame`. With recent history, fetch the
+  // same surplus the word-problem sample does so an unseen one can be chosen.
+  const dedupe = recentIdentities !== undefined && recentIdentities.size > 0;
+  const rotate = skillHistory !== undefined && skillHistory.length > 0;
   const rows = await ctx.db
     .query("practiceItems")
     .withIndex("by_skill", (qq) => qq.eq("skillKey", key))
@@ -342,7 +404,8 @@ async function resolveGuaranteedManipulative(
         q.eq(q.field("tier"), undefined),
       ),
     )
-    .take(4);
+    .take(dedupe || rotate ? STORED_FETCH_LIMIT : 4);
+  const candidates: ServedItem[] = [];
   for (const g of rows) {
     const servable = buildStoredServable(
       `gen#${g._id}`,
@@ -350,10 +413,14 @@ async function resolveGuaranteedManipulative(
       { label: labelByKey.get(g.skillKey), domain },
       domain,
     );
-    // Still exactly ONE manipulative — the guarantee, not a second item.
-    if (servable) return [servedItemFromServable(servable, stampDomain)];
+    if (servable) candidates.push(servedItemFromServable(servable, stampDomain));
   }
-  return [];
+  // Still exactly ONE manipulative — the guarantee, not a second item — and
+  // an unseen one when this skill has several, so they rotate.
+  const ordered = rotate ? leastRecentlySeenFirst(candidates, skillHistory) : candidates;
+  return recentIdentities && dedupe
+    ? preferUnseenCandidates(ordered, recentIdentities, 1)
+    : ordered.slice(0, 1);
 }
 
 // ── serveItems ─────────────────────────────────────────────────────────────
@@ -388,6 +455,12 @@ export type ServeInput = {
    *  worked-step fade level 1 — a completion problem — wherever the content for
    *  one exists. Never a queue filter: a cold node with no steps serves bare. */
   coldFailedSkillKeys?: ReadonlySet<string>;
+  /** Review lane only: per queued review skill, the item ids of this scholar's
+   *  latest attempts on it, newest first (`practiceSkills.reviewItemHistory`).
+   *  A skill present here rotates its stored items least-recently-seen first,
+   *  so a review never repeats the item just seen while the pool has another.
+   *  Skills absent (frontier work, omitted map) serve exactly as before. */
+  reviewHistoryBySkill?: ReadonlyMap<string, readonly string[]>;
 };
 
 /** Apply the one canonical fluency gate for answer-shape scaffolding. */
@@ -405,13 +478,19 @@ export function applyAnswerFormatFade(
 
 /** The form-variant selector for `buildSession`, per the policy: a GREEN-fluent
  *  skill's reviews go ~70% relational (missing-operand), ~30% direct; a skill
- *  still practicing (or only provisionally credited) stays 100% direct. */
-function formSelector(
+ *  still practicing (or only provisionally credited) stays 100% direct.
+ *  A `PRECEDENCE_FORM_SKILLS` skill instead takes the "precedence" form on 3 of
+ *  every 8 seeds at ANY proficiency (a scholar new to order of operations needs
+ *  the left-to-right trap most): with its un-formed draw landing on that shape
+ *  one time in five, the scholar meets it 3/8 + 5/8 × 1/5 = 1/2 of the time.
+ *  Exported for its test. */
+export function formSelector(
   policy: ServePolicy,
   masteryByKey: Map<string, Doc<"practiceMastery">>,
 ): ((key: string, seed: number) => string | undefined) | undefined {
   if (policy.formPolicy === "directOnly") return undefined;
   return (key, s) => {
+    if (PRECEDENCE_FORM_SKILLS.has(key)) return s % 8 < 3 ? "precedence" : undefined;
     const row = masteryByKey.get(key);
     return row && isFluent(row) && s % 10 < 7 ? "missing" : undefined;
   };
@@ -467,12 +546,21 @@ export async function serveItems(
       stampDomain,
       recentIdentities,
       instructionalCold.has(e.key),
+      input.reviewHistoryBySkill?.get(e.key),
     );
     generatedBySkill.push({ skillKey: e.key, variants: resolved.generated });
     manipulatives.push(...resolved.manipulatives);
     if (policy.manipulativeGuarantee && !resolved.sawManipulative) {
       manipulatives.push(
-        ...(await resolveGuaranteedManipulative(ctx, e.key, e.domain, labelByKey, stampDomain)),
+        ...(await resolveGuaranteedManipulative(
+          ctx,
+          e.key,
+          e.domain,
+          labelByKey,
+          stampDomain,
+          recentIdentities,
+          input.reviewHistoryBySkill?.get(e.key),
+        )),
       );
     }
   }
@@ -499,8 +587,17 @@ export async function serveItems(
   // Guarantee: every queued skill's manipulative item is served — swap it into
   // that skill's own slot when there is one, else append (space permitting). A
   // skill with no other slot in this session is skipped (rare).
+  //
+  // ONE manipulative per skill: the FIRST in the resolved order, which is the
+  // unseen-first order when recent history exists. (Until 2026-11 every one
+  // was written into the same slot in turn, so the LAST won — with history
+  // that is a recently SEEN one, and a skill with several manipulatives
+  // served the same board every session.)
   if (policy.manipulativeGuarantee) {
+    const placedFor = new Set<string>();
     for (const m of manipulatives) {
+      if (placedFor.has(m.skillKey)) continue;
+      placedFor.add(m.skillKey);
       if (served.some((it) => it.itemId === m.itemId)) continue;
       const pos = served.findIndex((it) => it.skillKey === m.skillKey);
       if (pos >= 0) served[pos] = m;

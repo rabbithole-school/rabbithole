@@ -7,9 +7,8 @@
  * one. It renders the artifact's HTML full-bleed in a `react-native-webview`,
  * runs HTML through the shared sandbox preparation path (the same CSP, bridge
  * scripts, and brand stylesheet the web CodeArtifactViewer injects), and drives
- * the full bridge: visual capture, scoped app state, optional shared-room
- * state, presence, and registered app actions. It is the native twin of the web
- * sandboxed iframe preview.
+ * the full bridge: visual capture, scoped app state, and registered app
+ * actions. It is the native twin of the web sandboxed iframe preview.
  *
  * Consumers:
  *   • VibecodeScreen — the full-screen landscape build surface (a
@@ -48,10 +47,14 @@ import {
   View,
   type ViewStyle,
 } from "react-native";
-import { useAction, useConvex, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import WebView from "react-native-webview";
 
 import { api, type Id } from "@/lib/convex";
+import { AppPlaySessionTracker } from "@/hooks/useAppPlaySession";
+import { AppLoadingSkeleton } from "@/components/AppLoadingSkeleton";
+import { createAppPlayInteractionSource } from "../../vendor/shared/appPlaySession";
 import {
   collectAppSnapshotConsoleLines,
   type AppSnapshotCapture,
@@ -67,6 +70,7 @@ import {
 } from "@/lib/codeArtifactStateScope";
 import * as appStateBridgeRuntime from "../../vendor/shared/appStateBridge.mjs";
 import {
+  APP_ACTIVITY_TYPE,
   APP_STATE_MAX_LOG_ENTRIES,
   appActionRegistryWriteDecision,
   appBridgeResponseInjectionScript,
@@ -85,14 +89,9 @@ import {
   CUSTOM_APP_STATE_MIN_WRITE_INTERVAL_MS,
   isCustomAppStateRateLimitErrorData,
 } from "../../vendor/shared/appStatePolicy";
-import {
-  commitResolvedRoomSelection,
-  isRoomAppStateRateLimitErrorData,
-  ROOM_PRESENCE_HEARTBEAT_MS,
-  type RequestedRoom,
-} from "../../vendor/shared/roomAppState";
 import { prepareCustomAppSandbox } from "../../vendor/shared/customAppSandbox";
 import { resolveNativeAppKitSource } from "@/lib/appKitAssets";
+import { rabbitholeWebBaseUrl } from "@/lib/webEmbedConfig";
 import {
   forwardAppTutorRequest,
   type AppTutorRequest,
@@ -209,7 +208,31 @@ export type CodeArtifactWebViewHandle = {
   discardPendingAppState: () => Promise<void>;
   /** Re-arm the writer after a discard whose Reset did not remount this host. */
   resumeAppStateWrites: () => void;
+  /**
+   * Whether the app document is on screen: `preparing` while assets resolve
+   * and the sandbox is built, `failed` once the host refused it (`onError`
+   * said why; the WebView shows an empty page), `ready` otherwise. A render
+   * check waits out `preparing` and reports `failed` instead of a blank
+   * capture.
+   */
+  hostStatus: () => "preparing" | "ready" | "failed";
+  /**
+   * Ask the running app to open a thing's rule card (its own popup with the
+   * rule controls): dispatches `rh:open-rules` with `detail.thing` on the
+   * app's window. The app opts in by listening (prompts.ts rules steering);
+   * an app that doesn't listen ignores it.
+   */
+  openRuleCard: (thing: string) => void;
 };
+
+/** The reason a host error carries: a ConvexError's data (the server's own
+ *  message, which a plain Error loses to "Server Error"), else the message. */
+function describeHostError(error: unknown): string {
+  if (error instanceof ConvexError && typeof error.data === "string") {
+    return error.data;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
 
 export const CodeArtifactWebView = forwardRef<
   CodeArtifactWebViewHandle,
@@ -285,11 +308,7 @@ export const CodeArtifactWebView = forwardRef<
       assetResolution.key === assetRequestKey &&
       assetResolution.error !== undefined
     ) {
-      const message =
-        assetResolution.error instanceof Error
-          ? assetResolution.error.message
-          : String(assetResolution.error);
-      onError?.(message);
+      onError?.(describeHostError(assetResolution.error));
     }
   }, [
     assetRequestKey,
@@ -331,12 +350,18 @@ export const CodeArtifactWebView = forwardRef<
       injectAppStateSdk,
       resolveNativeAppKitSource,
       (assetId) => resolvedUrls.get(assetId),
+      // The web app serves /app-kit/pyodide/ for apps that opt in; the
+      // WebView's HTML has no origin of its own to resolve it against.
+      rabbitholeWebBaseUrl,
     )
       .then(({ srcDoc }) => {
         if (active) setSourceHtml(srcDoc);
       })
       .catch((error: unknown) => {
         if (!active) return;
+        // An empty document, like a refused asset, so hostStatus reads
+        // "failed" rather than waiting forever.
+        setSourceHtml("");
         onErrorRef.current?.(
           error instanceof Error
             ? error.message
@@ -440,34 +465,9 @@ export const CodeArtifactWebView = forwardRef<
     sessionArtifactId,
   );
   activeAppStateArtifactIdRef.current = sessionArtifactId;
-  const [requestedRoom, setRequestedRoom] = useState<
-    RequestedRoom<Id<"artifacts">, Id<"rooms">> | null
-  >(null);
-  // WebView input remains raw until the resolver returns a typed, authorized ID.
-  const [, setPendingRoomSelection] = useState<{
-    artifactId: Id<"artifacts">;
-    roomId: string;
-    requestId: number;
-  } | null>(null);
-  const nextRoomSelectionRequestIdRef = useRef(0);
-  const [roomSelectionVersion, setRoomSelectionVersion] = useState(0);
-  const pendingSharedPatchRef = useRef<Record<string, unknown>>({});
-  const inFlightSharedPatchesRef = useRef<
-    Array<{
-      id: number;
-      roomId: Id<"rooms">;
-      patch: Record<string, unknown>;
-    }>
-  >([]);
-  const nextSharedWriteIdRef = useRef(0);
-  const sharedWriteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
-  const sharedPendingSinceRef = useRef<number | undefined>(undefined);
-  const activeSharedRoomIdRef = useRef<Id<"rooms"> | null | undefined>(
-    undefined,
-  );
-  const convex = useConvex();
+  // Touches on this view and touches, key presses and scrolls the app frame
+  // reports → play active time (shared/appPlaySession.ts).
+  const [appPlayInteractions] = useState(createAppPlayInteractionSource);
   const appStateSnapshotRef = useRef<
     | {
         doc?: unknown;
@@ -479,9 +479,6 @@ export const CodeArtifactWebView = forwardRef<
 
   const updateSessionAppState = useMutation(api.appStates.updateSessionState);
   const updateCustomAppState = useMutation(api.appStates.updateCustomAppState);
-  const updateRoomState = useMutation(api.appStates.updateRoomState);
-  const joinRoomPresence = useMutation(api.appStates.joinRoomPresence);
-  const leaveRoomPresence = useMutation(api.appStates.leaveRoomPresence);
   const appAiSay = useAction(api.appAiActions.say);
   const appAiJudge = useAction(api.appAiActions.judge);
 
@@ -723,6 +720,13 @@ export const CodeArtifactWebView = forwardRef<
     appStateWritesPausedRef.current = false;
   }, []);
 
+  const sourceHtmlRef = useRef(sourceHtml);
+  sourceHtmlRef.current = sourceHtml;
+  const hostStatus = useCallback((): "preparing" | "ready" | "failed" => {
+    const html = sourceHtmlRef.current;
+    if (html === null) return "preparing";
+    return html === "" ? "failed" : "ready";
+  }, []);
   useImperativeHandle(
     ref,
     () => ({
@@ -731,6 +735,13 @@ export const CodeArtifactWebView = forwardRef<
       pauseMedia,
       discardPendingAppState,
       resumeAppStateWrites,
+      hostStatus,
+      openRuleCard: (thing: string) => {
+        const detail = JSON.stringify({ thing }).replaceAll("<", "\\u003c");
+        webViewRef.current?.injectJavaScript(
+          `window.dispatchEvent(new CustomEvent("rh:open-rules",{detail:${detail}}));true;`,
+        );
+      },
     }),
     [
       captureSnapshot,
@@ -738,14 +749,21 @@ export const CodeArtifactWebView = forwardRef<
       pauseMedia,
       discardPendingAppState,
       resumeAppStateWrites,
+      hostStatus,
     ],
   );
 
   // Key the WebView on scope + content hash so an in-place edit reliably reloads it.
-  const webViewKey =
-    sourceHtml === null
-      ? `${appStateIdentity}:loading`
-      : `${appStateIdentity}:${hashContent(sourceHtml)}`;
+  // Memoized: the prepared document can run to megabytes (inlined app-kit
+  // libraries), and this host re-renders with every parent render — a streamed
+  // token, a clock tick — so re-hashing it each time stalls the JS thread.
+  const webViewKey = useMemo(
+    () =>
+      sourceHtml === null
+        ? `${appStateIdentity}:loading`
+        : `${appStateIdentity}:${hashContent(sourceHtml)}`,
+    [appStateIdentity, sourceHtml],
+  );
   const sessionAppState = useQuery(
     api.appStates.getSessionState,
     sessionArtifactId !== null ? { artifactId: sessionArtifactId } : "skip",
@@ -767,75 +785,6 @@ export const CodeArtifactWebView = forwardRef<
   useEffect(() => {
     appStateSnapshotRef.current = appState;
   }, [appState]);
-  const defaultRoom = useQuery(
-    api.rooms.defaultForArtifact,
-    sessionArtifactId !== null ? { artifactId: sessionArtifactId } : "skip",
-  );
-  const requestedRoomId =
-    requestedRoom &&
-    sessionArtifactId &&
-    requestedRoom.artifactId === sessionArtifactId
-      ? requestedRoom.roomId
-      : null;
-  const activeRoomId: Id<"rooms"> | null | undefined =
-    sessionArtifactId === null
-      ? null
-      : requestedRoomId ??
-        (defaultRoom === undefined ? undefined : (defaultRoom?._id ?? null));
-  activeSharedRoomIdRef.current = activeRoomId;
-  const sharedState = useQuery(
-    api.appStates.getRoomState,
-    activeRoomId ? { roomId: activeRoomId } : "skip",
-  );
-  const roomPresence = useQuery(
-    api.appStates.getRoomPresence,
-    activeRoomId ? { roomId: activeRoomId } : "skip",
-  );
-
-  const resolveRoomSelection = useCallback(
-    (targetArtifactId: Id<"artifacts">, rawRoomId: string) => {
-      const requestId = nextRoomSelectionRequestIdRef.current++;
-      setPendingRoomSelection({
-        artifactId: targetArtifactId,
-        roomId: rawRoomId,
-        requestId,
-      });
-      void convex
-        .query(api.rooms.resolveAccessibleForArtifact, {
-          artifactId: targetArtifactId,
-          roomId: rawRoomId,
-        })
-        .then((room) => {
-          if (
-            nextRoomSelectionRequestIdRef.current !== requestId + 1 ||
-            activeAppStateIdentityRef.current !== String(targetArtifactId)
-          ) {
-            return;
-          }
-          if (!room) {
-            // Re-send the committed room so the WebView abandons its rejected raw ID.
-            setRoomSelectionVersion((version) => version + 1);
-          }
-          setRequestedRoom((current) =>
-            commitResolvedRoomSelection(
-              current,
-              targetArtifactId,
-              room?._id ?? null,
-            ),
-          );
-        })
-        .catch((error) =>
-          console.warn("[code-webview] failed to resolve shared room", error),
-        )
-        .finally(() => {
-          setPendingRoomSelection((pending) =>
-            pending?.requestId === requestId ? null : pending,
-          );
-        });
-    },
-    [convex],
-  );
-
   const flushAppState = useCallback((): Promise<boolean> => {
     const epoch = appStateWriteEpochRef.current;
     clearTimeout(appStateWriteTimerRef.current);
@@ -936,54 +885,6 @@ export const CodeArtifactWebView = forwardRef<
     return writePromise;
   }, [appStateIdentity, persistAppState]);
 
-  const flushSharedState = useCallback(function flushSharedState(
-    roomOverride?: Id<"rooms">,
-  ) {
-    clearTimeout(sharedWriteTimerRef.current);
-    sharedWriteTimerRef.current = undefined;
-    sharedPendingSinceRef.current = undefined;
-    const roomId = roomOverride ?? activeSharedRoomIdRef.current;
-    const patch = pendingSharedPatchRef.current;
-    pendingSharedPatchRef.current = {};
-    if (!roomId || Object.keys(patch).length === 0) return;
-    const writeId = nextSharedWriteIdRef.current++;
-    inFlightSharedPatchesRef.current.push({ id: writeId, roomId, patch });
-    void updateRoomState({ roomId, patch })
-      .then(() => {
-        inFlightSharedPatchesRef.current =
-          inFlightSharedPatchesRef.current.filter(
-            (entry) => entry.id !== writeId,
-          );
-      })
-      .catch((error) => {
-        inFlightSharedPatchesRef.current =
-          inFlightSharedPatchesRef.current.filter(
-            (entry) => entry.id !== writeId,
-          );
-        const data =
-          error && typeof error === "object" && "data" in error
-            ? (error as { data?: unknown }).data
-            : undefined;
-        if (
-          activeSharedRoomIdRef.current === roomId &&
-          isRoomAppStateRateLimitErrorData(data)
-        ) {
-          pendingSharedPatchRef.current = {
-            ...patch,
-            ...pendingSharedPatchRef.current,
-          };
-          if (sharedPendingSinceRef.current == null) {
-            sharedPendingSinceRef.current = Date.now();
-          }
-          sharedWriteTimerRef.current = setTimeout(
-            flushSharedState,
-            data.retryAfterMs,
-          );
-        }
-        console.warn("[code-webview] failed to persist shared app state", error);
-      });
-  }, [updateRoomState]);
-
   const queueAppActions = useCallback(
     (actions: AppActionRegistration[]) => {
       if (appStateWritesPausedRef.current) return;
@@ -1029,29 +930,11 @@ export const CodeArtifactWebView = forwardRef<
         .map((entry) => entry.patch),
       pendingAppStatePatchRef.current,
     ];
-    const sharedMessage =
-      activeRoomId === null
-        ? null
-        : activeRoomId &&
-            sharedState !== undefined &&
-            roomPresence !== undefined
-          ? {
-              roomId: activeRoomId,
-              doc: mergeAppStateDoc(sharedState?.doc, [
-                ...inFlightSharedPatchesRef.current
-                  .filter((entry) => entry.roomId === activeRoomId)
-                  .map((entry) => entry.patch),
-                pendingSharedPatchRef.current,
-              ]),
-              presence: roomPresence,
-            }
-          : undefined;
     webViewRef.current.injectJavaScript(
       appStateHostInjectionScript(
         type,
         mergeAppStateDoc(appState?.doc, pendingPatches),
         appStateNonceRef.current,
-        sharedMessage,
         supportsActionResults && appState && "actionRequest" in appState
           ? appState.actionRequest
           : undefined,
@@ -1064,19 +947,17 @@ export const CodeArtifactWebView = forwardRef<
       ),
     );
     appStateInitializedRef.current = true;
-  }, [
-    activeRoomId,
-    appState,
-    appStateIdentity,
-    roomPresence,
-    sharedState,
-    supportsActionResults,
-  ]);
+  }, [appState, appStateIdentity, supportsActionResults]);
 
   const handleAppStateMessage = useCallback(
     (event: { nativeEvent: { data: string } }) => {
       const message = parseBridgeMessage(event.nativeEvent.data);
       if (!message) return;
+      // Its own nonce; only this WebView's frame can post here.
+      if (message.type === APP_ACTIVITY_TYPE) {
+        appPlayInteractions.emit();
+        return;
+      }
       if (message.type === APP_SNAPSHOT_READY_TYPE) {
         if (
           snapshotNonceRef.current &&
@@ -1112,28 +993,7 @@ export const CodeArtifactWebView = forwardRef<
         return;
       }
       if (!matchesAppStateBridgeNonce(message, appStateNonceRef.current)) return;
-      if (message.type === "sharedSelect") {
-        const currentArtifactId = activeAppStateArtifactIdRef.current;
-        if (!currentArtifactId) return;
-        resolveRoomSelection(currentArtifactId, message.roomId);
-        return;
-      }
-      if (message.type === "sharedChange") {
-        if (message.roomId !== activeSharedRoomIdRef.current) return;
-        pendingSharedPatchRef.current = {
-          ...pendingSharedPatchRef.current,
-          ...message.patch,
-        };
-        if (sharedPendingSinceRef.current == null) {
-          sharedPendingSinceRef.current = Date.now();
-        }
-        clearTimeout(sharedWriteTimerRef.current);
-        sharedWriteTimerRef.current = setTimeout(
-          flushSharedState,
-          appStateFlushDelay(sharedPendingSinceRef.current),
-        );
-        return;
-      }
+      if (message.type === "composeKey") return;
       if (message.type === "actionResult") {
         if (!supportsActionResults) return;
         const actionResult: AppActionResult = message.ok
@@ -1239,8 +1099,8 @@ export const CodeArtifactWebView = forwardRef<
       );
     },
     [
+      appPlayInteractions,
       flushAppState,
-      flushSharedState,
       clearPendingSnapshotRequests,
       appAiEnabled,
       appAiJudge,
@@ -1248,7 +1108,6 @@ export const CodeArtifactWebView = forwardRef<
       onAskTutor,
       postAppState,
       queueAppActions,
-      resolveRoomSelection,
       supportsActionResults,
       updateSessionAppState,
     ],
@@ -1277,36 +1136,8 @@ export const CodeArtifactWebView = forwardRef<
     [clearPendingSnapshotRequests, flushAppState],
   );
 
-  useEffect(() => {
-    postAppState();
-  }, [
-    activeRoomId,
-    postAppState,
-    roomPresence,
-    roomSelectionVersion,
-    sharedState,
-  ]);
-
-  useEffect(() => {
-    if (!activeRoomId) return;
-    void joinRoomPresence({ roomId: activeRoomId });
-    const heartbeat = setInterval(() => {
-      void joinRoomPresence({ roomId: activeRoomId });
-    }, ROOM_PRESENCE_HEARTBEAT_MS);
-    return () => {
-      clearInterval(heartbeat);
-      flushSharedState(activeRoomId);
-      void leaveRoomPresence({ roomId: activeRoomId });
-    };
-  }, [
-    activeRoomId,
-    flushSharedState,
-    joinRoomPresence,
-    leaveRoomPresence,
-  ]);
-
   if (sourceHtml === null) {
-    return <View style={[styles.webView, style]} />;
+    return <AppLoadingSkeleton style={style} />;
   }
 
   return (
@@ -1323,7 +1154,20 @@ export const CodeArtifactWebView = forwardRef<
       }}
       style={[styles.captureSurface, style]}
       collapsable={false}
+      // Observes (never claims) every touch over the app, the same signal
+      // the Single App Mode display policy trusts (AsamParentGate).
+      onTouchStart={appPlayInteractions.emit}
     >
+      {/* A session app on screen is play time (owner-only; the server
+          ignores everyone else). Static custom apps have no session
+          artifact and stay untracked. */}
+      {sessionArtifactId !== null && (
+        <AppPlaySessionTracker
+          artifactId={sessionArtifactId}
+          onScreen
+          interactions={appPlayInteractions}
+        />
+      )}
       <CodeWebView
         ref={webViewRef}
         key={webViewKey}
@@ -1392,10 +1236,30 @@ export const CodeArtifactWebView = forwardRef<
         mediaPlaybackRequiresUserAction={false}
         bounces={false}
         overScrollMode="never"
+        // An app is a fixed canvas: no pinch zoom and no double-tap zoom
+        // (they fired mid-game). Runs before the app's own scripts.
+        injectedJavaScriptBeforeContentLoaded={NO_ZOOM_SCRIPT}
+        allowsBackForwardNavigationGestures={false}
       />
     </View>
   );
 });
+
+/** Locks the app's zoom: a no-scale viewport, touch-action manipulation (no
+ * double-tap zoom), and WebKit's pinch gesture events cancelled. */
+const NO_ZOOM_SCRIPT = `(function(){
+  function lock(){
+    var head=document.head||document.documentElement;
+    var m=document.querySelector('meta[name="viewport"]');
+    if(!m){m=document.createElement('meta');m.name='viewport';head.appendChild(m);}
+    m.content='width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no';
+    var s=document.createElement('style');
+    s.textContent='html,body{touch-action:manipulation;}';
+    head.appendChild(s);
+  }
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',lock);}else{lock();}
+  ['gesturestart','gesturechange'].forEach(function(t){document.addEventListener(t,function(e){e.preventDefault();},{passive:false});});
+})();true;`;
 
 const styles = StyleSheet.create({
   captureSurface: { flex: 1, backgroundColor: "#ffffff" },

@@ -69,6 +69,14 @@ async function isStillManaged(
   );
 }
 
+/** A 0–100 level, or undefined for anything else (iOS reports -1 when the
+ *  level is unknown, as on a simulator). */
+function validBatteryLevel(level: number | undefined): number | undefined {
+  return level !== undefined && Number.isFinite(level) && level >= 0 && level <= 100
+    ? level
+    : undefined;
+}
+
 /**
  * Authenticated native clients report the build currently running on a stable
  * local installation id. Tenant and managed status are deliberately derived
@@ -81,6 +89,16 @@ export const record = authedMutation({
     appVersion: v.string(),
     buildNumber: v.string(),
     gitSha: v.string(),
+    // Builds with the battery reading send both; older builds send neither.
+    batteryLevel: v.optional(v.number()),
+    batteryState: v.optional(
+      v.union(
+        v.literal("unplugged"),
+        v.literal("charging"),
+        v.literal("full"),
+        v.literal("unknown"),
+      ),
+    ),
   },
   handler: async (ctx, args) => {
     const deviceId = normalizedDeviceId(args.deviceId);
@@ -102,6 +120,15 @@ export const record = authedMutation({
       gitSha: requiredMetadata(args.gitSha, "git SHA"),
       managedDeviceId: managedClaim?._id,
       lastSeenAt: now,
+      // Only a check-in that carries a reading moves `batteryAt`, so a stale
+      // reading can never look fresh (the charge reminder dates it by this).
+      ...(args.batteryState !== undefined
+        ? {
+            batteryState: args.batteryState,
+            batteryLevel: validBatteryLevel(args.batteryLevel),
+            batteryAt: now,
+          }
+        : {}),
     };
     const existing = await ctx.db
       .query("nativeClientHeartbeats")

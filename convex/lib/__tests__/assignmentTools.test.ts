@@ -21,20 +21,21 @@ const emit = () => {};
 const caller = "u_caller" as Id<"users">;
 
 const ASSIGNMENT_TOOLS = [
-  "assign_unit",
+  "give",
+  // Read-only class-day planning tool. give_class_days / move_class_days are
+  // offered only on surfaces that carry a confirmation scope (none here).
+  "get_class_days",
   "publish_unit",
-  "assign_activity_now",
   "list_assignments",
   "get_schedule",
   "get_assignment",
   "get_assignment_progress",
   "get_granule_coverage",
-  "schedule_activity",
   "reschedule_activity",
   "clear_activity",
-  "push_activity_now",
   "set_assignment_scholars",
   "add_assignment_scholars",
+  "remove_assignment_scholars",
   "archive_assignment",
   "add_activity_resource",
 ];
@@ -85,24 +86,17 @@ describe("makeAssignmentTools currentUnit hint", () => {
     (tools.find((t) => t.name === name)! as unknown as { description?: string })
       .description ?? "";
 
-  test("names the open unit using the identifier each assign tool accepts", async () => {
+  test("names the open unit by the unitId give accepts", async () => {
     const tools = await build(ROLES.TEACHER, {
       id: "unit_7" as Id<"units">,
       title: "Tide Pool Ecosystems",
     });
-    const assignUnit = describeOf(tools, "assign_unit");
-    expect(assignUnit).toContain(
+    const give = describeOf(tools, "give");
+    expect(give).toContain(
       'The unit currently in scope is "Tide Pool Ecosystems"',
     );
-    expect(assignUnit).toContain("unitId unit_7");
-    expect(assignUnit).toContain("pass that unitId");
-
-    const assignActivity = describeOf(tools, "assign_activity_now");
-    expect(assignActivity).toContain(
-      'The unit currently in scope is "Tide Pool Ecosystems"',
-    );
-    expect(assignActivity).toContain('pass unitTitle "Tide Pool Ecosystems"');
-    expect(assignActivity).not.toContain("unitId unit_7");
+    expect(give).toContain("unitId unit_7");
+    expect(give).toContain("pass that unitId");
 
     // Nothing else in the group changes shape because a unit is open.
     expect(describeOf(tools, "list_assignments")).not.toContain("currently in scope");
@@ -110,9 +104,7 @@ describe("makeAssignmentTools currentUnit hint", () => {
 
   test("says nothing about a current unit on the global (unit-less) aide", async () => {
     const tools = await build(ROLES.TEACHER);
-    for (const name of ["assign_unit", "assign_activity_now"]) {
-      expect(describeOf(tools, name)).not.toContain("currently in scope");
-    }
+    expect(describeOf(tools, "give")).not.toContain("currently in scope");
   });
 });
 
@@ -129,11 +121,11 @@ describe("makeAssignmentTools scholar lens", () => {
         allowedScholarIds: allowed,
       },
     );
-    const assign = tools.find((tool) => tool.name === "assign_unit")! as unknown as {
+    const give = tools.find((tool) => tool.name === "give")! as unknown as {
       run: (input: Record<string, unknown>) => Promise<string>;
     };
 
-    await assign.run({ groupName: "Robotics" });
+    await give.run({ unitTitle: "Robots", groupName: "Robotics" });
 
     expect(runQuery).toHaveBeenCalledWith(
       internal.curriculumAssistant.listScholarGroupsInternal,
@@ -142,23 +134,8 @@ describe("makeAssignmentTools scholar lens", () => {
   });
 });
 
-describe("assign_activity_now timing fields", () => {
-  test.each([
-    {
-      mode: "classFocus" as const,
-      timing: { dueAtMs: 1_800_000_000_000 },
-      expected: "dueAtMs is only valid for homework mode",
-    },
-    {
-      mode: "homework" as const,
-      timing: { endsAtMs: 1_800_000_000_000 },
-      expected: "endsAtMs is only valid for classFocus mode",
-    },
-  ])("rejects incompatible timing for $mode before resolving data", async ({
-    mode,
-    timing,
-    expected,
-  }) => {
+describe("give finish", () => {
+  test("rejects a malformed finish before resolving data", async () => {
     const runQuery = vi.fn();
     const runMutation = vi.fn();
     const tools = await makeAssignmentTools(
@@ -166,24 +143,22 @@ describe("assign_activity_now timing fields", () => {
       emit,
       { role: ROLES.TEACHER, callerUserId: caller },
     );
-    const tool = tools.find((t) => t.name === "assign_activity_now")! as unknown as {
+    const tool = tools.find((t) => t.name === "give")! as unknown as {
       run: (input: {
         unitTitle: string;
         activityTitle: string;
-        mode: "classFocus" | "homework";
-        endsAtMs?: number;
-        dueAtMs?: number;
+        startsNow?: boolean;
+        finish?: string;
       }) => Promise<string>;
     };
 
-    await expect(
-      tool.run({
-        unitTitle: "Tide Pool Ecosystems",
-        activityTitle: "Observe a Tide Pool",
-        mode,
-        ...timing,
-      }),
-    ).resolves.toContain(expected);
+    const result = await tool.run({
+      unitTitle: "Tide Pool Ecosystems",
+      activityTitle: "Observe a Tide Pool",
+      startsNow: true,
+      finish: "next week sometime",
+    });
+    expect(result.startsWith('finish "next week sometime"')).toBe(true);
     expect(runQuery).not.toHaveBeenCalled();
     expect(runMutation).not.toHaveBeenCalled();
   });

@@ -2,18 +2,15 @@
  * The done-screen pieces of the mission program (TRA-519), rendered under the
  * completion card in native/src/app/session/[id].tsx:
  *   • SavedForLaterBlock (B2) — the session's parked ideas come back, each with
- *     "Build it now" (sessions.startFreePlay with the idea → open the new
+ *     "Build it now" (sessions.startFreePlay with the idea → carry on in this
+ *     session via `onBuildHere`, or open an older free-play copy; was: open the new
  *     session) and "Make it a Quest" (sessions.questFromParkedIdea plants or
  *     reuses a seed → the existing seed flow, useExploreSeed).
- *   • QuestBuildUnlockOffer (B6) — a finished Quest with no build step offers
- *     "Unlock: build a simulation of this" (quests.appendBuildStep → open the
- *     new step the way the Quest page starts an activity).
- * The caller decides when each shows; labels come from shared/missionCopy so
- * they match web byte for byte. Web twins: components/SavedForLaterBlock.tsx,
- * components/QuestBuildUnlockOffer.tsx.
+ * The caller decides when it shows; labels come from shared/missionCopy so
+ * they match web byte for byte. Web twin: components/SavedForLaterBlock.tsx.
  */
 import { useMemo, useState, type ReactNode } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 import { useRouter } from "expo-router";
 import {
   ActivityIndicator,
@@ -27,13 +24,8 @@ import * as Haptics from "expo-haptics";
 
 import { ParkedIdeaList, type ParkedIdea } from "@/components/ParkedIdeaList";
 import { useExploreSeed } from "@/hooks/useExploreSeed";
-import { api, type Id } from "@/lib/convex";
-import {
-  appendBuildStepRef,
-  canUnlockBuildOf,
-  questFromParkedIdeaRef,
-  startFreePlayRef,
-} from "@/lib/missionApi";
+import type { Id } from "@/lib/convex";
+import { questFromParkedIdeaRef, startFreePlayRef } from "@/lib/missionApi";
 import { fonts, useColors } from "@/theme";
 import { MISSION_COPY } from "../../vendor/shared/missionCopy";
 import { serverErrorMessage } from "../../vendor/shared/serverErrorMessage";
@@ -42,42 +34,50 @@ type Busy = { text: string; action: "build" | "quest" } | null;
 
 /**
  * Build it now + Make it a Quest for each parked idea, shared by the chat done
- * screen (SavedForLaterBlock below) and the builder's done state (the Workshop
- * strip, components/vibecode/ParkingLot.tsx). `renderActions` goes to
- * ParkedIdeaList; the caller renders `dialog` (the seed flow's path picker).
+ * screen (SavedForLaterBlock below) and the builder's done state (the chat
+ * drawer's Saved tab, components/vibecode/VibecodeScreen.tsx). `renderActions` goes to
+ * ParkedIdeaList.
  */
 export function useSavedForLaterActions({
   sessionId,
   canBuildNow,
+  onBuildHere,
 }: {
   sessionId: Id<"sessions">;
   /** `freePlayEligible` from getWithMessages — whether Build it now works. */
   canBuildNow: boolean;
+  /** The builder's done state: carry on in this session with `idea`. Absent
+   *  (the chat done screen), the session the server names is opened. */
+  onBuildHere?: (idea: ParkedIdea) => void;
 }): {
   renderActions: (idea: ParkedIdea) => ReactNode;
-  dialog: ReactNode;
 } {
   const router = useRouter();
   const startFreePlay = useMutation(startFreePlayRef);
   const questFromParkedIdea = useMutation(questFromParkedIdeaRef);
-  const { exploreSeed, exploringSeedId, exploreSeedDialog } = useExploreSeed();
+  const { exploreSeed, exploringSeedId } = useExploreSeed();
   const [busy, setBusy] = useState<Busy>(null);
 
   const buildNow = async (idea: ParkedIdea) => {
     Haptics.selectionAsync();
     setBusy({ text: idea.text, action: "build" });
+    let next: Id<"sessions"> | null = null;
     try {
-      const result = await startFreePlay({ sessionId, idea: idea.text });
-      router.push({
-        pathname: "/session/[id]",
-        params: { id: result.sessionId },
-      });
+      next = (await startFreePlay({ sessionId, idea: idea.text })).sessionId;
     } catch (error) {
       Alert.alert(serverErrorMessage(error, "Couldn't start building that"));
     }
-    // No `finally`: the React Compiler bails out on it, and the catch never
-    // rethrows, so this always runs.
+    // No `finally`, and no branching inside the try: the React Compiler bails
+    // out on both, and the catch never rethrows, so this always runs.
     setBusy(null);
+    if (next === null) return;
+    if (next === sessionId) {
+      // One app, one session: carry on here.
+      if (onBuildHere) onBuildHere(idea);
+      return;
+    }
+    // A scholar with an older free-play copy is taken there.
+    router.push({ pathname: "/session/[id]", params: { id: next } });
   };
 
   const makeQuest = async (idea: ParkedIdea) => {
@@ -115,7 +115,7 @@ export function useSavedForLaterActions({
       />
     </>
   );
-  return { renderActions, dialog: exploreSeedDialog };
+  return { renderActions };
 }
 
 export function SavedForLaterBlock({
@@ -130,7 +130,7 @@ export function SavedForLaterBlock({
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const { renderActions, dialog } = useSavedForLaterActions({
+  const { renderActions } = useSavedForLaterActions({
     sessionId,
     canBuildNow,
   });
@@ -139,61 +139,7 @@ export function SavedForLaterBlock({
     <View style={styles.block} accessibilityLabel={MISSION_COPY.savedForLater}>
       <Text style={styles.heading}>{MISSION_COPY.savedForLater}</Text>
       <ParkedIdeaList ideas={ideas} renderActions={renderActions} />
-      {dialog}
     </View>
-  );
-}
-
-/** Append the Quest's build step and open a session on it; the new session's
- * id, or null. Module-level for the same React Compiler reason as
- * questSeedFor. */
-async function unlockBuildSession(
-  unitId: Id<"units">,
-  appendBuildStep: (args: { unitId: Id<"units"> }) => Promise<{ activityId: Id<"activities"> }>,
-  createSession: (args: { activityId: Id<"activities"> }) => Promise<{ id?: string } | null | undefined>,
-): Promise<string | null> {
-  const { activityId } = await appendBuildStep({ unitId });
-  const session = await createSession({ activityId });
-  return session?.id ?? null;
-}
-
-export function QuestBuildUnlockOffer({ unitId }: { unitId: Id<"units"> }) {
-  const router = useRouter();
-  const unit = useQuery(api.units.get, { id: unitId });
-  const appendBuildStep = useMutation(appendBuildStepRef);
-  const createSession = useMutation(api.sessions.create);
-  const [starting, setStarting] = useState(false);
-
-  if (!canUnlockBuildOf(unit)) return null;
-
-  const unlock = async () => {
-    Haptics.selectionAsync();
-    setStarting(true);
-    try {
-      const id = await unlockBuildSession(unitId, appendBuildStep, createSession);
-      if (id) {
-        router.push({
-          pathname: "/session/[id]",
-          params: { id, title: MISSION_COPY.unlockBuild },
-        });
-      }
-    } catch (error) {
-      Alert.alert(serverErrorMessage(error, "Couldn't unlock the build"));
-    }
-    // No `finally`: the React Compiler bails out on it, and the catch never
-    // rethrows, so this always runs.
-    setStarting(false);
-  };
-
-  return (
-    <ActionButton
-      label={MISSION_COPY.unlockBuild}
-      primary
-      loading={starting}
-      disabled={starting}
-      onPress={() => void unlock()}
-      wide
-    />
   );
 }
 
@@ -202,14 +148,12 @@ function ActionButton({
   primary = false,
   disabled = false,
   loading = false,
-  wide = false,
   onPress,
 }: {
   label: string;
   primary?: boolean;
   disabled?: boolean;
   loading?: boolean;
-  wide?: boolean;
   onPress: () => void;
 }) {
   const colors = useColors();
@@ -223,7 +167,6 @@ function ActionButton({
       style={({ pressed }) => [
         styles.button,
         primary ? styles.buttonPrimary : styles.buttonOutline,
-        wide && styles.buttonWide,
         (pressed || disabled) && { opacity: 0.7 },
       ]}
     >
@@ -268,12 +211,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     },
     buttonPrimary: { backgroundColor: c.violet },
     buttonOutline: { borderWidth: 1, borderColor: c.violet },
-    buttonWide: {
-      alignSelf: "center",
-      paddingHorizontal: 18,
-      paddingVertical: 10,
-      marginBottom: 14,
-    },
     buttonText: { fontFamily: fonts.semibold, fontSize: 13.5 },
   });
 }

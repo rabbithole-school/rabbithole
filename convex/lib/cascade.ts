@@ -44,11 +44,14 @@ import { attachmentOwnsBlob } from "./parentMessageAttachmentStorage";
 import { scheduleClaimDecommissionLocksForScholar } from "./deviceAppUnlockScheduling";
 import { recheckUnlocksForRemovedMembers } from "./scholarGroupUnlocks";
 import { settlePlacementAppPush } from "../masterSchedule";
+import { syncClassesForPlacements } from "./classLink";
 import { removeManagedDeviceRow } from "../managedDeviceClaims";
 import {
   deleteDeviceAuthSessionLog,
   revokeAllDeviceAuthSessions,
 } from "../devicePairing";
+import { closeScheduleForAssignment } from "./scheduleStore";
+import { threadKind } from "./scholarThreadAccess";
 
 // A running tally of deleted rows per table, merged across batched steps.
 export type Counts = Record<string, number>;
@@ -91,6 +94,7 @@ export type ScholarOwnedRowSource = {
 };
 
 const noBlobIds = () => [] as const;
+
 
 /**
  * Canonical inventory of directly scholar-owned rows.
@@ -195,6 +199,32 @@ export const scholarOwnedRowSources = [
     blobFields: [],
     collectByScholar: (ctx, scholarId) => ctx.db.query("mapReveals").withIndex("by_scholar_map", (q) => q.eq("scholarId", scholarId)).collect(),
     collectAll: (ctx) => ctx.db.query("mapReveals").withIndex("by_scholar_map").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "skyOpens",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("skyOpens").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("skyOpens").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    // A Sky star's vector (TRA-699), listed before its star so a purge takes
+    // the vectors first; both carry the scholar's id.
+    table: "skyStarEmbeddings",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("skyStarEmbeddings").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("skyStarEmbeddings").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "skyStars",
+    index: "by_scholar_seed",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("skyStars").withIndex("by_scholar_seed", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("skyStars").withIndex("by_scholar_seed").collect(),
     blobIds: noBlobIds,
   },
   {
@@ -640,7 +670,7 @@ async function isCustomAppThumbnail(
 export async function deleteScholarOwnedRows(
   ctx: MutationCtx,
   counts: Counts,
-  source: ScholarOwnedRowSource,
+  source: Pick<ScholarOwnedRowSource, "table" | "blobIds">,
   rows: ScholarOwnedRow[],
 ) {
   for (const row of rows) {
@@ -819,6 +849,7 @@ async function deleteAssignmentCascade(
   await del(ctx, counts, "tournaments", await ctx.db.query("tournaments").withIndex("by_assignment", (q) => q.eq("assignmentId", assignmentId)).collect());
   await del(ctx, counts, "classDigests", await ctx.db.query("classDigests").withIndex("by_assignment_activity", (q) => q.eq("assignmentId", assignmentId)).collect());
   await del(ctx, counts, "shareBackDigests", await ctx.db.query("shareBackDigests").withIndex("by_assignment_activity", (q) => q.eq("assignmentId", assignmentId)).collect());
+  await closeScheduleForAssignment(ctx, assignmentId);
   await ctx.db.delete(assignmentId);
   bump(counts, "assignments", 1);
 }
@@ -899,7 +930,6 @@ export async function purgeUserInner(
     await deleteAssignmentCascade(ctx, counts, a._id);
   }
   await del(ctx, counts, "teacherAffinities", await ctx.db.query("teacherAffinities").withIndex("by_teacher", (q) => q.eq("teacherId", uid)).collect());
-  await del(ctx, counts, "rooms", await ctx.db.query("rooms").withIndex("by_owner", (q) => q.eq("ownerTeacherId", uid)).collect());
 
   // Teacher-owned chat threads
   await del(ctx, counts, "chats", await ctx.db.query("chats").withIndex("by_teacher", (q) => q.eq("teacherId", uid)).collect());
@@ -916,6 +946,8 @@ export async function purgeUserInner(
   //    user's guardianship links can orphan a parent whose LAST target-scholar
   //    child is this user — that parent is purged here too (see purgeParentSide).
   await purgeParentSide(ctx, counts, uid, targetId);
+
+  await deleteUserLiveTalks(ctx, counts, uid);
 
   // 5. Synthetic scholar profiles the user owns
   await del(ctx, counts, "syntheticScholarProfiles", await ctx.db.query("syntheticScholarProfiles").withIndex("by_owner", (q) => q.eq("ownerId", uid)).collect());
@@ -958,6 +990,53 @@ export async function purgeUserInner(
   return true;
 }
 
+/**
+ * Live talks and their back-of-the-room recordings, for one deleted user.
+ * Talks they presented go with their recordings (and the video blobs).
+ * Talks where they were only the listener belong to someone else: clear
+ * `listenerId`, and delete just the recordings this user made (the field is
+ * required, and there is no precedent for rewriting it). Those are found by
+ * the recordings' own by_listener index, so a replaced listener is caught too.
+ */
+async function deleteUserLiveTalks(
+  ctx: MutationCtx,
+  counts: Counts,
+  uid: Id<"users">,
+) {
+  const deleteRecordings = async (recs: Doc<"talkRecordings">[]) => {
+    for (const r of recs) await delBlob(ctx, counts, r.storageId ?? null);
+    await del(ctx, counts, "talkRecordings", recs);
+  };
+  const presented = await ctx.db
+    .query("liveTalks")
+    .withIndex("by_presenter_state", (q) => q.eq("presenterId", uid))
+    .collect();
+  for (const talk of presented) {
+    await deleteRecordings(
+      await ctx.db.query("talkRecordings").withIndex("by_talk", (q) => q.eq("talkId", talk._id)).collect(),
+    );
+  }
+  await del(ctx, counts, "liveTalks", presented);
+  await deleteRecordings(
+    await ctx.db.query("talkRecordings").withIndex("by_listener", (q) => q.eq("listenerId", uid)).collect(),
+  );
+  const listened = await ctx.db
+    .query("liveTalks")
+    .withIndex("by_listener", (q) => q.eq("listenerId", uid))
+    .collect();
+  for (const talk of listened) {
+    await ctx.db.patch(talk._id, { listenerId: undefined });
+    bump(counts, "liveTalks.listenerCleared", 1);
+  }
+}
+
+/** Start the batched purges. The caller must be deleting the user row. */
+export async function scheduleDeferredScholarPurges(
+  ctx: MutationCtx,
+  uid: Id<"users">,
+) {
+}
+
 export async function purgeScholarOwned(
   ctx: MutationCtx,
   counts: Counts,
@@ -971,6 +1050,7 @@ export async function purgeScholarOwned(
       await source.collectByScholar(ctx, uid),
     );
   }
+  await scheduleDeferredScholarPurges(ctx, uid);
   // Alerts without a scholarId are institution/staff-owned, so only the
   // scholar-filtered subset belongs in this per-user cascade.
   await del(ctx, counts, "alerts", await ctx.db.query("alerts").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
@@ -1040,6 +1120,9 @@ export async function purgeScholarOwned(
     await ctx.db.delete(p._id);
     bump(counts, "portfolioItems", 1);
   }
+  for (const storageId of detached.orphanedBlobIds) {
+    await delBlob(ctx, counts, storageId);
+  }
 
 }
 
@@ -1076,15 +1159,15 @@ async function deleteParentAttachments(
   }
 }
 
-/** A scholar's own mentor/workshop conversations (never family threads). */
+/** A scholar's own scholar conversations, every flavor (never family threads). */
 async function scholarConversationThreads(ctx: MutationCtx, scholarId: Id<"users">) {
   return (
     await ctx.db.query("parentThreads").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect()
-  ).filter((thread) => thread.kind === "mentor" || thread.kind === "workshop");
+  ).filter((thread) => threadKind(thread) === "scholar");
 }
 
 /**
- * Delete a scholar's mentor/workshop conversations with everything hanging off
+ * Delete a scholar's scholar conversations with everything hanging off
  * them. For purge paths that don't run purgeParentSide (adminCloneScholar).
  */
 export async function deleteScholarConversationThreads(
@@ -1097,6 +1180,24 @@ export async function deleteScholarConversationThreads(
     await deleteParentThreadContents(ctx, counts, thread._id);
   }
   await del(ctx, counts, "parentThreads", threads);
+  await deleteAboutSlackThreads(ctx, counts, scholarId);
+}
+
+/** Slack roots mapped to a scholar's Quests and wonders (no thread needed). */
+async function deleteAboutSlackThreads(
+  ctx: MutationCtx,
+  counts: Counts,
+  scholarId: Id<"users">,
+) {
+  await del(
+    ctx,
+    counts,
+    "aboutSlackThreads",
+    await ctx.db
+      .query("aboutSlackThreads")
+      .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+      .collect(),
+  );
 }
 
 /** Everything hanging off one parentThreads row (not the row itself). */
@@ -1156,6 +1257,7 @@ async function purgeParentSide(
   await del(ctx, counts, "parentChatMessages", await ctx.db.query("parentChatMessages").withIndex("by_parent", (q) => q.eq("parentUserId", uid)).collect());
   await del(ctx, counts, "notificationPrefs", await ctx.db.query("notificationPrefs").withIndex("by_user", (q) => q.eq("userId", uid)).collect());
   await del(ctx, counts, "parentChannelIdentities", await ctx.db.query("parentChannelIdentities").withIndex("by_parent", (q) => q.eq("parentUserId", uid)).collect());
+  await del(ctx, counts, "parentSmsInbound", await ctx.db.query("parentSmsInbound").withIndex("by_parent", (q) => q.eq("parentUserId", uid)).collect());
   await deleteParentAttachments(
     ctx,
     counts,
@@ -1185,6 +1287,7 @@ async function purgeParentSide(
     await deleteParentThreadContents(ctx, counts, t._id);
   }
   await del(ctx, counts, "parentThreads", threads);
+  await deleteAboutSlackThreads(ctx, counts, uid);
   // A deleted mentor (or guardian) leaves the threads that survive them: drop
   // their participant rows so no dangling named participant remains. The
   // conversation itself stays with the scholar and their teachers.
@@ -1545,6 +1648,23 @@ export async function deleteInstitutionScopedBatch(
     await del(ctx, counts, "flairArt", rows);
     deleted += rows.length;
   }
+  // Live talks + back-row recordings (and their video blobs).
+  while (room() > 0) {
+    const talk = await ctx.db
+      .query("liveTalks")
+      .withIndex("by_institution_state", (q) => q.eq("institutionId", targetId))
+      .first();
+    if (!talk) break;
+    const recs = await ctx.db.query("talkRecordings").withIndex("by_talk", (q) => q.eq("talkId", talk._id)).take(room());
+    for (const r of recs) await delBlob(ctx, counts, r.storageId ?? null);
+    await del(ctx, counts, "talkRecordings", recs);
+    deleted += recs.length;
+    if (room() <= 0) break;
+    const more = await ctx.db.query("talkRecordings").withIndex("by_talk", (q) => q.eq("talkId", talk._id)).first();
+    if (more) continue;
+    await del(ctx, counts, "liveTalks", [talk]);
+    deleted += 1;
+  }
   if (room() > 0) {
     const rows = await ctx.db.query("alertChannel").withIndex("by_institution", (q) => q.eq("institutionId", targetId)).take(room());
     await del(ctx, counts, "alertChannel", rows); deleted += rows.length;
@@ -1649,6 +1769,17 @@ export async function deleteInstitutionScopedBatch(
         .take(room());
       await del(ctx, counts, "captureStationCaptures", captures);
       deleted += captures.length;
+    }
+    if (room() > 0) {
+      const take = await ctx.db
+        .query("decibelMeterTakes")
+        .withIndex("by_portfolio_item", (q) => q.eq("portfolioItemId", item._id))
+        .unique();
+      if (take) {
+        await delBlob(ctx, counts, take.audioStorageId ?? null);
+        await del(ctx, counts, "decibelMeterTakes", [take]);
+        deleted += 1;
+      }
     }
     if (room() > 0) {
       const [remainingAttribution, remainingCapture] = await Promise.all([
@@ -1765,6 +1896,7 @@ export async function deleteInstitutionScopedBatch(
         await settlePlacementAppPush(ctx, placement);
       }
       await del(ctx, counts, "schedulePlacements", placements);
+      await syncClassesForPlacements(ctx, placements);
       await del(ctx, counts, "scheduleBlocks", await ctx.db.query("scheduleBlocks").withIndex("by_period", (q) => q.eq("periodId", p._id)).collect());
     }
     await del(ctx, counts, "reportingPeriods", periods); deleted += periods.length;

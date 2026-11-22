@@ -18,9 +18,33 @@
  * SlideCanvas.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Button, Dialog, Flex, Heading, IconButton, Input, Portal, Text, Textarea } from "@chakra-ui/react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
+  closestCenter,
+  defaultDropAnimationSideEffects,
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  MouseSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+  type DropAnimation,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import { CSS } from "@dnd-kit/utilities";
+import { Box, Button, Dialog, Flex, Heading, IconButton, Input, Menu, Portal, Text, Textarea } from "@chakra-ui/react";
+import {
+  DotsThree,
   Plus,
   Trash,
   TextT,
@@ -53,14 +77,24 @@ import {
   SLIDE_TEXT_COLORS,
   SLIDE_BACKGROUND_COLORS,
   SLIDE_TEXT_SIZES,
+  resolveSlideCursor,
   textCommitOps,
+  textDraftTarget,
   type ApplyResult,
   type Deck,
   type Frame,
   type InsertKind,
+  type SlideCursor,
   type SlideHistory,
   type SlideOp,
 } from "@/shared/slidesScene";
+import {
+  copySlidesToClipboard,
+  getSlideClipboardSnapshot,
+  planSlidePaste,
+  slidesOnClipboard,
+  subscribeSlideClipboard,
+} from "@/shared/slideClipboard";
 import { SketchDialog } from "@/components/SketchDialog";
 import { SlideStyleControl } from "./SlideStyleControl";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
@@ -98,6 +132,20 @@ const INERT = () => {};
  * selection. Sized to the widest variant, [Text style][Delete text].
  */
 const CONTEXT_SLOT_WIDTH = "248px";
+
+/** How long "Copied 2 slides…" / "There isn't room…" stays on screen. */
+const CLIPBOARD_NOTICE_MS = 4000;
+
+type ClipboardNotice = { text: string; tone: "info" | "error" };
+
+/** What a filmstrip thumbnail's slide menu can do. Absent = no menu. */
+type FilmstripClipboard = {
+  /** Slides this user can paste right now; 0 hides the paste item. */
+  pasteCount: number;
+  /** Copy one slide by id, or every slide when `null`. */
+  onCopy: (slideId: string | null) => void;
+  onPasteAfter: (slideId: string) => void;
+};
 
 interface SlidesEditorProps {
   deck: Deck;
@@ -147,6 +195,14 @@ interface SlidesEditorProps {
   onImageSearchSnapshot?: (snapshot: ImageSearchSnapshot) => void;
   /** Render the deck to a real file. Absent = no export affordance. */
   onExport?: (format: "pptx" | "pdf") => Promise<void>;
+  /**
+   * The signed-in user's id, which owns the in-app slide clipboard
+   * (`shared/slideClipboard`). Present = each filmstrip thumbnail gets a slide
+   * menu to copy that slide or the whole deck and paste copied slides after it,
+   * so a scholar can bring earlier nights' slides into one deck. Absent or null
+   * = no copy/paste UI at all.
+   */
+  clipboardOwnerId?: string | null;
 }
 
 const INSERT_ICONS: Record<InsertKind, React.ReactNode> = {
@@ -169,10 +225,17 @@ export function SlidesEditor({
   imageSearchSnapshot,
   onImageSearchSnapshot,
   onExport,
+  clipboardOwnerId,
 }: SlidesEditorProps) {
   const [slideIndex, setSlideIndex] = useState(initialSlideIndex);
+  // The slide on screen, by id. The tutor can reorder slides mid-edit, and a
+  // bare index would then show (and save the draft onto) a different slide.
+  const [slideCursor, setSlideCursor] = useState<SlideCursor | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  // The slide the open text edit belongs to, so its commit lands there even if
+  // the slides moved while the scholar was typing.
+  const textEditSlideId = useRef<string | null>(null);
   const [notesDraft, setNotesDraft] = useState("");
   const notesDraftRef = useRef({ slideId: null as string | null, notes: "", saved: "" });
   const pendingNotes = useRef(new Map<string, string>());
@@ -197,9 +260,31 @@ export function SlidesEditor({
   // only; empty ones and elements delete straight through — trivially undoable).
   const [pendingDeleteSlideId, setPendingDeleteSlideId] = useState<string | null>(null);
 
-  // Deck is controlled — clamp the (possibly stale) index into range each render.
-  const currentIndex = Math.min(slideIndex, deck.slides.length - 1);
+  // A slide just inserted (Add slide, Paste, Duplicate) that should open once
+  // it arrives. The id is known up front, because `mutate` mints ids with the
+  // server's own factory, but on the server-authoritative path the deck prop
+  // has no such slide yet. Setting the index right away would pin the cursor
+  // to whichever slide sits there now and then follow THAT slide by id, so the
+  // editor stays where it is until the new slide is in the deck.
+  const [openOnArrival, setOpenOnArrival] = useState<string | null>(null);
+  const arrivedAt = openOnArrival ? deck.slides.findIndex((s) => s.id === openOnArrival) : -1;
+
+  // Deck is controlled: follow the slide on screen through a remote reorder,
+  // and clamp a stale index into range.
+  const currentIndex =
+    arrivedAt >= 0 ? arrivedAt : resolveSlideCursor(deck.slides, slideIndex, slideCursor);
   const slide = deck.slides[currentIndex];
+  const slideId = slide?.id;
+
+  useEffect(() => {
+    if (!slideId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- re-pins the cursor after the deck or the scholar moved it.
+    setSlideCursor((c) =>
+      c?.slideId === slideId && c.index === currentIndex ? c : { slideId, index: currentIndex },
+    );
+    setSlideIndex(currentIndex);
+    if (arrivedAt >= 0) setOpenOnArrival(null);
+  }, [slideId, currentIndex, arrivedAt]);
 
   const mutate = useCallback(
     (ops: SlideOp[], record = true): ApplyResult | null => {
@@ -279,20 +364,37 @@ export function SlidesEditor({
 
   const selectSlide = useCallback((i: number) => {
     commitSpeakerNotes();
+    setOpenOnArrival(null);
     setSlideIndex(i);
     setSelectedId(null);
     setEditingTextId(null);
   }, [commitSpeakerNotes]);
 
-  const addSlide = useCallback(() => {
-    commitSpeakerNotes();
-    mutate([{ op: "addSlide", afterSlideId: slide?.id }]);
-    // The new slide is inserted directly after the current one, so its index is
-    // known without waiting for the server to hand back an id.
-    setSlideIndex(currentIndex + 1);
+  // Drag-to-reorder in the filmstrip. One `moveSlide` op, so a single undo puts
+  // the slide back; the cursor follows the slide by id (see resolveSlideCursor).
+  const moveSlide = useCallback(
+    (slideId: string, afterSlideId: string | null) => {
+      commitSpeakerNotes();
+      mutate([{ op: "moveSlide", slideId, afterSlideId }]);
+    },
+    [commitSpeakerNotes, mutate],
+  );
+
+  const openInsertedSlide = useCallback((id: string | undefined) => {
+    if (!id) return;
+    setOpenOnArrival(id);
     setSelectedId(null);
     setEditingTextId(null);
-  }, [commitSpeakerNotes, mutate, slide?.id, currentIndex]);
+  }, []);
+
+  const addSlide = useCallback(() => {
+    commitSpeakerNotes();
+    const before = workingDeck.current;
+    mutate([{ op: "addSlide", afterSlideId: slide?.id }]);
+    if (workingDeck.current === before) return;
+    // The new slide sits directly after the current one in the working copy.
+    openInsertedSlide(workingDeck.current.slides[currentIndex + 1]?.id);
+  }, [commitSpeakerNotes, mutate, slide?.id, currentIndex, openInsertedSlide]);
 
   const performDeleteSlide = useCallback(
     (id: string) => {
@@ -326,6 +428,94 @@ export function SlidesEditor({
     if (pendingDeleteSlideId) performDeleteSlide(pendingDeleteSlideId);
     setPendingDeleteSlideId(null);
   }, [pendingDeleteSlideId, performDeleteSlide]);
+
+  // Slide copy/paste. The clipboard is module-level so it outlives this editor:
+  // a scholar copies in one night's deck and pastes in another session's.
+  const clipboardSnapshot = useSyncExternalStore(
+    subscribeSlideClipboard,
+    getSlideClipboardSnapshot,
+    getSlideClipboardSnapshot,
+  );
+  const pasteCount = slidesOnClipboard(clipboardSnapshot, clipboardOwnerId).length;
+  const [clipboardNotice, setClipboardNotice] = useState<ClipboardNotice | null>(null);
+  // Each notice is a fresh object, so copying again restarts the timer; the
+  // cleanup also clears it if the editor closes mid-notice.
+  useEffect(() => {
+    if (!clipboardNotice) return;
+    const timer = window.setTimeout(() => setClipboardNotice(null), CLIPBOARD_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [clipboardNotice]);
+
+  // Copy from the synchronous working copy, not the `deck` prop: an edit made
+  // a moment ago (including the notes committed just below) may not have come
+  // back from the server yet, and the copy should hold what the scholar sees.
+  const copySlides = useCallback(
+    (slideId: string | null) => {
+      if (!clipboardOwnerId) return;
+      commitSpeakerNotes();
+      const source = workingDeck.current.slides;
+      const slides = slideId === null ? source : source.filter((s) => s.id === slideId);
+      const count = copySlidesToClipboard(clipboardOwnerId, slides);
+      if (count > 0) {
+        setClipboardNotice({ text: SLIDES_COPY.copiedSlides(count), tone: "info" });
+      }
+    },
+    [clipboardOwnerId, commitSpeakerNotes],
+  );
+
+  const pasteSlidesAfter = useCallback(
+    (afterSlideId: string) => {
+      if (!clipboardOwnerId) return;
+      commitSpeakerNotes();
+      const target = workingDeck.current;
+      const anchorIndex = target.slides.findIndex((s) => s.id === afterSlideId);
+      if (anchorIndex < 0) return;
+      // Read the clipboard at click time rather than from the render that drew
+      // the menu, so a copy made since then is what pastes.
+      const plan = planSlidePaste(
+        target,
+        slidesOnClipboard(getSlideClipboardSnapshot(), clipboardOwnerId),
+        afterSlideId,
+      );
+      if (!plan.ok) {
+        if (plan.reason === "noRoom") {
+          setClipboardNotice({ text: SLIDES_COPY.pasteNoRoom, tone: "error" });
+        }
+        return;
+      }
+      // ONE batch through `mutate`, so a single undo removes the whole paste.
+      mutate(plan.ops);
+      // `mutate` advances the working copy only when the batch applied; if it
+      // was refused, stay on the current slide rather than jump to a stranger.
+      if (workingDeck.current === target) return;
+      // The pasted slides start right after the anchor in the working copy.
+      openInsertedSlide(workingDeck.current.slides[anchorIndex + 1]?.id);
+    },
+    [clipboardOwnerId, commitSpeakerNotes, mutate, openInsertedSlide],
+  );
+
+  // A copy of one slide, directly after it, through the same plan as a paste
+  // (new slide and element ids, one undo step). Unlike the clipboard it never
+  // leaves this deck, so every deck offers it.
+  const duplicateSlide = useCallback(
+    (slideId: string) => {
+      commitSpeakerNotes();
+      const target = workingDeck.current;
+      const slideIndex = target.slides.findIndex((s) => s.id === slideId);
+      if (slideIndex < 0) return;
+      const plan = planSlidePaste(target, [target.slides[slideIndex]], slideId);
+      if (!plan.ok) {
+        if (plan.reason === "noRoom") {
+          setClipboardNotice({ text: SLIDES_COPY.pasteNoRoom, tone: "error" });
+        }
+        return;
+      }
+      mutate(plan.ops);
+      if (workingDeck.current === target) return;
+      openInsertedSlide(workingDeck.current.slides[slideIndex + 1]?.id);
+    },
+    [commitSpeakerNotes, mutate, openInsertedSlide],
+  );
 
   const insertElement = useCallback(
     (kind: InsertKind) => {
@@ -696,22 +886,32 @@ export function SlidesEditor({
     [mutate, slide],
   );
 
+  const startTextEdit = useCallback(
+    (id: string | null) => {
+      textEditSlideId.current = id ? (slideId ?? null) : null;
+      setEditingTextId(id);
+    },
+    [slideId],
+  );
+
   const handleCommitText = useCallback(
     (id: string, text: string, touched: boolean) => {
       setEditingTextId(null);
-      const el = slide?.elements[id];
+      const target = textDraftTarget(workingDeck.current, textEditSlideId.current, id);
+      textEditSlideId.current = null;
       // `touched` comes from the textarea, NOT from comparing text to the
       // element: a scholar who types into a blank box and deletes it all back
       // to blank has genuinely emptied it, and inferring "untouched" from
       // equality left that invisible box behind on web while native removed it.
       // Untouched leaves a pre-existing blank box exactly as it was found.
-      if (el?.type !== "text" || !touched) return;
+      if (!target || !touched) return;
+      const el = target.element;
       // An unchanged non-blank draft has nothing to write — but a blank one
       // still has to be REMOVED, and by then blank IS what is stored.
       if (text === el.text && !isBlankSlideText(text)) return;
-      mutate(textCommitOps(slide.id, id, text));
+      mutate(textCommitOps(target.slide.id, id, text));
     },
-    [mutate, slide],
+    [mutate],
   );
 
   // The in-flight text draft lives inside the canvas's textarea, so the editor
@@ -734,15 +934,15 @@ export function SlidesEditor({
       if (document.visibilityState !== "hidden") return;
       commitSpeakerNotes();
       const draft = textDraftRef.current;
-      if (!draft || !slide) return;
-      const el = slide.elements[draft.id];
+      if (!draft) return;
+      const target = textDraftTarget(workingDeck.current, textEditSlideId.current, draft.id);
       const text = draft.read();
-      if (el?.type !== "text" || text === el.text || isBlankSlideText(text)) return;
-      mutate([{ op: "patchElement", slideId: slide.id, id: draft.id, text }]);
+      if (!target || text === target.element.text || isBlankSlideText(text)) return;
+      mutate([{ op: "patchElement", slideId: target.slide.id, id: draft.id, text }]);
     };
     document.addEventListener("visibilitychange", flush);
     return () => document.removeEventListener("visibilitychange", flush);
-  }, [commitSpeakerNotes, mutate, slide]);
+  }, [commitSpeakerNotes, mutate]);
 
   useEffect(() => {
     const draft = notesDraftRef.current;
@@ -794,12 +994,12 @@ export function SlidesEditor({
         // Enter edits the selected text box (matches native). Newlines inside
         // an edit are handled by the textarea, which owns keys once editing.
         e.preventDefault();
-        setEditingTextId(selectedId);
+        startTextEdit(selectedId);
       } else if (e.key === "Escape") {
         setSelectedId(null);
       }
     },
-    [editingTextId, selectedId, slide, deleteSelected, handleUndo, handleRedo],
+    [editingTextId, selectedId, slide, deleteSelected, handleUndo, handleRedo, startTextEdit],
   );
 
   const selectedType = selectedId ? slide?.elements[selectedId]?.type : undefined;
@@ -1107,6 +1307,13 @@ export function SlidesEditor({
           onSelect={selectSlide}
           onDelete={requestDeleteSlide}
           onAdd={addSlide}
+          onMove={moveSlide}
+          onDuplicate={duplicateSlide}
+          clipboard={
+            clipboardOwnerId
+              ? { pasteCount, onCopy: copySlides, onPasteAfter: pasteSlidesAfter }
+              : null
+          }
         />
 
         <Flex direction="column" flex={1} minW={0} minH={0}>
@@ -1120,7 +1327,7 @@ export function SlidesEditor({
                 selectedId={selectedId}
                 editingTextId={editingTextId}
                 onSelect={setSelectedId}
-                onStartTextEdit={setEditingTextId}
+                onStartTextEdit={startTextEdit}
                 onCommitTextEdit={handleCommitText}
                 onCancelTextEdit={() => setEditingTextId(null)}
                 registerTextDraft={registerTextDraft}
@@ -1130,6 +1337,39 @@ export function SlidesEditor({
                 onMovePlaceholder={movePlaceholder}
               />
             ) : null}
+            {/* The copy/paste notice floats over the stage's corner next to the
+                filmstrip, where the action happened. Overlaid rather than added
+                to the toolbar so it never reflows the toolbar or the canvas, and
+                the live region stays mounted so the message is announced. */}
+            {clipboardOwnerId && (
+              <Box
+                position="absolute"
+                left={4}
+                bottom={4}
+                zIndex={1}
+                maxW="calc(100% - 32px)"
+                pointerEvents="none"
+                role="status"
+                aria-live="polite"
+              >
+                {clipboardNotice && (
+                  <Text
+                    fontFamily="body"
+                    fontSize="sm"
+                    color={clipboardNotice.tone === "error" ? "red.600" : "charcoal.700"}
+                    bg="white"
+                    borderWidth="1px"
+                    borderColor="gray.200"
+                    borderRadius="md"
+                    shadow="sm"
+                    px={3}
+                    py={1.5}
+                  >
+                    {clipboardNotice.text}
+                  </Text>
+                )}
+              </Box>
+            )}
           </Box>
 
           {slide && (
@@ -1259,6 +1499,16 @@ export function SlidesEditor({
   );
 }
 
+/**
+ * The lifted thumbnail settles back into its slot instead of vanishing: the
+ * ghost left behind fades back in while the overlay glides home.
+ */
+const THUMB_DROP_ANIMATION: DropAnimation = {
+  duration: 180,
+  easing: "cubic-bezier(0.2, 0, 0, 1)",
+  sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: "0.35" } } }),
+};
+
 function SlideFilmstrip({
   deck,
   currentIndex,
@@ -1266,6 +1516,9 @@ function SlideFilmstrip({
   onSelect,
   onDelete,
   onAdd,
+  onMove,
+  onDuplicate,
+  clipboard,
 }: {
   deck: Deck;
   currentIndex: number;
@@ -1273,7 +1526,54 @@ function SlideFilmstrip({
   onSelect: (index: number) => void;
   onDelete: (slideId: string) => void;
   onAdd: () => void;
+  onMove: (slideId: string, afterSlideId: string | null) => void;
+  onDuplicate: (slideId: string) => void;
+  clipboard: FilmstripClipboard | null;
 }) {
+  const sensors = useSensors(
+    // Mouse: a few pixels of travel before a drag starts, so a click still selects.
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    // Touch: press and hold to pick up, so a swipe still scrolls the filmstrip.
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } }),
+    // Space picks a focused thumbnail up, arrows move it, Space drops, Esc
+    // cancels. Enter stays "open this slide".
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+      keyboardCodes: { start: ["Space"], cancel: ["Escape"], end: ["Space"] },
+    }),
+  );
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  // Hold the dropped order until the deck catches up. On the server-authoritative
+  // path the reordered deck arrives a round-trip later, and without this the
+  // thumbnail would snap back to its old slot and then jump forward again.
+  const [pendingOrder, setPendingOrder] = useState<{ ids: string[]; revision: number } | null>(
+    null,
+  );
+  const byId = new Map(deck.slides.map((s) => [s.id, s]));
+  const slides =
+    pendingOrder &&
+    pendingOrder.revision === deck.revision &&
+    pendingOrder.ids.length === deck.slides.length &&
+    pendingOrder.ids.every((id) => byId.has(id))
+      ? pendingOrder.ids.map((id) => byId.get(id)!)
+      : deck.slides;
+  const ids = slides.map((s) => s.id);
+  const activeId = deck.slides[currentIndex]?.id;
+  const draggingIndex = draggingId ? ids.indexOf(draggingId) : -1;
+
+  const onDragStart = (event: DragStartEvent) => setDraggingId(String(event.active.id));
+  const onDragEnd = (event: DragEndEvent) => {
+    setDraggingId(null);
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from < 0 || to < 0) return;
+    const next = arrayMove(ids, from, to);
+    setPendingOrder({ ids: next, revision: deck.revision });
+    onMove(String(active.id), to === 0 ? null : next[to - 1]);
+  };
+
   return (
     <Flex
       as="nav"
@@ -1290,18 +1590,45 @@ function SlideFilmstrip({
       overflowY="auto"
       flexShrink={0}
     >
-      {deck.slides.map((slide, index) => (
-        <SlideThumb
-          key={slide.id}
-          slide={slide}
-          index={index}
-          active={index === currentIndex}
-          deletable={deck.slides.length > 1}
-          resolveAsset={resolveAsset}
-          onSelect={() => onSelect(index)}
-          onDelete={() => onDelete(slide.id)}
-        />
-      ))}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        modifiers={[restrictToVerticalAxis]}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onDragCancel={() => setDraggingId(null)}
+      >
+        <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+          {slides.map((slide, index) => (
+            <SlideThumb
+              key={slide.id}
+              slide={slide}
+              index={index}
+              active={slide.id === activeId}
+              deletable={slides.length > 1}
+              resolveAsset={resolveAsset}
+              onSelect={() => {
+                const deckIndex = deck.slides.findIndex((s) => s.id === slide.id);
+                if (deckIndex >= 0) onSelect(deckIndex);
+              }}
+              onDelete={() => onDelete(slide.id)}
+              onDuplicate={() => onDuplicate(slide.id)}
+              clipboard={clipboard}
+            />
+          ))}
+        </SortableContext>
+        <DragOverlay dropAnimation={THUMB_DROP_ANIMATION}>
+          {draggingIndex >= 0 ? (
+            <ThumbFace
+              slide={slides[draggingIndex]}
+              index={draggingIndex}
+              active={slides[draggingIndex].id === activeId}
+              resolveAsset={resolveAsset}
+              lifted
+            />
+          ) : null}
+        </DragOverlay>
+      </DndContext>
       <IconButton
         aria-label={SLIDES_COPY.addSlide}
         title={SLIDES_COPY.addSlide}
@@ -1319,15 +1646,91 @@ function SlideFilmstrip({
 }
 
 /**
+ * The picture part of a filmstrip thumbnail: the slide at miniature scale and
+ * its number. Shared by the thumbnail in its slot and the lifted copy that
+ * follows the pointer during a drag, so the two can't drift apart.
+ */
+function ThumbFace({
+  slide,
+  index,
+  active,
+  resolveAsset,
+  lifted = false,
+}: {
+  slide: Deck["slides"][number];
+  index: number;
+  active: boolean;
+  resolveAsset?: (assetId: string) => string | null;
+  lifted?: boolean;
+}) {
+  return (
+    <Box
+      position="relative"
+      w="88px"
+      h="50px"
+      borderRadius="md"
+      bg="gray.50"
+      borderWidth="2px"
+      borderColor={active ? "cyan.500" : lifted ? "gray.300" : "gray.200"}
+      // Picked up: a little bigger, a soft shadow, a slight tilt.
+      transform={lifted ? "scale(1.08) rotate(-2deg)" : undefined}
+      shadow={lifted ? "lg" : undefined}
+      cursor={lifted ? "grabbing" : undefined}
+    >
+      <Box position="absolute" inset="0" overflow="hidden" borderRadius="sm" pointerEvents="none">
+        <SlideCanvas
+          slide={slide}
+          readOnly
+          selectedId={null}
+          editingTextId={null}
+          onSelect={INERT}
+          onStartTextEdit={INERT}
+          onCommitTextEdit={INERT}
+          onCancelTextEdit={INERT}
+          onFrameChange={INERT}
+          resolveAsset={resolveAsset}
+        />
+      </Box>
+      <Text
+        position="absolute"
+        bottom="0"
+        left="4px"
+        zIndex={1}
+        px={1}
+        fontSize="sm"
+        fontFamily="heading"
+        fontWeight="700"
+        color={active ? "cyan.700" : "charcoal.400"}
+        bg="rgba(255, 255, 255, 0.86)"
+        borderRadius="sm"
+      >
+        {index + 1}
+      </Text>
+    </Box>
+  );
+}
+
+/**
  * A filmstrip thumbnail — the canonical slide renderer at miniature scale,
  * inside a numbered, focusable slide switcher with its delete badge.
  *
  * Accessibility: the switcher is a focusable `role="button"` (tab-reachable and
- * Enter/Space-operable via `onKeyDown`), with a visible focus ring and
+ * Enter-operable via `onKeyDown`), with a visible focus ring and
  * `aria-current` marking the active slide. The delete badge appears on thumbnail
  * hover or when it receives keyboard focus, and stays visible on touch-only
  * devices (`@media (hover: none)`), where there is no hover to reveal it with;
  * deleting a non-empty slide is confirmed upstream.
+ *
+ * When the host enables the clipboard, a "…" badge in the bottom-right corner
+ * opens the slide menu (copy this slide, copy all, paste after this slide). It
+ * follows the delete badge's reveal rules and stays shown while its menu is
+ * open. It sits beside the switcher, not inside it, so opening the menu never
+ * selects the slide. The menu is non-modal and never locks the body, so it is
+ * safe inside the editor's cover dialog (the body-lock leak in
+ * engineering-principles.md).
+ *
+ * Drag a thumbnail (or press and hold on touch) to reorder; with the keyboard,
+ * Space picks it up, arrows move it and Space drops it.
  */
 function SlideThumb({
   slide,
@@ -1337,6 +1740,8 @@ function SlideThumb({
   resolveAsset,
   onSelect,
   onDelete,
+  onDuplicate,
+  clipboard,
 }: {
   slide: Deck["slides"][number];
   index: number;
@@ -1345,26 +1750,37 @@ function SlideThumb({
   resolveAsset?: (assetId: string) => string | null;
   onSelect: () => void;
   onDelete: () => void;
+  onDuplicate: () => void;
+  clipboard: FilmstripClipboard | null;
 }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: slide.id,
+  });
   return (
     // `className="group"` (not just role) is what Chakra v3's `_groupHover`
     // selector keys off — see `.group:is(:hover, [data-hover])` in its preset.
-    <Box position="relative" flexShrink={0} role="group" className="group">
+    <Box
+      ref={setNodeRef}
+      position="relative"
+      flexShrink={0}
+      role="group"
+      className="group"
+      // The slot the lifted thumbnail came from stays as a faint ghost, and the
+      // neighbours slide aside to make room.
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+      opacity={isDragging ? 0.35 : 1}
+    >
       <Flex
+        {...attributes}
+        {...listeners}
         role="button"
         tabIndex={0}
         aria-label={`Slide ${index + 1}`}
         aria-current={active ? "true" : undefined}
-        align="center"
-        justify="center"
-        w="88px"
-        h="50px"
         borderRadius="md"
-        bg="gray.50"
-        borderWidth="2px"
-        borderColor={active ? "cyan.500" : "gray.200"}
         cursor="pointer"
-        _hover={{ borderColor: active ? "cyan.500" : "gray.300" }}
+        css={{ touchAction: "manipulation" }}
+        _hover={{ "& > div": { borderColor: active ? "cyan.500" : "gray.300" } }}
         _focusVisible={{
           outline: "2px solid",
           outlineColor: "cyan.500",
@@ -1372,47 +1788,16 @@ function SlideThumb({
         }}
         onClick={onSelect}
         onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
+          if (e.key === "Enter") {
             e.preventDefault();
             onSelect();
+            return;
           }
+          // Space (and arrows while lifted) belong to the keyboard sensor.
+          listeners?.onKeyDown?.(e);
         }}
       >
-        <Box
-          position="absolute"
-          inset="2px"
-          overflow="hidden"
-          borderRadius="sm"
-          pointerEvents="none"
-        >
-          <SlideCanvas
-            slide={slide}
-            readOnly
-            selectedId={null}
-            editingTextId={null}
-            onSelect={INERT}
-            onStartTextEdit={INERT}
-            onCommitTextEdit={INERT}
-            onCancelTextEdit={INERT}
-            onFrameChange={INERT}
-            resolveAsset={resolveAsset}
-          />
-        </Box>
-        <Text
-          position="absolute"
-          bottom="2px"
-          left="6px"
-          zIndex={1}
-          px={1}
-          fontSize="sm"
-          fontFamily="heading"
-          fontWeight="700"
-          color={active ? "cyan.700" : "charcoal.400"}
-          bg="rgba(255, 255, 255, 0.86)"
-          borderRadius="sm"
-        >
-          {index + 1}
-        </Text>
+        <ThumbFace slide={slide} index={index} active={active} resolveAsset={resolveAsset} />
       </Flex>
       {deletable && (
         <IconButton
@@ -1447,6 +1832,75 @@ function SlideThumb({
           <Trash size={12} />
         </IconButton>
       )}
+      <Menu.Root
+        positioning={{ placement: "bottom-start" }}
+        onSelect={(details) => {
+          if (details.value === "duplicate") onDuplicate();
+          else if (details.value === "copy") clipboard?.onCopy(slide.id);
+          else if (details.value === "copy-all") clipboard?.onCopy(null);
+          else if (details.value === "paste") clipboard?.onPasteAfter(slide.id);
+        }}
+      >
+        <Menu.Trigger asChild>
+          <IconButton
+            aria-label={SLIDES_COPY.slideMenu(index + 1)}
+            size="xs"
+            boxSize="22px"
+            variant="outline"
+            bg="white"
+            color="charcoal.600"
+            borderColor="gray.200"
+            shadow="sm"
+            position="absolute"
+            bottom="2px"
+            right="2px"
+            zIndex={1}
+            borderRadius="full"
+            opacity={0}
+            pointerEvents="none"
+            transition="opacity 0.15s ease, border-color 0.15s ease"
+            _groupHover={{ opacity: 1, pointerEvents: "auto" }}
+            _focusVisible={{ opacity: 1, pointerEvents: "auto" }}
+            _open={{ opacity: 1, pointerEvents: "auto" }}
+            _hover={{ bg: "white", borderColor: "gray.300" }}
+            css={{ "@media (hover: none)": { opacity: 1, pointerEvents: "auto" } }}
+          >
+            <DotsThree size={14} weight="bold" />
+          </IconButton>
+        </Menu.Trigger>
+        <Portal>
+          <Menu.Positioner>
+            <Menu.Content
+              minW="200px"
+              // React portals bubble keys to the editor's own shortcuts:
+              // Enter on an item would open the selected text box, and
+              // Backspace would delete the selected element. The menu's
+              // keyboard handling lives on this element, so stopping here
+              // keeps it intact.
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              <Menu.Item value="duplicate" cursor="pointer">
+                {SLIDES_COPY.duplicateSlide}
+              </Menu.Item>
+              {clipboard && (
+                <>
+                  <Menu.Item value="copy" cursor="pointer">
+                    {SLIDES_COPY.copySlide}
+                  </Menu.Item>
+                  <Menu.Item value="copy-all" cursor="pointer">
+                    {SLIDES_COPY.copyAllSlides}
+                  </Menu.Item>
+                  {clipboard.pasteCount > 0 && (
+                    <Menu.Item value="paste" cursor="pointer">
+                      {SLIDES_COPY.pasteSlidesAfter(clipboard.pasteCount)}
+                    </Menu.Item>
+                  )}
+                </>
+              )}
+            </Menu.Content>
+          </Menu.Positioner>
+        </Portal>
+      </Menu.Root>
     </Box>
   );
 }

@@ -11,35 +11,53 @@ import {
 describe("parent tabs", () => {
   test("supports the enrolled-family routes, including an empty portfolio", () => {
     expect(PARENT_VISIBLE_TABS).toEqual([
-      "records",
+      "home",
       "portfolio",
+      "reports",
       "math",
+      "homework",
       "calendar",
       "messages",
+      "bunnypad",
+      "records",
     ]);
+    expect(parentTabFromPath("/parent/home")).toBe("home");
+    expect(parentTabFromPath("/parent/bunnypad")).toBe("bunnypad");
     expect(parentTabFromPath("/parent/records")).toBe("records");
     expect(parentTabFromPath("/parent/portfolio")).toBe("portfolio");
     expect(parentTabFromPath("/parent/math")).toBe("math");
+    expect(parentTabFromPath("/parent/homework")).toBe("homework");
     expect(parentTabFromPath("/parent/calendar")).toBe("calendar");
+    expect(parentTabFromPath("/parent/reports")).toBe("reports");
+    // A visiting student's family has no school reports.
+    expect(parentTabFromPath("/parent/reports", "program_guest")).toBe("records");
   });
 
   test("always includes Messages for enrolled families", () => {
     expect(parentVisibleTabs()).toEqual([
-      "records",
+      "home",
       "portfolio",
+      "reports",
       "math",
+      "homework",
       "calendar",
       "messages",
-      "admissions",
+      "bunnypad",
+      "records",
     ]);
     expect(parentTabFromPath("/parent/messages")).toBe("messages");
   });
 
-  test("falls back to Records for unknown or hidden routes", () => {
-    expect(parentTabFromPath("/parent")).toBe("records");
-    expect(parentTabFromPath("/parent/progress")).toBe("records");
-    expect(parentTabFromPath("/parent/settings")).toBe("records");
-    expect(parentTabFromPath("/parent/unknown")).toBe("records");
+  test("opens on Home, and falls back to it for unknown or hidden routes", () => {
+    expect(parentTabFromPath("/parent")).toBe("home");
+    expect(parentTabFromPath("/parent/progress")).toBe("home");
+    expect(parentTabFromPath("/parent/unknown")).toBe("home");
+  });
+
+  test("Settings is reachable by its route for families only", () => {
+    expect(parentTabFromPath("/parent/settings")).toBe("settings");
+    expect(parentTabFromPath("/parent/settings", "program_guest")).toBe("records");
+    expect(parentTabFromPath("/parent/settings", "applicant")).toBe("admissions");
   });
 
   test("lands program-guest families on Records with Portfolio and Messages also available", () => {
@@ -71,6 +89,7 @@ describe("parent tabs", () => {
       "records",
       "portfolio",
       "math",
+      "homework",
       "calendar",
       "messages",
       "progress",
@@ -82,10 +101,10 @@ describe("parent tabs", () => {
     }
   });
 
-  test("shows an enrolled family Admissions last, and keeps it from program guests", () => {
-    expect(parentVisibleTabs().at(-1)).toBe("admissions");
+  test("an enrolled family reaches Admissions by its route, off the tab row; program guests don't", () => {
+    expect(parentVisibleTabs()).not.toContain("admissions");
     expect(parentTabFromPath("/parent/admissions")).toBe("admissions");
-    expect(parentTabFromPath("/parent")).toBe("records");
+    expect(parentTabFromPath("/parent")).toBe("home");
     expect(parentVisibleTabs("program_guest")).not.toContain("admissions");
     expect(parentTabFromPath("/parent/admissions", "program_guest")).toBe(
       "records",

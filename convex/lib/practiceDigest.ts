@@ -13,13 +13,15 @@
  * Each scholar is described only against their own record.
  */
 
+import type { WeeklyMathTopicTier } from "./practice/weeklyMathTopics";
+import type { SlackPart } from "./slackGreyLine";
 import { escapeSlackText } from "./slackText";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const PRACTICE_DIGEST_WINDOW_MS = 7 * DAY_MS;
 
-export type MathSkillsTopicTier = "practice" | "acute" | "sustained";
+export type MathSkillsTopicTier = WeeklyMathTopicTier;
 export type MathSkillsSupportOutcome =
   | "triggered"
   | "repair_started"
@@ -52,6 +54,8 @@ export interface MathSkillsPriorityTopic {
   latestAttemptCorrect: boolean;
   trailingCorrectCount: number;
   breakerCount: number;
+  recurred?: boolean;
+  notAttempted?: boolean;
   supportOutcome?: MathSkillsSupportOutcome;
   missExamples: MathSkillsMissExample[];
   reason: string;
@@ -453,7 +457,7 @@ function tailClauses(
   }
   if ((s.breakerEvents ?? 0) > 0) {
     out.push(
-      `The practice brake stepped in ${s.breakerEvents} ${s.breakerEvents === 1 ? "time" : "times"}.`,
+      `Rabbithole stepped in after three misses in a row ${s.breakerEvents === 1 ? "once" : `${s.breakerEvents} times`}.`,
     );
   }
   if (s.dueReviews > 0) {
@@ -675,27 +679,50 @@ export function computePracticeDigest(input: PracticeDigestInput): PracticeDiges
   };
 }
 
-function renderPriorityTopic(topic: MathSkillsPriorityTopic): string {
+function topicLink(topic: MathSkillsPriorityTopic): string {
   const label = escapeSlackText(topic.label.trim() || topic.nodeKey);
-  const linked = topic.link ? `[${label}](${topic.link})` : `**${label}**`;
-  const marker = {
-    practice: "",
-    acute: "🟠 ",
-    sustained: "🔴 ",
-  }[topic.tier];
+  return topic.link ? `[${label}](${topic.link})` : `**${label}**`;
+}
+
+function topicCounts(topic: MathSkillsPriorityTopic): string {
   const sittings = `${topic.missSittingCount} ${
     topic.missSittingCount === 1 ? "sitting" : "sittings"
   }`;
-  return `  ${marker}${linked} — missed ${topic.missCount} of ${topic.attemptCount}, ${sittings}`;
+  return `missed ${topic.missCount} of ${topic.attemptCount}, ${sittings}`;
 }
 
-function renderPriorityTopicEvidence(
-  topic: MathSkillsPriorityTopic,
-): string | undefined {
-  if (!topic.narrative) return undefined;
-  const label = escapeSlackText(topic.label.trim() || topic.nodeKey);
-  const linked = topic.link ? `[${label}](${topic.link})` : `**${label}**`;
-  return `  • ${linked} — ${escapeSlackText(topic.narrative)}`;
+/**
+ * A persistent topic in the post: the wrong idea first, then the evidence.
+ * The idea is the generated evidence sentence, else the detector's pattern
+ * line, else the deterministic reason.
+ */
+function renderPersistentTopic(topic: MathSkillsPriorityTopic): string[] {
+  const idea = topic.notAttempted
+    ? "Not learned yet: no answer attempted this week."
+    : (topic.narrative ?? topic.patternDescription ?? topic.reason);
+  // The deterministic reason already carries the counts, so don't repeat them.
+  if (idea === topic.reason) {
+    return [`  ${topicLink(topic)} — ${escapeSlackText(idea)}`];
+  }
+  const why = [
+    topicCounts(topic),
+    ...(topic.recurred ? ["also came up last week"] : []),
+  ].join(" · ");
+  return [`  ${topicLink(topic)} — ${escapeSlackText(idea)}`, `    _${why}_`];
+}
+
+const THREAD_GROUP_LABEL: Record<
+  Exclude<MathSkillsTopicTier, "persistent">,
+  string
+> = {
+  watching: "Still missing, new this week",
+  notYet: "Not learned yet",
+  settled: "Settled this week",
+};
+
+function renderThreadTopic(topic: MathSkillsPriorityTopic): string {
+  const detail = topic.narrative ?? topic.reason;
+  return `  • ${topicLink(topic)} — ${escapeSlackText(detail)} (${topicCounts(topic)})`;
 }
 
 /** Slack-escaped variant of `named`, for labels rendered in the #math note. */
@@ -763,6 +790,22 @@ function renderCohortWins(
   return `_Wins this week: ${joinAnd(parts)}._`;
 }
 
+/** The key to the markers, the second line of the #math note's root. */
+export const MATH_SKILLS_LEGEND =
+  "_What held all week: still missing at the end, and back from last week, across 3+ sittings, or after Rabbithole stepped in. What settled or is new this week is in the thread. Due reviews are automatic._";
+
+/**
+ * The root's parts for Slack: the header, the legend in the grey context line,
+ * then the cohorts. Built at post time from the prepared `text`, which delivery
+ * retries carry unchanged. A text whose second line is not the legend stays
+ * one main part.
+ */
+export function mathSkillsUpdateParts(text: string): SlackPart[] {
+  const [header, legend, ...rest] = text.split("\n");
+  if (legend !== MATH_SKILLS_LEGEND) return [text];
+  return [header, { grey: legend }, rest.join("\n")];
+}
+
 /**
  * The scheduled #math note: a portrait with priorities. Topics are already
  * ranked from canonical practice evidence by the Convex snapshot; this renderer
@@ -815,10 +858,18 @@ export function computeMathSkillsUpdate(
   );
   const lines = [
     `🎯 **Math skills — week of ${isoWeekKey(input.now)}**`,
-    "_Each scholar's own week first, then the topics worth a 1:1 — 🔴 returned across sittings · 🟠 practice brake tripped · unmarked = repeated misses. Due reviews are automatic._",
+    MATH_SKILLS_LEGEND,
   ];
-  const threadLines = ["**Evidence behind this week's topics**"];
+  const threadLines = ["**Everything else this week**"];
   let hasThreadEvidence = false;
+  const persistentCount = scholars.reduce(
+    (sum, scholar) =>
+      sum +
+      (scholar.priorityTopics ?? []).filter(
+        (topic) => topic.tier === "persistent",
+      ).length,
+    0,
+  );
 
   if (scholars.length === 0) {
     if (mathAttemptCount === 0) {
@@ -832,6 +883,10 @@ export function computeMathSkillsUpdate(
         `${activeScholarCount} ${activeScholarCount === 1 ? "scholar practiced" : "scholars practiced"} math this week, but no skill was missed at least twice — nothing repeated enough to queue for a 1:1.`,
       );
     }
+  } else if (persistentCount === 0) {
+    lines.push(
+      "No misconception held all week. The week's misses are in the thread.",
+    );
   }
 
   for (const cohort of cohorts) {
@@ -842,32 +897,41 @@ export function computeMathSkillsUpdate(
       ...cohort.activeWithoutTopics,
     ]);
     if (cohortWins) lines.push(cohortWins);
+    const quiet: string[] = cohort.activeWithoutTopics.map((scholar) =>
+      escapeSlackText(safeName(scholar)),
+    );
     for (const scholar of cohort.scholarsWithTopics) {
-      lines.push(`• **${escapeSlackText(safeName(scholar))}**`);
-      const context = renderMathScholarWeekContext(scholar);
-      if (context) lines.push(`  ${context}`);
-      for (const topic of scholar.priorityTopics ?? []) {
-        lines.push(renderPriorityTopic(topic));
+      const topics = scholar.priorityTopics ?? [];
+      const persistent = topics.filter((topic) => topic.tier === "persistent");
+      if (persistent.length > 0) {
+        lines.push(`• **${escapeSlackText(safeName(scholar))}**`);
+        const context = renderMathScholarWeekContext(scholar);
+        if (context) lines.push(`  ${context}`);
+        for (const topic of persistent) {
+          lines.push(...renderPersistentTopic(topic));
+        }
+      } else {
+        quiet.push(escapeSlackText(safeName(scholar)));
       }
 
-      const evidence = (scholar.priorityTopics ?? [])
-        .map(renderPriorityTopicEvidence)
-        .filter((line): line is string => Boolean(line));
-      if (evidence.length > 0) {
-        if (!hasThreadEvidence) {
-          hasThreadEvidence = true;
-        }
-        threadLines.push("");
-        threadLines.push(
-          `**${escapeSlackText(cohort.title)} · ${escapeSlackText(safeName(scholar))}**`,
-        );
-        threadLines.push(...evidence);
+      const rest = topics.filter((topic) => topic.tier !== "persistent");
+      if (rest.length === 0) continue;
+      hasThreadEvidence = true;
+      threadLines.push("");
+      threadLines.push(
+        `**${escapeSlackText(cohort.title)} · ${escapeSlackText(safeName(scholar))}**`,
+      );
+      for (const tier of ["watching", "notYet", "settled"] as const) {
+        const group = rest.filter((topic) => topic.tier === tier);
+        if (group.length === 0) continue;
+        threadLines.push(`_${THREAD_GROUP_LABEL[tier]}_`);
+        threadLines.push(...group.map(renderThreadTopic));
       }
     }
-    if (cohort.activeWithoutTopics.length > 0) {
+    if (quiet.length > 0) {
       lines.push(
-        `  _Also practiced this week, with nothing repeating enough to queue: ${cohort.activeWithoutTopics
-          .map((scholar) => escapeSlackText(safeName(scholar)))
+        `  _Also practiced this week, with nothing that held all week: ${quiet
+          .sort((a, b) => a.localeCompare(b))
           .join(", ")}._`,
       );
     }

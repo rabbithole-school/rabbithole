@@ -28,9 +28,10 @@ import type { FactFluencyState } from "./lib/practice/factFluency";
 import { loadFastMathProgress } from "./lib/practice/fastMathRead";
 import type { FactOp } from "../shared/factKey";
 import { buildNodeReadings, normalizeLabel } from "./lib/nodeDepthHelpers";
-import { openErrorPatterns, type ErrorEvent } from "./lib/practice/errorFlags";
+import { openPracticeFlags } from "./lib/practiceFlags";
 import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "./seed/wholeNumberArithmeticGraph";
 import { PRACTICE_DOMAINS } from "./lib/practice/domains";
+import { frontierGradeValue, mathLevel } from "./lib/practice/frontierGrade";
 import {
   automaticityProxy,
   masteryOf,
@@ -221,7 +222,7 @@ export const masteryForScholars = teacherQuery({
       const scholar = await ctx.db.get(scholarId);
       if (!scholar || scholar.role !== "scholar") continue;
 
-      const [masteryRows, observations, errorEvents] = await Promise.all([
+      const [masteryRows, observations, practiceFlags] = await Promise.all([
         ctx.db
           .query("practiceMastery")
           .withIndex("by_scholar_domain", (q) =>
@@ -234,12 +235,7 @@ export const masteryForScholars = teacherQuery({
             q.eq("scholarId", scholarId).eq("domain", domain),
           )
           .collect(),
-        ctx.db
-          .query("practiceErrorEvents")
-          .withIndex("by_scholar_domain", (q) =>
-            q.eq("scholarId", scholarId).eq("domain", domain),
-          )
-          .collect(),
+        openPracticeFlags(ctx, scholarId, { domain }, now),
       ]);
       const masteryByKey = new Map(
         masteryRows.map((row) => [row.skillKey, row]),
@@ -322,12 +318,9 @@ export const masteryForScholars = teacherQuery({
       const depthByNode = new Map(
         depthReadings.map((reading) => [reading.nodeKey, reading]),
       );
-      const errorsByNode = new Map<string, ErrorEvent[]>();
-      for (const event of errorEvents) {
-        const bucket = errorsByNode.get(event.nodeKey) ?? [];
-        bucket.push({ pattern: event.pattern, createdAt: event.createdAt });
-        errorsByNode.set(event.nodeKey, bucket);
-      }
+      const practiceFlaggedKeys = new Set(
+        practiceFlags.map((flag) => flag.nodeKey),
+      );
 
       const readings = orderedNodes.map((node) => {
         const row = masteryByKey.get(node.nodeKey);
@@ -353,10 +346,7 @@ export const masteryForScholars = teacherQuery({
           missStreak: row?.missStreak ?? 0,
         };
         const depth = depthByNode.get(node.nodeKey);
-        const practiceFlag = openErrorPatterns(
-          errorsByNode.get(node.nodeKey) ?? [],
-          now,
-        ).length > 0;
+        const practiceFlag = practiceFlaggedKeys.has(node.nodeKey);
         return {
           nodeKey: node.nodeKey,
           mastery: masteryOf(treeNode),
@@ -367,12 +357,21 @@ export const masteryForScholars = teacherQuery({
         };
       });
 
+      const domainGrades = new Map(orderedNodes.map((node) => [node.nodeKey, node.grade]));
       scholars.push({
         scholarId,
         name: scholar.name ?? scholar.username ?? "Scholar",
         image: scholar.image ?? null,
         mappingState,
         readings,
+        // The scholar's grade level in this domain: the SAME level the Math
+        // Skills portrait shows (`mathLevel`, over the same rows and the same
+        // domain catalog, placement credit included), so a teacher sees one
+        // grade per scholar. Never re-derived from `readings` on the client.
+        // `highestGradeValue` is the legacy figure the portrait shows beside
+        // it (`frontierGradeValue`: highest grade shown in daily practice).
+        gradeValue: mathLevel(masteryRows, domainGrades)?.value ?? null,
+        highestGradeValue: frontierGradeValue(masteryRows, domainGrades),
         // Tier 2's freshness read (spec §10.2) — one domain-wide aggregate
         // over the SAME mastery rows already loaded for `readings`, not a
         // second fetch. Never surfaced on the cell itself.
@@ -622,34 +621,22 @@ export const domainRollup = teacherQuery({
 });
 
 /**
- * Cross-domain green-skill tallies, by grade, split PER seeded domain, for the
- * Mastery matrix's "All domains" rail item. The client runs
- * `masteryGradeLevel.ts`'s `levelFromGradeBuckets` on EACH domain's buckets and
- * averages the resulting levels (`averageDomainMasteryLevel`) into one sortable
- * "mastery grade level" per scholar (e.g. "Grade 3.6") that spans every seeded
- * domain rather than just the selected one.
+ * Per-domain grade levels for the Mastery matrix's "All domains" view: each
+ * seeded domain's level per scholar, plus that domain's retention summary, and
+ * the scholar's `overallLevel`. The client shows each domain's `gradeValue` in
+ * its cell and `overallLevel` as the column's one sortable number: `mathLevel`
+ * over the whole catalog, the same overall level the scholar profile shows
+ * (mathPortrait.ts), never a mean of the domain cells.
  *
- * Per-domain (not one pooled bucket set) on purpose: the frontier only advances
- * past a grade once that grade is ENTIRELY green, so a single pooled denominator
- * across all domains would require a scholar to be green in EVERY domain at a
- * grade to credit it — pinning the readout far below every single-domain number
- * (typically < 1.0). Splitting by domain and averaging the per-domain levels
- * keeps "All domains" inside the range of the numbers the teacher sees.
- *
- * Deliberately does NOT reuse `masteryForScholars`'s per-domain frontier/edge
- * machinery: a skill's mastery BAND only needs its `repetition` (via
- * `proficiencyFromReps`) to know whether it's "green" (fluent-or-better) —
- * `frontier`/`demonstrated` only distinguish the NON-green bands (practicing
- * vs. not-started) and this query never returns those, so building the full
- * per-domain frontier graph for every domain would be pure waste. `placed`
- * (access-proven-but-inferred credit) is still green under this test: it is
- * the SAME proficiency tier as fluent/overlearned, just rendered with a
- * hollow ring elsewhere — there is no separate "is it placed" check needed
- * here (see `masteryOf` in shared/treeMapLayout.ts).
- *
- * Returns RAW per-domain, per-grade counts, not a computed level — the
- * frontier-interpolation FORMULA lives in exactly one place
- * (masteryGradeLevel.ts), never duplicated server-side.
+ * `gradeValue` is `mathLevel` (lib/practice/frontierGrade.ts) over that
+ * domain's rows and catalog, the same function over the same rows the Math
+ * Skills portrait, the parent Math Skills tab and the parent aide read
+ * (mathPortrait.ts), so the matrix and the portrait show one grade per scholar
+ * per domain (#2462). The per-area levels are built the same way as the
+ * overall one, so the rows explain the "Across all math" row. Placement
+ * check-in credit counts toward them. `highestGradeValue` is the legacy
+ * figure (`frontierGradeValue`): the highest grade shown in daily practice,
+ * which placement credit never raises.
  *
  * Auth mirrors masteryForScholars / domainRollup: teacherQuery +
  * institution-scoped filter.
@@ -669,29 +656,35 @@ export const crossDomainMasteryForScholars = teacherQuery({
       requestedScholarIds,
     );
 
-    // Per-domain grade totals (curriculum-wide) plus nodeKey→domain and
-    // nodeKey→grade lookups for classifying a scholar's mastery rows. Every
-    // seeded domain's graded nodes — via `by_domain`, mirroring
-    // `standingPractice.listDomains` / `domainGradeRanges` rather than an
-    // unindexed full-table scan. Ungraded nodes are excluded (no rung on the
-    // K–8 axis; `masteryGradeLevel.ts` makes the same exclusion).
-    const gradeByNodeKey = new Map<string, string>();
-    const domainByNodeKey = new Map<string, string>();
-    // domain → (grade → total graded skills in that domain at that grade)
-    const totalByDomainGrade = new Map<string, Map<string, number>>();
+    // Each seeded domain's catalog grades (nodeKey → grade), the lookup
+    // `mathLevel` reads, loaded once per domain via `by_domain`
+    // exactly as `gatherMathPortrait` does. A domain with no graded node has
+    // no rung on the K–8 axis and is left out of the matrix.
+    const gradeByKeyByDomain = new Map<
+      string,
+      Map<string, string | null | undefined>
+    >();
+    // Graded nodeKey → domain, for bucketing the retention summary.
+    const domainByGradedNodeKey = new Map<string, string>();
+    // The whole catalog's grades across every registered domain: the
+    // denominator of the overall `mathLevel`, built the same way as
+    // `gatherMathPortrait`'s `catalogGrades` so the matrix and the profile show
+    // one overall level. Domains with no graded node add nothing to it.
+    const catalogGrades = new Map<string, string | null | undefined>();
     for (const { domain } of PRACTICE_DOMAINS) {
       const nodes = await ctx.db
         .query("knowledgeNodes")
         .withIndex("by_domain", (q) => q.eq("domain", domain))
         .collect();
-      const totalByGrade = new Map<string, number>();
+      for (const node of nodes) catalogGrades.set(node.nodeKey, node.grade);
+      if (!nodes.some((node) => node.grade)) continue;
+      gradeByKeyByDomain.set(
+        domain,
+        new Map(nodes.map((node) => [node.nodeKey, node.grade])),
+      );
       for (const node of nodes) {
-        if (!node.grade) continue;
-        gradeByNodeKey.set(node.nodeKey, node.grade);
-        domainByNodeKey.set(node.nodeKey, domain);
-        totalByGrade.set(node.grade, (totalByGrade.get(node.grade) ?? 0) + 1);
+        if (node.grade) domainByGradedNodeKey.set(node.nodeKey, domain);
       }
-      totalByDomainGrade.set(domain, totalByGrade);
     }
 
     const now = Date.now();
@@ -704,56 +697,47 @@ export const crossDomainMasteryForScholars = teacherQuery({
         .query("practiceMastery")
         .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
         .collect();
-      // domain → (grade → the scholar's green skills in that domain at that grade)
-      const greenByDomainGrade = new Map<string, Map<string, number>>();
-      // domain → this scholar's mastery rows in that domain — the SAME rows
-      // just classified above, bucketed for `summarizeDomainRetention` below
-      // (one pass, not a second fetch). Ungraded skills are excluded exactly
-      // like the grade tally, so retention and the grade counts agree on
-      // which rows belong to a domain.
-      const rowsByDomain = new Map<string, DomainRetentionInput[]>();
+      // Rows by their OWN domain stamp, the grouping the portrait uses, so
+      // `mathLevel` sees exactly the rows the portrait does.
+      const gradeRowsByDomain = new Map<string, typeof masteryRows>();
+      // Rows on a graded node, by that node's domain, for retention.
+      const retentionRowsByDomain = new Map<string, DomainRetentionInput[]>();
       for (const row of masteryRows) {
-        const grade = gradeByNodeKey.get(row.skillKey);
-        const domain = domainByNodeKey.get(row.skillKey);
-        if (!grade || !domain) continue;
-        const proficiency = proficiencyFromReps(row.repetition);
-        if (proficiency === "fluent" || proficiency === "overlearned") {
-          let byGrade = greenByDomainGrade.get(domain);
-          if (!byGrade) {
-            byGrade = new Map<string, number>();
-            greenByDomainGrade.set(domain, byGrade);
-          }
-          byGrade.set(grade, (byGrade.get(grade) ?? 0) + 1);
-        }
-        const domainRows = rowsByDomain.get(domain) ?? [];
-        domainRows.push(row);
-        rowsByDomain.set(domain, domainRows);
+        const own = gradeRowsByDomain.get(row.domain) ?? [];
+        own.push(row);
+        gradeRowsByDomain.set(row.domain, own);
+        const gradedDomain = domainByGradedNodeKey.get(row.skillKey);
+        if (!gradedDomain) continue;
+        const retentionRows = retentionRowsByDomain.get(gradedDomain) ?? [];
+        retentionRows.push(row);
+        retentionRowsByDomain.set(gradedDomain, retentionRows);
       }
 
-      // One bucket set PER domain — each gets its own frontier level on the
-      // client, and "All domains" is the mean of those levels. (Pooling every
-      // domain into one bucket set would require being green in EVERY domain at
-      // a grade to advance the floor, collapsing the readout below every
-      // single-domain number — the bug this shape fixes.)
       const domains = [];
       for (const { domain } of PRACTICE_DOMAINS) {
-        const totalByGrade = totalByDomainGrade.get(domain);
-        if (!totalByGrade || totalByGrade.size === 0) continue;
-        const greenByGrade = greenByDomainGrade.get(domain);
+        const gradeByKey = gradeByKeyByDomain.get(domain);
+        if (!gradeByKey) continue;
+        const domainRows = gradeRowsByDomain.get(domain) ?? [];
         domains.push({
           domain,
-          gradeCounts: [...totalByGrade.entries()].map(([grade, total]) => ({
-            grade,
-            total,
-            green: greenByGrade?.get(grade) ?? 0,
-          })),
+          gradeValue: mathLevel(domainRows, gradeByKey)?.value ?? null,
+          highestGradeValue: frontierGradeValue(domainRows, gradeByKey),
           // Tier 1's freshness read (spec §9/§10.2) — the all-domains matrix's
           // per-domain cell hover, never the cell itself.
-          retention: summarizeDomainRetention(rowsByDomain.get(domain) ?? [], now),
+          retention: summarizeDomainRetention(
+            retentionRowsByDomain.get(domain) ?? [],
+            now,
+          ),
         });
       }
 
-      scholars.push({ scholarId, domains });
+      scholars.push({
+        scholarId,
+        domains,
+        // The canonical overall math level (lib/practice/frontierGrade.ts),
+        // the number the profile's Math skills tab shows.
+        overallLevel: mathLevel(masteryRows, catalogGrades)?.value ?? null,
+      });
     }
 
     return { scholars };

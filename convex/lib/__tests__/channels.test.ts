@@ -104,6 +104,24 @@ describe("channels — formattingGuidance is channel-conditional", () => {
   });
 });
 
+describe("channels — sms is plain text with absolute links", () => {
+  test("sms links are absolute, like Slack's", () => {
+    expect(linkBaseFor("sms")).toBe(siteUrl());
+    expect(linkBaseFor("sms")).toBeTruthy();
+  });
+
+  test("sms guidance forbids markdown and tables, sets a ~300-char budget, and asks for bare URLs", () => {
+    const sms = formattingGuidance("sms");
+    expect(sms).not.toBe(formattingGuidance("slack"));
+    expect(sms).not.toBe(formattingGuidance("web"));
+    expect(sms).toMatch(/no markdown/i);
+    expect(sms).toMatch(/never[^.]*table/i);
+    expect(sms).toMatch(/300 characters/);
+    expect(sms).toMatch(/bare URL/i);
+    expect(sms).toMatch(/Never wrap a URL in `\[text\]\(url\)`/);
+  });
+});
+
 describe("channels — school-time labels (TRA-486)", () => {
   // The fixed -10h formatter every aide label used before labels took the
   // institution's zone. Kept here as an independent oracle: the primary

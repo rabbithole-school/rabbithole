@@ -228,6 +228,7 @@ describe.sequential("scholar-roster write access", () => {
           scholarIds: [scholarA],
           startsAt: Date.now(),
           target: { kind: "unit" },
+          finish: { kind: "inClass" },
         }),
       ).rejects.toThrow(forbidden);
       await expect(
@@ -238,6 +239,7 @@ describe.sequential("scholar-roster write access", () => {
             scholarIds: [scholarA],
             startsAt: Date.now(),
             target: { kind: "unit" },
+            finish: { kind: "inClass" },
           }),
         ),
       ).rejects.toThrow(forbidden);
@@ -290,12 +292,14 @@ describe.sequential("scholar-roster write access", () => {
       await asTeacher.mutation(api.assignments.dispatchActivity, {
         scholarId: scholarB,
         title: "Local dispatch",
+        finish: { kind: "inClass" },
       });
       await asTeacher.mutation(api.assignments.assignWork, {
         unitId,
         scholarIds: [scholarB],
         startsAt: Date.now(),
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       });
       const groupId = await asTeacher.mutation(api.scholarGroups.create, {
         name: "Kona cohort",
@@ -342,12 +346,14 @@ describe.sequential("scholar-roster write access", () => {
       await asAdmin.mutation(api.assignments.dispatchActivity, {
         scholarId: scholarA,
         title: "Global dispatch",
+        finish: { kind: "inClass" },
       });
       await asAdmin.mutation(api.assignments.assignWork, {
         unitId,
         scholarIds: [scholarA],
         startsAt: Date.now(),
         target: { kind: "unit" },
+        finish: { kind: "inClass" },
       });
       await asAdmin.mutation(api.scholarGroups.create, {
         name: "Global cohort",

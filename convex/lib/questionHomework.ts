@@ -16,6 +16,7 @@
  */
 
 import type { MutationCtx, QueryCtx } from "../_generated/server";
+import { readSchedule } from "./scheduleStore";
 import type { Doc, Id } from "../_generated/dataModel";
 
 export type LiveQuestionHomework = {
@@ -54,7 +55,7 @@ export async function liveQuestionHomework(
     if (!launcher.dispatchAssignmentId) continue;
     const assignment = await ctx.db.get(launcher.dispatchAssignmentId);
     if (!assignment) continue;
-    for (const entry of assignment.activitySchedule ?? []) {
+    for (const entry of await readSchedule(ctx, assignment)) {
       if (!isLiveQuestionHomeworkEntry(assignment, entry, scholarId, launcher._id)) {
         continue;
       }

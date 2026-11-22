@@ -28,6 +28,7 @@ import {
 } from "@chakra-ui/react";
 import { Lectern, Plus, X, ArrowSquareOut } from "@phosphor-icons/react";
 import { ActivityModeBadge } from "@/lib/activityMode";
+import { giveBadge } from "@/lib/giveBadge";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { StartAssignmentDialog } from "@/components/StartAssignmentDialog";
@@ -35,7 +36,6 @@ import { RoomCueControl } from "@/components/RoomCueControl";
 import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 import { Surface } from "@/components/ui/Surface";
 import { toaster } from "@/lib/toaster";
-import { dueStatus } from "@/shared/institutionDay";
 import { isClassFocusRunningLong } from "@/shared/roomTurn";
 import {
   ScholarsStillWorkingNotice,
@@ -182,7 +182,10 @@ export function ClassActiveView() {
                   borderColor="gray.200"
                   borderRadius="md"
                 >
-                  <ActivityModeBadge mode={p.mode} />
+                  <ActivityModeBadge
+                    mode={p.mode}
+                    label={giveBadge(p, { nowMs: now, timeZone: p.timeZone }).text}
+                  />
                   <Stack gap={0} flex={1} minW={0}>
                     <Flex align="center" gap={1.5}>
                       <Text
@@ -217,33 +220,40 @@ export function ClassActiveView() {
                         fontFamily="heading"
                       >
                         {p.lessonTitle}
-                        {p.dueAt
-                          ? ` · ${dueStatus(p.dueAt, Date.now(), p.timeZone)?.phrase ?? ""}`
-                          : p.endsAt
-                            ? ` · ${formatRemaining(p.endsAt)} left`
-                            : ""}
+                        {/* The badge carries the due day and the open-until
+                            day (TRA-722); only in-class adds its time left. */}
+                        {p.endsAt &&
+                        giveBadge(p, { nowMs: now, timeZone: p.timeZone }).kind === "inClass"
+                          ? ` · ${formatRemaining(p.endsAt)} left`
+                          : ""}
                       </Text>
                     )}
                   </Stack>
                   {p.mode === "classFocus" ? (
                     <Flex gap={1.5} flexShrink={0}>
-                      <Button
-                        size="2xs"
-                        variant="outline"
-                        color="violet.600"
-                        borderColor="violet.200"
-                        onClick={async () => {
-                          await pushActivity({
-                            assignmentId: p.assignmentId,
-                            activityId: p.activityId,
-                            mode: "classFocus",
-                            endsAt: (p.endsAt ?? Date.now()) + 10 * 60_000,
-                          });
-                          toaster.success({ title: "Extended 10 minutes" });
-                        }}
-                      >
-                        Extend +10
-                      </Button>
+                      {/* Extend is for in-class work only: open-until work
+                          closes at the end of its day, and the server refuses
+                          minutes on it (TRA-726). */}
+                      {giveBadge(p, { nowMs: now, timeZone: p.timeZone }).kind === "inClass" && (
+                        <Button
+                          size="2xs"
+                          variant="outline"
+                          color="violet.600"
+                          borderColor="violet.200"
+                          onClick={async () => {
+                            await pushActivity({
+                              assignmentId: p.assignmentId,
+                              activityId: p.activityId,
+                              mode: "classFocus",
+                              endsAt: (p.endsAt ?? Date.now()) + 10 * 60_000,
+                              openUntilKind: false,
+                            });
+                            toaster.success({ title: "Extended 10 minutes" });
+                          }}
+                        >
+                          Extend +10
+                        </Button>
+                      )}
                       <Button
                         size="2xs"
                         variant="outline"
@@ -336,8 +346,8 @@ function EmptyClassState({ onStart }: { onStart: () => void }) {
         textAlign="center"
         maxW="400px"
       >
-        Assign a unit to your scholars and push activities as class focus or
-        homework. Multiple cohorts can have different pushes active at once.
+        Assign a unit to your scholars and give activities to finish in class
+        or by a day. Multiple cohorts can have different pushes active at once.
       </Text>
       <Button
         bg="violet.500"

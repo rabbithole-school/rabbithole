@@ -36,16 +36,23 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import {
+  AccessibilityInfo,
+  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   AppState,
+  findNodeHandle,
   LayoutChangeEvent,
   Pressable,
   StyleSheet,
   Text,
   View,
+  type StyleProp,
+  type ViewStyle,
 } from "react-native";
 import {
   Gesture,
@@ -54,9 +61,19 @@ import {
 } from "react-native-gesture-handler";
 import Animated, {
   runOnJS,
+  useAnimatedReaction,
+  useAnimatedRef,
   useAnimatedStyle,
   useSharedValue,
+  withTiming,
+  type SharedValue,
 } from "react-native-reanimated";
+import Sortable, {
+  useCommonValuesContext,
+  useIsInPortalOutlet,
+  type SortableGridDragEndParams,
+  type SortableGridRenderItem,
+} from "react-native-sortables";
 
 import {
   CANVAS_H,
@@ -75,14 +92,24 @@ import {
   nextInsertFrame,
   pushHistory,
   redo as redoStep,
+  resolveSlideCursor,
   textCommitOps,
+  textDraftTarget,
   undo as undoStep,
   type Deck,
   type Frame,
+  type SlideCursor,
   type SlideHistory,
   type SlideElement,
   type SlideOp,
 } from "../../../vendor/shared/slidesScene";
+import {
+  copySlidesToClipboard,
+  getSlideClipboardSnapshot,
+  planSlidePaste,
+  slidesOnClipboard,
+  subscribeSlideClipboard,
+} from "../../../vendor/shared/slideClipboard";
 import {
   clipsOverflow,
   verticalAlignToJustify,
@@ -132,6 +159,8 @@ const DRAFT_AUTOSAVE_MS = 2000;
  * toolbar's wrap identical regardless of what's selected.
  */
 const CONTEXT_SLOT_WIDTH = 200;
+/** How long the "Copied N slides" notice stays up. It never blocks a tap. */
+const COPY_NOTICE_MS = 4000;
 
 const INSERT_SYMBOLS: Record<
   (typeof INSERT_KINDS)[number],
@@ -198,6 +227,12 @@ export type SlidesEditorNativeProps = {
   /** Controlled top-level editor view. Omit to let compact viewers manage it locally. */
   gridOpen?: boolean;
   onGridOpenChange?: (open: boolean) => void;
+  /**
+   * The signed-in user whose slide clipboard this editor reads and writes.
+   * Present only where the deck is editable; absent or null leaves the slide
+   * menu without Copy and Paste.
+   */
+  clipboardOwnerId?: string | null;
 };
 
 export type SlideMedia = {
@@ -266,6 +301,7 @@ export const SlidesEditorNative = forwardRef<
     onExport,
     gridOpen: controlledGridOpen,
     onGridOpenChange,
+    clipboardOwnerId = null,
   },
   ref,
 ) {
@@ -273,8 +309,14 @@ export const SlidesEditorNative = forwardRef<
   const hardwareKeyboard = useHardwareKeyboard();
   const scrollRef = useRef<unknown>(null);
   const [internalIndex, setInternalIndex] = useState(0);
+  // The slide on screen, by id. The tutor can reorder slides mid-edit, and a
+  // bare index would then show (and save the draft onto) a different slide.
+  const [slideCursor, setSlideCursor] = useState<SlideCursor | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // The slide the open text edit belongs to, so the autosave and the commit
+  // land there even if the slides moved while the scholar was typing.
+  const editingSlideId = useRef<string | null>(null);
   // The in-flight text. RN's multiline onBlur carries a TargetedEvent with no
   // `text`, so the draft is tracked here rather than read off the event.
   const [draft, setDraft] = useState("");
@@ -306,7 +348,8 @@ export const SlidesEditorNative = forwardRef<
     },
     [onGridOpenChange],
   );
-  const lastThumbnailTap = useRef<{ index: number; at: number } | null>(null);
+  // The slide menu that opens when a thumbnail lifts. `frame` is the
+  // thumbnail's rectangle inside the workspace, so the menu can sit beside it.
   const [history, setHistory] = useState<SlideHistory>(() => createHistory());
   // Render the local scene until Convex confirms it. The server-backed `deck`
   // prop still contains the prior revision between an edit and its subscription
@@ -318,11 +361,23 @@ export const SlidesEditorNative = forwardRef<
     setVisibleDeck((current) => (deck.revision >= current.revision ? deck : current));
   }, [deck]);
 
-  const index = Math.min(
-    slideIndex ?? internalIndex,
-    Math.max(0, visibleDeck.slides.length - 1),
-  );
+  const requestedIndex = slideIndex ?? internalIndex;
+  const index = resolveSlideCursor(visibleDeck.slides, requestedIndex, slideCursor);
   const slide = visibleDeck.slides[index];
+  const slideId = slide?.id;
+
+  // Re-pin the cursor after the deck or the scholar moved it, and tell the
+  // host (or the internal pager) when a remote reorder moved the slide.
+  useEffect(() => {
+    if (!slideId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- re-pins the cursor after the deck or the scholar moved it.
+    setSlideCursor((c) =>
+      c?.slideId === slideId && c.index === index ? c : { slideId, index },
+    );
+    if (index === requestedIndex) return;
+    if (onSlideIndexChange) onSlideIndexChange(index);
+    else setInternalIndex(index);
+  }, [slideId, index, requestedIndex, onSlideIndexChange]);
   // Read the current slide from imperative-handle callbacks without stale
   // closures — `startImagePlaceholder` runs long after the render that created it.
   // The deck as this editor currently sees it, readable from async work: a
@@ -429,18 +484,18 @@ export const SlidesEditorNative = forwardRef<
       return true;
     }
     if (!editingId) return true;
-    const el = slide?.elements[editingId];
+    const target = textDraftTarget(visibleDeckRef.current, editingSlideId.current, editingId);
     const touched = draftDirty.current;
     cancelTextBlur.current = true;
     draftDirty.current = false;
     setEditingId(null);
-    if (el?.type !== "text" || !touched) return true;
+    if (!target || !touched) return true;
     // The idle auto-save may already have written this exact text, so an
     // unchanged draft normally has nothing left to do — but a blank box still
     // has to be removed, and by then its blank text IS what is stored.
-    if (draft === el.text && !isBlankSlideText(draft)) return true;
-    return mutate(textCommitOps(slide.id, editingId, draft));
-  }, [draft, editingId, mutate, slide]);
+    if (draft === target.element.text && !isBlankSlideText(draft)) return true;
+    return mutate(textCommitOps(target.slide.id, editingId, draft));
+  }, [draft, editingId, mutate]);
 
   /**
    * Write the in-flight draft WITHOUT ending the edit session: the idle
@@ -453,13 +508,14 @@ export const SlidesEditorNative = forwardRef<
    */
   const persistTextDraft = useCallback(() => {
     if (!editingId || isBlankSlideText(draft)) return;
-    // Read the slide from the ref: this runs from a timer or an AppState
-    // callback, long after the render that created the closure.
-    const current = slideRef.current;
-    const el = current?.elements[editingId];
-    if (el?.type !== "text" || draft === el.text) return;
+    // Read the deck from the ref: this runs from a timer or an AppState
+    // callback, long after the render that created the closure. Find the slide
+    // by the id the edit began on, never by position: the tutor may have
+    // reordered the slides since.
+    const target = textDraftTarget(visibleDeckRef.current, editingSlideId.current, editingId);
+    if (!target || draft === target.element.text) return;
     mutate([
-      { op: "patchElement", slideId: current.id, id: editingId, text: draft },
+      { op: "patchElement", slideId: target.slide.id, id: editingId, text: draft },
     ]);
   }, [draft, editingId, mutate]);
 
@@ -536,6 +592,7 @@ export const SlidesEditorNative = forwardRef<
   const beginEdit = useCallback(
     (id: string) => {
       const el = slide?.elements[id];
+      editingSlideId.current = slide?.id ?? null;
       cancelTextBlur.current = false;
       draftDirty.current = false;
       setDraft(el && el.type === "text" ? el.text : "");
@@ -718,6 +775,16 @@ export const SlidesEditorNative = forwardRef<
     [mutate, setGridOpen, setIndex],
   );
 
+  // Drag-to-reorder from the rail or the grid. One `moveSlide` op, so a single
+  // undo puts it back; the slide on screen follows by id (resolveSlideCursor).
+  const moveSlide = useCallback(
+    (slideId: string, afterSlideId: string | null) => {
+      mutate([{ op: "moveSlide", slideId, afterSlideId }]);
+    },
+    [mutate],
+  );
+  const railScrollRef = useAnimatedRef<Animated.ScrollView>();
+
   const removeSlideAt = useCallback(
     (slideId: string, slideIndex: number) => {
       if (visibleDeck.slides.length <= 1) return;
@@ -754,13 +821,145 @@ export const SlidesEditorNative = forwardRef<
     [visibleDeck.slides, index, mutate, setIndex],
   );
 
+  // The slide clipboard is shared by every editor in the app, so a slide copied
+  // from one night's deck is offered in the next deck's menu. It belongs to one
+  // signed-in user: a mismatch reads as empty.
+  const clipboard = useSyncExternalStore(
+    subscribeSlideClipboard,
+    getSlideClipboardSnapshot,
+  );
+  const clipboardSlides = useMemo(
+    () => slidesOnClipboard(clipboard, clipboardOwnerId),
+    [clipboard, clipboardOwnerId],
+  );
+
+  // A short confirmation after a copy. A fresh object per copy restarts the
+  // timer even when the message repeats; the effect's cleanup clears it on
+  // unmount.
+  const [copyNotice, setCopyNotice] = useState<{ message: string } | null>(null);
+  useEffect(() => {
+    if (!copyNotice) return;
+    const timer = setTimeout(() => setCopyNotice(null), COPY_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [copyNotice]);
+
+  /**
+   * Copy one slide (by id) or the whole deck (`null`). In-flight text and
+   * speaker notes are written first, the same way a slide switch writes them,
+   * so the copy carries what the scholar can see right now. The notes write is
+   * awaited because it lands in the local deck a tick later.
+   */
+  const copySlides = useCallback(
+    async (slideId: string | null) => {
+      if (!clipboardOwnerId) return;
+      const notesCommitted = commitSpeakerNotes();
+      commitTextEdit();
+      await notesCommitted;
+      const current = visibleDeckRef.current.slides;
+      const slides =
+        slideId === null ? current : current.filter((s) => s.id === slideId);
+      const count = copySlidesToClipboard(clipboardOwnerId, slides);
+      if (count === 0) return;
+      const message = SLIDES_COPY.copiedSlides(count);
+      setCopyNotice({ message });
+      AccessibilityInfo.announceForAccessibility(message);
+    },
+    [clipboardOwnerId, commitSpeakerNotes, commitTextEdit],
+  );
+
+  /**
+   * Paste the clipboard directly after `afterSlideId` as ONE op batch, so a
+   * single undo removes the whole paste, then open the first pasted slide.
+   */
+  // What a paste calls AFTER waiting for the notes to save. That wait can span
+  // a network round trip, and the scholar may start a text edit during it; the
+  // render-time handlers would then commit an older draft and drop the new
+  // one. So the paste reads the latest handlers when it resumes.
+  const pasteResumeRef = useRef({ commitTextEdit, mutate, setIndex, setGridOpen });
+  useEffect(() => {
+    pasteResumeRef.current = { commitTextEdit, mutate, setIndex, setGridOpen };
+  }, [commitTextEdit, mutate, setIndex, setGridOpen]);
+
+  const pasteSlidesAfter = useCallback(
+    async (afterSlideId: string) => {
+      // Write in-flight text and speaker notes FIRST, as Copy does. Moving to
+      // the pasted slide commits them anyway, and done after the paste they
+      // become the newest undo step, so one Undo would clear the notes
+      // instead of removing the paste.
+      const notesCommitted = commitSpeakerNotes();
+      commitTextEdit();
+      await notesCommitted;
+      const latest = pasteResumeRef.current;
+      const current = visibleDeckRef.current;
+      const afterIndex = current.slides.findIndex((s) => s.id === afterSlideId);
+      if (afterIndex < 0) return;
+      const plan = planSlidePaste(current, clipboardSlides, afterSlideId);
+      if (!plan.ok) {
+        if (plan.reason === "noRoom") Alert.alert(SLIDES_COPY.pasteNoRoom);
+        return;
+      }
+      // Text typed during the wait is written before the paste too, so the
+      // paste stays the newest undo step.
+      latest.commitTextEdit();
+      if (latest.mutate(plan.ops) === false) return;
+      latest.setIndex(afterIndex + 1);
+      latest.setGridOpen(false);
+    },
+    [clipboardSlides, commitSpeakerNotes, commitTextEdit],
+  );
+
+  /**
+   * Put a copy of one slide directly after it, as ONE op batch so a single undo
+   * removes it, then open the copy. It goes through the same plan as a paste,
+   * which gives the copy new slide and element ids.
+   */
+  const duplicateSlide = useCallback(
+    async (slideId: string) => {
+      const notesCommitted = commitSpeakerNotes();
+      commitTextEdit();
+      await notesCommitted;
+      const latest = pasteResumeRef.current;
+      latest.commitTextEdit();
+      const current = visibleDeckRef.current;
+      const slideIndex = current.slides.findIndex((s) => s.id === slideId);
+      if (slideIndex < 0) return;
+      const plan = planSlidePaste(current, [current.slides[slideIndex]], slideId);
+      if (!plan.ok) {
+        if (plan.reason === "noRoom") Alert.alert(SLIDES_COPY.pasteNoRoom);
+        return;
+      }
+      if (latest.mutate(plan.ops) === false) return;
+      latest.setIndex(slideIndex + 1);
+      latest.setGridOpen(false);
+    },
+    [commitSpeakerNotes, commitTextEdit],
+  );
+
+  /**
+   * The slide menu, as the native iPad action sheet popped over the held
+   * thumbnail (`anchor`). Tapping outside it closes it. `onClose` runs once it
+   * is gone, whichever way.
+   */
+  // Bumped whenever the sheet is opened or pulled away, so the callback of a
+  // sheet closed from code runs nothing.
+  const slideMenuToken = useRef(0);
+  const dismissSlideMenu = useCallback(() => {
+    slideMenuToken.current += 1;
+    ActionSheetIOS.dismissActionSheet();
+  }, []);
+
   const showSlideMenu = useCallback(
-    (slideIndex: number) => {
+    (slideIndex: number, anchor: View | null, onClose?: () => void) => {
       const target = visibleDeck.slides[slideIndex];
-      if (!target) return;
-      Alert.alert(SLIDES_COPY.slideTitle(slideIndex + 1), undefined, [
+      if (!target) {
+        onClose?.();
+        return;
+      }
+      const token = ++slideMenuToken.current;
+      const items: SlideMenuItem[] = [
         {
-          text: SLIDES_COPY.addSlideBefore,
+          key: "add-before",
+          label: SLIDES_COPY.addSlideBefore,
           onPress: () =>
             addSlideAt(
               slideIndex === 0 ? null : visibleDeck.slides[slideIndex - 1].id,
@@ -768,22 +967,73 @@ export const SlidesEditorNative = forwardRef<
             ),
         },
         {
-          text: SLIDES_COPY.addSlideAfter,
+          key: "add-after",
+          label: SLIDES_COPY.addSlideAfter,
           onPress: () => addSlideAt(target.id, slideIndex + 1),
         },
+        {
+          key: "duplicate",
+          label: SLIDES_COPY.duplicateSlide,
+          onPress: () => void duplicateSlide(target.id),
+        },
+        ...(clipboardOwnerId
+          ? [
+              {
+                key: "copy",
+                label: SLIDES_COPY.copySlide,
+                onPress: () => void copySlides(target.id),
+              },
+              {
+                key: "copy-all",
+                label: SLIDES_COPY.copyAllSlides,
+                onPress: () => void copySlides(null),
+              },
+            ]
+          : []),
+        ...(clipboardOwnerId && clipboardSlides.length > 0
+          ? [
+              {
+                key: "paste",
+                label: SLIDES_COPY.pasteSlidesAfter(clipboardSlides.length),
+                onPress: () => void pasteSlidesAfter(target.id),
+              },
+            ]
+          : []),
         ...(visibleDeck.slides.length > 1
           ? [
               {
-                text: SLIDES_COPY.deleteSlide,
-                style: "destructive" as const,
+                key: "delete",
+                label: SLIDES_COPY.deleteSlide,
+                danger: true,
                 onPress: () => removeSlideAt(target.id, slideIndex),
               },
             ]
           : []),
-        { text: SLIDES_COPY.cancel, style: "cancel" },
-      ]);
+      ];
+      const handle = anchor ? findNodeHandle(anchor) : null;
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: [SLIDES_COPY.cancel, ...items.map((item) => item.label)],
+          cancelButtonIndex: 0,
+          destructiveButtonIndex: items.findIndex((item) => item.danger) + 1 || undefined,
+          ...(handle != null ? { anchor: handle } : {}),
+        },
+        (index) => {
+          onClose?.();
+          if (token === slideMenuToken.current) items[index - 1]?.onPress();
+        },
+      );
     },
-    [addSlideAt, visibleDeck.slides, removeSlideAt],
+    [
+      addSlideAt,
+      clipboardOwnerId,
+      clipboardSlides.length,
+      copySlides,
+      duplicateSlide,
+      pasteSlidesAfter,
+      visibleDeck.slides,
+      removeSlideAt,
+    ],
   );
 
   /**
@@ -1115,180 +1365,198 @@ export const SlidesEditorNative = forwardRef<
         </View>
       )}
 
+      {/*
+       * The portal draws a dragged thumbnail above the whole workspace, so the
+       * rail's scroll view cannot clip its scaled-up edge or its shadow.
+       */}
       <View style={styles.editorWorkspace}>
-        {!gridOpen && (
-          <RNGHScrollView
-            style={[styles.thumbnailRail, { borderColor: colors.border }]}
-            contentContainerStyle={styles.thumbnailRailContent}
-            showsVerticalScrollIndicator={false}
-          >
-            {visibleDeck.slides.map((railSlide, railIndex) => (
-            <Pressable
-              key={railSlide.id}
-              accessibilityRole="button"
-              accessibilityLabel={`Open slide ${railIndex + 1}`}
-              onPress={() => {
-                const now = Date.now();
-                const previous = lastThumbnailTap.current;
-                lastThumbnailTap.current = { index: railIndex, at: now };
-                if (previous?.index === railIndex && now - previous.at < 350) {
-                  showSlideMenu(railIndex);
-                } else {
+        <Sortable.PortalProvider>
+          {!gridOpen && (
+            <Animated.ScrollView
+              ref={railScrollRef}
+              style={[styles.thumbnailRail, { borderColor: colors.border }]}
+              contentContainerStyle={styles.thumbnailRailContent}
+              showsVerticalScrollIndicator={false}
+            >
+              <ReorderableSlides
+                deck={visibleDeck}
+                columns={1}
+                selectedIndex={index}
+                readOnly={readOnly}
+                scrollableRef={railScrollRef}
+                resolveAsset={resolveAsset}
+                testIDPrefix="slides-thumbnail"
+                cellStyle={styles.railThumb}
+                onTap={(railIndex) => {
                   setIndex(railIndex);
                   setGridOpen(false);
+                }}
+                onLift={showSlideMenu}
+                onPullAway={dismissSlideMenu}
+                onMove={moveSlide}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add slide"
+                onPress={() =>
+                  addSlideAt(
+                    visibleDeck.slides[visibleDeck.slides.length - 1]?.id,
+                    visibleDeck.slides.length,
+                  )
                 }
-              }}
-              onLongPress={() => showSlideMenu(railIndex)}
-              testID={`slides-thumbnail-${railSlide.id}`}
-              style={[
-                styles.railThumb,
-                {
-                  borderColor: railIndex === index ? colors.cyan : colors.border,
-                },
-              ]}
-            >
-              <StaticSlidePreview slide={railSlide} resolveAsset={resolveAsset} />
-              <View style={[styles.railNumber, { backgroundColor: colors.bg }]}>
-                <Text style={{ fontFamily: fonts.medium, fontSize: 11, color: colors.fg }}>
-                  {railIndex + 1}
-                </Text>
-              </View>
-            </Pressable>
-            ))}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Add slide"
-              onPress={() =>
-                addSlideAt(
-                  visibleDeck.slides[visibleDeck.slides.length - 1]?.id,
-                  visibleDeck.slides.length,
-                )
-              }
-              testID="slides-add-slide"
-              style={[styles.addSlideTile, { borderColor: colors.border }]}
-            >
-              <SymbolView name="plus" size={22} tintColor={colors.fgMuted} />
-              <Text style={{ fontFamily: fonts.medium, fontSize: 12, color: colors.fgMuted }}>
-                {SLIDES_COPY.addSlide}
-              </Text>
-            </Pressable>
-          </RNGHScrollView>
-        )}
-        <View style={styles.editorMain}>
-          {gridOpen ? (
-            <SlideGrid
-              deck={visibleDeck}
-              selectedIndex={index}
-              onSelect={(nextIndex) => {
-                setIndex(nextIndex);
-                setGridOpen(false);
-              }}
-              resolveAsset={resolveAsset}
-            />
-          ) : (
-            <View style={styles.canvasWrap} onLayout={onLayout}>
-              <View
-                testID="slides-canvas"
-                style={[
-                  styles.canvas,
-                  {
-                    width: scale * CANVAS_W,
-                    height: scale * CANVAS_H,
-                    backgroundColor: slide.background,
-                    borderColor: colors.border,
-                  },
-                ]}
+                testID="slides-add-slide"
+                style={[styles.addSlideTile, { borderColor: colors.border }]}
               >
-          <GestureDetector gesture={deselect}>
-            <View style={styles.backdrop} />
-          </GestureDetector>
-
-          {scale > 0 &&
-            slide.elementIds.map((eid) => {
-              const el = slide.elements[eid];
-              if (!el) return null;
-              return (
-                <ElementView
-                  key={eid}
-                  el={el}
-                  scale={scale}
-                  selected={selectedId === eid}
-                  editing={editingId === eid}
+                <SymbolView name="plus" size={22} tintColor={colors.fgMuted} />
+                <Text style={{ fontFamily: fonts.medium, fontSize: 12, color: colors.fgMuted }}>
+                  {SLIDES_COPY.addSlide}
+                </Text>
+              </Pressable>
+            </Animated.ScrollView>
+          )}
+          <View style={styles.editorMain}>
+            {gridOpen ? (
+              <View style={styles.grid}>
+                <ReorderableSlides
+                  deck={visibleDeck}
+                  columns={3}
+                  selectedIndex={index}
                   readOnly={readOnly}
-                  scrollRef={scrollRef as React.RefObject<unknown>}
-                  onSelect={setSelectedId}
-                  onBeginEdit={beginEdit}
-                  onCommit={commitFrame}
                   resolveAsset={resolveAsset}
+                  testIDPrefix="slides-grid"
+                  cellStyle={styles.gridCell}
+                  onTap={(nextIndex) => {
+                    setIndex(nextIndex);
+                    setGridOpen(false);
+                  }}
+                  onLift={showSlideMenu}
+                  onPullAway={dismissSlideMenu}
+                  onMove={moveSlide}
                 />
-              );
-            })}
-
-          {/* In-flight image placeholders: client-only spinners at the frame the
-              finished image will occupy, so the scholar sees WHICH picture is
-              coming and WHERE. Draggable — the finished image lands wherever the
-              scholar moved the spinner (resolveImagePlaceholder reads its frame). */}
-          {scale > 0 &&
-            placeholders
-              .filter((p) => p.slideId === slide.id)
-              .map((p) => (
-                <DraggablePlaceholder
-                  key={p.id}
-                  placeholder={p}
-                  scale={scale}
-                  readOnly={readOnly}
-                  scrollRef={scrollRef as React.RefObject<unknown>}
-                  onMove={moveImagePlaceholder}
-                />
-              ))}
-
-          {/* Text overlay. Axis-aligned by construction — the model pins
-              rotation to 0 for text — so the native editor can sit directly
-              over the rendered element rather than putting a caret in rotated
-              or scaled coordinates. */}
-          {editing && editing.type === "text" && scale > 0 && !readOnly && (
-            <CommandTextInput
-              accessibilityLabel="Slide text"
-              autoFocus
-              captureEditorCommands
-              contentInsetHorizontal={0}
-              contentInsetVertical={0}
-              fontName={
-                editing.style.bold
-                  ? "HankenGrotesk-Bold"
-                  : "HankenGrotesk-Regular"
-              }
-              fontSize={editing.style.fontSize * scale}
-              maxLength={MAX_TEXT_LENGTH}
-              onCommandReturn={() => onChord("Cmd+Enter")}
-              value={draft}
-              onChangeText={onDraftChange}
-              onEscape={() => onChord("Escape")}
-              onBlur={() => void commitTextEdit()}
-              showSoftInputOnFocus={!hardwareKeyboard}
-              textColor={editing.style.color}
-              style={{
-                position: "absolute",
-                left: editing.frame.x * scale,
-                top: editing.frame.y * scale,
-                width: editing.frame.w * scale,
-                height: editing.frame.h * scale,
-                backgroundColor: colors.cyanSubtle,
-              }}
-            />
-          )}
-          {readOnly && onCanvasPress && (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Edit slide ${index + 1}`}
-              onPress={onCanvasPress}
-              style={styles.canvasOpenTarget}
-            />
-          )}
               </View>
-            </View>
-          )}
-        </View>
+            ) : (
+              <View style={styles.canvasWrap} onLayout={onLayout}>
+                <View
+                  testID="slides-canvas"
+                  style={[
+                    styles.canvas,
+                    {
+                      width: scale * CANVAS_W,
+                      height: scale * CANVAS_H,
+                      backgroundColor: slide.background,
+                      borderColor: colors.border,
+                    },
+                  ]}
+                >
+            <GestureDetector gesture={deselect}>
+              <View style={styles.backdrop} />
+            </GestureDetector>
+
+            {scale > 0 &&
+              slide.elementIds.map((eid) => {
+                const el = slide.elements[eid];
+                if (!el) return null;
+                return (
+                  <ElementView
+                    key={eid}
+                    el={el}
+                    scale={scale}
+                    selected={selectedId === eid}
+                    editing={editingId === eid}
+                    readOnly={readOnly}
+                    scrollRef={scrollRef as React.RefObject<unknown>}
+                    onSelect={setSelectedId}
+                    onBeginEdit={beginEdit}
+                    onCommit={commitFrame}
+                    resolveAsset={resolveAsset}
+                  />
+                );
+              })}
+
+            {/* In-flight image placeholders: client-only spinners at the frame the
+                finished image will occupy, so the scholar sees WHICH picture is
+                coming and WHERE. Draggable — the finished image lands wherever the
+                scholar moved the spinner (resolveImagePlaceholder reads its frame). */}
+            {scale > 0 &&
+              placeholders
+                .filter((p) => p.slideId === slide.id)
+                .map((p) => (
+                  <DraggablePlaceholder
+                    key={p.id}
+                    placeholder={p}
+                    scale={scale}
+                    readOnly={readOnly}
+                    scrollRef={scrollRef as React.RefObject<unknown>}
+                    onMove={moveImagePlaceholder}
+                  />
+                ))}
+
+            {/* Text overlay. Axis-aligned by construction — the model pins
+                rotation to 0 for text — so the native editor can sit directly
+                over the rendered element rather than putting a caret in rotated
+                or scaled coordinates. */}
+            {editing && editing.type === "text" && scale > 0 && !readOnly && (
+              <CommandTextInput
+                accessibilityLabel="Slide text"
+                autoFocus
+                captureEditorCommands
+                contentInsetHorizontal={0}
+                contentInsetVertical={0}
+                fontName={
+                  editing.style.bold
+                    ? "HankenGrotesk-Bold"
+                    : "HankenGrotesk-Regular"
+                }
+                fontSize={editing.style.fontSize * scale}
+                maxLength={MAX_TEXT_LENGTH}
+                onCommandReturn={() => onChord("Cmd+Enter")}
+                value={draft}
+                onChangeText={onDraftChange}
+                onEscape={() => onChord("Escape")}
+                onBlur={() => void commitTextEdit()}
+                showSoftInputOnFocus={!hardwareKeyboard}
+                textColor={editing.style.color}
+                style={{
+                  position: "absolute",
+                  left: editing.frame.x * scale,
+                  top: editing.frame.y * scale,
+                  width: editing.frame.w * scale,
+                  height: editing.frame.h * scale,
+                  backgroundColor: colors.cyanSubtle,
+                }}
+              />
+            )}
+            {readOnly && onCanvasPress && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Edit slide ${index + 1}`}
+                onPress={onCanvasPress}
+                style={styles.canvasOpenTarget}
+              />
+            )}
+                </View>
+              </View>
+            )}
+            {copyNotice && (
+              <View pointerEvents="none" style={styles.copyNoticeWrap}>
+                <View
+                  accessibilityLiveRegion="polite"
+                  testID="slides-copy-notice"
+                  style={[styles.copyNotice, { backgroundColor: colors.fg }]}
+                >
+                  <Text
+                    style={[
+                      styles.copyNoticeText,
+                      { fontFamily: fonts.medium, color: colors.bg },
+                    ]}
+                  >
+                    {copyNotice.message}
+                  </Text>
+                </View>
+              </View>
+            )}
+          </View>
+        </Sortable.PortalProvider>
       </View>
 
       {!gridOpen && (!readOnly || Boolean(slide.speakerNotes)) && (
@@ -1418,44 +1686,351 @@ function CompactSlidesViewer({
   );
 }
 
-function SlideGrid({
+/**
+ * The slide thumbnails as a sortable grid: one column in the rail beside the
+ * canvas, three in Grid view. Tap opens a slide. Press and hold lifts it (a
+ * little bigger, with a shadow and a haptic tick) and the others slide aside
+ * as it moves; letting go without moving it opens the slide menu instead.
+ * VoiceOver gets "Move earlier" / "Move later" actions on each thumbnail.
+ *
+ * Built on react-native-sortables, which runs the drag on the UI thread with
+ * Reanimated and Gesture Handler, so the lift and the reflow stay smooth on a
+ * BunnyPad.
+ */
+function ReorderableSlides({
   deck,
+  columns,
   selectedIndex,
-  onSelect,
+  readOnly,
+  scrollableRef,
   resolveAsset,
+  testIDPrefix,
+  cellStyle,
+  onTap,
+  onLift,
+  onPullAway,
+  onMove,
 }: {
   deck: Deck;
+  columns: number;
   selectedIndex: number;
-  onSelect: (index: number) => void;
+  readOnly: boolean;
+  scrollableRef?: ReturnType<typeof useAnimatedRef<Animated.ScrollView>>;
   resolveAsset?: (assetId: string) => string | null;
+  testIDPrefix: string;
+  cellStyle: StyleProp<ViewStyle>;
+  onTap: (index: number) => void;
+  /**
+   * A thumbnail was held still past `HOLD_MS`: a long press, so open its menu,
+   * and call `onClose` when the menu goes away so the thumbnail can settle.
+   */
+  onLift: (index: number, anchor: View | null, onClose?: () => void) => void;
+  /** The finger pulled a long-pressed thumbnail away: close its menu, it is a drag now. */
+  onPullAway: () => void;
+  onMove: (slideId: string, afterSlideId: string | null) => void;
 }) {
   const colors = useColors();
-  return (
-    <View style={styles.grid}>
-      {deck.slides.map((gridSlide, gridIndex) => (
-        <Pressable
-          key={gridSlide.id}
+  // A lifted thumbnail is a drag until it has been held still for HOLD_MS.
+  // Then it is a long press: the menu opens and the thumbnail is pinned where
+  // it is (`pinnedKey`, from the finger at `pinOrigin`), so small movements
+  // don't drag it. Pulling it more than PULL_AWAY points closes the menu and
+  // lets it follow the finger again. Letting go while pinned leaves the menu
+  // open and the thumbnail lifted (`heldKey`) until the menu closes.
+  // `dragOrigin` is where the finger was at lift, `fingerMoved` whether it has
+  // since moved past HOLD_SLOP, `holdTimer` the pending decision, and
+  // `menuKey` the thumbnail whose menu is open.
+  const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+  const fingerMoved = useRef(false);
+  const menuKey = useRef<string | null>(null);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHold = useCallback(() => {
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+    holdTimer.current = null;
+  }, []);
+  useEffect(() => clearHold, [clearHold]);
+  const heldKey = useSharedValue<string | null>(null);
+  const pinnedKey = useSharedValue<string | null>(null);
+  const pinOrigin = useSharedValue<Point | null>(null);
+  const cellRefs = useRef(new Map<string, View | null>());
+  const slides = deck.slides;
+
+  const openMenu = useCallback(
+    (key: string, index: number) => {
+      menuKey.current = key;
+      onLift(index, cellRefs.current.get(key) ?? null, () => {
+        if (menuKey.current === key) menuKey.current = null;
+        if (heldKey.get() === key) heldKey.set(null);
+      });
+    },
+    [heldKey, onLift],
+  );
+
+  const pullAway = useCallback(() => {
+    menuKey.current = null;
+    onPullAway();
+  }, [onPullAway]);
+
+  const moveBy = useCallback(
+    (from: number, delta: -1 | 1) => {
+      const to = from + delta;
+      if (to < 0 || to >= slides.length) return;
+      const ids = slides.map((s) => s.id);
+      const [moved] = ids.splice(from, 1);
+      ids.splice(to, 0, moved);
+      onMove(moved, to === 0 ? null : ids[to - 1]);
+    },
+    [slides, onMove],
+  );
+
+  const renderItem = useCallback<SortableGridRenderItem<Deck["slides"][number]>>(
+    ({ item, index: itemIndex }) => (
+      <HeldLift itemKey={item.id} heldKey={heldKey} pinnedKey={pinnedKey} pinOrigin={pinOrigin}>
+        <Sortable.Touchable
+          accessible
           accessibilityRole="button"
-          accessibilityLabel={`Open slide ${gridIndex + 1}`}
-          onPress={() => onSelect(gridIndex)}
+          accessibilityLabel={`Open slide ${itemIndex + 1}`}
+          accessibilityActions={
+            readOnly
+              ? undefined
+              : [
+                  { name: "showMenu", label: "Slide options" },
+                  { name: "moveEarlier", label: "Move earlier" },
+                  { name: "moveLater", label: "Move later" },
+                ]
+          }
+          onAccessibilityAction={(event) => {
+            if (event.nativeEvent.actionName === "showMenu") openMenu(item.id, itemIndex);
+            if (event.nativeEvent.actionName === "moveEarlier") moveBy(itemIndex, -1);
+            if (event.nativeEvent.actionName === "moveLater") moveBy(itemIndex, 1);
+          }}
+          onTap={() => onTap(itemIndex)}
+          testID={`${testIDPrefix}-${item.id}`}
           style={[
-            styles.gridCell,
+            cellStyle,
             {
-              borderColor: gridIndex === selectedIndex ? colors.cyan : colors.border,
+              backgroundColor: colors.bg,
+              borderColor: itemIndex === selectedIndex ? colors.cyan : colors.border,
             },
           ]}
         >
-          <StaticSlidePreview slide={gridSlide} resolveAsset={resolveAsset} />
+          <StaticSlidePreview slide={item} resolveAsset={resolveAsset} />
+          <PullAwayWatcher
+            itemKey={item.id}
+            pinnedKey={pinnedKey}
+            pinOrigin={pinOrigin}
+            onPullAway={pullAway}
+          />
+          <View
+            ref={(view) => {
+              cellRefs.current.set(item.id, view);
+            }}
+            pointerEvents="none"
+            style={StyleSheet.absoluteFill}
+          />
           <View style={[styles.gridNumber, { backgroundColor: colors.bg }]}>
             <Text style={{ fontFamily: fonts.medium, fontSize: 11, color: colors.fg }}>
-              {gridIndex + 1}
+              {itemIndex + 1}
             </Text>
           </View>
-        </Pressable>
-      ))}
-    </View>
+        </Sortable.Touchable>
+      </HeldLift>
+    ),
+    [
+      cellStyle,
+      colors,
+      heldKey,
+      moveBy,
+      onTap,
+      openMenu,
+      pinOrigin,
+      pinnedKey,
+      pullAway,
+      readOnly,
+      resolveAsset,
+      selectedIndex,
+      testIDPrefix,
+    ],
+  );
+
+  const onDragEnd = useCallback(
+    ({ key, fromIndex, toIndex, indexToKey }: SortableGridDragEndParams<Deck["slides"][number]>) => {
+      pinnedKey.set(null);
+      if (menuKey.current === key) {
+        // Let go while pinned: the menu stays open and the thumbnail lifted.
+        if (fromIndex === toIndex) {
+          heldKey.set(key);
+          return;
+        }
+        // It moved after all: a drag, so the menu goes.
+        pullAway();
+      }
+      if (fromIndex === toIndex) return;
+      onMove(key, toIndex === 0 ? null : indexToKey[toIndex - 1]);
+    },
+    [heldKey, onMove, pinnedKey, pullAway],
+  );
+
+  return (
+    <Sortable.Grid
+      data={slides}
+      columns={columns}
+      rowGap={10}
+      columnGap={10}
+      keyExtractor={slideKey}
+      renderItem={renderItem}
+      sortEnabled={!readOnly}
+      hapticsEnabled
+      dragActivationDelay={DRAG_LIFT_MS}
+      // The library's default snaps the lifted thumbnail's centre under the
+      // finger, so it slides by up to half its width. Keep it where it was.
+      enableActiveItemSnap={false}
+      activeItemScale={LIFT_SCALE}
+      activeItemShadowOpacity={LIFT_SHADOW_OPACITY}
+      inactiveItemOpacity={0.9}
+      dropAnimationDuration={DROP_MS}
+      overDrag="none"
+      scrollableRef={scrollableRef}
+      autoScrollEnabled={Boolean(scrollableRef)}
+      onDragStart={({ key, fromIndex }) => {
+        dragOrigin.current = null;
+        fingerMoved.current = false;
+        clearHold();
+        holdTimer.current = setTimeout(() => {
+          holdTimer.current = null;
+          if (fingerMoved.current) return;
+          pinOrigin.set(null);
+          pinnedKey.set(key);
+          openMenu(key, fromIndex);
+        }, HOLD_MS - DRAG_LIFT_MS);
+      }}
+      onDragMove={({ touchData }) => {
+        if (fingerMoved.current) return;
+        const origin = dragOrigin.current;
+        if (!origin) {
+          dragOrigin.current = { x: touchData.absoluteX, y: touchData.absoluteY };
+        } else if (
+          Math.hypot(touchData.absoluteX - origin.x, touchData.absoluteY - origin.y) > HOLD_SLOP
+        ) {
+          fingerMoved.current = true;
+          clearHold();
+        }
+      }}
+      onDragEnd={(params) => {
+        clearHold();
+        onDragEnd(params);
+      }}
+    />
   );
 }
+
+const slideKey = (slide: Deck["slides"][number]) => slide.id;
+
+/** How a lifted thumbnail looks, and how long it takes to settle back. */
+const LIFT_SCALE = 1.06;
+const LIFT_SHADOW_OPACITY = 0.22;
+const DROP_MS = 220;
+
+type Point = { x: number; y: number };
+
+/**
+ * A thumbnail's long-press look, on top of whatever the library is drawing.
+ *
+ * Pinned (menu open, finger still down): the drag is still live, so the library
+ * keeps the thumbnail lifted and moves it with the finger; this shifts it back
+ * by the same amount so it stays put. When it is pulled away the shift eases
+ * to zero and the thumbnail slides to the finger. On release, the library
+ * drops it from the finger to its slot while the shift eases out over the same
+ * time, so it stays where it is.
+ *
+ * Held (finger up, menu still open): the library has dropped the thumbnail and
+ * animates its lift away; this animates the same scale and shadow back in over
+ * the same time, so the two cross-fade and it appears to stay up.
+ */
+function HeldLift({
+  itemKey,
+  heldKey,
+  pinnedKey,
+  pinOrigin,
+  children,
+}: {
+  itemKey: string;
+  heldKey: SharedValue<string | null>;
+  pinnedKey: SharedValue<string | null>;
+  pinOrigin: SharedValue<Point | null>;
+  children: ReactNode;
+}) {
+  const { touchPosition } = useCommonValuesContext();
+  const style = useAnimatedStyle(() => {
+    const held = heldKey.value === itemKey;
+    const origin = pinOrigin.value;
+    const touch = touchPosition.value;
+    const pinned = pinnedKey.value === itemKey && origin !== null && touch !== null;
+    const timing = { duration: DROP_MS };
+    return {
+      transform: [
+        { translateX: pinned ? origin.x - touch.x : withTiming(0, timing) },
+        { translateY: pinned ? origin.y - touch.y : withTiming(0, timing) },
+        { scale: withTiming(held ? LIFT_SCALE : 1, timing) },
+      ],
+      shadowOpacity: withTiming(held ? LIFT_SHADOW_OPACITY : 0, timing),
+    };
+  });
+  return <Animated.View style={[styles.heldLift, style]}>{children}</Animated.View>;
+}
+
+/**
+ * Notices, on the UI thread, when the finger pulls a pinned thumbnail more
+ * than PULL_AWAY points from where the menu opened, unpins it and tells the
+ * editor to close the menu. It also records where the finger was when the
+ * thumbnail was pinned. The library draws a lifted thumbnail twice (in the grid
+ * and in the portal), so only the grid's copy watches.
+ */
+function PullAwayWatcher(props: PullAwayWatcherProps) {
+  return useIsInPortalOutlet() ? null : <GridPullAwayWatcher {...props} />;
+}
+
+type PullAwayWatcherProps = {
+  itemKey: string;
+  pinnedKey: SharedValue<string | null>;
+  pinOrigin: SharedValue<Point | null>;
+  onPullAway: () => void;
+};
+
+function GridPullAwayWatcher({ itemKey, pinnedKey, pinOrigin, onPullAway }: PullAwayWatcherProps) {
+  const { touchPosition } = useCommonValuesContext();
+  useAnimatedReaction(
+    () => (pinnedKey.value === itemKey ? touchPosition.value : null),
+    (touch) => {
+      if (!touch) return;
+      const origin = pinOrigin.value;
+      if (!origin) {
+        pinOrigin.set(touch);
+        return;
+      }
+      if (Math.hypot(touch.x - origin.x, touch.y - origin.y) > PULL_AWAY) {
+        pinnedKey.set(null);
+        runOnJS(onPullAway)();
+      }
+    },
+  );
+  return null;
+}
+
+/** How long a touch rests before the thumbnail lifts and can be dragged. */
+const DRAG_LIFT_MS = 250;
+/** How long a touch must stay still (within HOLD_SLOP) to be a long press. */
+const HOLD_MS = 600;
+/** How far (in points) a lifted thumbnail may wander and still count as a hold. */
+const HOLD_SLOP = 10;
+/** How far (in points) the finger must pull a long-pressed thumbnail to drag it after all. */
+const PULL_AWAY = 30;
+
+type SlideMenuItem = {
+  key: string;
+  label: string;
+  danger?: boolean;
+  onPress: () => void;
+};
 
 function StaticSlidePreview({
   slide,
@@ -1836,7 +2411,15 @@ function DraggablePlaceholder({
   );
 }
 
+/**
+ * Room around a rail thumbnail for its lifted state: 6% scale on a 120-wide
+ * thumbnail adds about 4pt a side, and the shadow 5pt more.
+ */
+const RAIL_LIFT_ROOM = 10;
+
 const styles = StyleSheet.create({
+  // Matches react-native-sortables' own lifted-item shadow.
+  heldLift: { shadowColor: "#000", shadowOffset: { width: 0, height: 0 }, shadowRadius: 5 },
   body: { flexGrow: 1, padding: 16 },
   emptyWrap: { padding: 24, alignItems: "center" },
   emptyText: { fontSize: 14 },
@@ -1906,14 +2489,9 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.92)",
   },
   staticSlide: { width: "100%", aspectRatio: CANVAS_W / CANVAS_H, overflow: "hidden" },
-  grid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-    paddingVertical: 8,
-  },
+  grid: { paddingVertical: 8 },
   gridCell: {
-    width: "31%",
+    width: "100%",
     aspectRatio: CANVAS_W / CANVAS_H,
     borderWidth: 2,
     borderRadius: 8,
@@ -1936,14 +2514,25 @@ const styles = StyleSheet.create({
     alignItems: "stretch",
     gap: 14,
   },
+  // The scroll view clips its content, and a long-pressed thumbnail stays
+  // lifted in place (scaled up, with a shadow) while its menu is open. So the
+  // content gets RAIL_LIFT_ROOM on every side, and the rail grows and is pulled
+  // out by the same amount, leaving the thumbnails where they were.
   thumbnailRail: {
-    width: 130,
+    width: 130 + RAIL_LIFT_ROOM,
     flexGrow: 0,
     flexShrink: 0,
-    marginTop: -46,
+    marginTop: -46 - RAIL_LIFT_ROOM,
+    marginLeft: -RAIL_LIFT_ROOM,
     borderRightWidth: StyleSheet.hairlineWidth,
   },
-  thumbnailRailContent: { gap: 10, paddingRight: 4, paddingBottom: 8 },
+  thumbnailRailContent: {
+    gap: 10,
+    paddingTop: RAIL_LIFT_ROOM,
+    paddingLeft: RAIL_LIFT_ROOM,
+    paddingRight: RAIL_LIFT_ROOM,
+    paddingBottom: 8 + RAIL_LIFT_ROOM,
+  },
   railThumb: {
     width: 120,
     aspectRatio: CANVAS_W / CANVAS_H,
@@ -1951,17 +2540,23 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: "hidden",
   },
-  railNumber: {
-    position: "absolute",
-    left: 4,
-    bottom: 4,
-    minWidth: 20,
-    height: 20,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   editorMain: { flex: 1, minWidth: 0, minHeight: 0 },
+  // Floats over the bottom of the canvas area and passes every touch through,
+  // so the scholar can keep working while it shows.
+  copyNoticeWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 16,
+    alignItems: "center",
+  },
+  copyNotice: {
+    maxWidth: 440,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  copyNoticeText: { fontSize: 15, textAlign: "center" },
   backdrop: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0 },
   // Laid out at the ORIGIN; position comes from the animated transform.
   // Selection chrome lives here and may extend outside its element frame.

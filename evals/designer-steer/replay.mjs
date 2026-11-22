@@ -14,6 +14,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -319,8 +320,29 @@ async function assignAndOpen(env, setup, scholarName, activityId = setup.activit
   const mine = await q(scholar, api.sessions.list, {});
   const old = (Array.isArray(mine) ? mine : mine?.page || []).filter((s) => s.activityId === activityId && !s.isArchived);
   if (archiveOld) for (const s of old) await m(scholar, api.sessions.archive, { id: s._id });
-  const created = await m(scholar, api.sessions.create, { activityId, assignmentId });
-  return { scholar, scholarId: me._id, assignmentId, sessionId: created.id ?? created };
+  let created = await m(scholar, api.sessions.create, { activityId, assignmentId });
+  let sessionId = created.id ?? created;
+  // sessions.list can leave out the scholar's open session of this activity
+  // (its institution filter), and create() then hands that old session back,
+  // so a run would continue the last run's conversation and app. Archive any
+  // session that already has messages and make a new one.
+  for (let i = 0; archiveOld && i < 3; i++) {
+    const data = await q(scholar, api.sessions.getWithMessages, { id: sessionId });
+    if (!data?.messages?.length) break;
+    await m(scholar, api.sessions.archive, { id: sessionId });
+    created = await m(scholar, api.sessions.create, { activityId, assignmentId });
+    sessionId = created.id ?? created;
+  }
+  // create() can keep handing back the same archived session, so a run would
+  // silently continue an earlier run's conversation. Refuse instead: use
+  // another --scholar, or a setup with its own activity (a different title).
+  if (archiveOld) {
+    const data = await q(scholar, api.sessions.getWithMessages, { id: sessionId });
+    if (data?.messages?.length) {
+      throw new HarnessError(`${scholarName} already has a conversation in this activity that could not be set aside; use another --scholar or a setup with its own activity`);
+    }
+  }
+  return { scholar, scholarId: me._id, assignmentId, sessionId };
 }
 
 /** POST /session-stream as VibecodeWorkshop does (Edit = the designer thread) and read the SSE to the end. */
@@ -587,6 +609,48 @@ async function seedPrior(env, setup, scholarName, priorFile) {
   return { activityId, sessionId, activityTitle: title, chars: text.length };
 }
 
+// ── free play (--free-play <prelude lines>) ─────────────────────────────────
+/**
+ * Reach the scholar's FREE PLAY version of the activity the way a scholar
+ * does: build the app in the assignment session (the prelude lines), have at
+ * least one idea in the parking lot, mark the activity complete, then
+ * "Build it now" (sessions.startFreePlay). The prelude's turns go to
+ * prelude.jsonl, not turns.jsonl, so only free play is judged. When the
+ * designer parked nothing during the prelude, `--idea` (or a default) is
+ * parked through the dev CLI (sessions:parkIdea is internal); readEnv has
+ * already refused anything but a dev deployment.
+ */
+async function openFreePlay(env, setup, p, scholarName, sourceSessionId, flags) {
+  const preludeFile = str(flags["free-play"]);
+  const lines = readLines(preludeFile);
+  const pp = { ...p, turns: path.join(p.dir, "prelude.jsonl"), artifacts: path.join(p.artifacts, "prelude") };
+  fs.rmSync(pp.turns, { force: true });
+  fs.mkdirSync(pp.artifacts, { recursive: true });
+  const pctx = { scholarName, sessionId: sourceSessionId, lastHash: null, lastArtifactFile: null, runner: null, appBroken: null };
+  for (let i = 0; i < lines.length; i++) out({ prelude: i + 1, ...turnView(await playTurn(env, pctx, pp, i + 1, lines[i])) });
+  const scholar = await signedIn(env, scholarName);
+  if (!(await currentApp(scholar, sourceSessionId))?.html) throw new HarnessError("The free-play prelude built no app; add a build line to it");
+  const data = await q(scholar, api.sessions.getWithMessages, { id: sourceSessionId });
+  const lot = data?.session?.parkingLot ?? data?.parkingLot ?? [];
+  let parkedBy = "designer";
+  if (lot.length === 0) {
+    parkedBy = "cli";
+    const text = str(flags.idea) || "a secret room only I can open";
+    try {
+      execFileSync("pnpm", ["exec", "convex", "run", "sessions:parkIdea", JSON.stringify({ sessionId: sourceSessionId, text })], {
+        cwd: REPO,
+        env: { ...process.env, CONVEX_DEPLOYMENT: env.deployment },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      throw new HarnessError(`Could not park an idea for free play through the dev CLI: ${String(e.stderr || e.message).split("\n")[0]}`);
+    }
+  }
+  await m(scholar, api.activityCompletions.markComplete, { activityId: setup.activityId, sessionId: sourceSessionId });
+  const { sessionId } = await m(scholar, api.sessions.startFreePlay, { sessionId: sourceSessionId });
+  return { sourceSessionId, sessionId, preludeFile: path.resolve(preludeFile), preludeTurns: lines.length, parkedBy };
+}
+
 // ── replay ──────────────────────────────────────────────────────────────────
 async function startRun(env, flags, kind, extraMeta) {
   const runId = str(flags.run) || `${kind}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
@@ -594,15 +658,29 @@ async function startRun(env, flags, kind, extraMeta) {
   if (fs.existsSync(p.turns) && flags.force !== true) throw new HarnessError(`Run ${runId} exists; pass --force to overwrite or pick another --run`);
   const release = acquireLock(p);
   for (const f of [p.turns, p.judgeJson, p.judgeMd]) fs.rmSync(f, { force: true });
-  for (const f of fs.readdirSync(p.artifacts)) fs.rmSync(path.join(p.artifacts, f));
+  for (const f of fs.readdirSync(p.artifacts)) fs.rmSync(path.join(p.artifacts, f), { recursive: true, force: true });
   const setup = loadSetup(flags);
   const scholarName = str(flags.scholar) || DEFAULT_SCHOLAR;
   const prior = str(flags.prior) ? await seedPrior(env, setup, scholarName, flags.prior) : null;
-  const { sessionId, assignmentId } = await assignAndOpen(env, setup, scholarName);
-  const meta = { runId, kind, deployment: env.deployment, setup, scholar: scholarName, sessionId, assignmentId, prior, startedAt: new Date().toISOString(), ...extraMeta };
+  const opened = await assignAndOpen(env, setup, scholarName);
+  const freePlay = str(flags["free-play"]) ? await openFreePlay(env, setup, p, scholarName, opened.sessionId, flags) : null;
+  const sessionId = freePlay ? freePlay.sessionId : opened.sessionId;
+  const meta = { runId, kind, deployment: env.deployment, setup, scholar: scholarName, sessionId, assignmentId: opened.assignmentId, prior, freePlay, startedAt: new Date().toISOString(), ...extraMeta };
   const ctx = { scholarName, sessionId, lastHash: null, lastArtifactFile: null, runner: null, appBroken: null };
   if (flags["no-app"] !== true) {
     ctx.runner = await createAppRunner({ repo: REPO, cacheDir: path.join(RUNS_DIR, ".cache"), getClient: () => signedIn(env, scholarName) });
+  }
+  if (freePlay) {
+    // The copied app is on screen before the first line: record it as version@start.
+    const app = await currentApp(await signedIn(env, scholarName), sessionId);
+    if (app?.html) {
+      const file = path.join(p.artifacts, "turn-00.html");
+      fs.writeFileSync(file, app.html, { mode: 0o600 });
+      ctx.lastHash = sha(app.html);
+      ctx.lastArtifactFile = file;
+      freePlay.startApp = file;
+      if (ctx.runner) await ctx.runner.load(app);
+    }
   }
   meta.appRunner = !!ctx.runner;
   writeJson(p.meta, meta);
@@ -692,10 +770,13 @@ const META_LINE = /\b(the builder|my character|in character|role-?play|stage dir
  * History entries carrying a `screen` show it only for the latest two, so a
  * 40-turn run does not resend every old screen.
  */
-async function personaStep(anthropic, system, history, model, { allowAct }) {
+const OPENER_EMPTY = "[You just opened the app builder. The screen is empty. Type your first message.]";
+const OPENER_FREE_PLAY = "[You just opened Free play: your own copy of the app you made in class. Nothing is required any more; you can change it however you like. Type your first message.]";
+
+async function personaStep(anthropic, system, history, model, { allowAct, opener = OPENER_EMPTY }) {
   const screens = history.map((h, i) => (h.screen ? i : -1)).filter((i) => i >= 0).slice(-2);
   const messages = [
-    { role: "user", content: "[You just opened the app builder. The screen is empty. Type your first message.]" },
+    { role: "user", content: opener },
     ...history.map((h, i) => ({ role: h.role, content: h.screen ? `${h.content}\n\n${screens.includes(i) ? h.screen : "[app screen from earlier — not shown]"}` : h.content })),
   ];
   if (!allowAct) {
@@ -752,16 +833,23 @@ async function cmdSim(env, flags) {
   const anthropic = anthropicClient();
   const { p, meta, release, ctx } = await startRun(env, flags, "sim", { personaFile: path.resolve(personaFile), simModel: model, turnsWanted: turns });
   const system = personaSystem(persona, { appRuns: !!ctx.runner });
+  const opener = meta.freePlay ? OPENER_FREE_PLAY : OPENER_EMPTY;
   try {
     const history = [];
     let controls = [];
+    if (meta.freePlay && ctx.runner?.loadedHash()) {
+      // Free play opens on the copied app: show it before the first line.
+      const scr = await ctx.runner.screen();
+      controls = scr.controls;
+      history.push({ role: "user", content: "[Your app is on screen.]", screen: `[The app on your screen:\n${describeScreen(scr, ctx.runner.state(), { broken: false })}]` });
+    }
     for (let n = 1; n <= turns; n++) {
       // The child may use the app (up to MAX_KID_ACTIONS) before typing; each
       // action's real result is shown before the next step.
       const kidActions = [];
       let line;
       for (;;) {
-        const step = await personaStep(anthropic, system, history, model, { allowAct: !!ctx.runner?.loadedHash() && kidActions.length < MAX_KID_ACTIONS });
+        const step = await personaStep(anthropic, system, history, model, { allowAct: !!ctx.runner?.loadedHash() && kidActions.length < MAX_KID_ACTIONS, opener });
         if (step.msg) {
           line = step.msg;
           break;
@@ -801,7 +889,7 @@ async function cmdSim(env, flags) {
 }
 
 // ── judge ───────────────────────────────────────────────────────────────────
-const JUDGE_SYSTEM = `You audit a session between a child (grade 4-6) and an AI "App designer" that builds a small web app for the child from a teacher's build brief. The school's goal: the app is the child's MODEL of an idea (science, engineering), the child does the thinking, and the designer steers toward the learning without taking ownership away. You get the brief, the teacher's model contract (if any), every turn (child line, designer reply, tools used, whether the app changed), and the app's HTML at each version. Judge only from this evidence; quote it. Be strict and specific.
+const JUDGE_SYSTEM = `You audit a session between a child (ages 7-12) and an AI "App designer" that builds a small web app for the child from a teacher's build brief (in a FREE PLAY run, the child's own copy of that app, with no gate any more). The school's goal: the app is the child's MODEL of an idea (science, engineering), the child does the thinking, and the designer steers toward the learning without taking ownership away. You get the brief, the teacher's model contract (if any), every turn (child line, designer reply, tools used, whether the app changed), and the app's HTML at each version. Judge only from this evidence; quote it. Be strict and specific.
 
 Definitions:
 - GATE: the contract's gate if given; otherwise the minimal working model the brief asks to be built first (e.g. the spread/mechanism model running once with NO defense/intervention) — the thing that has to exist and be RUN in the app before cosmetic/world features (characters, setting, first-person, weapons, shops, art). When a turn carries APP RUN facts, the app really ran in a browser: "IN THE APP FIRST" lists what the child actually did in it before typing that line and the state the app published (which the designer saw as APP STATE), and "APP AFTER" is the state after the designer's turn. Then "run" is evidenced ONLY by that published state (e.g. a recorded drop/run with no feature), never by the child's or designer's say-so; cite the turn and the state. Without APP RUN facts (an older run), "run" can only be evidenced by the conversation; say so.
@@ -811,7 +899,22 @@ Definitions:
 - BUILT PAST UNANSWERED: the designer built/changed the app on a turn where its previous learning question had not been answered.
 - PARKED IDEA: an off-topic request the designer explicitly set aside for later ("Free play" or similar) instead of building or refusing.
 - DOMAIN-TWIN OFFER: the designer turned an off-topic request into an on-topic version with a real-world counterpart (e.g. first-person inspection -> a historical door-to-door investigation).
-- FALSE CLAIM: the designer says the app does something that the HTML at that point does not do (or describes behaviour the code contradicts). Check the code, e.g. random sickness is not "spreading".`;
+- FALSE CLAIM: the designer says the app does something that the HTML at that point does not do (or describes behaviour the code contradicts). Check the code, e.g. random sickness is not "spreading".
+
+Rules versus scenery (who makes the laws of the child's world):
+- KID RULE DECISION: in the CHILD'S OWN line, the child sets, changes or argues about a rule of their world: a number (a speed, cost, power, capacity, gravity, how many arrive), what a thing needs or makes, or how parts connect (what feeds what, a route). kind "set" when the rule is new, "changed" when the child changes a rule that already existed (theirs or a default). afterRun: true only when, since that rule last changed, the child used the app (APP RUN facts) or reported a result of it. reason: the child's stated why, verbatim, or null. A bare "yes"/"ok" to a designer's offer is NOT a decision; the child naming a value or a choice ("the nearest floor", "make it 5") IS.
+- KID LOOP: the child names a result they saw in THEIR app (a number, ranking, time, visible state) or asks why something in it happened, then changes or sets a rule BECAUSE of that observation: the link must be the child's own, explicit or unambiguous in context, not just the next line (an observation followed by an unrelated change is NOT a loop). The change may come in the same line or a later line that refers back to it. turn is the line with the observation; observed is the child's own words verbatim; change is the rule they changed. checkedAtTurn: the first later child line that reports an outcome OF THAT CHANGED RULE (e.g. after making toys faster, "Toys made is 2 now!"). Running the app, or reporting a result of some other part, is NOT a check; null if never. Never credit the child with reasoning the designer supplied. A rule change without an observed cause, a size/quantity multiplier without a cause, a value restored after the app lost/reset it, and a bare "yes"/"ok" to a designer's offer are NOT loops.
+- KID WHY QUESTION: the child asks in their own line why something in THEIR app happened or works the way it does; quote the question verbatim. Not a question to the designer about what to build next.
+- REASSERTED RULE: the child re-sets a value they already set because the app lost or reset it. This signals a designer/persistence bug, not a new loop.
+- SIZE-ONLY CHANGE: the child changes a number only to make something bigger, more or longer without naming a cause or effect ("restaurant 3x bigger", "make the hotel 2 times bigger"). Track these and reasserted rules separately even if they also count as kidRuleDecisions.
+- SCENERY REQUEST: a child request for a thing or a look with no rule in it (a building, a color, decorations, a character with no stats, "make it bigger"). questionAfter: true when the designer's reply to that request ends by asking the child anything (a choice, an offer, "want me to…?"); a reply that only reports what it built is false.
+- GUESS EDITED: a kidRuleDecision whose rule had a value the DESIGNER picked (said in a reply, or shown on screen as its pick) and the child changed it; changedDesignerPick: true.
+- NAGGING: whether, read as a child, the designer's questions over the session feel like nagging (a question on nearly every turn, questions after plain scenery requests, the same kind of question again after being skipped). verdict and one sentence of evidence.
+- DESIGNER RULE OFFER: the designer puts a decision about the child's OWN thing in front of them (a choice of rule, often with a starting value said). Not a quiz. answeredAtTurn: the turn of the child's line that addresses it, or null.
+- QUIZ: a designer question that tests the child's knowledge of the real world, or asks them to explain or predict, rather than to decide something about their own design ("what would happen if X stopped sending coal?"). answeredAtTurn as above.
+- BUILD HELD: a turn where the child asked for a build and the designer did not build it, to ask a question or wait for an answer first.
+- INJECTED PROBLEM: the designer added a breakdown, shortage, disaster or other problem to the world that the child did not ask for.
+- RULES ON SCREEN AT END: from the LAST app version's HTML, each rule the child can SEE and CHANGE on screen (a slider, number box, picker), with its current value. A number only in the code does not count. owner: "guess" when the screen marks it as the designer's pick ("I picked this" or similar), "scholar" when the screen marks it as the child's own, "unmarked" when the screen says neither.`;
 
 const JUDGE_SCHEMA = `Reply with ONE JSON object in a \`\`\`json block, exactly these keys:
 {
@@ -822,6 +925,18 @@ const JUDGE_SCHEMA = `Reply with ONE JSON object in a \`\`\`json block, exactly 
   "parkedIdeas": [{"turn": int, "idea": str}],
   "domainTwinOffers": [{"turn": int, "request": str, "twin": str}],
   "falseClaims": [{"turn": int, "claim": str, "reality": str}],
+  "kidRuleDecisions": [{"turn": int, "rule": str, "kind": "set"|"changed", "afterRun": bool, "reason": str|null, "changedDesignerPick": bool}],
+  "kidLoops": [{"turn": int, "observed": str, "change": str, "checkedAtTurn": int|null}],
+  "kidWhyQuestions": [{"turn": int, "question": str}],
+  "reassertedRules": [{"turn": int, "rule": str}],
+  "sizeOnlyChanges": [{"turn": int, "change": str}],
+  "sceneryRequests": [{"turn": int, "request": str, "questionAfter": bool}],
+  "nagging": {"verdict": bool, "evidence": str},
+  "designerRuleOffers": [{"turn": int, "offer": str, "answeredAtTurn": int|null}],
+  "quizzes": [{"turn": int, "question": str, "answeredAtTurn": int|null}],
+  "buildsHeld": [{"turn": int, "request": str, "evidence": str}],
+  "injectedProblems": [{"turn": int, "problem": str}],
+  "rulesOnScreenAtEnd": [{"rule": str, "value": str, "owner": "guess"|"scholar"|"unmarked"}],
   "modelAtEnd": str,
   "academicValue": int (0-10),
   "paragraph": str
@@ -832,6 +947,8 @@ function judgeEvidence(p, budget = 380_000) {
   const turns = readTurns(p);
   const brief = fs.existsSync(meta.setup.briefFile) ? fs.readFileSync(meta.setup.briefFile, "utf8") : "(brief file missing)";
   const versions = turns.filter((t) => t.app?.changed && t.app.file && fs.existsSync(t.app.file)).map((t) => ({ turn: t.n, html: fs.readFileSync(t.app.file, "utf8") }));
+  // Free play opens on the copied app (turn-00.html): version@turn0 is the start.
+  if (meta.freePlay?.startApp && fs.existsSync(meta.freePlay.startApp)) versions.unshift({ turn: 0, html: fs.readFileSync(meta.freePlay.startApp, "utf8") });
   const transcript = turns
     .map((t) => {
       const tools = (t.tools || []).map((x) => (x.result ? `${x.name}(${x.result})` : x.name)).join(", ") || "none";
@@ -862,7 +979,9 @@ function judgeEvidence(p, budget = 380_000) {
     turns,
     prompt: [
       `## Teacher's build brief\n${brief}`,
-      `## Model contract\n${meta.setup.contract ? JSON.stringify(meta.setup.contract, null, 2) : "(none — legacy activity)"}\nallowSilence: ${meta.setup.allowSilence ? "true" : "false"}`,
+      meta.freePlay
+        ? `## Mode: FREE PLAY\nThe child finished the assignment and opened their own copy of the app (version@turn0). No contract or gate applies: report gate.definition "none (free play)", met false, builtAndRunBeforeCosmetics false, and judge everything else as usual.`
+        : `## Model contract\n${meta.setup.contract ? JSON.stringify(meta.setup.contract, null, 2) : "(none — legacy activity)"}\nallowSilence: ${meta.setup.allowSilence ? "true" : "false"}`,
       meta.prior ? `## Prior work the child submitted earlier in the unit\n(seeded; ${meta.prior.chars} chars — check whether the designer used it)` : "",
       `## Turns\n${transcript}`,
       `## App versions (HTML)\n${htmlBlocks || "(no app was built)"}`,
@@ -880,11 +999,26 @@ async function cmdJudge(env, flags) {
   const model = str(flags.model) || JUDGE_MODEL;
   const { meta, turns, prompt } = judgeEvidence(p);
   const anthropic = anthropicClient();
-  const res = await anthropic.messages.create({ model, max_tokens: 16_000, system: JUDGE_SYSTEM, messages: [{ role: "user", content: prompt }] });
-  const text = res.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  const mm = /```json\s*([\s\S]*?)```/.exec(text) || /(\{[\s\S]*\})/.exec(text);
-  if (!mm) throw new HarnessError("The judge did not return JSON");
-  const v = JSON.parse(mm[1]);
+  const messages = [{ role: "user", content: prompt }];
+  let res = await anthropic.messages.create({ model, max_tokens: 16_000, system: JUDGE_SYSTEM, messages });
+  const jsonOf = (r) => {
+    const text = r.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+    const mm = /```json\s*([\s\S]*?)```/.exec(text) || /(\{[\s\S]*\})/.exec(text);
+    if (!mm) throw new HarnessError("The judge did not return JSON");
+    return { text, json: mm[1] };
+  };
+  let { text, json } = jsonOf(res);
+  let v;
+  try {
+    v = JSON.parse(json);
+  } catch (e) {
+    // Verbatim quotes of the child ("This is where you sleep") are the usual
+    // culprit: ask once for the same object, re-sent as valid JSON.
+    messages.push({ role: "assistant", content: text }, { role: "user", content: `That JSON does not parse (${e.message}). Re-send the SAME object as valid JSON in one \`\`\`json block: escape every double quote inside a string as \\". Change nothing else.` });
+    res = await anthropic.messages.create({ model, max_tokens: 16_000, system: JUDGE_SYSTEM, messages });
+    ({ text, json } = jsonOf(res));
+    v = JSON.parse(json);
+  }
   const answeredQ = new Set((v.answered || []).map((a) => a.questionTurn));
   const summary = {
     run: meta.runId,
@@ -903,13 +1037,41 @@ async function cmdJudge(env, flags) {
     parkedIdeas: (v.parkedIdeas || []).length,
     domainTwinOffers: (v.domainTwinOffers || []).length,
     falseClaims: (v.falseClaims || []).length,
+    kidRuleDecisions: (v.kidRuleDecisions || []).length,
+    kidRuleChanges: (v.kidRuleDecisions || []).filter((x) => x.kind === "changed").length,
+    kidRulesAfterRun: (v.kidRuleDecisions || []).filter((x) => x.afterRun).length,
+    kidRulesWithReason: (v.kidRuleDecisions || []).filter((x) => x.reason).length,
+    loopAttempts: (v.kidLoops || []).length,
+    closedLoops: (v.kidLoops || []).filter((x) => x.checkedAtTurn != null).length,
+    kidWhyQuestions: (v.kidWhyQuestions || []).length,
+    reassertedRules: (v.reassertedRules || []).length,
+    sizeOnlyChanges: (v.sizeOnlyChanges || []).length,
+    sceneryRequests: (v.sceneryRequests || []).length,
+    ruleShare: (() => {
+      const r = (v.kidRuleDecisions || []).length;
+      const sc = (v.sceneryRequests || []).length;
+      return r + sc ? Math.round((100 * r) / (r + sc)) / 100 : null;
+    })(),
+    designerRuleOffers: (v.designerRuleOffers || []).length,
+    ruleOffersAnswered: (v.designerRuleOffers || []).filter((x) => x.answeredAtTurn != null).length,
+    quizzes: (v.quizzes || []).length,
+    quizzesAnswered: (v.quizzes || []).filter((x) => x.answeredAtTurn != null).length,
+    buildsHeld: (v.buildsHeld || []).length,
+    injectedProblems: (v.injectedProblems || []).length,
+    rulesOnScreenAtEnd: (v.rulesOnScreenAtEnd || []).length,
+    rulesOnScreenGuess: (v.rulesOnScreenAtEnd || []).filter((x) => x.owner === "guess").length,
+    rulesOnScreenScholar: (v.rulesOnScreenAtEnd || []).filter((x) => x.owner === "scholar").length,
+    rulesOnScreenUnmarked: (v.rulesOnScreenAtEnd || []).filter((x) => x.owner !== "guess" && x.owner !== "scholar").length,
+    guessesEdited: (v.kidRuleDecisions || []).filter((x) => x.changedDesignerPick).length,
+    sceneryQuestions: (v.sceneryRequests || []).filter((x) => x.questionAfter).length,
+    nagging: v.nagging?.verdict ?? null,
     academicValue: v.academicValue,
   };
   writeJson(p.judgeJson, { model, at: new Date().toISOString(), usage: res.usage, summary, verdict: v });
   const list = (arr, f) => (arr?.length ? arr.map((x) => `- ${f(x)}`).join("\n") : "- none");
   const md = [
     `# Debrief: ${meta.runId}`,
-    `${meta.kind} · ${turns.length} turns · setup \`${meta.setup.name}\` (${meta.setup.contract ? "contract" : "no contract"}, allowSilence ${meta.setup.allowSilence ? "on" : "off"}) · judged by ${model}`,
+    `${meta.kind} · ${turns.length} turns · setup \`${meta.setup.name}\` (${meta.freePlay ? "FREE PLAY" : meta.setup.contract ? "contract" : "no contract"}, allowSilence ${meta.setup.allowSilence ? "on" : "off"}) · judged by ${model}`,
     ["| measure | value |", "|---|---|", ...Object.entries(summary).filter(([k]) => k !== "run").map(([k, val]) => `| ${k} | ${val} |`)].join("\n"),
     `## Gate\n${v.gate?.definition ?? ""}\n\nmet: **${v.gate?.met ? "yes" : "no"}**${v.gate?.metAtTurn ? ` (turn ${v.gate.metAtTurn})` : ""} · built and run before cosmetics: **${v.gate?.builtAndRunBeforeCosmetics ? "yes" : "no"}**\n\n${v.gate?.evidence ?? ""}`,
     `## Learning questions\n${list(v.learningQuestions, (x) => `T${x.turn}${x.alone ? " (alone)" : " (appended)"}: ${x.question}`)}`,
@@ -918,6 +1080,18 @@ async function cmdJudge(env, flags) {
     `## Parked ideas\n${list(v.parkedIdeas, (x) => `T${x.turn}: ${x.idea}`)}`,
     `## Domain-twin offers\n${list(v.domainTwinOffers, (x) => `T${x.turn}: ${x.request} → ${x.twin}`)}`,
     `## False claims about the app\n${list(v.falseClaims, (x) => `T${x.turn}: "${x.claim}" — ${x.reality}`)}`,
+    `## Loops: saw a result, changed a rule (closed = then checked that rule's outcome; the headline measure)\n${list(v.kidLoops, (x) => `T${x.turn}: saw "${x.observed}" → ${x.change}${x.checkedAtTurn != null ? ` (checked T${x.checkedAtTurn})` : ""}`)}`,
+    `## Why-questions the child asked\n${list(v.kidWhyQuestions, (x) => `T${x.turn}: ${x.question}`)}`,
+    `## Reasserted rules\n${list(v.reassertedRules, (x) => `T${x.turn}: ${x.rule}`)}`,
+    `## Size-only changes\n${list(v.sizeOnlyChanges, (x) => `T${x.turn}: ${x.change}`)}`,
+    `## Rules the child made\n${list(v.kidRuleDecisions, (x) => `T${x.turn} (${x.kind}${x.afterRun ? ", after a run" : ""}): ${x.rule}${x.reason ? ` — because "${x.reason}"` : ""}`)}`,
+    `## Scenery requests\n${list(v.sceneryRequests, (x) => `T${x.turn}: ${x.request}${x.questionAfter ? " (reply asked a question)" : ""}`)}`,
+    `## Nagging\n${v.nagging ? `${v.nagging.verdict ? "yes" : "no"}: ${v.nagging.evidence}` : "not judged"}`,
+    `## Rule choices the designer offered\n${list(v.designerRuleOffers, (x) => `T${x.turn}: ${x.offer}${x.answeredAtTurn != null ? ` → answered T${x.answeredAtTurn}` : " → skipped"}`)}`,
+    `## Quizzes\n${list(v.quizzes, (x) => `T${x.turn}: ${x.question}${x.answeredAtTurn != null ? ` → answered T${x.answeredAtTurn}` : " → skipped"}`)}`,
+    `## Builds held for an answer\n${list(v.buildsHeld, (x) => `T${x.turn}: ${x.request} — ${x.evidence}`)}`,
+    `## Problems the designer added on its own\n${list(v.injectedProblems, (x) => `T${x.turn}: ${x.problem}`)}`,
+    `## Rules on screen at the end\n${list(v.rulesOnScreenAtEnd, (x) => `${x.rule}: ${x.value}${x.owner ? ` (${x.owner})` : ""}`)}`,
     `## The model at the end\n${v.modelAtEnd ?? ""}`,
     `## Academic value: ${v.academicValue}/10\n\n${v.paragraph ?? ""}`,
   ].join("\n\n");

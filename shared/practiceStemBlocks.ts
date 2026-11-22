@@ -24,7 +24,20 @@ export type StemBlock =
   | { kind: "text"; text: string }
   /** A lifted pipe table. `header` is present only when the first row is a
    *  label row (see the header rule below); otherwise all lines are `rows`. */
-  | { kind: "table"; header?: string[]; rows: string[][] };
+  | { kind: "table"; header?: string[]; rows: string[][] }
+  /** A fenced code listing (see `CODE_FENCE`). Lines keep their leading
+   *  spaces: indentation is syntax in Python. Drawn monospaced, left-aligned,
+   *  and never passed through the fraction or math typesetters. */
+  | { kind: "code"; lines: string[] };
+
+/** A line holding only three backticks opens a code listing; the next such
+ *  line closes it. An unclosed fence stays ordinary text. */
+export const CODE_FENCE = "```";
+
+/** Wrap code lines as a fenced stem block (for template authors). */
+export function stemCodeBlock(lines: readonly string[]): string {
+  return [CODE_FENCE, ...lines, CODE_FENCE].join("\n");
+}
 
 // A cell "parses as a number" if, trimmed, it is a plain (optionally signed /
 // decimal) numeral OR contains a fraction. Used ONLY for the header rule below.
@@ -61,7 +74,7 @@ export function splitStemBlocks(stem: string): StemBlock[] {
   const lines = stem.split("\n");
   const blocks: StemBlock[] = [];
   let textBuf: string[] = [];
-  let sawTable = false;
+  let sawBlock = false;
 
   const flushText = () => {
     if (textBuf.length > 0) {
@@ -72,6 +85,16 @@ export function splitStemBlocks(stem: string): StemBlock[] {
 
   let i = 0;
   while (i < lines.length) {
+    if (lines[i].trim() === CODE_FENCE) {
+      const close = lines.findIndex((line, at) => at > i && line.trim() === CODE_FENCE);
+      if (close > i + 1) {
+        flushText();
+        blocks.push({ kind: "code", lines: lines.slice(i + 1, close) });
+        sawBlock = true;
+        i = close + 1;
+        continue;
+      }
+    }
     if (lines[i].includes("|")) {
       // Gather the maximal run of consecutive lines that all contain "|".
       let j = i;
@@ -89,7 +112,7 @@ export function splitStemBlocks(stem: string): StemBlock[] {
         } else {
           blocks.push({ kind: "table", rows: cellRows });
         }
-        sawTable = true;
+        sawBlock = true;
         i = j;
         continue;
       }
@@ -106,9 +129,9 @@ export function splitStemBlocks(stem: string): StemBlock[] {
   }
   flushText();
 
-  // No table anywhere ⇒ hand back the original string untouched, so a non-table
-  // stem renders exactly as it did before this parser existed.
-  if (!sawTable) return [{ kind: "text", text: stem }];
+  // No table or code listing anywhere ⇒ hand back the original string
+  // untouched, so a plain stem renders exactly as it did before this parser.
+  if (!sawBlock) return [{ kind: "text", text: stem }];
   return blocks;
 }
 
@@ -125,6 +148,25 @@ function speakTable(block: Extract<StemBlock, { kind: "table" }>): string {
   return parts.join(" ");
 }
 
+/** Code read line by line, with the punctuation a voice would stumble on
+ *  turned into words or dropped. */
+function speakCode(block: Extract<StemBlock, { kind: "code" }>): string {
+  return block.lines
+    .map((line) =>
+      line
+        .trim()
+        .replace(/\/\//g, " divided by ")
+        .replace(/\+=/g, " plus equals ")
+        .replace(/==/g, " equals ")
+        .replace(/[():[\]]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .filter(Boolean)
+    .map((line) => `${line}.`)
+    .join(" ");
+}
+
 /**
  * A single coherent spoken reading of a whole stem, for the wrapper's aria /
  * accessibility label (never per block — fragments confuse a screen reader).
@@ -135,7 +177,7 @@ function speakTable(block: Extract<StemBlock, { kind: "table" }>): string {
 export function stemToSpeech(stem: string): string {
   const blocks = splitStemBlocks(stem);
   const spoken = blocks.map((b) =>
-    b.kind === "text" ? fractionsToSpeech(b.text) : speakTable(b),
+    b.kind === "text" ? fractionsToSpeech(b.text) : b.kind === "table" ? speakTable(b) : speakCode(b),
   );
   return spoken.join(" ").replace(/\s+/g, " ").trim();
 }
@@ -201,6 +243,7 @@ export function stemPreviewText(stem: string): string {
   if (blocks.length === 1 && blocks[0].kind === "text") return stem;
   const parts = blocks.map((b) => {
     if (b.kind === "text") return b.text;
+    if (b.kind === "code") return b.lines.map((line) => line.trim()).join("; ");
     const rows = b.header ? [b.header, ...b.rows] : b.rows;
     return rows.map((row) => row.join(", ")).join(" · ");
   });

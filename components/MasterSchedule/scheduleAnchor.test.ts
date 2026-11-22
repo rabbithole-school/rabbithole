@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ReportingPeriodOption } from "./DateTermPicker";
-import { clampToWeekday, initialAnchorMs, todayAnchorMs } from "./scheduleAnchor";
+import { clampToWeekday, defaultTerm, initialAnchorMs, todayAnchorMs } from "./scheduleAnchor";
 
 function term(id: string, startsAt: number, endsAt: number): ReportingPeriodOption {
   return {
@@ -56,6 +56,24 @@ describe("scheduleAnchor", () => {
       vi.setSystemTime(new Date(2026, 6, 27, 9, 30)); // Mon 2026-07-27
       const summer = term("summer", localMidnight(2026, 5, 1), localMidnight(2026, 7, 31));
       expect(initialAnchorMs([summer], summer)).toBe(localMidnight(2026, 6, 27));
+    });
+  });
+
+  describe("defaultTerm", () => {
+    test("the term today falls in wins over the 'current' (open/writing) term", () => {
+      vi.setSystemTime(new Date(2026, 10, 9, 9, 30)); // Mon 2026-11-09
+      const fall = term("fall", localMidnight(2026, 7, 10), localMidnight(2026, 11, 18));
+      const spring = term("spring", localMidnight(2027, 0, 5), localMidnight(2027, 4, 28));
+      expect(defaultTerm([spring, fall], spring)?._id).toBe("fall");
+    });
+
+    test("between terms → the term the grid snaps to, else current, else newest", () => {
+      vi.setSystemTime(new Date(2026, 6, 27, 9, 30)); // between terms
+      const fall = term("fall", localMidnight(2026, 7, 10), localMidnight(2026, 11, 18));
+      const spring = term("spring", localMidnight(2027, 0, 5), localMidnight(2027, 4, 28));
+      expect(defaultTerm([spring, fall], fall)?._id).toBe("fall");
+      expect(defaultTerm([spring, fall], null)?._id).toBe("spring");
+      expect(defaultTerm([], null)).toBeNull();
     });
   });
 });

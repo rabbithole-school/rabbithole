@@ -65,18 +65,73 @@ fi
 # pnpm ends its output with a blank line; show its last real one.
 say "  $(grep -v '^[[:space:]]*$' "$STATE/install.log" | tail -n 1)"
 
+# The Convex CLI downloads and starts the backend itself, and it has no option
+# for the network interface: the backend would listen on every interface,
+# reachable from the LAN (TRA-526). So the runner installs the pinned release
+# under its own name in the CLI's cache, behind a two-line wrapper that adds
+# --interface 127.0.0.1, and points the CLI at that name. The CLI finds the
+# version already downloaded and runs it like any other. It also looks up the
+# local dashboard by that name, so the runner installs that too.
+CONVEX_CACHE="$HOME/.cache/convex"
+BACKEND_NAME="$CONVEX_BACKEND_VERSION-loopback"
+BACKEND_DIR="$CONVEX_CACHE/binaries/$BACKEND_NAME"
+# Download one asset of the pinned release and unpack it into a directory.
+fetch_release() {
+  local url="https://github.com/get-convex/convex-backend/releases/download/$CONVEX_BACKEND_VERSION/$1"
+  command -v unzip >/dev/null || die "unzip is needed to unpack the Convex backend; install it and run again"
+  curl -fsSL --retry 3 -o "$STATE/release.zip" "$url" || die "downloading $url failed"
+  rm -rf "$2" && mkdir -p "$2"
+  unzip -q -o "$STATE/release.zip" -d "$2" || die "unpacking $1 failed"
+  rm -f "$STATE/release.zip"
+}
+install_backend() {
+  local arch tmp
+  if [ ! -x "$BACKEND_DIR/convex-local-backend.real" ] ||
+    ! grep -qs -- '--interface 127.0.0.1' "$BACKEND_DIR/convex-local-backend"; then
+    case "$(uname -s)-$(uname -m)" in
+      Darwin-arm64) arch=aarch64-apple-darwin ;;
+      Darwin-x86_64) arch=x86_64-apple-darwin ;;
+      Linux-aarch64 | Linux-arm64) arch=aarch64-unknown-linux-gnu ;;
+      Linux-x86_64) arch=x86_64-unknown-linux-gnu ;;
+      *) die "no Convex local backend is published for $(uname -s) $(uname -m)" ;;
+    esac
+    say "  downloading the Convex backend $CONVEX_BACKEND_VERSION (about 65 MB)"
+    fetch_release "convex-local-backend-$arch.zip" "$STATE/backend.tmp"
+    # The cache is shared by every checkout on this computer, and another
+    # checkout's local:setup may be installing the same release right now. So
+    # each file is written under a name of its own in the cache directory, then
+    # renamed into place in one step.
+    mkdir -p "$BACKEND_DIR"
+    tmp="$(mktemp "$BACKEND_DIR/.convex-local-backend.real.XXXXXX")"
+    mv -f "$STATE/backend.tmp/convex-local-backend" "$tmp"
+    chmod 755 "$tmp"
+    mv -f "$tmp" "$BACKEND_DIR/convex-local-backend.real"
+    rm -rf "$STATE/backend.tmp"
+    # Written last: the CLI treats the version as present once this file exists.
+    tmp="$(mktemp "$BACKEND_DIR/.convex-local-backend.XXXXXX")"
+    printf '%s\n' '#!/bin/sh' \
+      'exec "$(dirname "$0")/convex-local-backend.real" --interface 127.0.0.1 "$@"' \
+      >"$tmp"
+    chmod 755 "$tmp"
+    mv -f "$tmp" "$BACKEND_DIR/convex-local-backend"
+  fi
+  # The CLI keeps one dashboard, stamped with the backend version it belongs to.
+  if ! grep -qs "\"version\":\"$BACKEND_NAME\"" "$CONVEX_CACHE/dashboard/config.json"; then
+    fetch_release dashboard.zip "$STATE/dashboard.tmp"
+    rm -rf "$CONVEX_CACHE/dashboard" && mkdir -p "$CONVEX_CACHE/dashboard"
+    mv "$STATE/dashboard.tmp" "$CONVEX_CACHE/dashboard/out"
+    printf '{"version":"%s"}' "$BACKEND_NAME" >"$CONVEX_CACHE/dashboard/config.json"
+  fi
+}
+
 start_backend() {
   : >"$STATE/convex.log"
   # Typechecking adds about 90 seconds and isn't needed to run the app;
   # `pnpm typecheck` is the check for that. Codegen is off because the checkout
   # already has convex/_generated/, and regenerating it would change tracked
   # files.
-  #
-  # The backend listens on every network interface, not just this computer:
-  # the Convex CLI starts it without --interface and has no option to pass one
-  # (TRA-526). The web app, which holds the password-less /dev-login page, is
-  # loopback-only (step 5).
   nohup npx convex dev --local-cloud-port "$CLOUD_PORT" --local-site-port "$SITE_PORT" \
+    --local-backend-version "$BACKEND_NAME" \
     --typecheck disable --codegen disable </dev/null >>"$STATE/convex.log" 2>&1 &
   echo $! >"$STATE/convex.pid"
 }
@@ -92,6 +147,7 @@ backend_ready() {
 }
 
 step "2/5  Start the local Convex backend and load Rabbithole's functions"
+install_backend
 set -m # each background job gets its own process group, so stop_all can end it cleanly
 start_backend
 if ! backend_ready; then

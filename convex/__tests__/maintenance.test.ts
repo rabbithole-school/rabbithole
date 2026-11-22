@@ -35,6 +35,8 @@ const REPRESENTATIVE_TABLES = [
   "practiceAttempts",
   "momentEvents",
   "practicePlacements",
+  "skyStarEmbeddings",
+  "skyStars",
 ] as const;
 
 async function seedRepresentativePracticeRows(
@@ -134,7 +136,28 @@ async function seedRepresentativePracticeRows(
         updatedAt: 1,
       }),
     };
-    return { rows, blobIds: [workImageId, letterSketchId] };
+    // A Sky star (TRA-699) and its vector: the kid's own label goes with them.
+    const skyStar = await ctx.db.insert("skyStars", {
+      scholarId,
+      unitId: await ctx.db.insert("units", {
+        teacherId: scholarId,
+        title: "A test Quest",
+        isActive: true,
+        authorScholarId: scholarId,
+      }),
+      label: "A test Quest",
+      x: 0,
+      y: 0,
+    });
+    const skyRows = {
+      skyStar,
+      skyStarEmbedding: await ctx.db.insert("skyStarEmbeddings", {
+        starId: skyStar,
+        scholarId,
+        vector: [0.6, 0.8],
+      }),
+    };
+    return { rows: { ...rows, ...skyRows }, blobIds: [workImageId, letterSketchId] };
   });
 }
 

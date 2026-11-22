@@ -10,16 +10,21 @@ import {
   DISCRETE_MATH_SKILLS,
 } from "../seed/discreteMathGraph";
 
-const SKILL_KEYS = DISCRETE_MATH_SKILLS.map((skill) => skill.skillKey);
+const ALL_SKILL_KEY_SET = new Set(DISCRETE_MATH_SKILLS.map((skill) => skill.skillKey));
+// The algorithms strand (2026-11-21) shows code listings and types one
+// expression family, so it has its own suite (algorithmsTemplates.test.ts).
+// The template policies below cover the four original strands.
+const SKILL_KEYS = DISCRETE_MATH_SKILLS.filter((skill) => skill.strand !== "algorithms").map((skill) => skill.skillKey);
 const SKILL_KEY_SET = new Set(SKILL_KEYS);
 
 // Every cross-domain prerequisite `fromKey` (an edge whose source lives in
-// whole-number-arithmetic). Recounted directly from the real graph in the
+// whole-number-arithmetic; `exponents_repeated_mult` feeds two nodes). Recounted directly from the real graph in the
 // count test; this is the expected sorted list.
 const CROSS_DOMAIN_FROM_KEYS = [
   "divisibility_rules_2_5_10",
   "divisibility_rules_3_9",
   "equal_groups_concept",
+  "exponents_repeated_mult",
   "exponents_repeated_mult",
   "gcf",
   "prime_or_composite",
@@ -32,6 +37,7 @@ const STRAND_COUNTS: Record<string, number> = {
   "graph-theory": 12,
   "number-theory": 13,
   logic: 11,
+  algorithms: 13,
 };
 
 // Decision/classification nodes that must stay multiple choice (no free-
@@ -85,29 +91,30 @@ function graderSubmission(item: PracticeItem): string {
 }
 
 describe("discrete-math deterministic templates", () => {
-  test("the authoritative graph has 48 nodes, 56 edges, 8 foreign prerequisites, and 0 implies edges", () => {
+  test("the authoritative graph has 61 nodes, 75 edges, 9 foreign prerequisites, and 0 implies edges", () => {
     expect(DISCRETE_MATH_DOMAIN).toBe("discrete-math");
-    expect(DISCRETE_MATH_SKILLS).toHaveLength(48);
+    expect(DISCRETE_MATH_SKILLS).toHaveLength(61);
+    expect(ALL_SKILL_KEY_SET.size).toBe(61);
     expect(SKILL_KEY_SET.size).toBe(48);
-    expect(DISCRETE_MATH_EDGES).toHaveLength(56);
+    expect(DISCRETE_MATH_EDGES).toHaveLength(75);
 
-    const localFrom = DISCRETE_MATH_EDGES.filter((edge) => SKILL_KEY_SET.has(edge.fromKey));
-    expect(localFrom).toHaveLength(48);
+    const localFrom = DISCRETE_MATH_EDGES.filter((edge) => ALL_SKILL_KEY_SET.has(edge.fromKey));
+    expect(localFrom).toHaveLength(66);
 
-    const foreign = DISCRETE_MATH_EDGES.filter((edge) => !SKILL_KEY_SET.has(edge.fromKey));
-    expect(foreign).toHaveLength(8);
+    const foreign = DISCRETE_MATH_EDGES.filter((edge) => !ALL_SKILL_KEY_SET.has(edge.fromKey));
+    expect(foreign).toHaveLength(9);
     expect(foreign.map((edge) => edge.fromKey).sort()).toEqual(CROSS_DOMAIN_FROM_KEYS);
 
     // Every edge endpoint is a real key: `toKey` is always local (discrete-math
     // is a pure sink domain — no edge points out of it).
     for (const edge of DISCRETE_MATH_EDGES) {
-      expect(SKILL_KEY_SET.has(edge.toKey), `toKey ${edge.toKey}`).toBe(true);
+      expect(ALL_SKILL_KEY_SET.has(edge.toKey), `toKey ${edge.toKey}`).toBe(true);
     }
 
     // Every LOCAL edge is grade-forward (the repo-wide drift lock only covers
     // CROSS-DOMAIN edges — graphGrades.test.ts).
     const gradeByKey = new Map(DISCRETE_MATH_SKILLS.map((s) => [s.skillKey, s.grade]));
-    const GRADE_ORDER = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    const GRADE_ORDER = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
     for (const edge of DISCRETE_MATH_EDGES) {
       const from = gradeByKey.get(edge.fromKey);
       if (from === undefined) continue; // foreign edges: covered by graphGrades

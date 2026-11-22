@@ -1,3 +1,8 @@
+import {
+  APP_SNAPSHOT_NODE_FILTER_SOURCE,
+  APP_SNAPSHOT_PAINT_SOURCE,
+} from "../../vendor/shared/appStateBridge.mjs";
+
 export function nativeAppSnapshotInjectionScript(
   requestJson: string,
   timeoutMs: number,
@@ -40,44 +45,9 @@ export function nativeAppSnapshotInjectionScript(
         context.drawImage(canvas, 0, 0, output.width, output.height);
         return output.toDataURL("image/jpeg", 0.7);
       };
-      const compositeCanvases = async (
-        backgroundDataUrl,
-        canvases,
-        width,
-        height,
-        scale,
-      ) => {
-        if (canvases.length === 0) return backgroundDataUrl;
-        const image = new Image();
-        await new Promise((resolve, reject) => {
-          image.onload = resolve;
-          image.onerror = () => reject(new Error("Render failed"));
-          image.src = backgroundDataUrl;
-        });
-        const output = document.createElement("canvas");
-        output.width = Math.ceil(width * scale);
-        output.height = Math.ceil(height * scale);
-        const context = output.getContext("2d");
-        if (!context) throw new Error("Canvas unavailable");
-        context.drawImage(image, 0, 0);
-        for (const canvas of canvases) {
-          const rect = canvas.getBoundingClientRect();
-          if (!canvas.width || !canvas.height || !rect.width || !rect.height) {
-            continue;
-          }
-          context.drawImage(
-            canvas,
-            rect.left * scale,
-            rect.top * scale,
-            rect.width * scale,
-            rect.height * scale,
-          );
-        }
-        return output.toDataURL("image/jpeg", 0.7);
-      };
       const capture = async () => {
         const domToImage = window.domtoimage;
-        if (!domToImage?.toJpeg) throw new Error("dom-to-image unavailable");
+        if (!domToImage?.toSvg) throw new Error("dom-to-image unavailable");
         const root = document.body || document.documentElement;
         const documentElement = document.documentElement;
         const body = document.body;
@@ -99,15 +69,15 @@ export function nativeAppSnapshotInjectionScript(
           ? Math.max(1, Math.min(1600, Math.round(request.maxWidth)))
           : ${defaultMaxWidth};
         const scale = Math.min(1, maxWidth / width);
-        const canvases = [...document.querySelectorAll("canvas")];
         try {
-          const backgroundDataUrl = await domToImage.toJpeg(root, {
-            quality: 0.7,
+          // Canvases render in place, so the HUD an app layers over a canvas
+          // stays on top (TRA-592); the paint step waits out WebKit's decode
+          // of the images inside the SVG.
+          const svgDataUrl = await domToImage.toSvg(root, {
             bgcolor: "#fff",
             width: Math.ceil(width * scale),
             height: Math.ceil(height * scale),
-            filter: (node) =>
-              node.tagName !== "CANVAS" && node.tagName !== "SCRIPT",
+            filter: ${APP_SNAPSHOT_NODE_FILTER_SOURCE},
             style: {
               transform: "scale(" + scale + ")",
               transformOrigin: "top left",
@@ -115,12 +85,10 @@ export function nativeAppSnapshotInjectionScript(
               height: height + "px",
             },
           });
-          return await compositeCanvases(
-            backgroundDataUrl,
-            canvases,
-            width,
-            height,
-            scale,
+          return await ${APP_SNAPSHOT_PAINT_SOURCE}(
+            svgDataUrl,
+            Math.ceil(width * scale),
+            Math.ceil(height * scale),
           );
         } catch (error) {
           const fallback = canvasFallback(maxWidth, width, height);

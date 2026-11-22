@@ -6,6 +6,15 @@
 
 import { convexTest, type TestConvex } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
+
+// These tests cover Quest app building, which is OFF in the product
+// (shared/missionCopy.ts SCHOLAR_LED_APP_BUILDING) but kept for a revisit, so
+// they run with it on. scholarAppBuildingOff.test.ts covers the off state.
+vi.mock("../../shared/missionCopy", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../shared/missionCopy")>()),
+  SCHOLAR_LED_APP_BUILDING: true,
+}));
+
 import schema from "../schema";
 import { internal } from "../_generated/api";
 import type { ActionCtx } from "../_generated/server";
@@ -504,6 +513,7 @@ function toolState(): TutorToolSessionState {
     rubricPreToolClosingIsValid: false,
     suppressCompletionFollowUp: false,
     activityCompletedThisStream: false,
+    pendingCompletionNote: null,
     createdCodeArtifact: false,
   };
 }
@@ -545,40 +555,12 @@ async function coDesignTools(runMutation: ReturnType<typeof vi.fn>) {
 }
 
 describe("tutor co-design tools", () => {
-  test("create_activity kind app writes the app shape and the mission", async () => {
-    const runMutation = vi.fn().mockResolvedValue("activity");
-    const tools = await coDesignTools(runMutation);
-    const tool = tools.find((x) => x.name === "create_activity")!;
-    await tool.run({
-      lessonId: "lesson",
-      title: "Bridge simulator",
-      kind: "app",
-      systemPrompt: "Build a bridge that sags under trucks.",
-      mission: { gate: "It runs once", freedoms: ["the river"], invariants: ["Longer spans sag more"] },
-    } as never);
-    expect(getFunctionName(runMutation.mock.calls[0][0])).toBe(
-      getFunctionName(internal.activities.aiCreateForIsUnit),
-    );
-    expect(runMutation.mock.calls[0][1]).toMatchObject({
-      kind: "online",
-      appActivity: true,
-      mission: { gate: "It runs once", freedoms: ["the river"], invariants: ["Longer spans sag more"] },
-    });
-  });
-
-  test("create_activity surfaces the B6 refusal so the model can act on it", async () => {
-    const runMutation = vi
-      .fn()
-      .mockRejectedValue(new Error(QUEST_BUILD_NEEDS_LEARNING_STEP));
-    const tools = await coDesignTools(runMutation);
-    const tool = tools.find((x) => x.name === "create_activity")!;
-    const reply = await tool.run({
-      lessonId: "lesson",
-      title: "Bridge simulator",
-      kind: "app",
-      systemPrompt: "Build it.",
-    } as never);
-    expect(String(reply)).toContain("Add a learning step first");
+  test("the own Quest's set has no unit-planning tools since TRA-682", async () => {
+    const tools = await coDesignTools(vi.fn());
+    const names = tools.map((x) => x.name);
+    expect(names).not.toContain("create_lesson");
+    expect(names).not.toContain("create_activity");
+    expect(names).toContain("save_follow_up");
   });
 
   test("set_quest_mission is offered in the Quest's own co-design set and calls the mutation", async () => {

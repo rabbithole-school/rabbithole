@@ -11,6 +11,14 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ImpersonationBanner } from "@/components/ImpersonationBanner";
 import { SuspendedInstitutionGate } from "@/components/SuspendedInstitutionGate";
 import { RoutePrefetcher } from "@/components/RoutePrefetcher";
+import { BedtimeGate } from "@/components/BedtimeGate";
+import { useSyncTTSAuthToken } from "@/hooks/useTTSQueue";
+
+/** Hands the Convex auth token to the app-wide TTS engine (see useTTSQueue). */
+function TTSAuthTokenSync() {
+  useSyncTTSAuthToken();
+  return null;
+}
 
 const convex = new ConvexReactClient(
   process.env.NEXT_PUBLIC_CONVEX_URL as string,
@@ -31,6 +39,7 @@ const convex = new ConvexReactClient(
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <ConvexAuthProvider client={convex}>
+      <TTSAuthTokenSync />
       {/* Keeps recently-unmounted query subscriptions warm so back-nav
           renders instantly (perceived-speed cache, plan Part 4). */}
       <ConvexQueryCacheProvider>
@@ -49,7 +58,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
                 AccountMenu is mounted). See ImpersonationBanner. */}
             <ImpersonationBanner />
             <SuspendedInstitutionGate>
-              <RoutePrefetcher>{children}</RoutePrefetcher>
+              {/* 8 pm–6 am night sky for primary-institution scholars; covers, never
+                  unmounts, the page underneath. See BedtimeGate. */}
+              <BedtimeGate>
+                <RoutePrefetcher>{children}</RoutePrefetcher>
+              </BedtimeGate>
             </SuspendedInstitutionGate>
             <Toaster toaster={toaster}>
               {(toast) => (

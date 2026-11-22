@@ -8,6 +8,8 @@ import { normalizeStoredTutorModel } from "./tutorModel";
 import { isUsableVibecodeStarterApp } from "./vibecodeStarter";
 import {
   defaultAppDeliverable,
+  isUntouchedDefaultAppDeliverable,
+  isUntouchedDefaultAutoAppDeliverable,
   resolveActivityWriteTarget,
   storedShapeFields,
 } from "./appActivity";
@@ -91,10 +93,21 @@ export function duplicateActivityDesign(
   // when the source is a legacy kind:"vibecode" row.
   const shape = storedShapeFields(resolveActivityWriteTarget(source, {}));
   const isApp = shape.appActivity === true;
+  const defaultDeliverable =
+    isApp &&
+    !source.advanceRubric &&
+    (!source.deliverable ||
+      isUntouchedDefaultAppDeliverable(
+        source.deliverable, source.scholarDescription,
+      ) ||
+      isUntouchedDefaultAutoAppDeliverable(
+        source.deliverable, source.scholarDescription, source.buildContract,
+      ));
   return {
     lessonId,
     title,
     description: source.description,
+    ...(isApp ? { scholarDescription: source.scholarDescription } : {}),
     ...shape,
     webUrl: source.webUrl,
     webAllowedHosts: source.webAllowedHosts
@@ -130,16 +143,15 @@ export function duplicateActivityDesign(
     allowSilence: isApp ? source.allowSilence : undefined,
     hasScholarAngles: source.hasScholarAngles,
     assessesWritingMechanics: source.assessesWritingMechanics,
-    defaultMode: source.defaultMode,
-    deliverable: source.deliverable
-      ? {
-          ...source.deliverable,
-          criteria: source.deliverable.criteria.map((criterion) => ({
-            ...criterion,
-          })),
-        }
-      : isApp && !source.advanceRubric
-        ? defaultAppDeliverable(source)
+    deliverable: defaultDeliverable
+      ? defaultAppDeliverable(source)
+      : source.deliverable
+        ? {
+            ...source.deliverable,
+            criteria: source.deliverable.criteria.map((criterion) => ({
+              ...criterion,
+            })),
+          }
         : undefined,
     advanceRubric: source.advanceRubric
       ? {

@@ -32,6 +32,7 @@ import {
   unitKeyFamily,
   UNIT_MISSING_NUDGE,
   UNIT_WRONG_NUDGE,
+  nearMissNudge,
   DONT_KNOW_LABEL,
   PLACEMENT_SLIP_PROMPT,
   PLACEMENT_SLIP_RETRY_LABEL,
@@ -46,20 +47,9 @@ import {
   type StoryThreadTurnResult,
 } from "../../vendor/shared/practiceLoop";
 
-export { applyKey, applyUnitKey, choiceSubmitValue, isPadAnswerType, padShowFraction, padShowRemainder, padShowSign, sanitizePadInput, unitKeyFamily, UNIT_MISSING_NUDGE, UNIT_WRONG_NUDGE, DONT_KNOW_LABEL, PLACEMENT_SLIP_PROMPT, PLACEMENT_SLIP_RETRY_LABEL, PLACEMENT_SLIP_CONCEDE_LABEL, placementFeedback, placementProgress, streamStoryOpenTurn, makeClientEventId };
+export { applyKey, applyUnitKey, choiceSubmitValue, isPadAnswerType, padShowFraction, padShowRemainder, padShowSign, sanitizePadInput, unitKeyFamily, UNIT_MISSING_NUDGE, UNIT_WRONG_NUDGE, nearMissNudge, DONT_KNOW_LABEL, PLACEMENT_SLIP_PROMPT, PLACEMENT_SLIP_RETRY_LABEL, PLACEMENT_SLIP_CONCEDE_LABEL, placementFeedback, placementProgress, streamStoryOpenTurn, makeClientEventId };
 export type { PadAnswerType, PlacementOutcome, ExplainFetch, StoryThreadTurnResult };
 
-/**
- * The bottom-left key of the 3×4 grid: `/` for fraction/expression, `.` for
- * decimal, blank (hidden) for integer. Follows the shared `applyKey` vocabulary.
- */
-export function padOpKey(t: PadAnswerType): string {
-  if (t === "fraction" || t === "expression") return "/";
-  if (t === "decimal") return ".";
-  return "";
-}
-
-/** The 12 grid keys in row-major order (`""` = a hidden placeholder cell). */
-export function padGridKeys(t: PadAnswerType): string[] {
-  return ["7", "8", "9", "4", "5", "6", "1", "2", "3", padOpKey(t), "0", "⌫"];
-}
+// The grid layout (the bottom-left operator key and the 12 keys in order)
+// lives in the MIT-licensed keypad package, vendored for Metro.
+export { padGridKeys, padOpKey } from "../../vendor/react-native-math-keypad/model/flatPad";

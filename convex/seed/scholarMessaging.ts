@@ -25,6 +25,7 @@ import {
   ensureThreadParticipants,
 } from "../parentMessages";
 import { ensureWorkshopThreadForSuggestion } from "../scholarMessages";
+import { threadFlavor } from "../lib/scholarThreadAccess";
 
 export const SEEDED_MENTOR_USERNAME = "test-mentor-001";
 const SEEDED_IDEA_TITLE = "Let me pick the color of my quest cards";
@@ -39,14 +40,14 @@ async function userByUsername(ctx: MutationCtx, username: string) {
 async function threadsFor(
   ctx: MutationCtx,
   scholarId: Id<"users">,
-  kind: "mentor" | "workshop",
+  flavor: "general" | "workshop",
 ): Promise<Doc<"parentThreads">[]> {
   return (
     await ctx.db
       .query("parentThreads")
       .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
       .collect()
-  ).filter((thread) => thread.kind === kind);
+  ).filter((thread) => threadFlavor(thread) === flavor);
 }
 
 async function participantIds(ctx: MutationCtx, threadId: Id<"parentThreads">) {
@@ -122,10 +123,10 @@ export async function seedScholarMessagingFixtures(
 
   // ── Mentor thread: Chris opened it, Kai replied ────────────────────────
   if (kai?.institutionId === moli) {
-    const hasThread = (await threadsFor(ctx, kai._id, "mentor")).length > 0;
+    const hasThread = (await threadsFor(ctx, kai._id, "general")).length > 0;
     if (!hasThread) {
       const threadId = await createThread(ctx, {
-        kind: "mentor",
+        flavor: "general",
         parentUserIds: [kai._id],
         scholarId: kai._id,
         institutionId: moli,
@@ -196,7 +197,7 @@ export async function seedScholarMessagingFixtures(
     );
     if (staffStarted.length === 0) {
       const threadId = await createThread(ctx, {
-        kind: "workshop",
+        flavor: "workshop",
         parentUserIds: [oliver._id],
         scholarId: oliver._id,
         institutionId: moli,

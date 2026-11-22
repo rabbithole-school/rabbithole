@@ -357,7 +357,7 @@ describe("makeScholarCodeTools", () => {
     }).run({ path: "convex/lib/models.ts" });
     expect(String(result)).toContain("const y = 2;");
     expect(emit).toHaveBeenCalledWith({
-      toolComplete: { name: "read_rabbithole_file", result: "convex/lib/models.ts" },
+      toolComplete: { name: "read_rabbithole_file", result: "Read convex/lib/models.ts" },
     });
   });
 });

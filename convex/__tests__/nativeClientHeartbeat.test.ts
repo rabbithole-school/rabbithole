@@ -134,6 +134,48 @@ describe("native client heartbeat", () => {
     ).resolves.toMatchObject([{ managed: false }]);
   });
 
+  test("stores a battery reading only from a check-in that carries one", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedInstitution(t, "moli");
+    const scholarId = await seedUser(t, "scholar", institutionId);
+    const scholar = await asUser(t, scholarId);
+    const readBattery = async () => {
+      const [row] = await t.run((ctx) =>
+        ctx.db.query("nativeClientHeartbeats").collect(),
+      );
+      return {
+        batteryLevel: row.batteryLevel,
+        batteryState: row.batteryState,
+        batteryAt: row.batteryAt,
+      };
+    };
+
+    await scholar.mutation(api.nativeClientHeartbeat.record, {
+      ...client,
+      batteryLevel: 37,
+      batteryState: "charging",
+    });
+    const first = await readBattery();
+    expect(first).toMatchObject({ batteryLevel: 37, batteryState: "charging" });
+    expect(first.batteryAt).toEqual(expect.any(Number));
+
+    // An older build's check-in (no battery fields) leaves the reading, and its
+    // date, alone: a stale "charging" must never look fresh.
+    await scholar.mutation(api.nativeClientHeartbeat.record, client);
+    await expect(readBattery()).resolves.toEqual(first);
+
+    // iOS reports -1 when it can't read the level; the state still counts.
+    await scholar.mutation(api.nativeClientHeartbeat.record, {
+      ...client,
+      batteryLevel: -1,
+      batteryState: "unplugged",
+    });
+    await expect(readBattery()).resolves.toMatchObject({
+      batteryLevel: undefined,
+      batteryState: "unplugged",
+    });
+  });
+
   test("does not let a user classify an unclaimed personal client as managed", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await seedInstitution(t, "moli");

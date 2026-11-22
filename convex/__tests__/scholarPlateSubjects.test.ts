@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, withDefaultSchools } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -74,7 +75,7 @@ async function seedUnitWithActivity(
 
 describe("scholarPlate.activeForMe subject enrichment", () => {
   test("uses placement subjects and exposes matching due/end metadata", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const teacherId = await seedUser(t, "teacher");
     const scholarId = await seedUser(t, "scholar");
     const { unitId, lessonId, activityId: homeworkActivityId } =
@@ -91,7 +92,7 @@ describe("scholarPlate.activeForMe subject enrichment", () => {
         systemPrompt: "...",
         order: 1,
       });
-      const assignmentId = await ctx.db.insert("assignments", {
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId],
@@ -162,14 +163,14 @@ describe("scholarPlate.activeForMe subject enrichment", () => {
   });
 
   test("falls back to assigned unit subjects when no timetable exists", async () => {
-    const t = convexTest(schema, modules);
+    const t = await withDefaultSchools(convexTest(schema, modules));
     const teacherId = await seedUser(t, "teacher");
     const scholarId = await seedUser(t, "scholar");
     const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
     const now = Date.now();
 
     await t.run(async (ctx) => {
-      await ctx.db.insert("assignments", {
+      await insertAssignmentWithSchedule(ctx, {
         teacherId,
         unitId,
         scholarIds: [scholarId],
@@ -191,5 +192,57 @@ describe("scholarPlate.activeForMe subject enrichment", () => {
     expect(result.rows.find((row) => row.activityId === activityId)?.subject).toBe(
       "Interdisciplinary Science",
     );
+  });
+
+  test("subjectLabel still names an unplaced row's unit subject when the timetable files it under Other", async () => {
+    const t = await withDefaultSchools(convexTest(schema, modules));
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, lessonId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const now = Date.now();
+
+    await t.run(async (ctx) => {
+      const placedActivityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Placed",
+        kind: "online",
+        systemPrompt: "...",
+        order: 1,
+      });
+      const assignmentId = await insertAssignmentWithSchedule(ctx, {
+        teacherId,
+        unitId,
+        scholarIds: [scholarId],
+        startedAt: now,
+        activitySchedule: [
+          { activityId, mode: "homework", setAt: now - 1_000 },
+        ],
+      });
+      const periodId = await ctx.db.insert("reportingPeriods", {
+        label: "Current Term",
+        startsAt: now - 86_400_000,
+        endsAt: now + 86_400_000,
+        status: "open",
+      });
+      const groupId = await ctx.db.insert("scholarGroups", {
+        teacherId,
+        name: "Geckos",
+        scholarIds: [scholarId],
+      });
+      await ctx.db.insert("schedulePlacements", {
+        periodId,
+        groupId,
+        subject: "Math Workshop",
+        assignmentId,
+        activityId: placedActivityId,
+      });
+    });
+
+    const asScholar = await withUser(t, scholarId);
+    const result = await asScholar.query(api.scholarPlate.activeForMe, {});
+    const row = result.rows.find((r) => r.activityId === activityId);
+
+    expect(row?.subject).toBeNull();
+    expect(row?.subjectLabel).toBe("Interdisciplinary Science");
   });
 });

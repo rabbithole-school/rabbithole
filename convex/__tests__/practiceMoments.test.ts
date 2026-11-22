@@ -1168,7 +1168,7 @@ describe("practiceMoments event lifecycle", () => {
       expect(event?.outcomeAt).toBeCloseTo(openedAt, 0);
     });
 
-    test("following a seed invitation retires it while both writers leave it opened", async () => {
+    test("following a seed moment leaves it opened from both writers", async () => {
       const t = convexTest(schema, modules);
       const scholarId = await seedUser(t);
       const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
@@ -1178,11 +1178,6 @@ describe("practiceMoments event lifecycle", () => {
         api.practiceMoments.recordMomentOffered,
         { scholarId, kind: "seed", seedId, clientEventId: "seed-follow-card" },
       );
-
-      // It stands in the "New quests" section until the scholar acts on it.
-      await expect(
-        asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
-      ).resolves.toMatchObject([{ kind: "seed", seedId, eventId }]);
 
       vi.setSystemTime(createdAt + 2 * HOUR_MS);
       // Follow: createFromSeed's server-side `opened` write and the client's
@@ -1198,10 +1193,6 @@ describe("practiceMoments event lifecycle", () => {
         ctx.db.get("momentEvents", eventId),
       );
       expect(event?.outcome).toBe("opened");
-      // A started session (session.seedId) retires the standing invitation.
-      await expect(
-        asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
-      ).resolves.toEqual([]);
     });
 
     test("a seed launched with no card of its own leaves the ledger alone", async () => {

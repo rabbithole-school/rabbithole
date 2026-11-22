@@ -48,6 +48,18 @@ export function shouldAutoListen(s: AutoListenInput): boolean {
 export const LISTEN_CUE_MS = 300;
 
 /**
+ * The iPad mic records raw audio (no OS echo cancellation — see the `rawMic`
+ * note in lib/realtimeTranscriptionProtocol.ts), so while the tutor's voice
+ * plays, the mic hears it and the transcriber writes it down as the child's
+ * answer (TRA-706: a story line and the tutor's own question came back as
+ * spoken turns). While the tutor is audible, and for this long after, the
+ * mic's buffers are replaced with silence. 500 ms covers one 100 ms stream
+ * buffer of delivery lag plus the speaker's decay in a classroom; a child
+ * rarely starts answering sooner than that after the tutor stops.
+ */
+export const TUTOR_ECHO_TAIL_MS = 500;
+
+/**
  * Volume (TRA-492): voice mode is useless on a muted iPad, and a pre-reader
  * can't read why nothing is happening. The native OutputVolume module
  * (modules/output-volume) reads the system output volume; at or below this

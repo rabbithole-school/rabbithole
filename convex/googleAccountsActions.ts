@@ -44,7 +44,7 @@ export const beginOAuth = action({
   args: {
     returnTo: v.optional(v.string()),
     purpose: v.optional(
-      v.union(v.literal("default"), v.literal("admissions")),
+      v.union(v.literal("default"), v.literal("admissions"), v.literal("sheets")),
     ),
   },
   handler: async (ctx, args): Promise<{ url: string }> => {
@@ -68,7 +68,7 @@ export const beginOAuth = action({
 
     let scopes: string[] | undefined;
     let includeGrantedScopes = true;
-    if (purpose === "admissions") {
+    if (purpose === "admissions" || purpose === "sheets") {
       const existing = await ctx.runQuery(
         internal.googleAccounts.getForUserInternal,
         { userId },

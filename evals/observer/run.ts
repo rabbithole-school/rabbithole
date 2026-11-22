@@ -165,7 +165,14 @@ async function main() {
   // ─── Write raw artifacts ───────────────────────────────────────────
   const runArtifacts = records.map((r) => ({
     id: r.c.id, source: r.c.source, title: r.c.title,
-    runs: Object.fromEntries(Object.entries(r.runs).map(([m, v]) => [m, { result: v.run.result, latencyMs: v.run.latencyMs, usage: v.run.usage, error: v.run.error }])),
+    runs: Object.fromEntries(Object.entries(r.runs).map(([m, v]) => [m, {
+      result: v.run.result,
+      latencyMs: v.run.latencyMs,
+      usage: v.run.usage,
+      error: v.run.error,
+      responses: v.run.responses,
+      maxTokens: v.run.maxTokens,
+    }])),
   }));
   const judgmentArtifacts = records.map((r) => ({
     id: r.c.id,

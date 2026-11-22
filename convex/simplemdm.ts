@@ -28,6 +28,7 @@ import { primaryInstitutionId } from "./institutions";
 import {
   auditManagedClaim,
   stageClaimReplacementForSimpleMdm,
+  type AgentAssignResult,
 } from "./managedDeviceClaims";
 import { ROLES, isPlatformAdminRole } from "./lib/roles";
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
@@ -38,7 +39,11 @@ import {
   weekdayForDayKey,
 } from "../shared/institutionDay";
 import { isClosedDay } from "../shared/schoolClosures";
-import { deviceBatteryBand } from "../shared/deviceBattery";
+import {
+  batteryReadingIsStale,
+  DEVICE_BATTERY_STALE_AFTER_MS,
+  deviceBatteryBand,
+} from "../shared/deviceBattery";
 import { raiseAlert } from "./alerts";
 import { siteUrl, withBase } from "./lib/channels";
 import { escapeSlackText } from "./lib/slackApi";
@@ -156,6 +161,9 @@ type LowBatteryAlertDevice = {
   scholarName: string;
   batteryLevel: number;
   lastSeenAt: number | null;
+  /** The reading is older than DEVICE_BATTERY_STALE_AFTER_MS (or undated),
+   * so it says nothing about the iPad's charge this morning. */
+  stale: boolean;
 };
 
 type LowBatteryCheckResult = {
@@ -199,6 +207,19 @@ async function requireSimpleMdmAccessForUser(
 
   return { user, institutionId };
 }
+
+/**
+ * An agent transport (the in-app staff aide, Slack bot, OAuth MCP connector)
+ * commanding a device on a named staff member's behalf. Absent means the
+ * browser session is the caller.
+ * `source` lands in the audit line, so it is required rather than defaulted —
+ * the same rule `deviceLock.setFromAgent` follows.
+ */
+const deviceCommandAgentCallerValidator = v.object({
+  userId: v.id("users"),
+  source: v.union(v.literal("slack"), v.literal("mcp"), v.literal("app")),
+});
+type DeviceCommandAgentCaller = Infer<typeof deviceCommandAgentCallerValidator>;
 
 /**
  * The school a SimpleMDM push for this claim row is scoped to, or null to
@@ -597,9 +618,16 @@ async function renameSimpleMdmDevice(
 }
 
 export const managedDeviceForPush = internalQuery({
-  args: { managedDeviceId: v.id("managedDeviceClaims") },
+  args: {
+    managedDeviceId: v.id("managedDeviceClaims"),
+    /** Set only by an agent transport; absent = the browser session. */
+    agentCaller: v.optional(deviceCommandAgentCallerValidator),
+  },
   handler: async (ctx, args) => {
-    const { user, institutionId: primaryId } = await requireSimpleMdmAccess(ctx);
+    const { user, institutionId: primaryId } = await requireDeviceCommandCaller(
+      ctx,
+      args.agentCaller,
+    );
     const row = await ctx.db.get(args.managedDeviceId);
     const institutionId = row ? simpleMdmPushScope(user, primaryId, row) : null;
     if (!row || !institutionId) {
@@ -618,6 +646,30 @@ export const managedDeviceForPush = internalQuery({
       serial: row.serial,
       institutionId,
     };
+  },
+});
+
+/**
+ * Can this agent caller push a claim for this row at all? Asked BEFORE
+ * `assignDeviceFromAgent` mints anything: the drawer, on a school without
+ * SimpleMDM, hands staff the minted payload to enrol by hand, and a chat tool
+ * has nowhere to put it. Minting there would sign the old scholar out and
+ * strand the iPad, so the agent refuses instead and sends staff to the drawer.
+ */
+export const agentCanPushManagedDevice = internalQuery({
+  args: {
+    managedDeviceId: v.id("managedDeviceClaims"),
+    agentCaller: deviceCommandAgentCallerValidator,
+  },
+  handler: async (ctx, args): Promise<boolean> => {
+    try {
+      const { user, institutionId: primaryId } =
+        await requireDeviceCommandCaller(ctx, args.agentCaller);
+      const row = await ctx.db.get(args.managedDeviceId);
+      return !!row && simpleMdmPushScope(user, primaryId, row) !== null;
+    } catch {
+      return false;
+    }
   },
 });
 
@@ -818,6 +870,7 @@ export const raiseLowBatteryAlert = internalMutation({
         scholarName: v.string(),
         batteryLevel: v.number(),
         lastSeenAt: v.union(v.number(), v.null()),
+        stale: v.boolean(),
       }),
     ),
   },
@@ -831,24 +884,59 @@ export const raiseLowBatteryAlert = internalMutation({
       hour: "numeric",
       minute: "2-digit",
     });
-    const deviceLines = args.devices.map((device) => {
+    const deviceLine = (device: LowBatteryAlertDevice) => {
       const lastSeen =
         device.lastSeenAt === null
           ? "last check-in unavailable"
           : `last seen ${formatter.format(new Date(device.lastSeenAt))}`;
       return `- ${escapeSlackText(device.scholarName)} — ${device.batteryLevel}% (${lastSeen})`;
-    });
-    const plural = args.devices.length !== 1;
+    };
+    // A stale reading only says the iPad was low when it last reported. It
+    // may have died since, or been charged: list it, but don't claim it's low
+    // now.
+    const low = args.devices.filter((device) => !device.stale);
+    const unknown = args.devices.filter((device) => device.stale);
+    const lowPlural = low.length !== 1;
+    const unknownPlural = unknown.length !== 1;
+    const staleHours = DEVICE_BATTERY_STALE_AFTER_MS / (60 * 60 * 1000);
+    const body: string[] = [];
+    if (low.length > 0) {
+      body.push(
+        `${low.length} scholar iPad${lowPlural ? "s are" : " is"} below 20% at the start of the school day:`,
+        ...low.map(deviceLine),
+        `Please plug ${lowPlural ? "them" : "it"} in before use.`,
+      );
+    }
+    if (unknown.length > 0) {
+      if (body.length > 0) body.push("");
+      // An undated reading is stale too, but its age isn't known.
+      const undated = unknown.filter((device) => device.lastSeenAt === null);
+      const age =
+        undated.length === 0
+          ? `more than ${staleHours} hours ago`
+          : undated.length === unknown.length
+            ? "at an unknown time"
+            : `more than ${staleHours} hours ago or at an unknown time`;
+      body.push(
+        `${unknown.length} ${low.length > 0 ? "more " : ""}scholar iPad${unknownPlural ? "s were" : " was"} below 20% at ${unknownPlural ? "their" : "its"} last check-in, ${age}, so ${unknownPlural ? "their" : "its"} charge now is unknown:`,
+        ...unknown.map(deviceLine),
+        `Check that ${unknownPlural ? "they're" : "it's"} charged before use.`,
+      );
+    }
+    const title =
+      low.length > 0
+        ? lowPlural
+          ? "iPads need charging"
+          : "An iPad needs charging"
+        : unknownPlural
+          ? "iPads may need charging"
+          : "An iPad may need charging";
 
     await raiseAlert(ctx, {
       kind: "device_low_battery",
       severity: "warning",
-      title: plural ? "iPads need charging" : "An iPad needs charging",
-      body: [
-        `${args.devices.length} scholar iPad${plural ? "s are" : " is"} below 20% at the start of the school day:`,
-        ...deviceLines,
-        `Please plug ${plural ? "them" : "it"} in before use.`,
-      ].join("\n"),
+      title,
+      body: body.join("\n"),
       source: "simplemdm.checkLowBatteryAtSchoolStart",
       audience: "institution",
       institutionId: args.institutionId,
@@ -860,9 +948,15 @@ export const raiseLowBatteryAlert = internalMutation({
 });
 
 export const stageManagedDeviceClaimForPush = internalMutation({
-  args: { managedDeviceId: v.id("managedDeviceClaims") },
+  args: {
+    managedDeviceId: v.id("managedDeviceClaims"),
+    agentCaller: v.optional(deviceCommandAgentCallerValidator),
+  },
   handler: async (ctx, args) => {
-    const { user, institutionId: primaryId } = await requireSimpleMdmAccess(ctx);
+    const { user, institutionId: primaryId } = await requireDeviceCommandCaller(
+      ctx,
+      args.agentCaller,
+    );
     await assertCanWrite(ctx);
     const row = await ctx.db.get(args.managedDeviceId);
     const institutionId = row ? simpleMdmPushScope(user, primaryId, row) : null;
@@ -892,9 +986,13 @@ export const recordSimpleMdmPush = internalMutation({
     managedDeviceId: v.id("managedDeviceClaims"),
     pendingClaimIssuedAt: v.number(),
     pendingRotationCount: v.number(),
+    agentCaller: v.optional(deviceCommandAgentCallerValidator),
   },
   handler: async (ctx, args): Promise<{ recorded: boolean }> => {
-    const { user, institutionId: primaryId } = await requireSimpleMdmAccess(ctx);
+    const { user, institutionId: primaryId } = await requireDeviceCommandCaller(
+      ctx,
+      args.agentCaller,
+    );
     await assertCanWrite(ctx);
     const row = await ctx.db.get(args.managedDeviceId);
     const institutionId = row ? simpleMdmPushScope(user, primaryId, row) : null;
@@ -954,12 +1052,14 @@ async function pushPreparedDevice(
   },
   apiKey: string,
   mappedSimpleMdmDeviceId?: string | null,
+  agentCaller?: DeviceCommandAgentCaller,
 ): Promise<SimpleMdmPushResult> {
   const result = await pushPreparedDeviceUnrecorded(
     ctx,
     device,
     apiKey,
     mappedSimpleMdmDeviceId,
+    agentCaller,
   );
   // Remember the outcome so "Push failed" survives a page reload; the
   // transient per-click result the console shows is the same data.
@@ -1007,6 +1107,7 @@ async function pushPreparedDeviceUnrecorded(
   },
   apiKey: string,
   mappedSimpleMdmDeviceId?: string | null,
+  agentCaller?: DeviceCommandAgentCaller,
 ): Promise<SimpleMdmPushResult> {
   const publicDevice = { managedDeviceId: device.managedDeviceId, serial: device.serial };
   const notFound = (): SimpleMdmPushResult => ({
@@ -1026,7 +1127,7 @@ async function pushPreparedDeviceUnrecorded(
   try {
     minted = await ctx.runMutation(
       internal.simplemdm.stageManagedDeviceClaimForPush,
-      { managedDeviceId: device.managedDeviceId },
+      { managedDeviceId: device.managedDeviceId, agentCaller },
     );
   } catch {
     return {
@@ -1073,6 +1174,7 @@ async function pushPreparedDeviceUnrecorded(
         managedDeviceId: device.managedDeviceId,
         pendingClaimIssuedAt: minted.pendingClaimIssuedAt,
         pendingRotationCount: minted.pendingRotationCount,
+        agentCaller,
       },
     );
   } catch {
@@ -1665,6 +1767,9 @@ export const verifySimpleMdmClaims = action({
       internal.simplemdm.simpleMdmAccessContext,
       {},
     );
+    // A fresh check persists snapshot + inventory rows and spends vendor
+    // calls; a read-only identity reads the stored snapshots instead.
+    await assertWritableAction(ctx);
     const apiKey = simpleMdmApiKey();
     const { results, inventory } = await refreshSnapshotsForInstitution(
       ctx,
@@ -1723,18 +1828,6 @@ export const primaryInstitutionForSnapshots = internalQuery({
 // durable owner of Lost Mode state, so the console always reads it back live
 // (`lostModeStatus`) rather than tracking a second, possibly-stale copy.
 
-/**
- * An agent transport (the in-app staff aide, Slack bot, OAuth MCP connector)
- * commanding a device on a named staff member's behalf. Absent means the
- * browser session is the caller.
- * `source` lands in the audit line, so it is required rather than defaulted —
- * the same rule `deviceLock.setFromAgent` follows.
- */
-const deviceCommandAgentCallerValidator = v.object({
-  userId: v.id("users"),
-  source: v.union(v.literal("slack"), v.literal("mcp"), v.literal("app")),
-});
-type DeviceCommandAgentCaller = Infer<typeof deviceCommandAgentCallerValidator>;
 
 /**
  * The caller of a mutating device command, plus the institution it may
@@ -1987,6 +2080,9 @@ export const lostModeStatus = action({
       internal.simplemdm.pairedDeviceForLostModeStatus,
       { pairedDeviceId: args.pairedDeviceId },
     );
+    // The read-back records device inventory (readDeviceAttributes →
+    // recordDeviceInventory), so it is a write for a read-only identity.
+    await assertWritableAction(ctx);
     const { configured } = await ctx.runQuery(api.simplemdm.integrationStatus, {});
     if (!configured) {
       return {
@@ -2345,17 +2441,132 @@ export const restartDeviceFromAgent = internalAction({
   },
 });
 
+export type AgentAssignDeviceResult =
+  | { ok: true; message: string }
+  | { ok: false; message: string };
+
+/**
+ * The agent transports' assign/reassign (`reassign_managed_device`,
+ * `lib/deviceOpsTools.ts`) — the devices drawer's `handleAssign`, server-side:
+ * mint the new owner's claim (`managedDeviceClaims.assignFromAgent`, the
+ * drawer's own mutation body), then push it to SimpleMDM so the iPad actually
+ * switches. Every step re-authorizes the named caller from current state, as
+ * the console's session does.
+ *
+ * A push failure after a successful assign is reported, not rolled back —
+ * the drawer behaves the same way, and the devices page's Push button (or a
+ * retry here) finishes the job. The message says which half landed, because
+ * "assigned" and "the iPad has it" are different facts.
+ */
+export const assignDeviceFromAgent = internalAction({
+  args: {
+    callerUserId: v.id("users"),
+    source: v.union(v.literal("slack"), v.literal("mcp"), v.literal("app")),
+    managedDeviceId: v.id("managedDeviceClaims"),
+    scholarId: v.id("users"),
+  },
+  handler: async (ctx, args): Promise<AgentAssignDeviceResult> => {
+    const agentCaller = { userId: args.callerUserId, source: args.source };
+    const apiKey = simpleMdmApiKeyOrNull();
+    if (
+      !apiKey ||
+      !(await ctx.runQuery(internal.simplemdm.agentCanPushManagedDevice, {
+        managedDeviceId: args.managedDeviceId,
+        agentCaller,
+      }))
+    ) {
+      return {
+        ok: false,
+        message:
+          "This iPad isn't managed through SimpleMDM here, so its new claim would have to be entered by hand. Nothing was changed; reassign it from the devices page, which shows the enrollment payload.",
+      };
+    }
+    let assigned: AgentAssignResult;
+    try {
+      await ctx.runMutation(
+        internal.simplemdm.assertDeviceCommandCallerNotImpersonating,
+        {},
+      );
+      assigned = await ctx.runMutation(
+        internal.managedDeviceClaims.assignFromAgent,
+        {
+          callerUserId: args.callerUserId,
+          source: args.source,
+          managedDeviceId: args.managedDeviceId,
+          scholarId: args.scholarId,
+        },
+      );
+    } catch (error) {
+      return {
+        ok: false,
+        message: simpleMdmErrorMessage(error, "Couldn't assign that iPad."),
+      };
+    }
+    if (!assigned.ok) return assigned;
+
+    const who = assigned.scholarName ?? "the scholar";
+    const what = assigned.reassignedFrom
+      ? `Reassigned iPad ${assigned.serial} from ${assigned.reassignedFrom} to ${who}.`
+      : `Assigned iPad ${assigned.serial} to ${who}.`;
+    const pushLater =
+      "Push its claim from the devices page so the iPad switches over.";
+
+    let device: {
+      managedDeviceId: Id<"managedDeviceClaims">;
+      serial: string;
+      institutionId: Id<"institutions">;
+    };
+    try {
+      device = await ctx.runQuery(internal.simplemdm.managedDeviceForPush, {
+        managedDeviceId: args.managedDeviceId,
+        agentCaller,
+      });
+    } catch (error) {
+      return {
+        ok: true,
+        message: `${what} The claim was not pushed (${simpleMdmErrorMessage(error, "SimpleMDM is unavailable")}). ${pushLater}`,
+      };
+    }
+    const pushed = await pushPreparedDevice(
+      ctx,
+      device,
+      apiKey,
+      undefined,
+      agentCaller,
+    );
+    if (pushed.status === "device-not-found-in-simplemdm") {
+      return {
+        ok: true,
+        message: `${what} The claim could not be pushed: ${pushed.message} Once SimpleMDM has the iPad, push its claim from the devices page.`,
+      };
+    }
+    if (pushed.status !== "pushed") {
+      return {
+        ok: true,
+        message: `${what} The claim push failed: ${pushed.message} ${pushLater}`,
+      };
+    }
+    return {
+      ok: true,
+      message: `${what} Claim pushed to SimpleMDM; the iPad switches over once it picks up the new claim, and is signed out of the previous scholar meanwhile.`,
+    };
+  },
+});
+
 /**
  * First-party fleet check, run at the institution's first bell. SimpleMDM reports
  * the most recent inventory value, so the alert includes each device's
- * last-seen time rather than implying the percentage is a live telemetry feed.
+ * last-seen time rather than implying the percentage is a live telemetry feed,
+ * and lists a reading older than DEVICE_BATTERY_STALE_AFTER_MS as "charge now
+ * unknown" instead of "below 20%".
  */
 export const checkLowBatteryAtSchoolStart = internalAction({
   args: { nowMs: v.optional(v.number()) },
   handler: async (ctx, args): Promise<LowBatteryCheckResult> => {
+    const nowMs = args.nowMs ?? Date.now();
     const context: BatteryAlertContext = await ctx.runQuery(
       internal.simplemdm.batteryAlertContext,
-      { nowMs: args.nowMs ?? Date.now() },
+      { nowMs },
     );
     if (
       !context.isSchoolDay ||
@@ -2401,6 +2612,7 @@ export const checkLowBatteryAtSchoolStart = internalAction({
             scholarName: device.scholarName,
             batteryLevel,
             lastSeenAt: details.lastSeenAt,
+            stale: batteryReadingIsStale(details.lastSeenAt, nowMs),
           },
         ];
       },

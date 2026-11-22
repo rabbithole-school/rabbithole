@@ -81,7 +81,10 @@ export function ArtifactChipStrip({
 
 function chipIcon(type: string | undefined): SymbolViewProps["name"] {
   // A code artifact is the session's app (AppCard), not source to read.
-  return type === "code" ? "macwindow" : "doc.text";
+  if (type === "code") return "macwindow";
+  // Same glyph the panel's slides kind pill uses.
+  if (type === "slides") return "rectangle.on.rectangle";
+  return "doc.text";
 }
 
 function makeStyles(c: ReturnType<typeof useColors>) {

@@ -98,7 +98,10 @@ function mixSeed(base: number, salt: number): number {
 function toProbeItem(skillKey: string, seed: number): ProbeItem | null {
   const item = generateItem(skillKey, seed);
   if (!item) return null;
-  const answerShape = expressionAnswerSignals(item.answerType, item.answer).answerShape;
+  // An algebra-pad item routes by its palette, never the box editor.
+  const answerShape = item.answerPalette
+    ? undefined
+    : expressionAnswerSignals(item.answerType, item.answer).answerShape;
   return {
     skillKey,
     itemId: makeItemId(skillKey, seed, item.form),

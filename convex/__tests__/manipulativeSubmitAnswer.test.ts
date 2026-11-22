@@ -7,6 +7,7 @@ import {
   MANIPULATIVE_ANSWER_TYPE,
   MANIPULATIVE_VERIFIER_KIND,
 } from "../../lib/manipulative/practiceContract";
+import { FUNCTION_GRAPH_EXAMPLES } from "../../lib/manipulative/functionGraphExamples";
 import type {
   AreaPerimeterSpec,
   DistributeSpec,
@@ -290,5 +291,59 @@ describe("practiceSkills.submitAnswer manipulative anti-offloading", () => {
     expect(res.answer).toBeNull();
     expect(res.steps).toBeNull();
     expect(res.answerType).toBe(MANIPULATIVE_ANSWER_TYPE);
+  });
+
+  test("functionGraph items grade server-side from the submitted board state", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t);
+    const asScholar = await asUser(t, scholar);
+    const byGoal = (type: string) => FUNCTION_GRAPH_EXAMPLES.find((s) => s.goal.type === type)!;
+
+    // matchTransform: y = −2|x − 3| + 1 — the flipped-the-wrong-way board fails,
+    // the exact board passes, and nothing reveals the target.
+    const transform = await seedManipulativeItem(t, byGoal("matchTransform"), "fg_match_transform");
+    const flipped = await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: transform.itemId,
+      answer: json({ a: 2, h: 3, k: 1 }),
+    });
+    expect(flipped.correct).toBe(false);
+    expect(flipped.correctAnswer).toBeUndefined();
+    const matched = await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: transform.itemId,
+      answer: json({ a: -2, h: 3, k: 1 }),
+    });
+    expect(matched.correct).toBe(true);
+
+    // placeZeros: y = −(x − 1)²(x + 3) — right zeros, wrong bounce flag fails.
+    const zeros = await seedManipulativeItem(t, byGoal("placeZeros"), "fg_place_zeros");
+    const wrongFlag = await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: zeros.itemId,
+      answer: json({ zeros: [{ x: -3, touch: false }, { x: 1, touch: false }], leftUp: true, rightUp: false }),
+    });
+    expect(wrongFlag.correct).toBe(false);
+    const sketched = await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: zeros.itemId,
+      answer: json({ zeros: [{ x: -3, touch: false }, { x: 1, touch: true }], leftUp: true, rightUp: false }),
+    });
+    expect(sketched.correct).toBe(true);
+
+    // placeAsymptotes: (2x + 1)/(x + 3) — a vertical line off by one fails.
+    const asym = await seedManipulativeItem(t, byGoal("placeAsymptotes"), "fg_place_asymptotes");
+    const offByOne = await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: asym.itemId,
+      answer: json({ vertical: [-2], horizontal: 2 }),
+    });
+    expect(offByOne.correct).toBe(false);
+    const found = await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: asym.itemId,
+      answer: json({ vertical: [-3], horizontal: 2 }),
+    });
+    expect(found.correct).toBe(true);
   });
 });

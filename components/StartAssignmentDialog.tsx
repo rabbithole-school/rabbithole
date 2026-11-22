@@ -32,6 +32,7 @@ import {
   ProgramSettings,
 } from "@/components/startAssignment/ProgramScheduleSection";
 import { TeacherSettings } from "@/components/startAssignment/TeacherAssignmentSection";
+import { giveButtonLabel } from "@/components/GiveWindowFields";
 import { useProgramScheduleMode } from "@/components/startAssignment/useProgramScheduleMode";
 import { useTeacherAssignmentMode } from "@/components/startAssignment/useTeacherAssignmentMode";
 import type { StartAssignmentProgramTarget } from "@/components/startAssignment/types";
@@ -580,15 +581,12 @@ export function StartAssignmentDialog({
                     onWorldBudgetChange={teacher.setWorldBudget}
                     isSingleActivity={isSingleActivity}
                     deliverNow={teacher.deliverNow}
-                    setDeliverNow={teacher.setDeliverNow}
-                    mode={teacher.mode}
-                    setMode={teacher.setMode}
-                    startsAt={teacher.startsAt}
-                    setStartsAt={teacher.setStartsAt}
-                    durationMin={teacher.durationMin}
-                    setDurationMin={teacher.setDurationMin}
-                    dueAt={teacher.dueAt}
-                    setDueAt={teacher.setDueAt}
+                    nowMs={teacher.nowMs}
+                    giveChoices={teacher.giveChoices}
+                    showsUp={teacher.showsUp}
+                    setShowsUp={teacher.setShowsUp}
+                    finish={teacher.finish}
+                    setFinish={teacher.setFinish}
                     effectiveForSel={teacher.effectiveForSel}
                     setForSel={teacher.setForSel}
                     forScholarIds={teacher.forScholarIds}
@@ -658,10 +656,13 @@ export function StartAssignmentDialog({
                       : "Schedule homework"
                   ) : confirmDraft && teacher.selectedUnitIsDraft ? (
                     "Assign anyway"
-                  ) : isSingleActivity && teacher.deliverNow ? (
-                    "Start now"
                   ) : (
-                    "Assign"
+                    giveButtonLabel(
+                      teacher.finish,
+                      isSingleActivity && teacher.deliverNow
+                        ? "Give now"
+                        : "Assign",
+                    )
                   )}
                 </Button>
               </Flex>

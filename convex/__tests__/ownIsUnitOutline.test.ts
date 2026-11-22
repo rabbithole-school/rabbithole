@@ -9,8 +9,11 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import type { Id } from "../_generated/dataModel";
-import { internal } from "../_generated/api";
-import { resolveActivityScopedContext } from "../sessionHelpers";
+import { api, internal } from "../_generated/api";
+import {
+  buildSystemPromptParts,
+  resolveActivityScopedContext,
+} from "../sessionHelpers";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -136,9 +139,18 @@ describe("own IS unit outline in the planning-chat context", () => {
     expect(after?.ownIsUnitNextActivityTitle).toBeNull();
   });
 
-  test("not loaded inside an activity session", async () => {
-    const { t, sessionId, unitId, activityB } = await setup({
+  // An activity session of the scholar's own Quest is offered create_lesson /
+  // create_activity too, so it must see what the unit holds: the tutor never
+  // sees its earlier tool calls, and without this list it confessed to "not
+  // running the tools" and rebuilt the same lessons seven times in prod.
+  test("loaded inside an activity session, which is not the planning chat", async () => {
+    const { t, sessionId, unitId, activityB, scholarId } = await setup({
       ownedByScholar: true,
+    });
+    await t.mutation(internal.lessons.aiCreateForIsUnit, {
+      unitId,
+      scholarId,
+      title: "Built mid-activity",
     });
     const unitContext = await resolve(t, {
       sessionId,
@@ -146,7 +158,12 @@ describe("own IS unit outline in the planning-chat context", () => {
       activityId: activityB,
     });
     expect(unitContext?.isOwnIsUnit).toBe(true);
-    expect(unitContext?.ownIsUnitOutline).toBeUndefined();
+    expect(unitContext?.isPlanningChat).toBeUndefined();
+    expect(unitContext?.ownIsUnitOutline?.map((l) => l.title)).toEqual([
+      "First lesson",
+      "Second lesson",
+      "Built mid-activity",
+    ]);
   });
 
   test("structure from elsewhere (a bake) is not marked as built in this chat", async () => {
@@ -212,5 +229,182 @@ describe("own IS unit outline in the planning-chat context", () => {
     const unitContext = await resolve(t, { sessionId, unitId, activityId: null });
     expect(unitContext?.isOwnIsUnit).toBe(false);
     expect(unitContext?.ownIsUnitOutline).toBeUndefined();
+  });
+});
+
+describe("Quest create tools are idempotent on title", () => {
+  test("re-creating a lesson with the same title returns the existing one", async () => {
+    const { t, unitId, scholarId } = await setup({ ownedByScholar: true });
+    const plan = ["Building the yardstick", "When tiny odds pile up"];
+    const first = [];
+    for (const title of plan) {
+      first.push(
+        await t.mutation(internal.lessons.aiCreateForIsUnit, {
+          unitId,
+          scholarId,
+          title,
+        }),
+      );
+    }
+    // The tutor re-issues the same plan, with incidental case/space drift.
+    const again = [];
+    for (const title of ["  building the  YARDSTICK ", "When tiny odds pile up"]) {
+      again.push(
+        await t.mutation(internal.lessons.aiCreateForIsUnit, {
+          unitId,
+          scholarId,
+          title,
+        }),
+      );
+    }
+    expect(again).toEqual(first);
+    const titles = await t.run(async (ctx) =>
+      (
+        await ctx.db
+          .query("lessons")
+          .withIndex("by_unit", (q) => q.eq("unitId", unitId))
+          .collect()
+      ).map((l) => l.title),
+    );
+    expect(titles).toHaveLength(4); // 2 seeded + 2 created once
+  });
+
+  test("re-creating an activity in the same lesson returns the existing one", async () => {
+    const { t, unitId, scholarId, lesson2 } = await setup({
+      ownedByScholar: true,
+    });
+    const args = {
+      lessonId: lesson2,
+      scholarId,
+      unitId,
+      title: "The showdown",
+      kind: "online" as const,
+      systemPrompt: "Compare the two odds.",
+    };
+    const a = await t.mutation(internal.activities.aiCreateForIsUnit, args);
+    const b = await t.mutation(internal.activities.aiCreateForIsUnit, args);
+    expect(b).toBe(a);
+    const count = await t.run(async (ctx) =>
+      (
+        await ctx.db
+          .query("activities")
+          .withIndex("by_lesson", (q) => q.eq("lessonId", lesson2))
+          .collect()
+      ).length,
+    );
+    expect(count).toBe(1);
+  });
+
+  test("an archived activity with the same title does not block a new one", async () => {
+    const { t, unitId, scholarId } = await setup({ ownedByScholar: true });
+    const lessonId = await t.run(async (ctx) =>
+      (await ctx.db
+        .query("lessons")
+        .withIndex("by_unit", (q) => q.eq("unitId", unitId))
+        .collect()).find((l) => l.title === "First lesson")!._id,
+    );
+    const id = await t.mutation(internal.activities.aiCreateForIsUnit, {
+      lessonId,
+      scholarId,
+      unitId,
+      title: "Archived",
+      kind: "online",
+      systemPrompt: "Try again.",
+    });
+    const row = await t.run((ctx) => ctx.db.get(id));
+    expect(row?.archivedAt).toBeUndefined();
+  });
+});
+
+// The co-design block the tutor reads (buildSystemPromptParts' unit slot is
+// the 3rd positional arg; see beginnerReaderSection.test.ts for the shape).
+function unitPrompt(unit: Record<string, unknown>): string {
+  const args: unknown[] = new Array(60).fill(undefined);
+  args.splice(0, 5, null, "Kai", unit, null, null);
+  return (
+    buildSystemPromptParts as unknown as (
+      ...a: unknown[]
+    ) => ReturnType<typeof buildSystemPromptParts>
+  )(...args).stable;
+}
+
+describe("own Quest co-design prompt", () => {
+  const quest = {
+    title: "Odds",
+    description: null,
+    systemPrompt: null,
+    rubric: null,
+    youtubeUrl: null,
+    videoTranscript: null,
+    bigIdea: null,
+    essentialQuestions: null,
+    enduringUnderstandings: null,
+    isOwnIsUnit: true,
+    ownIsUnitOutline: [
+      { title: "Building the yardstick", activities: [{ title: "Measure it", done: false }] },
+    ],
+    ownIsUnitBuiltInChat: false,
+    ownIsUnitNextActivityTitle: "Measure it",
+  };
+  const READY = "say once that their activities are ready";
+
+  // Since TRA-682 the tutor adds no lessons or activities to a kid's own
+  // Quest, so the old "where what you build shows up" and "never say you did
+  // not build it" lines are gone; the outline still shows what the Quest holds.
+  test("an activity session lists the unit's parts", () => {
+    const prompt = unitPrompt(quest);
+    expect(prompt).toContain('Lesson: "Building the yardstick"');
+    expect(prompt).not.toContain(READY);
+  });
+
+  test("the planning chat still offers the built activities once", () => {
+    const prompt = unitPrompt({ ...quest, isPlanningChat: true });
+    expect(prompt).toContain(READY);
+    expect(prompt).toContain('Lesson: "Building the yardstick"');
+  });
+});
+
+// Reproduction for the "it's not there" report: the rows the planning tutor's
+// tools write are visible, live, to the scholar through the queries behind the
+// Quest outline she reaches from Home → Quests (web UnitProgressDialog and
+// native /unit-progress both read exactly these). The read path was never the
+// bug; the tutor pointed her at the session list on the left.
+describe("tool-created Quest lessons reach the scholar's Quest outline", () => {
+  test("lessons and activities appear in the outline queries", async () => {
+    const { t, unitId, scholarId } = await setup({ ownedByScholar: true });
+    const lessonId = await t.mutation(internal.lessons.aiCreateForIsUnit, {
+      unitId,
+      scholarId,
+      title: "Building the yardstick",
+    });
+    await t.mutation(internal.activities.aiCreateForIsUnit, {
+      lessonId,
+      scholarId,
+      unitId,
+      title: "Measure the odds",
+      kind: "online",
+      systemPrompt: "Build a yardstick for chance.",
+    });
+    const authSession = await t.run((ctx) =>
+      ctx.db.insert("authSessions", {
+        userId: scholarId,
+        expirationTime: Date.now() + 60 * 60 * 1000,
+      }),
+    );
+    const asScholar = t.withIdentity({
+      subject: `${scholarId}|${authSession}`,
+      issuer: "https://convex.dev",
+    });
+    const lessons = await asScholar.query(api.lessons.listByUnitPublic, {
+      unitId,
+    });
+    expect(lessons.map((l) => l.title)).toContain("Building the yardstick");
+    const activities = await asScholar.query(api.activities.listByUnitPublic, {
+      unitId,
+      includeResources: true,
+    });
+    expect(
+      activities.find((a) => a.title === "Measure the odds")?.lessonId,
+    ).toBe(lessonId);
   });
 });

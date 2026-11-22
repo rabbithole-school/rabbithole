@@ -1,4 +1,5 @@
 import { convexTest } from "convex-test";
+import { setSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -66,7 +67,7 @@ async function seedOfflineSession(
   teacherId: Id<"users">,
   scholarId: Id<"users">,
 ) {
-  return await t.run(async (ctx) => {
+  const __mirrored = await t.run(async (ctx) => {
     const unitId = await ctx.db.insert("units", {
       teacherId,
       title: "U",
@@ -104,6 +105,7 @@ async function seedOfflineSession(
     });
     return { sessionId, activityId, deliverableId, unitId, lessonId, assignmentId };
   });
+  return __mirrored;
 }
 
 describe("offlineSessionView — scholar-facing read shape (Phase 2)", () => {
@@ -243,16 +245,14 @@ describe("offlineSessionView — scholar-facing read shape (Phase 2)", () => {
         order: 0,
         uploadedBy: teacherId,
       });
-      await ctx.db.patch(assignmentId, {
-        activitySchedule: [
+      await setSchedule(ctx, assignmentId, [
           {
             activityId,
             mode: "homework",
             setAt: Date.now() - 60_000,
             dueAt: Date.UTC(2026, 7, 9, 20, 34),
           },
-        ],
-      });
+        ]);
     });
 
     const asScholar = await withUser(t, scholarId);
@@ -291,16 +291,16 @@ describe("offlineSessionView — scholar-facing read shape (Phase 2)", () => {
     await t.run(async (ctx) => {
       await ctx.db.patch(assignmentId, {
         scholarIds: [scholarId, otherScholarId],
-        activitySchedule: [
-          {
-            activityId,
-            mode: "homework",
-            setAt: Date.now() - 60_000,
-            dueAt: Date.UTC(2026, 7, 9, 20, 34),
-            scholarIds: [otherScholarId],
-          },
-        ],
       });
+      await setSchedule(ctx, assignmentId, [
+        {
+          activityId,
+          mode: "homework",
+          setAt: Date.now() - 60_000,
+          dueAt: Date.UTC(2026, 7, 9, 20, 34),
+          scholarIds: [otherScholarId],
+        },
+      ]);
     });
 
     const asScholar = await withUser(t, scholarId);

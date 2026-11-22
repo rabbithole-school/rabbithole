@@ -1,6 +1,7 @@
 "use client";
 
-import { HStack, Box, Text, Button, Menu } from "@chakra-ui/react";
+import NextLink from "next/link";
+import { HStack, Box, Text, Button, Menu, Link } from "@chakra-ui/react";
 import { Eye, Plus, PencilSimple, NotePencil, Upload, FileDoc, Medal, UsersThree } from "@phosphor-icons/react";
 import { useQuery } from "convex/react";
 import { GooglePickerButton } from "@/components/GooglePickerButton";
@@ -11,6 +12,9 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { ScholarFocusHeader } from "./ScholarFocusHeader";
 import { type Scholar, timeAgo } from "./types";
 import { talkLevelLabel } from "@/convex/lib/readingLevels";
+import { useNow } from "@/hooks/useNow";
+import { dayKeyForTimezone, shiftDayKey } from "@/shared/institutionDay";
+import { formatScreenMinutes, sumScholarWeeks } from "@/shared/screenTimeWeek";
 
 // ── Scholar Id Head ───────────────────────────────────────────────────────
 // The slim identity header atop a scholar's main column: the shared
@@ -25,7 +29,10 @@ import { talkLevelLabel } from "@/convex/lib/readingLevels";
 // the learning record in either form. This is the
 // per-scholar identity that used to live in the left rail before the rail
 // became a scholar switcher. (The aide is now the global header Robot →
-// docked panel, not a per-scholar toggle here.)
+// docked panel, not a per-scholar toggle here.) The detail line ends with the
+// scholar's BunnyPad time over the last 7 days, linking to their row on
+// School › Screen time (TRA-585); it reads the same `dailyUsage` scholar-days
+// and the same `sumScholarWeeks` sum as that page, so the two always agree.
 
 // The TALK level (TRA-503) — "Gr 3 talk", "K talk". A legacy "pre-reader"
 // reads as K (its listener half is the read level, shown on the profile).
@@ -72,6 +79,15 @@ export function ScholarIdHead({
     scholarId: scholarId as Id<"users">,
   });
   const identity = scholar ?? profile?.scholar;
+  // A 7-day window that rolls at the school's midnight: a minute clock keeps
+  // the day boundary honest (T11) while the args only change once a day.
+  const todayKey = dayKeyForTimezone(useNow(60_000));
+  const screenRows = useQuery(api.deviceActivity.dailyUsage, {
+    startDayKey: shiftDayKey(todayKey, -6),
+    endDayKey: todayKey,
+    scholarId: scholarId as Id<"users">,
+  });
+  const screenWeek = screenRows ? sumScholarWeeks(screenRows)[0] : undefined;
   const reading = fmtReading(identity?.readingLevel);
   const active = scholar?.lastActive ? `active ${timeAgo(scholar.lastActive)}` : "no activity yet";
   const detail = [
@@ -91,7 +107,21 @@ export function ScholarIdHead({
       dateOfBirth={profile?.scholar.dateOfBirth ?? null}
       gradeLevel={profile?.scholar.gradeLevel ?? null}
       scale="compact"
-      detail={<Text lineClamp={1}>{detail}</Text>}
+      detail={
+        <Text lineClamp={1}>
+          {detail}
+          {screenWeek && screenWeek.totals.measuredMinutes >= 1 ? (
+            <>
+              {" · "}
+              <Link asChild color="violet.600">
+                <NextLink href={`/school/screen-time?scholar=${scholarId}`}>
+                  {formatScreenMinutes(screenWeek.totals.measuredMinutes)} on the BunnyPad, last 7 days
+                </NextLink>
+              </Link>
+            </>
+          ) : null}
+        </Text>
+      }
       actions={
         <HStack gap={2} flexShrink={0}>
         {/* One canonical Add affordance at every altitude. An operations staffer / ops

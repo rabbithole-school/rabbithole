@@ -127,6 +127,40 @@ export function decideAsamAction({
 }
 
 /**
+ * Who is holding the lock open for system UI. One owner ending its release can't
+ * end another's: the lock stays released while anyone still holds it.
+ */
+export type SystemUIOwner = "presentation" | "photo_resync";
+
+export function withSystemUIHolder(
+  holders: ReadonlySet<SystemUIOwner>,
+  owner: SystemUIOwner,
+  held: boolean,
+): Set<SystemUIOwner> {
+  const next = new Set(holders);
+  if (held) next.add(owner);
+  else next.delete(owner);
+  return next;
+}
+
+/**
+ * True once nothing more should happen to the lock: iOS says it's on, or the
+ * controller wouldn't turn it on, because staff disarmed, the iPad is offline or
+ * unpaired, or someone else still holds a release. Unknown pairing isn't an
+ * answer, so it stays unsettled.
+ */
+export function isAsamLockSettled({
+  inSam,
+  isOnline,
+  paired,
+  armed,
+}: AsamInputs): boolean {
+  if (inSam) return true;
+  if (paired === "unknown") return false;
+  return decideAsamAction({ isOnline, paired, armed, inSam: false }) !== "enter";
+}
+
+/**
  * The controller's inputs at one reconcile pass, as recorded for the next
  * pass's `asamTransitionReason`. `armed` here is the SERVER's intent, before a
  * system-UI release is folded in.

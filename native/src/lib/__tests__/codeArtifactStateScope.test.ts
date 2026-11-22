@@ -4,7 +4,7 @@ import type { Id } from "@/lib/convex";
 import { selectCodeArtifactStateScope } from "../codeArtifactStateScope";
 
 describe("code artifact state scope", () => {
-  it("selects session state with rooms and tutor action results", () => {
+  it("selects session state with tutor action results", () => {
     const artifactId = "artifact-1" as Id<"artifacts">;
 
     expect(
@@ -14,7 +14,6 @@ describe("code artifact state scope", () => {
       identity: "artifact-1",
       artifactId,
       customAppArgs: null,
-      supportsRooms: true,
       supportsActionResults: true,
     });
   });
@@ -36,7 +35,6 @@ describe("code artifact state scope", () => {
         userId: "anon:device-1",
         key: "default",
       },
-      supportsRooms: false,
       supportsActionResults: false,
     });
   });

@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -144,21 +144,97 @@ async function seedStaticApp(
   );
 }
 
+type AutosaveArgs = {
+  sessionId: Id<"sessions">;
+  callerUserId: Id<"users">;
+  activityId: Id<"activities">;
+  artifactId: Id<"artifacts">;
+};
+
+type PromotedStarter = {
+  id: Id<"customApps">;
+  name: string;
+  updatedAt: number;
+};
+
+/**
+ * Promote through the production path (the never-throwing autosave), assert it
+ * did not stamp a failure, and read the promoted starter back from the DB.
+ */
+async function autosaveStarter(
+  t: ReturnType<typeof convexTest>,
+  args: AutosaveArgs,
+): Promise<PromotedStarter> {
+  await t.action(
+    internal.vibecodeStarterActions.autosaveStarterFromArtifact,
+    args,
+  );
+  return await t.run(async (ctx) => {
+    const session = await ctx.db.get(args.sessionId);
+    expect(session?.appAutosaveFailedAt).toBeUndefined();
+    const activity = await ctx.db.get(args.activityId);
+    const app = activity?.starterAppId
+      ? await ctx.db.get(activity.starterAppId)
+      : null;
+    if (!app || app.updatedAt === undefined) {
+      throw new Error("Expected autosave to promote a starter");
+    }
+    return { id: app._id, name: app.name, updatedAt: app.updatedAt };
+  });
+}
+
+/**
+ * The autosave never throws: a refused promotion is logged and stamped on the
+ * session. Assert the refusal reason, the stamp, and that nothing was written.
+ */
+async function expectAutosaveRefused(
+  t: ReturnType<typeof convexTest>,
+  args: AutosaveArgs,
+  reason: RegExp,
+) {
+  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  let logged: unknown[][];
+  try {
+    await t.action(
+      internal.vibecodeStarterActions.autosaveStarterFromArtifact,
+      args,
+    );
+  } finally {
+    logged = errorSpy.mock.calls.map((call) => [...call]);
+    errorSpy.mockRestore();
+  }
+  expect(
+    logged.some((call) =>
+      call.some((arg) => arg instanceof Error && reason.test(arg.message)),
+    ),
+  ).toBe(true);
+  const state = await t.run(async (ctx) => ({
+    session: await ctx.db.get(args.sessionId),
+    activity: await ctx.db.get(args.activityId),
+    customApps: await ctx.db.query("customApps").collect(),
+  }));
+  expect(state.session?.appAutosaveFailedAt).toEqual(expect.any(Number));
+  expect(state.activity?.starterAppId).toBeUndefined();
+  expect(state.customApps).toEqual([]);
+}
+
 describe("Vibecode starter promotion", () => {
   test("creates an uninstalled static app reference from the caller's rehearsal", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
     const { activityId } = await seedUnitWithActivity(t, teacherId);
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
     });
     const asTeacher = await withUser(t, teacherId);
 
-    const starter = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const starter = await autosaveStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
 
     expect(starter).toMatchObject({
       name: "Pattern explorer app",
@@ -231,12 +307,13 @@ describe("Vibecode starter promotion", () => {
       });
       return { olderStorageId, newestStorageId };
     });
-    const asTeacher = await withUser(t, teacherId);
 
-    const starter = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const starter = await autosaveStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
     const app = await t.run((ctx) => ctx.db.get(starter.id));
 
     expect(app?.thumbnailStorageId).toBe(newestStorageId);
@@ -272,10 +349,12 @@ describe("Vibecode starter promotion", () => {
     });
     const asTeacher = await withUser(t, teacherId);
 
-    const starter = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const starter = await autosaveStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
     await asTeacher.mutation(api.activities.setScholarsStartFrom, {
       activityId,
       value: "starter",
@@ -344,12 +423,12 @@ describe("Vibecode starter promotion", () => {
       });
       return { assetId, thumbnailId };
     });
-    const asTeacher = await withUser(t, teacherId);
-
-    const first = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId: firstSource.artifactId },
-    );
+    const first = await autosaveStarter(t, {
+      sessionId: firstSource.sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId: firstSource.artifactId,
+    });
     const original = await t.run((ctx) => ctx.db.get(first.id));
     const originalAssetId = original?.appAssetIds?.[0];
     const originalThumbnailId = original?.thumbnailStorageId;
@@ -386,10 +465,12 @@ describe("Vibecode starter promotion", () => {
       return { assetId, thumbnailId };
     });
 
-    const second = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId: secondSource.artifactId },
-    );
+    const second = await autosaveStarter(t, {
+      sessionId: secondSource.sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId: secondSource.artifactId,
+    });
     const state = await t.run(async (ctx) => ({
       activity: await ctx.db.get(activityId),
       app: await ctx.db.get(second.id),
@@ -442,15 +523,16 @@ describe("Vibecode starter promotion", () => {
         scholarLensResolved: true,
       },
     );
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
     });
-    const asTeacher = await withUser(t, teacherId);
-    const starter = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const starter = await autosaveStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
 
     const updated = await t.mutation(
       internal.customApps.updateStaticApp,
@@ -496,37 +578,33 @@ describe("Vibecode starter promotion", () => {
     const teacherId = await seedUser(t, "teacher", "owner");
     const otherTeacherId = await seedUser(t, "teacher", "other");
     const { activityId } = await seedUnitWithActivity(t, teacherId);
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: otherTeacherId,
       activityId,
     });
-    const asTeacher = await withUser(t, teacherId);
 
-    await expect(
-      asTeacher.action(api.vibecodeStarterActions.setVibecodeStarterFromArtifact, {
-        activityId,
-        artifactId,
-      }),
-    ).rejects.toThrow(/your rehearsal/i);
+    await expectAutosaveRefused(
+      t,
+      { sessionId, callerUserId: teacherId, activityId, artifactId },
+      /your rehearsal/i,
+    );
   });
 
   test("rejects an artifact from a non-test-drive session", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
     const { activityId } = await seedUnitWithActivity(t, teacherId);
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
       isTestDrive: false,
     });
-    const asTeacher = await withUser(t, teacherId);
 
-    await expect(
-      asTeacher.action(api.vibecodeStarterActions.setVibecodeStarterFromArtifact, {
-        activityId,
-        artifactId,
-      }),
-    ).rejects.toThrow(/your rehearsal/i);
+    await expectAutosaveRefused(
+      t,
+      { sessionId, callerUserId: teacherId, activityId, artifactId },
+      /your rehearsal/i,
+    );
   });
 
   test("rejects an artifact rehearsed for a different activity", async () => {
@@ -542,18 +620,21 @@ describe("Vibecode starter promotion", () => {
         order: 1,
       }),
     );
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
     });
-    const asTeacher = await withUser(t, teacherId);
 
-    await expect(
-      asTeacher.action(api.vibecodeStarterActions.setVibecodeStarterFromArtifact, {
+    await expectAutosaveRefused(
+      t,
+      {
+        sessionId,
+        callerUserId: teacherId,
         activityId: otherActivityId,
         artifactId,
-      }),
-    ).rejects.toThrow(/your rehearsal/i);
+      },
+      /your rehearsal/i,
+    );
   });
 
   test("rejects a code artifact that is not an HTML app", async () => {
@@ -564,19 +645,17 @@ describe("Vibecode starter promotion", () => {
       teacherId,
       "vibecode",
     );
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
       content: "console.log('not a page');",
     });
-    const asTeacher = await withUser(t, teacherId);
 
-    await expect(
-      asTeacher.action(api.vibecodeStarterActions.setVibecodeStarterFromArtifact, {
-        activityId,
-        artifactId,
-      }),
-    ).rejects.toThrow(/HTML app/i);
+    await expectAutosaveRefused(
+      t,
+      { sessionId, callerUserId: teacherId, activityId, artifactId },
+      /HTML app/i,
+    );
   });
 
   test("rejects promotion for an online activity", async () => {
@@ -587,18 +666,16 @@ describe("Vibecode starter promotion", () => {
       teacherId,
       "online",
     );
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
     });
-    const asTeacher = await withUser(t, teacherId);
 
-    await expect(
-      asTeacher.action(api.vibecodeStarterActions.setVibecodeStarterFromArtifact, {
-        activityId,
-        artifactId,
-      }),
-    ).rejects.toThrow(/must be an app activity/i);
+    await expectAutosaveRefused(
+      t,
+      { sessionId, callerUserId: teacherId, activityId, artifactId },
+      /must be an app activity/i,
+    );
   });
 
   test("rejects choosing the saved app before a starter exists", async () => {
@@ -685,15 +762,17 @@ describe("Vibecode starter promotion", () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
     const { activityId } = await seedUnitWithActivity(t, teacherId);
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
     });
     const asTeacher = await withUser(t, teacherId);
-    const starter = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const starter = await autosaveStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
     await asTeacher.mutation(api.activities.setScholarsStartFrom, {
       activityId,
       value: "starter",
@@ -869,16 +948,18 @@ describe("Vibecode starter session setup", () => {
         language: "html",
       }),
     );
-    const starter = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const starter = await autosaveStarter(t, {
+      sessionId: rehearsal.id,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
     await asTeacher.mutation(api.activities.setScholarsStartFrom, {
       activityId,
       value: "starter",
     });
 
-    const reset = await asTeacher.mutation(api.sessions.resetTestDrive, {
+    const reset =await asTeacher.mutation(api.sessions.resetTestDrive, {
       sessionId: rehearsal.id,
     });
     const result = await t.run(async (ctx) => ({
@@ -925,15 +1006,17 @@ describe("Vibecode starter duplication", () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
     const { activityId } = await seedUnitWithActivity(t, teacherId);
-    const { artifactId } = await seedArtifactSource(t, {
+    const { sessionId, artifactId } = await seedArtifactSource(t, {
       ownerId: teacherId,
       activityId,
     });
     const asTeacher = await withUser(t, teacherId);
-    const starter = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId },
-    );
+    const starter = await autosaveStarter(t, {
+      sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
     await asTeacher.mutation(api.activities.setScholarsStartFrom, {
       activityId,
       value: "starter",
@@ -956,10 +1039,12 @@ describe("Vibecode starter duplication", () => {
       activityId,
     });
     const asTeacher = await withUser(t, teacherId);
-    const shared = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId: firstSource.artifactId },
-    );
+    const shared = await autosaveStarter(t, {
+      sessionId: firstSource.sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId: firstSource.artifactId,
+    });
     const copyId = await asTeacher.mutation(api.activities.duplicate, {
       activityId,
     });
@@ -970,10 +1055,12 @@ describe("Vibecode starter duplication", () => {
       content: "<!doctype html><html><body>Forked</body></html>",
     });
 
-    const replacement = await asTeacher.action(
-      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
-      { activityId, artifactId: replacementSource.artifactId },
-    );
+    const replacement = await autosaveStarter(t, {
+      sessionId: replacementSource.sessionId,
+      callerUserId: teacherId,
+      activityId,
+      artifactId: replacementSource.artifactId,
+    });
     const state = await t.run(async (ctx) => ({
       source: await ctx.db.get(activityId),
       copy: await ctx.db.get(copyId),

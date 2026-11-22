@@ -1,7 +1,9 @@
+import { ConvexError } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { entryTargetsScholar, isLiveEntry } from "../assignments";
 import { includesProgramGuests } from "../../shared/scholarGroupRouting";
+import { readSchedule } from "./scheduleStore";
 
 type ProgramGuestWorkCtx = QueryCtx | MutationCtx;
 
@@ -18,7 +20,7 @@ async function assignedProgramAssignmentsForScholar(
       !assignment.unitId ||
       !assignment.scholarGroupId ||
       !assignment.scholarIds.includes(scholarId) ||
-      !(assignment.activitySchedule ?? []).some(
+      !(await readSchedule(ctx, assignment)).some(
         (entry) =>
           entryTargetsScholar(entry, scholarId) &&
           isLiveEntry(entry, now),
@@ -51,17 +53,42 @@ export async function assignedProgramAssignmentForUnit(
   activityId?: Id<"activities">,
 ): Promise<Doc<"assignments"> | null> {
   const now = Date.now();
-  return (
-    (await assignedProgramAssignmentsForScholar(ctx, scholarId)).find(
-      (assignment) =>
-        assignment.unitId === unitId &&
-        (!activityId ||
-          (assignment.activitySchedule ?? []).some(
-            (entry) =>
-              entry.activityId === activityId &&
-              entryTargetsScholar(entry, scholarId) &&
-              isLiveEntry(entry, now),
-          )),
-    ) ?? null
+  for (const assignment of await assignedProgramAssignmentsForScholar(
+    ctx,
+    scholarId,
+  )) {
+    if (assignment.unitId !== unitId) continue;
+    if (
+      !activityId ||
+      (await readSchedule(ctx, assignment)).some(
+        (entry) =>
+          entry.activityId === activityId &&
+          entryTargetsScholar(entry, scholarId) &&
+          isLiveEntry(entry, now),
+      )
+    ) {
+      return assignment;
+    }
+  }
+  return null;
+}
+
+/**
+ * A scholar's OWN Quest (a unit they authored) is theirs to explore whatever
+ * their standing: Extended Education isolation covers school-assigned work,
+ * not a kid's curiosity. Program work a teacher assigns stays gated above.
+ */
+export function isOwnQuestUnit(
+  unit: Pick<Doc<"units">, "authorScholarId"> | null,
+  scholarId: Id<"users">,
+): boolean {
+  return !!unit && unit.authorScholarId === scholarId;
+}
+
+/** The refusal a program guest sees for unassigned school work. A
+ *  ConvexError so production shows the sentence, not "Server Error". */
+export function notAssignedProgramWork(): ConvexError<string> {
+  return new ConvexError(
+    "This isn't part of your assigned program work yet. Ask your teacher if you'd like to do it.",
   );
 }

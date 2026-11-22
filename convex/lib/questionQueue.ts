@@ -30,16 +30,15 @@
  * `liveQuestionHomework` → `questionRowFromState` and the same ranker, so they
  * agree on the top question.
  *
- * The eligibility here is the SAME as `standingStoryInvitationsForScholar`
- * (active seed, not started, latest event non-terminal) extended to items with
- * no ledger row, and the question lookups are the same ones the done-screen
+ * Eligibility: an active seed, not started, whose latest ledger event is
+ * non-terminal or absent. The question lookups are the same ones the done-screen
  * card and `recordMomentAnswer` use, so an answer recorded from a row grades
  * against exactly the question the row showed.
  *
  * The caller owns auth. Scholar-facing fields only: graph keys, the edge's
  * scholar-safe story hook, registry card copy, and the scholar's own answers —
- * never provenance or teacher-only seed fields (`rationale` reaches a teacher
- * row only as the existing scholar-invitation fallback `suggestedQuests` uses).
+ * never provenance or teacher-only seed fields (a teacher row's text is
+ * `seedScholarText`, via `suggestedQuestsForScholar`).
  */
 
 import type { MutationCtx, QueryCtx } from "../_generated/server";
@@ -50,8 +49,9 @@ import { storyCardQuestion } from "./practice/storyCardQuestions";
 import { seedCardQuestion } from "./practice/seedCardQuestions";
 import { seedCardCopy } from "./practice/crossDomainSeeds";
 import { isTerminalStoryMomentOutcome } from "./moments/storyMomentPolicy";
-import { suggestedQuestsForScholar } from "./scholarReads";
-import { ACTIVE_SEED_READ_LIMIT, recentSeedsForScholarByStatus } from "./seeds";
+import { groupTeacherForScholar, suggestedQuestsForScholar } from "./scholarReads";
+import { activeSeedsForScholar, isObserverPoolSeed } from "./seeds";
+import { seedScholarText } from "./seedLabel";
 import { liveQuestionHomework } from "./questionHomework";
 
 export type QuestionQueueSource = "missed" | "offered" | "new" | "teacher";
@@ -245,14 +245,10 @@ function questionCandidates(
 }
 
 /** The scholar's active seeds, newest first, through the SAME bounded read the
- *  seed list / sky use (`ACTIVE_SEED_READ_LIMIT`). */
+ *  seed list / sky use (activeSeedsForScholar: the anchors' window, and the
+ *  observer's live ideas in a budget of their own). */
 function activeSeedsForQueue(ctx: QueryCtx | MutationCtx, scholarId: Id<"users">) {
-  return recentSeedsForScholarByStatus(
-    ctx,
-    scholarId,
-    ["active"],
-    ACTIVE_SEED_READ_LIMIT,
-  );
+  return activeSeedsForScholar(ctx, scholarId);
 }
 
 /** Indexed: this item's ledger rows only. */
@@ -489,4 +485,250 @@ export async function questionQueueForScholar(
   });
 
   return rankQuestionQueue(rows);
+}
+
+// ─── Starters: the queue as "Things to wonder about" (TRA-669) ────────────
+
+/**
+ * Where a starter came from, for the row's meta line. Today the queue holds
+ * "story" (a Story from practice), "idea" (one of Rabbithole's own seeds) and
+ * "teacher" (a teacher's pick). "parked" (a question saved while building) and
+ * "followUp" (a follow-up from a Quest) arrive with the Quests rebuild's next
+ * starters PR; they are listed now so the screens built against this read
+ * handle every value before an installed BunnyPad can receive one.
+ */
+export type StarterSource = "story" | "idea" | "teacher" | "parked" | "followUp";
+
+/**
+ * The raw piece a starter's meta line names, worded by the client ("From your
+ * prime numbers practice", "Picked for you by Ms. Rivera"): a Story's practice
+ * skill, or a teacher's display name. Null when there is none (Rabbithole's
+ * ideas, for now). Kid-safe only: a graph label or a person's name, never a
+ * seed's `rationale` or any teacher-written note.
+ */
+export type StarterDetail =
+  | { skillName: string }
+  | { teacherName: string }
+  /** A question saved while building, or a follow-up from the scholar's own
+   *  Quest (TRA-682): what they were building, for "Saved while building …"
+   *  and "From your … Quest". The scholar's own Quest or activity title. */
+  | { questTitle: string };
+
+export type StarterRow = {
+  seedId: Id<"seeds">;
+  /** The row's mark: the queue row's own emoji. */
+  emoji: string;
+  /** What the kid reads: `seedScholarText`, the one rule (never `rationale`). */
+  line: string;
+  source: StarterSource;
+  detail: StarterDetail | null;
+};
+
+/** A queue row's starter source, from the seed behind it. Pure. */
+export function starterSource(
+  row: Pick<QuestionQueueRow, "kind" | "origin">,
+  seed: Pick<Doc<"seeds">, "origin">,
+): StarterSource {
+  if (row.kind === "teacherQuest" || seed.origin === "teacher") return "teacher";
+  if (row.origin === "story") return "story";
+  return "idea";
+}
+
+/** The meta-line piece for one starter (StarterDetail). A Story names the
+ *  skill node it was unlocked from (its graph label, else the label stored at
+ *  mint). A teacher's pick names the teacher by their display name only
+ *  (`users.name`, never the login username): the seed's teacher, or for a
+ *  Quest offer with none recorded, the group teacher the card attributes it
+ *  to (suggestedQuestsForScholar). No display name, no detail. */
+async function starterDetail(
+  ctx: QueryCtx | MutationCtx,
+  row: QuestionQueueRow,
+  seed: Doc<"seeds">,
+  source: StarterSource,
+  groupTeacher: () => Promise<Doc<"users"> | null>,
+): Promise<StarterDetail | null> {
+  if (source === "teacher") {
+    const seedTeacher = seed.teacherId ? await ctx.db.get(seed.teacherId) : null;
+    const teacher =
+      seedTeacher ?? (row.kind === "teacherQuest" ? await groupTeacher() : null);
+    return teacher?.name ? { teacherName: teacher.name } : null;
+  }
+  if (source === "story" && seed.storyFromKey) {
+    const fromKey = seed.storyFromKey;
+    const node = await ctx.db
+      .query("knowledgeNodes")
+      .withIndex("by_nodeKey", (q) => q.eq("nodeKey", fromKey))
+      .first();
+    const skillName = node?.label ?? seed.connectionTo;
+    return skillName ? { skillName } : null;
+  }
+  return null;
+}
+
+/** How many of Rabbithole's own ideas the starters list adds after the
+ *  queue's rows: the design's "a few at a time, newest first". */
+export const STARTER_IDEAS_LIMIT = 3;
+
+/** How far back the idea read looks: the observer's pool is capped at
+ *  OBSERVER_SEED_CAP live ideas, so this covers it with room for ideas
+ *  already started or already in the queue. */
+const STARTER_IDEAS_LOOKBACK = 60;
+
+/** A live observer idea's mark. Observer seeds carry no emoji of their own;
+ *  the queue's rows fall back to the same one. */
+const STARTER_IDEA_EMOJI = "✨";
+
+/**
+ * Rabbithole's own ideas as starters (TRA-679): the observer's live ideas
+ * (isObserverPoolSeed, written `active` since TRA-679), newest first, at most
+ * STARTER_IDEAS_LIMIT. Ideas still `pending` from before TRA-679 stay out:
+ * they were written before the observer asked its ideas as one question
+ * (review/quests-rebuilt-proposal.html: "Ideas written before the change are
+ * left as they are and don't join the list"). Also left out: an idea the
+ * scholar already opened a chat from, one the queue already lists as a
+ * question, and one with no text a kid may read (seedScholarText). Pure of
+ * auth; the caller's.
+ */
+async function observerIdeaStarters(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+  alreadyListed: ReadonlySet<string>,
+): Promise<StarterRow[]> {
+  const recent = await ctx.db
+    .query("seeds")
+    .withIndex("by_scholar_origin", (q) =>
+      q.eq("scholarId", scholarId).eq("origin", "ai"),
+    )
+    .order("desc")
+    .take(STARTER_IDEAS_LOOKBACK);
+  const starters: StarterRow[] = [];
+  for (const seed of recent) {
+    if (starters.length >= STARTER_IDEAS_LIMIT) break;
+    if (seed.status !== "active" || !isObserverPoolSeed(seed)) continue;
+    if (alreadyListed.has(String(seed._id))) continue;
+    const line = seedScholarText(seed);
+    if (!line) continue;
+    const started = await ctx.db
+      .query("sessions")
+      .withIndex("by_user_seed", (q) =>
+        q.eq("userId", scholarId).eq("seedId", seed._id),
+      )
+      .first();
+    if (started) continue;
+    starters.push({
+      seedId: seed._id,
+      emoji: STARTER_IDEA_EMOJI,
+      line,
+      source: "idea",
+      detail: null,
+    });
+  }
+  return starters;
+}
+
+/**
+ * The scholar's starters: first the queue's rows in its own order (the same
+ * rows Prep's "Keep going" reads, questionQueueForScholar), then a few of the
+ * scholar's own saved questions and follow-ups (savedStarters, TRA-682), then
+ * a few of Rabbithole's own live ideas (observerIdeaStarters), each seed once. Each is its seed, its
+ * mark, the line a kid may read, where it came from, and the piece its meta
+ * line names. So only seeds a kid can already see are here (active seeds;
+ * observer ideas still pending from before TRA-679 stay out), and never a
+ * wonder (the queue's seed read and the idea read leave them out). A row
+ * whose seed has no scholar text is left out. Auth is the caller's.
+ */
+export async function startersForScholar(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+): Promise<StarterRow[]> {
+  const queue = await questionQueueForScholar(ctx, scholarId);
+  // Read once, and only if a Quest offer has no teacher of its own.
+  let groupTeacherRead: Promise<Doc<"users"> | null> | null = null;
+  const groupTeacher = () =>
+    (groupTeacherRead ??= groupTeacherForScholar(ctx, scholarId));
+  const rows = await Promise.all(
+    queue.map(async (row): Promise<StarterRow | null> => {
+      const seed = await ctx.db.get(row.seedId);
+      if (!seed || seed.scholarId !== scholarId) return null;
+      const line = seedScholarText(seed);
+      if (!line) return null;
+      const source = starterSource(row, seed);
+      return {
+        seedId: seed._id,
+        emoji: row.emoji,
+        line,
+        source,
+        detail: await starterDetail(ctx, row, seed, source, groupTeacher),
+      };
+    }),
+  );
+  const queued = rows.filter((row) => row !== null);
+  const ideas = await observerIdeaStarters(
+    ctx,
+    scholarId,
+    new Set(queue.map((row) => String(row.seedId))),
+  );
+  // The queue's rows, then the scholar's own saved questions and follow-ups
+  // (their words), then Rabbithole's ideas, each seed once.
+  const seen = new Set<string>();
+  return [...queued, ...(await savedStarters(ctx, scholarId)), ...ideas].filter(
+    (row) => {
+      const key = String(row.seedId);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    },
+  );
+}
+
+/** How many saved questions and follow-ups the starters list adds after the
+ *  queue's rows, newest first: "a few at a time" (TRA-682). */
+export const SAVED_STARTERS_LIMIT = 3;
+
+/** How far back each origin's read looks for live, unstarted ones. */
+const SAVED_STARTERS_LOOKBACK = 30;
+
+/**
+ * The scholar's own saved starters (TRA-682): questions about the world they
+ * asked while building (`saved_question`, source "parked") and follow-ups
+ * from their own Quest (`follow_up`, source "followUp"). Live ones only,
+ * never one they already opened a chat from, newest first, at most
+ * SAVED_STARTERS_LIMIT. Each reads its seedScholarText, and its meta line
+ * names what they were building (`connectionTo`). Auth is the caller's.
+ */
+async function savedStarters(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+): Promise<StarterRow[]> {
+  const byOrigin = await Promise.all(
+    (["saved_question", "follow_up"] as const).map((origin) =>
+      ctx.db
+        .query("seeds")
+        .withIndex("by_scholar_origin", (q) =>
+          q.eq("scholarId", scholarId).eq("origin", origin),
+        )
+        .order("desc")
+        .filter((q) => q.eq(q.field("status"), "active"))
+        .take(SAVED_STARTERS_LOOKBACK),
+    ),
+  );
+  const newestFirst = byOrigin
+    .flat()
+    .sort((a, b) => b._creationTime - a._creationTime);
+  const starters: StarterRow[] = [];
+  for (const seed of newestFirst) {
+    if (starters.length >= SAVED_STARTERS_LIMIT) break;
+    const line = seedScholarText(seed);
+    if (!line) continue;
+    if (await seedStarted(ctx, scholarId, seed._id)) continue;
+    const questTitle = seed.connectionTo?.trim();
+    starters.push({
+      seedId: seed._id,
+      emoji: seed.origin === "follow_up" ? "🧭" : "❓",
+      line,
+      source: seed.origin === "follow_up" ? "followUp" : "parked",
+      detail: questTitle ? { questTitle } : null,
+    });
+  }
+  return starters;
 }

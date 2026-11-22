@@ -622,8 +622,8 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
 
   test("a FULLY-MAPPED scholar gets ZERO mapping items (existing behavior untouched)", async () => {
     const t = sharedSeeded();
-    // A grade-9 scholar so the affect-safe ring admits every registered domain up
-    // to Algebra 1 — otherwise "fully mapped" would be vacuous, satisfied by the
+    // A grade-9 scholar so the affect-safe ring (grade + 2 = 11) admits every
+    // core domain up to Algebra 2 — otherwise "fully mapped" would be vacuous, satisfied by the
     // high-floor domains simply never becoming eligible.
     const scholar = await seedScholar(t, "map_placed", "9");
     const asScholar = await asUser(t, scholar);
@@ -663,6 +663,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
         "integers-coordinates",
         "early-algebra",
         "algebra-1",
+        "algebra-2",
       ].sort(),
     );
     const state = await asScholar.query(api.practiceSkills.mappingPlaylistState, { scholarId: scholar });

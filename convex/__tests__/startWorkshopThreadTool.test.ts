@@ -8,6 +8,7 @@ import { convexTest, type TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
+import { threadFlavor } from "../lib/scholarThreadAccess";
 import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { makeSuggestionTools } from "../lib/suggestionTools";
@@ -56,7 +57,7 @@ async function workshopRows(t: TestCtx, scholarId: Id<"users">) {
         .query("parentThreads")
         .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
         .collect()
-    ).filter((thread) => thread.kind === "workshop");
+    ).filter((thread) => threadFlavor(thread) === "workshop");
     const messages = [];
     for (const thread of threads) {
       messages.push(

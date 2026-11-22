@@ -15,10 +15,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "convex/react";
 import { SymbolView } from "expo-symbols";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 
 import { api, type Id } from "@/lib/convex";
+import { confirmFinishAndSend } from "@/lib/confirmFinishAndSend";
+import { useQuestSession } from "@/lib/questSession";
 import { fonts, useColors } from "@/theme";
+import {
+  FINISH_AND_SEND_ACCESSIBILITY_LABEL,
+  FINISH_AND_SEND_LABEL,
+} from "../../vendor/shared/finishAndSend";
 import { FlairChips } from "./FlairChips";
 
 export type Criterion = { id: string; label: string; description?: string };
@@ -73,14 +86,20 @@ export function useDeliverableSetup({
 export type DeliverableFooterProps = {
   /** A photo is checked from its stored file; everything else from a document. */
   kind: "photo" | "text";
-  /** `none` hands the work in without a rubric ("Send it"). */
+  /** `none` hands the work in without a rubric ("Finish and send", asked first). */
   mode: DeliverableMode;
+  /** Hand in without checking, even if criteria are pending or failed. */
+  finishOnly?: boolean;
+  /** A leading control opts into a single row with horizontally scrolling flair. */
+  leading?: React.ReactNode;
   /** Keys the flair row by the work being shown, so switching documents can
    *  never treat the other one's flair as arriving. */
   flairKey: string;
   flairEarned?: React.ComponentProps<typeof FlairChips>["flairEarned"];
   criteria: Criterion[];
   deliverableId?: React.ComponentProps<typeof FlairChips>["deliverableId"];
+  /** The session whose spotted flair joins the strip. */
+  sessionId: React.ComponentProps<typeof FlairChips>["sessionId"];
   /** The deliverable query has resolved (flair already there is static). */
   resolved: boolean;
   criteriaPending: boolean;
@@ -95,10 +114,13 @@ export type DeliverableFooterProps = {
 export function DeliverableFooter({
   kind,
   mode,
+  finishOnly = false,
+  leading,
   flairKey,
   flairEarned,
   criteria,
   deliverableId,
+  sessionId,
   resolved,
   criteriaPending,
   criteriaFailed,
@@ -109,60 +131,102 @@ export function DeliverableFooter({
 }: DeliverableFooterProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
+  const questSession = useQuestSession();
   const isPhoto = kind === "photo";
-  const sendsWithoutCheck = !isPhoto && mode === "none";
+  const sendsWithoutCheck = finishOnly || (!isPhoto && mode === "none");
+  const preparing = !finishOnly && criteriaPending;
+  const failed = !finishOnly && criteriaFailed;
+  const inline = leading != null;
   // The button swaps its navy fill for a light gray one whenever it is
   // unavailable — busy included. Derive that state ONCE so the spinner, the
   // symbol, and the label always share a foreground that reads on whichever
   // fill is actually painted (a white spinner on the gray fill was effectively
   // invisible).
-  const unavailable = disabled || busy || criteriaPending;
-  const muted = !criteriaFailed && unavailable;
+  const unavailable = disabled || busy || preparing;
+  const muted = !failed && unavailable;
+  // Finishing is irreversible, so ask first.
+  const press = failed
+    ? onRetry
+    : unavailable
+      ? undefined
+      : sendsWithoutCheck
+        ? () => {
+            void confirmFinishAndSend().then((finish) => {
+              if (finish) onCheck();
+            });
+          }
+        : onCheck;
+
+  const flair = (
+    <FlairChips
+      key={flairKey}
+      flairEarned={flairEarned}
+      sessionId={sessionId}
+      criteria={criteria}
+      deliverableId={deliverableId}
+      resolved={resolved}
+    />
+  );
+
+  // A Quest's session hands in from the header's "I'm ready to show"
+  // (TRA-720), so it never offers Finish and send here, nor while that is
+  // still being looked up. Its flair stays; a check that hands nothing in
+  // ("Check my work") would stay too.
+  if (sendsWithoutCheck && questSession !== null) {
+    return <View style={styles.flairOnly}>{flair}</View>;
+  }
 
   return (
-    <View style={styles.footer}>
-      <FlairChips
-        key={flairKey}
-        flairEarned={flairEarned}
-        criteria={criteria}
-        deliverableId={deliverableId}
-        resolved={resolved}
-      />
+    <View style={[styles.footer, inline && styles.inlineFooter]}>
+      {leading}
+      {inline ? (
+        <ScrollView
+          horizontal
+          style={styles.flairLane}
+          contentContainerStyle={styles.flairContent}
+          showsHorizontalScrollIndicator={false}
+        >
+          {flair}
+        </ScrollView>
+      ) : (
+        flair
+      )}
       <Pressable
-        onPress={criteriaFailed ? onRetry : unavailable ? undefined : onCheck}
+        onPress={press}
         style={({ pressed }) => [
           styles.checkBtn,
+          inline && styles.inlineCheckBtn,
           muted && styles.checkBtnDisabled,
           pressed && !unavailable && styles.checkBtnPressed,
         ]}
         accessibilityRole="button"
         accessibilityLabel={
-          criteriaFailed
+          failed
             ? isPhoto
               ? "Try preparing the photo check again"
               : "Try preparing the rubric check again"
             : sendsWithoutCheck
-              ? "Send this work"
+              ? FINISH_AND_SEND_ACCESSIBILITY_LABEL
               : "Check my work"
         }
-        accessibilityState={{ disabled: !criteriaFailed && unavailable }}
+        accessibilityState={{ disabled: !failed && unavailable }}
       >
-        {busy || criteriaPending ? (
+        {busy || preparing ? (
           <ActivityIndicator color={muted ? colors.charcoalMuted : colors.white} />
-        ) : criteriaFailed || sendsWithoutCheck ? (
+        ) : failed || sendsWithoutCheck ? (
           <SymbolView
-            name={criteriaFailed ? "exclamationmark.triangle.fill" : "paperplane.fill"}
+            name={failed ? "exclamationmark.triangle.fill" : "paperplane.fill"}
             size={17}
             tintColor={muted ? colors.charcoalMuted : colors.white}
           />
         ) : null}
         <Text style={[styles.checkBtnText, muted && styles.checkBtnTextDisabled]}>
-          {criteriaFailed
+          {failed
             ? "Try preparing check again"
-            : criteriaPending
+            : preparing
               ? "Preparing check…"
               : sendsWithoutCheck
-                ? "Send it"
+                ? FINISH_AND_SEND_LABEL
                 : "Check my work"}
         </Text>
       </Pressable>
@@ -179,6 +243,27 @@ function makeStyles(c: ReturnType<typeof useColors>) {
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: c.border,
       backgroundColor: c.white,
+    },
+    // No chrome around flair alone: with none earned yet it takes no room
+    // but this bottom inset.
+    flairOnly: {
+      paddingHorizontal: 16,
+      paddingBottom: 12,
+    },
+    inlineFooter: {
+      flexDirection: "row",
+      alignItems: "center",
+    },
+    flairLane: {
+      flex: 1,
+      height: 44,
+    },
+    flairContent: {
+      alignItems: "center",
+    },
+    inlineCheckBtn: {
+      flexShrink: 0,
+      paddingHorizontal: 16,
     },
     checkBtn: {
       flexDirection: "row",

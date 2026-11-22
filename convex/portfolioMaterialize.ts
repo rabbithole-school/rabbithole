@@ -24,6 +24,7 @@
 
 import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import { readSchedule } from "./lib/scheduleStore";
 import { maybeScheduleArtifactAssessment } from "./granuleAssessment";
 import { entryTargetsScholar } from "./assignments";
 import { attributedScholarIds } from "./lib/portfolioAttributions";
@@ -33,6 +34,7 @@ import {
   maybeScheduleScanObservation,
 } from "./portfolioAssess";
 import { requireActiveLearnerInstitution } from "./lib/scholarEnrollment";
+import { assertProposedQuestIsOwn } from "./lib/questStructure";
 
 /** Resolve an activity's lesson + unit ancestors (best-effort). */
 async function activityAncestors(
@@ -93,6 +95,9 @@ export async function ensureOfflineSession(
     ctx,
     activityId,
   );
+  // A proposed Quest is its proposer's: no one else's offline work lands in
+  // it (TRA-685).
+  if (unitId) assertProposedQuestIsOwn(await ctx.db.get(unitId), scholarId);
   const institutionId = await requireActiveLearnerInstitution(ctx, scholarId);
   return await ctx.db.insert("sessions", {
     userId: scholarId,
@@ -191,7 +196,9 @@ async function clearOfflineSessionIfEmpty(
   const assignment = session.assignmentId
     ? await ctx.db.get(session.assignmentId)
     : null;
-  const isHomeworkContainer = assignment?.activitySchedule?.some(
+  const isHomeworkContainer = (
+    assignment ? await readSchedule(ctx, assignment) : []
+  ).some(
     (entry) =>
       entry.activityId === session.activityId &&
       entry.mode === "homework" &&

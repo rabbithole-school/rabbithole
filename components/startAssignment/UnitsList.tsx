@@ -14,7 +14,7 @@ import {
   unitAuthorOptions,
   unitMatchesFilters,
 } from "@/components/SubjectFilterChips";
-import { uniqueSubjects } from "@/lib/subjects";
+import { unitSubjectFilterOptions } from "@/lib/subjects";
 import { ColumnSpinner } from "./primitives";
 
 export function UnitsList({
@@ -69,7 +69,7 @@ export function UnitsList({
       : meId || "all";
   const authorFilter = authorFilterOverride ?? defaultAuthorId;
   const authors = unitAuthorOptions(allActive);
-  const subjects = uniqueSubjects(allActive);
+  const subjects = unitSubjectFilterOptions(allActive);
   const activeUnits = allActive.filter((unit) =>
     unitMatchesFilters(unit, authorFilter, selectedSubject),
   );

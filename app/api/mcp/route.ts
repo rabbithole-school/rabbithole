@@ -13,7 +13,22 @@
 // which enforce the shared role→tool policy (convex/lib/scholarReadPolicy)
 // and guardianship/self scoping server-side. The per-role tool list
 // assembled here is UX; the queries are the security boundary.
+//
+// The same handlers also serve the READ-ONLY connector at /api/mcp/read
+// (./read/route.ts re-exports them). On that path the server lists only the
+// tools that read and refuses every other tool by name, so a coding session
+// can debug against live data without being able to change it. For a
+// person's OAuth token the mode rides on the URL only: the token is not bound
+// to the connector it was approved for, so the same token works on /api/mcp
+// with every tool. That holds against a coding agent (the token stays inside
+// the MCP client, out of the session), not against the client itself, which
+// is why the consent page describes the full access whatever `resource` the
+// client names (app/oauth/authorize/consentAccess.ts, TRA-635). A READ-ONLY service token (mcpServiceTokens.readOnly) is read-only on
+// both URLs: whoami reports the identity as read-only, so it gets the same
+// read-only server here, and Convex refuses its writes however the JWT is
+// used (users.readOnly → assertCanWrite).
 
+import { mcpToolRoute } from "./toolRoute";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
@@ -28,11 +43,16 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
   allowedScholarReadTools,
+  isReadOnlyToolName,
   type ScholarReadToolName,
 } from "@/convex/lib/scholarReadPolicy";
 import { isTeacherRole, type Role } from "@/convex/lib/roles";
 import { INCLUDE_EXTENDED_EDUCATION_PROP } from "@/convex/lib/scholarParticipationTooling";
-import { requestOrigin } from "@/lib/oauthHttp";
+import {
+  isReadOnlyMcpRequest,
+  mcpResourcePath,
+  requestOrigin,
+} from "@/lib/oauthHttp";
 import { sha256Hex } from "@/convex/lib/oauthCrypto";
 
 const CONVEX_CLOUD_URL = process.env.NEXT_PUBLIC_CONVEX_URL;
@@ -125,7 +145,7 @@ async function exchangeServiceToken(
 function unauthorized(request: Request, description?: string): Response {
   const origin = requestOrigin(request);
   const challenge = [
-    `resource_metadata="${origin}/.well-known/oauth-protected-resource/api/mcp"`,
+    `resource_metadata="${origin}/.well-known/oauth-protected-resource${mcpResourcePath(request)}"`,
     ...(description
       ? [`error="invalid_token"`, `error_description="${description}"`]
       : []),
@@ -199,7 +219,15 @@ interface Whoami {
   scholarNames: string[] | null;
   schoolOperations: boolean;
   isServiceAccount?: boolean;
+  /** The identity itself is read-only (a read-only service token). */
+  readOnly?: boolean;
 }
+
+// Why a connection is read-only, if it is: the URL (/api/mcp/read, which a
+// full identity can leave by changing the URL) or the identity (a read-only
+// service token, read-only on every URL). The copy differs because only the
+// first has a full connector to point at.
+type ReadOnlyReason = "path" | "identity" | null;
 
 function text(s: string) {
   return { content: [{ type: "text" as const, text: s }] };
@@ -286,7 +314,15 @@ const WORK_SAMPLES_SCHEMA: Tool["inputSchema"] = {
 async function buildServer(
   convex: ConvexHttpClient,
   me: Whoami,
+  // Set on /api/mcp/read or for a read-only identity: only the tools that
+  // read are listed or callable.
+  readOnlyReason: ReadOnlyReason,
 ): Promise<Server> {
+  const readOnly = readOnlyReason !== null;
+  const readOnlyHint =
+    readOnlyReason === "identity"
+      ? "Its token can only read; changes are made in Rabbithole itself."
+      : "Make changes in Rabbithole itself or through the full connector.";
   const isParent = me.role === "parent";
   const isScholar = me.role === "scholar";
   // "a scholar's" / "your child's" / "your" — same tools, role-true copy.
@@ -300,7 +336,11 @@ async function buildServer(
   // (read how a cohort is going, push activities live, schedule, edit
   // rosters, archive, plus unit reads + scholar-scoped writes); everyone
   // else is read-only over learning data.
-  const surfaceLine = isTeacherRole(me.role)
+  const surfaceLine = readOnly
+    ? readOnlyReason === "identity"
+      ? "Read-only view of Rabbithole (an AI classroom). This connection's token can look things up but cannot change anything; changes are made in Rabbithole itself."
+      : "Read-only view of Rabbithole (an AI classroom). This connection can look things up but cannot change anything; changes are made in Rabbithole itself or through the full connector."
+    : isTeacherRole(me.role)
     ? "View Rabbithole (an AI classroom) learning data AND run the curriculum — read how a cohort is going, push activities live, schedule/reschedule, edit rosters, archive, read units, capture scholar directives/seeds, and check or control the school's managed iPads."
     : me.role === "staff" && me.schoolOperations
       ? "Manage the roster, account operations, and managed iPads for scholars in your granted schools. You cannot access learning records or curriculum."
@@ -311,7 +351,7 @@ async function buildServer(
       // `name` is the protocol identifier; `title` is what a connector UI is
       // free to show a human. Without `icons` that UI has nothing to render
       // but a letter avatar, which is exactly what Claude's connector list did.
-      title: "Rabbithole",
+      title: readOnly ? "Rabbithole (read-only)" : "Rabbithole",
       version: "2.0.0",
       websiteUrl: APP_BASE_URL,
       description: "AI that makes you think harder.",
@@ -446,7 +486,7 @@ async function buildServer(
   addRead({
     name: "get_scholar_sessions",
     description:
-      "Get a scholar's recent sessions (their tutor work) with timestamps — answers 'what have they been working on?' and 'when was their last session?'. Up to 50 most recent, newest first.",
+      "Get a scholar's recent sessions (their tutor work) with timestamps — answers 'what have they been working on?' and 'when was their last session?'. Up to 50 most recent, newest first. Also returns appPlay: when the scholar had an app from their own sessions (one they built, or an assignment's starter app) open, one entry per stretch with local start, last check-in and last touch times — the answer to 'when did they start playing?'. Report activeMinutes (time with touches) first and onScreenMinutes only as secondary; on-screen time alone never shows the BunnyPad was awake or the scholar was using it, and on_screen_only entries are unverified. Follow its interpretation field and use its *Local fields as given.",
     inputSchema: SCHOLAR_NAME_SCHEMA,
     handler: async (args) => {
       const scholarName = nameArg(args);
@@ -465,6 +505,7 @@ async function buildServer(
         scholar: result.scholar,
         currentTime: new Date(now).toISOString(),
         sessions,
+        appPlay: result.appPlay,
       });
     },
   });
@@ -489,7 +530,7 @@ async function buildServer(
 
   addRead({
     name: "get_scholar_web_activity",
-    description: `See ${whose} recent external practice sessions, with institution-local dates and freshness-derived status — newest first. Only activeNow:true means current activity; stale_unfinalized is not live. webviewOpenMinutes is how long the locked webview stayed open, not proof of continuous practice; use XP, completed tasks, task summaries, or the recap as evidence of work. Separate from Rabbithole's own tutor sessions. Include this when asked how a scholar is doing or about their math practice.`,
+    description: `See ${whose} recent external practice sessions and launcher-app sessions (apps opened from the Apps launcher: kind app, named in site), with institution-local dates and freshness-derived status — newest first. Only activeNow:true means current activity; stale_unfinalized is not live. webviewOpenMinutes is how long the locked webview stayed open, not proof of continuous practice; use XP, completed tasks, task summaries, or the recap as evidence of work. Separate from Rabbithole's own tutor sessions. Include this when asked how a scholar is doing or about their math practice.`,
     inputSchema: SCHOLAR_NAME_SCHEMA,
     handler: async (args) => {
       const scholarName = nameArg(args);
@@ -503,7 +544,7 @@ async function buildServer(
     name: "get_scholar_practice",
     description: isParent
       ? "Get a trend-level view of your child's first-party practice progress: per-strand placement, frontier skills ready to grow into next, and skills recently crossed into fluency. This is Rabbithole's own practice engine, separate from web/external-site activity."
-      : `Get ${whose} first-party practice progress: per-strand placement, frontier skills ready to practice next, skills due for review, recently fluent skills, and any role-appropriate misconception details. This is Rabbithole's own practice engine, separate from web/external-site activity.`,
+      : `Get ${whose} first-party practice progress: per-strand placement, frontier skills ready to practice next, skills due for review, recently fluent skills, and any role-appropriate misconception details. For teachers and admins it also carries \`mathLevel\`: the overall math level (the share of each grade's skills the scholar is credited with, added up from kindergarten, so all of K-4 reads 5.0), the grade equivalent (enrolled grade plus the school month in tenths) and where the level sits against it in the teacher skills matrix's bands (behind, onPace, ahead, farAhead), how many skills come from daily work and how many from the placement check-in, and this term's pace (months of curriculum newly learned against months of school; 1.0 is the standard pace, and a low pace with few skills usually means little practice). This is Rabbithole's own practice engine, separate from web/external-site activity.`,
     inputSchema: SCHOLAR_NAME_SCHEMA,
     handler: async (args) => {
       const scholarName = nameArg(args);
@@ -574,9 +615,16 @@ async function buildServer(
   // from the shared assemble layer. Role-gated server-side (empty for
   // non-staff; the iPad tools only for school operations), so this is exactly
   // the set the caller may both see and call.
-  const curriculumTools = await convex.action(api.mcp.listCurriculumTools, {});
+  // The read-only connector keeps only the curriculum tools that read, and
+  // none of the unit designer's (it edits units; get_unit_details and
+  // list_units already cover reading them).
+  const curriculumTools = (
+    await convex.action(api.mcp.listCurriculumTools, {})
+  ).filter((t) => !readOnly || isReadOnlyToolName(t.name));
   const curriculumNames = new Set(curriculumTools.map((t) => t.name));
-  const unitDesignerTools = await convex.action(api.mcp.listUnitDesignerTools, {});
+  const unitDesignerTools = readOnly
+    ? []
+    : await convex.action(api.mcp.listUnitDesignerTools, {});
   const unitDesignerNames = new Set(unitDesignerTools.map((t) => t.name));
 
 
@@ -604,9 +652,25 @@ async function buildServer(
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name } = request.params;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-    const read = readByName.get(name);
+    // Refuse first, before any tool set is consulted, so a tool family added
+    // below can't slip past it. Say why, so the client does not go looking
+    // for a workaround.
+    if (readOnly && !isReadOnlyToolName(name)) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `${name} is not available on the read-only Rabbithole connection, which can only read. ${readOnlyHint}`,
+      );
+    }
+    // A listed name, or a cached old give verb routed to `give`'s transport
+    // (compatibility for long-lived MCP clients; remove after 2026-12-01).
+    const route = mcpToolRoute(name, {
+      reads: new Set(readByName.keys()),
+      curriculum: curriculumNames,
+      unitDesigner: unitDesignerNames,
+    });
+    const read = route === "read" ? readByName.get(name) : undefined;
     if (read) return await read.handler(args);
-    if (curriculumNames.has(name)) {
+    if (route === "curriculum") {
       // The proxy re-asserts the role gate; a name outside the caller's set
       // throws "Forbidden: <name>" → surfaced to the client as an error.
       const result = await convex.action(api.mcp.callCurriculumTool, {
@@ -615,7 +679,7 @@ async function buildServer(
       });
       return text(result);
     }
-    if (unitDesignerNames.has(name)) {
+    if (route === "unitDesigner") {
       const unitId = args.unitId;
       if (typeof unitId !== "string") {
         throw new McpError(ErrorCode.InvalidParams, "unitId is required");
@@ -683,7 +747,15 @@ async function handleMcpRequest(request: Request): Promise<Response> {
   const convex = new ConvexHttpClient(CONVEX_CLOUD_URL!);
   convex.setAuth(jwt);
 
-  const server = await buildServer(convex, me);
+  // A read-only identity gets the read-only server on EVERY path, so the
+  // full URL is no way around a read-only token (its writes are refused in
+  // Convex too; this keeps them out of the list and refuses them by name).
+  const readOnlyReason: ReadOnlyReason = me.readOnly
+    ? "identity"
+    : isReadOnlyMcpRequest(request)
+      ? "path"
+      : null;
+  const server = await buildServer(convex, me, readOnlyReason);
   const transport = new WebStandardStreamableHTTPServerTransport();
   await server.connect(transport);
   return withCors(await transport.handleRequest(request));

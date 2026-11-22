@@ -1,9 +1,10 @@
 "use client";
 
 /**
- * The scholar's ONE list of open items (`api.questionQueue.forSelf`) — the
- * Quests tab renders the whole list; the Scholar's Prep "Keep going" section
- * renders its top rows with the SAME row component (T1: one rendering).
+ * The scholar's ONE list of open items (`api.questionQueue.forSelf`): the
+ * Scholar's Prep "Keep going" section renders its top rows, and the Quests
+ * tab's "Things to wonder about" (components/WonderLists, TRA-676) renders its
+ * question cards, with the SAME row component (T1: one rendering).
  *
  * Row anatomy: emoji · small meta line · bold question, then EITHER the
  * equal-size answer grid OR — once answered — a one-line reveal over an equal
@@ -21,6 +22,12 @@
  * otherwise move a miss to the top and drop a correct answer instantly) until
  * the scholar taps Later or leaves. Native twin: native/src/components/
  * QuestionQueue.tsx. Copy: shared/questionQueue.ts.
+ *
+ * Dismiss (Scholar's Prep only, `dismissable`): a corner × that ends the row
+ * for good. A question row records the terminal "dismissed" outcome on its
+ * ledger row (minting one first if it was never carded), which the queue
+ * already drops; a teacher quest goes through `seeds.dismissForSelf`. The row
+ * hides at once and comes back, with an error toast, if the write fails.
  */
 
 import { useCallback, useMemo, useState } from "react";
@@ -28,6 +35,7 @@ import { useRouter } from "next/navigation";
 import { useMutation } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { Box, Button, Grid, HStack, Stack, Text, chakra } from "@chakra-ui/react";
+import { DismissButton } from "@/components/ui/DismissButton";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Surface } from "@/components/ui/Surface";
@@ -38,7 +46,6 @@ import { makeClientEventId } from "@/shared/practiceLoop";
 import { QUESTION_CARD_COPY, isCorrectChoice } from "@/shared/questionCard";
 import { QUESTION_QUEUE_COPY, answerGridColumns } from "@/shared/questionQueue";
 import { toaster } from "@/lib/toaster";
-import type { ExploreSeedOptions } from "@/lib/bakePaths";
 
 export type QueueRow = FunctionReturnType<typeof api.questionQueue.forSelf>[number];
 type QuestionRow = Extract<QueueRow, { kind: "question" }>;
@@ -73,8 +80,18 @@ export function useQuestionQueue() {
     const base: QueueRow[] = rows.filter(
       (row) => !hidden.has(row.id) && !pinned.has(row.id),
     );
+    // A missed pick stays on the server's queue, so one the server no longer
+    // returns was dismissed or followed elsewhere (another tab's queue, the
+    // other app): drop it. A correct pick is expected to leave the server's
+    // queue and stays pinned until Later or the visit ends.
+    const live = new Set(rows.map((row) => row.id));
     const ordered = [...pinned.values()]
       .filter((entry) => !hidden.has(entry.row.id))
+      .filter(
+        (entry) =>
+          live.has(entry.row.id) ||
+          isCorrectChoice(entry.row.question, entry.choiceIndex),
+      )
       .sort((a, b) => a.index - b.index);
     for (const entry of ordered) {
       const answeredRow: QuestionRow = {
@@ -116,59 +133,76 @@ export function useQuestionQueue() {
   const setAside = useCallback((id: string) => {
     setHidden((prev) => new Set(prev).add(id));
   }, []);
+  const unhide = useCallback((id: string) => {
+    setHidden((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
 
-  return { rows: visible, pin, unpin, setAside };
-}
-
-/** Quests tab: the whole queue on one white surface, two eyebrows. */
-export function QuestionQueueList({
-  onStartTeacherQuest,
-  startingSeedId,
-}: {
-  onStartTeacherQuest: (seedId: Id<"seeds">, opts?: ExploreSeedOptions) => void;
-  startingSeedId: string | null;
-}) {
-  const queue = useQuestionQueue();
-  if (queue.rows === undefined || queue.rows.length === 0) return null;
-  const questions = queue.rows.filter((row) => row.kind === "question");
-  const teacher = queue.rows.filter((row) => row.kind === "teacherQuest");
-  return (
-    <QueueSurface>
-      {questions.length > 0 && (
-        <>
-          <Eyebrow>{QUESTION_QUEUE_COPY.openQuestions}</Eyebrow>
-          {questions.map((row, index) => (
-            <QuestionQueueRowView
-              key={row.id}
-              row={row}
-              divided={index > 0}
-              queue={queue}
-              onStartTeacherQuest={onStartTeacherQuest}
-              startingSeedId={startingSeedId}
-            />
-          ))}
-        </>
-      )}
-      {teacher.length > 0 && (
-        <>
-          <Eyebrow divided={questions.length > 0}>
-            {QUESTION_QUEUE_COPY.fromTeacher}
-          </Eyebrow>
-          {teacher.map((row, index) => (
-            <QuestionQueueRowView
-              key={row.id}
-              row={row}
-              divided={index > 0}
-              queue={queue}
-              onStartTeacherQuest={onStartTeacherQuest}
-              startingSeedId={startingSeedId}
-            />
-          ))}
-        </>
-      )}
-    </QueueSurface>
+  // Dismiss for good: hide now, then write. The ledger row comes from the
+  // server's copy of the row (a row answered this visit is pinned from its
+  // older, pre-answer copy, which has no eventId yet).
+  const { user } = useCurrentUser();
+  const recordOffered = useMutation(api.practiceMoments.recordMomentOffered);
+  const recordOutcome = useMutation(api.practiceMoments.recordMomentOutcome);
+  const dismissSeed = useMutation(api.seeds.dismissForSelf);
+  const dismiss = useCallback(
+    async (row: QueueRow) => {
+      setAside(row.id);
+      // A question answered correctly closed itself once the server has the
+      // answer (it has left the server's queue): nothing to write. Until then
+      // the dismiss is written like any other, so a failed answer write can't
+      // bring the row back.
+      if (
+        row.kind === "question" &&
+        row.answer?.correct &&
+        !rows?.some((r) => r.id === row.id)
+      ) {
+        return;
+      }
+      try {
+        if (row.kind === "teacherQuest") {
+          await dismissSeed({ seedId: row.seedId });
+          return;
+        }
+        if (!user) throw new Error("Not signed in");
+        const live = rows?.find((r) => r.id === row.id);
+        let eventId = (live?.kind === "question" ? live.eventId : null) ?? row.eventId;
+        if (!eventId) {
+          const minted = await recordOffered({
+            scholarId: user._id,
+            clientEventId: makeClientEventId("prep-dismiss"),
+            surface: "quests",
+            ...(row.moment.kind === "seed"
+              ? { kind: "seed" as const, seedId: row.moment.seedId }
+              : {
+                  kind: "story" as const,
+                  fromKey: row.moment.fromKey,
+                  toKey: row.moment.toKey,
+                }),
+          });
+          eventId = minted.eventId;
+        }
+        await recordOutcome({ eventId, outcome: "dismissed" });
+      } catch (error) {
+        console.error("[question-queue] dismiss not recorded", error);
+        unhide(row.id);
+        toaster.error({ title: "Couldn't dismiss that", description: "Please try again." });
+      }
+    },
+    [rows, user, recordOffered, recordOutcome, dismissSeed, setAside, unhide],
   );
+
+  return { rows: visible, pin, unpin, setAside, dismiss };
 }
+
+type QueueActions = Pick<
+  ReturnType<typeof useQuestionQueue>,
+  "pin" | "unpin" | "setAside" | "dismiss"
+>;
 
 /** The white list surface every queue/Prep section shares. */
 export function QueueSurface({ children }: { children: React.ReactNode }) {
@@ -213,33 +247,51 @@ export function QuestionQueueRowView({
   onStartTeacherQuest,
   startingSeedId,
   divided = false,
+  dismissable = false,
 }: {
   row: QueueRow;
   /** Hairline above the row (every row but the first under an eyebrow). */
   divided?: boolean;
-  queue: Pick<ReturnType<typeof useQuestionQueue>, "pin" | "unpin" | "setAside">;
-  onStartTeacherQuest: (seedId: Id<"seeds">, opts?: ExploreSeedOptions) => void;
+  /** A corner × that dismisses the row for good (Scholar's Prep only). */
+  dismissable?: boolean;
+  queue: QueueActions;
+  onStartTeacherQuest: (seedId: Id<"seeds">) => void;
   startingSeedId: string | null;
 }) {
   if (row.kind === "teacherQuest") {
+    const starting = startingSeedId === String(row.seedId);
     return (
       <TeacherQuestRow
         row={row}
         divided={divided}
-        starting={startingSeedId === String(row.seedId)}
-        onStart={() => onStartTeacherQuest(row.seedId, { skipMenu: true })}
+        starting={starting}
+        onStart={() => onStartTeacherQuest(row.seedId)}
         onNotNow={() => queue.setAside(row.id)}
+        dismiss={
+          dismissable ? (
+            <DismissButton
+              label={row.title}
+              disabled={starting}
+              onPress={() => void queue.dismiss(row)}
+            />
+          ) : null
+        }
       />
     );
   }
-  return <QuestionRowView row={row} queue={queue} divided={divided} />;
+  return (
+    <QuestionRowView row={row} queue={queue} divided={divided} dismissable={dismissable} />
+  );
 }
 
 function RowShell({
   divided,
+  dismiss,
   children,
 }: {
   divided: boolean;
+  /** The corner × (DismissButton), when the row is dismissable. */
+  dismiss?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -251,23 +303,37 @@ function RowShell({
       borderColor="gray.100"
     >
       {children}
+      {dismiss && (
+        <Box position="absolute" top="6px" right="6px">
+          {dismiss}
+        </Box>
+      )}
     </Box>
   );
 }
+
+/** Room the corner × takes at the head's right. */
+const DISMISS_RESERVE = 36;
+/** Room the verdict stamp takes at the head's right. */
+const STAMP_RESERVE = 92;
 
 function RowHead({
   emoji,
   meta,
   title,
   reserveStamp,
+  reserveDismiss,
 }: {
   emoji: string;
   meta: string;
   title: string;
   reserveStamp?: boolean;
+  reserveDismiss?: boolean;
 }) {
+  const reserve =
+    (reserveStamp ? STAMP_RESERVE : 0) + (reserveDismiss ? DISMISS_RESERVE : 0);
   return (
-    <HStack align="flex-start" gap={3} pr={reserveStamp ? "92px" : 0}>
+    <HStack align="flex-start" gap={3} pr={`${reserve}px`}>
       <Text fontSize="22px" lineHeight="1.2" flexShrink={0} aria-hidden="true">
         {emoji}
       </Text>
@@ -294,10 +360,12 @@ function QuestionRowView({
   row,
   queue,
   divided,
+  dismissable,
 }: {
   row: QuestionRow;
   divided: boolean;
-  queue: Pick<ReturnType<typeof useQuestionQueue>, "pin" | "unpin" | "setAside">;
+  dismissable: boolean;
+  queue: QueueActions;
 }) {
   const router = useRouter();
   const { user } = useCurrentUser();
@@ -353,12 +421,24 @@ function QuestionRowView({
   const { narrow, wide } = answerGridColumns(question.choices.length);
 
   return (
-    <RowShell divided={divided}>
+    <RowShell
+      divided={divided}
+      dismiss={
+        dismissable ? (
+          <DismissButton
+            label={question.prompt}
+            disabled={opening}
+            onPress={() => void queue.dismiss(row)}
+          />
+        ) : null
+      }
+    >
       <RowHead
         emoji={row.emoji}
         meta={row.meta}
         title={question.prompt}
         reserveStamp={!!tone}
+        reserveDismiss={dismissable}
       />
       {!answer ? (
         <Grid
@@ -429,7 +509,21 @@ function QuestionRowView({
           </Grid>
         </Stack>
       )}
-      <VerdictStamp tone={tone} placement="row" />
+      {dismissable ? (
+        // Beside the corner ×, not under it.
+        <Box
+          position="absolute"
+          top={0}
+          bottom={0}
+          left={0}
+          right={`${DISMISS_RESERVE}px`}
+          pointerEvents="none"
+        >
+          <VerdictStamp tone={tone} placement="row" />
+        </Box>
+      ) : (
+        <VerdictStamp tone={tone} placement="row" />
+      )}
     </RowShell>
   );
 }
@@ -440,16 +534,23 @@ function TeacherQuestRow({
   starting,
   onStart,
   onNotNow,
+  dismiss,
 }: {
   row: TeacherRow;
   divided: boolean;
   starting: boolean;
   onStart: () => void;
   onNotNow: () => void;
+  dismiss: React.ReactNode;
 }) {
   return (
-    <RowShell divided={divided}>
-      <RowHead emoji={row.emoji} meta={row.meta} title={row.title} />
+    <RowShell divided={divided} dismiss={dismiss}>
+      <RowHead
+        emoji={row.emoji}
+        meta={row.meta}
+        title={row.title}
+        reserveDismiss={dismiss !== null}
+      />
       {row.body && (
         <Text
           mt={1}

@@ -171,7 +171,7 @@ const cases: Case[] = [
 ];
 
 function systemFor(c: Case, isFirstTurn: boolean): string {
-  const args: unknown[] = new Array(55).fill(undefined);
+  const args: unknown[] = new Array(54).fill(undefined);
   const unit = c.ownQuest
     ? {
         title: c.ownQuest,
@@ -187,11 +187,11 @@ function systemFor(c: Case, isFirstTurn: boolean): string {
         ownIsUnitOutline: [],
       }
     : null;
-  args.splice(0, 6, null, c.talk, "Kai", unit, null, null);
-  args[21] = isFirstTurn; // isFirstTurn
-  args[22] = false; // isFirstSession
-  args[23] = null; // lastSessionAt
-  args[54] = { read: "beginner", write: "voice", beginnerTeams: c.teams };
+  args.splice(0, 5, c.talk, "Kai", unit, null, null);
+  args[20] = isFirstTurn; // isFirstTurn
+  args[21] = false; // isFirstSession
+  args[22] = null; // lastSessionAt
+  args[53] = { read: "beginner", write: "voice", beginnerTeams: c.teams };
   const parts = (
     buildSystemPromptParts as unknown as (
       ...a: unknown[]

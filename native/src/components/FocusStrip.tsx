@@ -31,14 +31,14 @@ import {
 } from "@/lib/externalAppHost";
 import { AppTileMark } from "@/components/AppTileMark";
 import { useNativeAppLauncher } from "@/hooks/useNativeAppLauncher";
-import { colors, fonts, palette } from "@/theme";
+import { fonts, palette } from "@/theme";
 import {
-  FOCUS_STRIP_HEADING,
   pushActionLabel,
   pushGlyph,
-  pushTimeLeftLabel,
+  pushMetaLine,
   type PushTargetKind,
 } from "../../vendor/shared/pushCopy";
+import { openUntilPhrase } from "../../vendor/shared/openUntil";
 
 type LivePush = {
   _id: Id<"pushes">;
@@ -59,10 +59,14 @@ type LivePush = {
   note?: string;
   blocking: boolean;
   endsAt: number | null;
+  /** Set for an "Open until a date" give: when its window closes. The Home
+   *  draws it under "Open from class" (convex/pushes.ts `HydratedPush`). */
+  openUntil?: number | null;
 };
 
-/** The countdown has to tick on its own — nothing refetches every minute. */
-function useNow(active: boolean, intervalMs = 15_000): number {
+/** The minute re-arm for the live read. The row shows its end as a time,
+ *  so nothing on it ticks. */
+function useNow(active: boolean, intervalMs = 60_000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
@@ -72,33 +76,72 @@ function useNow(active: boolean, intervalMs = 15_000): number {
   return now;
 }
 
-export function FocusStrip() {
+/** The scholar's live pushes. The Home reads them once, so the class
+ *  section knows whether to show. */
+export function useLivePushes(enabled: boolean): LivePush[] {
   const { isAuthenticated } = useConvexAuth();
-  const now = useNow(isAuthenticated);
+  const active = enabled && isAuthenticated;
+  const now = useNow(active);
   const minuteNow = Math.floor(now / 60_000) * 60_000;
-  // Smoothed so the minute re-arm doesn't blank the strip for a round-trip.
+  // Smoothed so the minute re-arm doesn't blank the rows for a round-trip.
   const pushes = useSmoothedQuery(
     api.pushes.livePushesForMe,
-    isAuthenticated ? { now: minuteNow } : "skip",
+    active ? { now: minuteNow } : "skip",
   ) as LivePush[] | undefined;
+  return pushes ?? [];
+}
 
-  if (!pushes || pushes.length === 0) return null;
-
+/**
+ * The pushes as rows at the top of the class section ("In class now" /
+ * "From class today"), above its activity rows, in the same row grid and
+ * emoji column. There is no separate heading. Web twin: PushRows in
+ * components/FocusStrip.tsx.
+ */
+export function PushRows({
+  pushes,
+  timeZone,
+  nowMs,
+}: {
+  pushes: LivePush[];
+  timeZone: string;
+  /** The Home's clock, so an open-until give's "Open until Fri" reads like
+   *  the rows beside it. */
+  nowMs: number;
+}) {
+  if (pushes.length === 0) return null;
   return (
     <View style={styles.root}>
-      <Text style={styles.heading}>{FOCUS_STRIP_HEADING.toUpperCase()}</Text>
       {pushes.map((push) => (
-        <FocusCard key={String(push._id)} push={push} now={now} />
+        <FocusCard
+          key={String(push._id)}
+          push={push}
+          timeZone={timeZone}
+          nowMs={nowMs}
+        />
       ))}
     </View>
   );
 }
 
-function FocusCard({ push, now }: { push: LivePush; now: number }) {
+function FocusCard({
+  push,
+  timeZone,
+  nowMs,
+}: {
+  push: LivePush;
+  timeZone: string;
+  nowMs: number;
+}) {
   const launchNativeApp = useNativeAppLauncher();
   const router = useRouter();
   const createSession = useMutation(api.sessions.create);
-  const timeLeft = pushTimeLeftLabel(push.endsAt, now);
+  const meta = pushMetaLine(
+    { note: push.note ?? null, endsAt: push.endsAt },
+    timeZone,
+    push.openUntil != null
+      ? openUntilPhrase(push.openUntil, timeZone, nowMs)
+      : null,
+  );
 
   const open = () => {
     void Haptics.selectionAsync();
@@ -174,88 +217,70 @@ function FocusCard({ push, now }: { push: LivePush; now: number }) {
       accessibilityRole="button"
       accessibilityLabel={`${pushActionLabel(push)} ${push.title}`}
     >
-      {push.kind === "app" ? (
-        // An app's mark resolves through the ONE shared chain the launcher
-        // tile and the unlock modal use — logo → the staff-chosen emoji → the
-        // initial, on the app's own tint — so the same app cannot look like
-        // two different things on one screen. The Pressable already names it.
-        <AppTileMark
-          name={push.title}
-          iconUrl={push.iconUrl ?? null}
-          iconEmoji={push.iconEmoji ?? null}
-          color={push.color ?? null}
-          // 16 on a 44pt tile is the same mark:tile ratio the launcher (28 on
-          // 80) and the unlock modal use, so the initial is the same weight
-          // wherever a scholar meets this app — and it matches web's card.
-          markFontSize={16}
-          decorative
-          style={styles.icon}
-        />
-      ) : (
-        // A video, link or activity has no catalog tile: its glyph names the
-        // KIND of thing, and shared/pushCopy.ts owns that word so the web and
-        // iPad strips can't drift. Only an app carries a catalog `color`, so
-        // this square is always the strip's own violet.
-        <View style={[styles.icon, styles.kindIcon]}>
+      {/* The class rows' emoji column, so a push's glyph or app tile lines
+          up with the activity rows' emoji. */}
+      <View style={styles.glyphCol}>
+        {push.kind === "app" ? (
+          // An app's mark resolves through the ONE shared chain the launcher
+          // tile and the unlock modal use — logo → the staff-chosen emoji →
+          // the initial, on the app's own tint. The Pressable already names it.
+          <AppTileMark
+            name={push.title}
+            iconUrl={push.iconUrl ?? null}
+            iconEmoji={push.iconEmoji ?? null}
+            color={push.color ?? null}
+            markFontSize={11}
+            decorative
+            style={styles.icon}
+          />
+        ) : (
+          // A video, link or activity has no catalog tile: its glyph names
+          // the KIND of thing (shared/pushCopy.ts).
           <Text style={styles.iconGlyph}>{pushGlyph(push)}</Text>
-        </View>
-      )}
+        )}
+      </View>
       <View style={styles.body}>
         <Text style={styles.title} numberOfLines={1}>
           {push.title}
         </Text>
-        {push.note ? (
+        {meta ? (
           <Text style={styles.note} numberOfLines={2}>
-            {push.note}
+            {meta}
           </Text>
         ) : null}
       </View>
-      <View style={styles.trailing}>
-        <Text style={styles.action}>{pushActionLabel(push)}</Text>
-        {timeLeft ? <Text style={styles.timeLeft}>{timeLeft}</Text> : null}
-      </View>
+      <Text style={styles.action}>{pushActionLabel(push)}</Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    paddingHorizontal: 18,
-    paddingTop: 12,
-    paddingBottom: 4,
-    gap: 8,
-  },
-  heading: {
-    color: palette.navy[500],
-    fontFamily: fonts.semibold,
-    fontSize: 11,
-    letterSpacing: 1.2,
-  },
+  root: { gap: 8 },
   card: {
     flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
+    alignItems: "flex-start",
+    gap: 10,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: palette.violet[200],
-    backgroundColor: palette.violet[50],
+    borderColor: palette.gray[200],
+    backgroundColor: palette.white,
   },
   cardPressed: { opacity: 0.75 },
+  glyphCol: { width: 22, alignItems: "center", paddingTop: 1 },
   icon: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
+    width: 22,
+    height: 22,
+    borderRadius: 5,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
   },
-  kindIcon: { backgroundColor: palette.violet[500] },
   iconGlyph: {
-    color: colors.white,
+    color: palette.violet[500],
     fontFamily: fonts.semibold,
-    fontSize: 20,
+    fontSize: 17,
   },
   body: { flex: 1, gap: 2 },
   title: {
@@ -269,15 +294,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  trailing: { alignItems: "flex-end", gap: 2 },
   action: {
     color: palette.violet[700],
     fontFamily: fonts.semibold,
     fontSize: 14,
-  },
-  timeLeft: {
-    color: palette.navy[500],
-    fontFamily: fonts.regular,
-    fontSize: 12,
+    alignSelf: "center",
   },
 });

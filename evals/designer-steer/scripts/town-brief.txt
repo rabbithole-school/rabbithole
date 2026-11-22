@@ -1,0 +1,10 @@
+BUILD BRIEF: My Town (fictional, for the designer-steer bench)
+
+Context: The scholar has been learning about towns and cities: who lives there, what people do all day, and how places in a town are different. They direct the AI builder to make a town game of their own. The scholar is the designer and director; the builder writes the code. The scholar owns every design decision.
+
+(a) What the app should have
+- A town the scholar designs, with places in it (homes, shops, anything they think of), drawn simply.
+- Something to do or watch in it.
+
+(b) Scholar choice
+- The scholar chooses the town's name, its look, its places, and what happens there. Start small: get a first version on screen, then let them grow it.

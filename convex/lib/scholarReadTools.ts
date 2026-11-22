@@ -21,7 +21,10 @@
 import type { ActionCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
-import { ROLES, type Role } from "./roles";
+import type { MathPortrait } from "../mathPortrait";
+import { ROLES, isTeacherRole, type Role } from "./roles";
+import { gradeLabelFromRank } from "../../shared/gradeRange";
+import { gradeEquivalentFromRank, gradeRelativeBand, levelDelta } from "../../shared/gradeEquivalent";
 import { allowedScholarReadTools } from "./scholarReadPolicy";
 import { redactScholarPractice } from "./scholarReads";
 import {
@@ -29,6 +32,8 @@ import {
   extendedEducationOmittedNote,
 } from "./scholarParticipationTooling";
 import { withBase, scholarPath, sessionPath } from "./channels";
+import { matchByName, type ScholarNameMatch } from "./nameMatch";
+import { homeworkPlanWeek } from "../../shared/homeworkPlanWeeks";
 
 // The role → tool-names policy lives in lib/scholarReadPolicy.ts — ONE
 // table shared with the OAuth MCP connector (app/api/mcp/route.ts +
@@ -83,59 +88,10 @@ export async function resolveScholarByName(
   return match ?? null;
 }
 
-/**
- * Strict name → scholar matcher for DESTRUCTIVE roster writes.
- *
- * The read-path `resolveScholarByName` is first-substring-wins, which is fine
- * for "show me Kai's mastery" (a wrong guess is read-only) but unsafe for
- * `set/add_assignment_scholars`, where a silent mis-match adds/removes the
- * WRONG child from a cohort. This matcher is the strict variant the batch
- * roster resolvers use:
- *
- *  1. Prefer a UNIQUE exact case-insensitive full-name match. Duplicate exact
- *     display names remain ambiguous; a sensitive read or roster write must
- *     never guess between two people with the same name.
- *  2. Otherwise allow a partial (substring) match ONLY when exactly one
- *     candidate matches.
- *  3. If a partial query matches MULTIPLE candidates, refuse with the list
- *     of colliding names rather than silently picking the first.
- *
- * Pure (takes the candidate list, no ctx) so both batch resolvers — the aide
- * (lib/aideTools.ts) and the MCP path (convex/mcp.ts) — share one definition.
- * The query is trimmed/lowercased by the caller-facing wrappers; here we trim
- * defensively too.
- */
-export type ScholarNameMatch<S> =
-  | { kind: "match"; scholar: S }
-  | { kind: "none" }
-  | { kind: "ambiguous"; candidates: S[] };
-
-/**
- * Strict {name}-keyed matcher core. Generalizes the exact-preferred /
- * ambiguity-refusing logic over an arbitrary `normalize` step so the same
- * three-way verdict (match / none / ambiguous) can serve both scholar+group
- * names (identity normalize) and unit TITLES (dash + punctuation folding —
- * see `normalizeUnitTitle` in aideTools.ts). Keeping one core here means the
- * unit resolver mirrors the scholar resolver instead of forking it.
- *
- * `normalize` is applied to BOTH the query and every candidate name; an
- * empty normalized query refuses (never `includes("")`-matches everything).
- */
-export function matchByName<S extends { name: string }>(
-  query: string,
-  rows: S[],
-  normalize: (s: string) => string = (s) => s.trim().toLowerCase(),
-): ScholarNameMatch<S> {
-  const q = normalize(query);
-  if (!q) return { kind: "none" };
-  const exact = rows.filter((s) => normalize(s.name) === q);
-  if (exact.length === 1) return { kind: "match", scholar: exact[0] };
-  if (exact.length > 1) return { kind: "ambiguous", candidates: exact };
-  const partial = rows.filter((s) => normalize(s.name).includes(q));
-  if (partial.length === 0) return { kind: "none" };
-  if (partial.length === 1) return { kind: "match", scholar: partial[0] };
-  return { kind: "ambiguous", candidates: partial };
-}
+// The strict matcher core lives in ./nameMatch (no imports), so a mutation
+// module can use it without pulling this tool file — and its dynamic SDK
+// import — into the Convex schema bundle. Re-exported for existing callers.
+export { matchByName, type ScholarNameMatch };
 
 export function matchScholarByName<S extends { name: string }>(
   query: string,
@@ -155,6 +111,98 @@ const scholarNameSchema = {
   },
   required: ["scholarName"] as const,
 };
+
+/**
+ * How the parent aide may use `fluentSkills` / `fluentSkillLabels` (TRA-322).
+ * Appended to the parent tool description only when those fields are sent.
+ */
+const PARENT_FLUENT_SKILLS_GUIDANCE =
+  " Each portrait domain also has `fluentSkills`, the number the portal shows as \"N skills from daily work\" for that domain, and `fluentSkillLabels`, the names of those skills. Name the skills only when the parent asks which skills are behind that count, in plain words. If the list is shorter than the count, say there are a few more counted that you can't name here. Any other number or label on the portal (a grade level, growth) is explained in plain words, without listing skills.";
+
+/**
+ * The parent's Math Skills portrait as `get_scholar_practice` returns it: what
+ * the portal's Math Skills tab shows, per domain, without the chart series:
+ * the level, the legacy "highest" grade, and where the credit came from.
+ * `domain` is the slug `frontier` and `strandPlacement` use, so the model can
+ * pair what comes next with the right domain. With `withFluentSkills` (the
+ * guardian-scoped parent aide only), each domain also carries the tile's
+ * "N skills fluent" and the skills it counts (TRA-322), so the aide can answer
+ * a parent who asks which skills those are.
+ */
+function parentMathPortrait(
+  portrait: MathPortrait,
+  withFluentSkills: boolean,
+) {
+  return {
+    domains: portrait.domains.map((d) => ({
+      domain: d.domain,
+      label: d.label,
+      gradeLabel: d.gradeLabel,
+      highestGradeLabel: d.highestGradeLabel,
+      skillsFromDailyWork: d.fluentSkills,
+      skillsFromPlacementCheckIn: d.placementSkills,
+      ...(withFluentSkills
+        ? {
+            fluentSkills: d.fluentSkills,
+            fluentSkillLabels: d.fluentSkillLabels ?? [],
+          }
+        : {}),
+      growth: d.growth
+        ? { fromLabel: d.growth.fromLabel, toLabel: d.growth.toLabel }
+        : null,
+    })),
+    monthsCovered: portrait.monthsCovered,
+  };
+}
+
+const roundToTenth = (n: number) => Math.round(n * 10) / 10;
+
+/**
+ * The staff view of a scholar's overall math level and learned pace, as
+ * `get_scholar_practice` (staff aide) and the MCP `getScholarPractice` return
+ * it: plain fields read straight off `gatherMathPortrait(..., { withOverall })`,
+ * never derived a second way. `position` is the skills matrix's band against the
+ * grade equivalent at the portrait's `asOfMs`. Null when nothing is credited
+ * yet (the caller then omits `mathLevel`). Teacher/admin only; parents and
+ * scholars never get it.
+ */
+export function staffMathLevel(
+  portrait: Pick<MathPortrait, "overall" | "asOfMs"> | null | undefined,
+) {
+  const overall = portrait?.overall;
+  const level = overall?.level;
+  if (!portrait || !overall || !level) return null;
+  const enrolledRank = overall.enrolledGradeRank;
+  const gradeEquivalent = gradeEquivalentFromRank(enrolledRank, new Date(portrait.asOfMs));
+  const pace = overall.pace;
+  return {
+    overallLevel: roundToTenth(level.value),
+    enrolledGrade: enrolledRank === null ? null : gradeLabelFromRank(enrolledRank),
+    gradeEquivalent: gradeEquivalent === null ? null : roundToTenth(gradeEquivalent),
+    position:
+      gradeEquivalent === null ? null : gradeRelativeBand(levelDelta(level.value, gradeEquivalent)),
+    solidThroughGrade:
+      level.solidThroughRank === null ? null : gradeLabelFromRank(level.solidThroughRank),
+    skillsShownInDailyWork: level.dailySkills,
+    skillsCreditedFromPlacement: level.placementSkills,
+    paceThisTerm: pace
+      ? {
+          term: pace.periodLabel,
+          // The term's start, or the day the scholar joined when later.
+          measuredFrom: pace.windowStartsDay,
+          monthsOfNewLearning: roundToTenth(pace.learnedMonths),
+          monthsOfSchool: roundToTenth(pace.schoolMonths),
+          timesStandardPace: pace.pace === null ? null : roundToTenth(pace.pace),
+          skillsLearned: pace.learnedSkills,
+          skillsAlreadyKnown: pace.knownSkills,
+        }
+      : null,
+  };
+}
+
+/** Appended to the staff `get_scholar_practice` description. */
+const STAFF_MATH_LEVEL_GUIDANCE =
+  " For teacher/admin it also carries `mathLevel` (absent when nothing is credited yet). `overallLevel` adds up, from kindergarten, the share of each grade's skills the scholar is credited with, so all of K-4 reads 5.0; `gradeEquivalent` is `enrolledGrade` plus the school month in tenths (3.4 for a third grader in November), and `position` is how far `overallLevel` sits from it, in the teacher skills matrix's bands: behind (more than 0.5 below), onPace (within 0.5), ahead (up to 1.5 above), farAhead (beyond 1.5); and `skillsCreditedFromPlacement` (from the check-in) is kept apart from `skillsShownInDailyWork`. `paceThisTerm` counts only skills that were new to the scholar this term (missed on the way to fluent, twice if it sits in a grade they already have solid), as months of curriculum (`monthsOfNewLearning`) against `monthsOfSchool` since `measuredFrom` (the term's start, or the day the scholar joined if that was later), where a `timesStandardPace` of 1.0 is the standard pace; a low pace with few `skillsLearned` usually means little practice.";
 
 /**
  * Build the seven scholar-detail read tools, closed over the calling
@@ -190,6 +238,13 @@ export async function makeScholarReadTools(
   // only after resolving an active school:operations grant; the policy still
   // limits that principal to the redacted roster tool.
   hasSchoolOperationsAccess = false,
+  // TRA-322: the per-domain "N skills fluent" count and the names of those
+  // skills, for the PARENT AIDE ONLY. lib/parentAideTurn.ts is the one caller
+  // that sets this: it forces the parent audience and scopes
+  // `allowedScholarIds` to the parent's guardianships. A role string alone is
+  // not enough, since the quest baker and designer tools pass an account's
+  // primary role ("parent") alongside a staff roster.
+  opts: { guardianScopedParentAide?: boolean } = {},
 ) {
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
@@ -218,6 +273,11 @@ export async function makeScholarReadTools(
   // Parents get the coarsest practice view (trend altitude — no due backlog,
   // no misconceptions; see redactScholarPractice) and a matching description.
   const isParent = role === ROLES.PARENT;
+  const parentAideFluentSkills =
+    isParent && opts.guardianScopedParentAide === true;
+  // Teacher/admin (the same tier redactScholarPractice gives everything) also
+  // get the overall math level and learned pace. Never parents or scholars.
+  const isStaffReader = isTeacherRole(role);
   const interestAudience =
     role && (role === ROLES.PARENT || role === ROLES.SCHOLAR || role === ROLES.LIFELONG_LEARNER)
       ? ("parent" as const)
@@ -252,6 +312,9 @@ export async function makeScholarReadTools(
         internal.curriculumAssistant.listScholarsInternal,
         {
           includeProgramGuests: includeExtendedEducation,
+          // The roster is current scholars; named lookups still find one
+          // who has withdrawn.
+          includeWithdrawn: false,
           ...(allowedScholarIds
             ? { allowedScholarIds: [...allowedScholarIds] }
             : {}),
@@ -417,9 +480,11 @@ export async function makeScholarReadTools(
     run: async (input) => {
       const scholar = await resolveScholar(input.scholarName);
       if (!scholar) return notFound(input.scholarName);
+      // Pass the caller's role so readScholarSeeds swaps the teacher-private
+      // rationale for the scholar's own seed text for Tier-1 callers.
       const seeds = await ctx.runQuery(
         internal.curriculumAssistant.getScholarSeeds,
-        { scholarId: scholar.id as Id<"users"> },
+        { scholarId: scholar.id as Id<"users">, role: role ?? undefined },
       );
       emit({ toolComplete: { name: "get_scholar_seeds", result: `Loaded ${scholar.name}'s seeds` } });
       return JSON.stringify({ scholar: scholar.name, seeds });
@@ -446,15 +511,19 @@ export async function makeScholarReadTools(
   const getScholarSessionsTool = betaTool({
     name: "get_scholar_sessions",
     description:
-      "Get a scholar's recent projects (chat sessions) with timestamps. Use this to answer questions like 'how long ago was their last session?' or 'what have they been working on this week?'. Returns up to 50 most recent non-archived projects, sorted newest first, with creation time, last message time, title, and unit/lesson context.",
+      "Get a scholar's recent projects (chat sessions) with timestamps. Use this to answer questions like 'how long ago was their last session?' or 'what have they been working on this week?'. Returns up to 50 most recent non-archived projects, sorted newest first, with creation time, last message time, title, and unit/lesson context. Also returns appPlay: when the scholar had an app from their own sessions (one they built, or an assignment's starter app) open, one entry per stretch with local start, last check-in and last touch times — the answer to 'when did they start playing?'. Report activeMinutes (time with touches) first and onScreenMinutes only as secondary; on-screen time alone never shows the BunnyPad was awake or the scholar was using it, and on_screen_only entries are unverified. Follow its interpretation field and use its *Local fields as given.",
     inputSchema: scholarNameSchema,
     run: async (input) => {
       const scholar = await resolveScholar(input.scholarName);
       if (!scholar) return notFound(input.scholarName);
-      const sessions = await ctx.runQuery(
-        internal.curriculumAssistant.getScholarSessions,
-        { scholarId: scholar.id as Id<"users"> },
-      );
+      const [sessions, appPlay] = await Promise.all([
+        ctx.runQuery(internal.curriculumAssistant.getScholarSessions, {
+          scholarId: scholar.id as Id<"users">,
+        }),
+        ctx.runQuery(internal.curriculumAssistant.getScholarAppPlay, {
+          scholarId: scholar.id as Id<"users">,
+        }),
+      ]);
       const now = Date.now();
       const formatted = sessions.map((p) => {
         const lastActivityMs = p.lastMessageAt ?? p.createdAt;
@@ -481,6 +550,7 @@ export async function makeScholarReadTools(
         scholarUrl: withBase(linkBase, scholarPath(scholar.username)),
         currentTime: new Date(now).toISOString(),
         sessions: formatted,
+        appPlay,
       });
     },
   });
@@ -488,7 +558,7 @@ export async function makeScholarReadTools(
   const getScholarWebActivityTool = betaTool({
     name: "get_scholar_web_activity",
     description:
-      "Get a scholar's recent EXTERNAL practice sessions — external practice sites and other web assignments opened in the locked iPad webview. The result already resolves every timestamp into the scholar's institution-local clock: use dayRelation and the *Local fields directly; NEVER convert the timestamps yourself. Only activeNow:true means current activity; stale_unfinalized means the webview failed to finalize and is NOT live. webviewOpenMinutes is wall-clock open duration, not proof of continuous work, so do not say a scholar 'worked/practiced for N minutes' unless XP, completed tasks, task summaries, or the recap supports that claim. This is SEPARATE from Rabbithole's own tutor projects and practice engine. ALWAYS include this when asked about math practice / external practice progress.",
+      "Get a scholar's recent EXTERNAL practice sessions and launcher-app sessions — external practice sites and web assignments, plus apps opened from their Apps launcher (a classmate's published app, a teacher-made tile, an outside app; kind app, named in site). The result already resolves every timestamp into the scholar's institution-local clock: use dayRelation and the *Local fields directly; NEVER convert the timestamps yourself. Only activeNow:true means current activity; stale_unfinalized means the webview failed to finalize and is NOT live. webviewOpenMinutes is wall-clock open duration, not proof of continuous work, so do not say a scholar 'worked/practiced for N minutes' unless XP, completed tasks, task summaries, or the recap supports that claim. When a scholar reports \"Couldn't open this activity\", read loadError: it names the page that failed and the HTTP status the site returned. This is SEPARATE from Rabbithole's own tutor projects and practice engine. ALWAYS include this when asked about math practice / external practice progress.",
     inputSchema: scholarNameSchema,
     run: async (input) => {
       const scholar = await resolveScholar(input.scholarName);
@@ -505,16 +575,34 @@ export async function makeScholarReadTools(
   const getScholarPracticeTool = betaTool({
     name: "get_scholar_practice",
     description: isParent
-      ? "Get a trend-level view of a child's first-party practice progress: per-strand placement (how far they've come in each strand of a domain), the frontier (skills they're ready to grow into next — the best fuel for at-home enrichment ideas), and skills recently crossed into fluency. In `strandPlacement`, `fluentCount` means the current green state and is retention- and speed-gated; `provisionalCount` is inferred placement, not fluency. Use it to describe monthly/quarterly growth at the topic level, or to design a well-aimed at-home activity — never recite the raw per-skill lists back to the parent."
-      : "Get a scholar's homegrown procedural-practice state: today's Math Check-In glance (`checkIn` — how much of the domain map is drawn, plus today's probe counts), per-strand placement (how far they've progressed in each strand of a domain), the frontier (skills ready to practice next — all prerequisites met), skills due for spaced-rep review, skills recently crossed into fluency (last 14 days), and open observer-flagged misconceptions. In `strandPlacement`, `fluentCount` means the current green state and is retention- and speed-gated; `provisionalCount` is inferred placement, not fluency. This is Rabbithole's first-party practice engine — separate from web/external-practice activity. A check-in is a placement MAP, not a score: never read a partial check-in as mastery. Use this when asked how a scholar is doing with math practice, what they've mastered, what to assign next, or whether there are open misconceptions to address; for anything about the check-in itself — its questions, per-probe performance, or whether it is finished — call get_scholar_math_checkin instead.",
+      ? "Get a child's math progress. It starts with `mathPortrait`, the same Math Skills portrait the parent portal shows: for each math domain the child has practiced, `gradeLabel` is the grade level in that area, which adds up how much of each grade's skills in the area the child has covered (all of kindergarten through grade 4 reads 5.0). Skills credited by the placement check-in count toward it, and `skillsFromDailyWork` and `skillsFromPlacementCheckIn` report the two sources separately. `highestGradeLabel` is the hardest grade in which the child has shown a skill in daily work, so it can read above the level. `growth` is how far the level rose over the last `monthsCovered` months. A null `gradeLabel` means the child has begun the domain but no skill is credited yet; a null `growth` means there is not enough history yet to show a trend, never that the child stalled. When a parent asks what their child is learning or how they are doing in math, lead with each domain's grade level and growth, then say what comes next from `frontier` (skills they are ready to grow into, keyed to the portrait by `domain`, and the best fuel for at-home enrichment ideas). Everything after the portrait is supporting detail: `strandPlacement` counts skills per strand (`fluentCount` is retention- and speed-gated; `provisionalCount` is inferred placement, not fluency) and `recentlyCrossed` lists skills that just became fluent. Strands are listed in curriculum order, so foundational strands such as counting appear first even for a child working well past them. Never describe a child as starting, learning, or branching into a domain or topic below the grade level the portrait shows for that domain, and never recite the raw per-skill lists back to the parent." + (parentAideFluentSkills ? PARENT_FLUENT_SKILLS_GUIDANCE : "")
+      : "Get a scholar's homegrown procedural-practice state: today's Math Check-In glance (`checkIn` — how much of the domain map is drawn, plus today's probe counts), per-strand placement (how far they've progressed in each strand of a domain), the frontier (skills ready to practice next — all prerequisites met), skills due for spaced-rep review, skills recently crossed into fluency (last 14 days), and open observer-flagged misconceptions. In `strandPlacement`, `fluentCount` means the current green state and is retention- and speed-gated; `provisionalCount` is inferred placement, not fluency. This is Rabbithole's first-party practice engine — separate from web/external-practice activity. A check-in is a placement MAP, not a score: never read a partial check-in as mastery. Use this when asked how a scholar is doing with math practice, what they've mastered, what to assign next, or whether there are open misconceptions to address; for anything about the check-in itself — its questions, per-probe performance, or whether it is finished — call get_scholar_math_checkin instead." + (isStaffReader ? STAFF_MATH_LEVEL_GUIDANCE : ""),
     inputSchema: scholarNameSchema,
     run: async (input) => {
       const scholar = await resolveScholar(input.scholarName);
       if (!scholar) return notFound(input.scholarName);
-      const practice = await ctx.runQuery(
-        internal.curriculumAssistant.getScholarPractice,
-        { scholarId: scholar.id as Id<"users"> },
-      );
+      const scholarId = scholar.id as Id<"users">;
+      // A parent also gets the Math Skills portrait the portal shows, so the
+      // aide reads grade level and growth from the same source as the screen
+      // instead of guessing them from strand counts (TRA-619). Other roles are
+      // unchanged.
+      const [practice, portrait] = await Promise.all([
+        ctx.runQuery(internal.curriculumAssistant.getScholarPractice, {
+          scholarId,
+        }),
+        isParent
+          ? ctx.runQuery(internal.mathPortrait.getScholarMathPortrait, {
+              scholarId,
+              withFluentSkillLabels: parentAideFluentSkills,
+            })
+          : isStaffReader
+            ? ctx.runQuery(internal.mathPortrait.getScholarMathPortrait, {
+                scholarId,
+                withOverall: true,
+              })
+            : null,
+      ]);
+      const mathLevel = isStaffReader ? staffMathLevel(portrait) : null;
       // REDACTION (centralized, role-tiered): parents get trend altitude (no
       // due backlog, no misconceptions); scholars keep due-for-review but not
       // misconceptions; teacher/admin get everything.
@@ -531,9 +619,15 @@ export async function makeScholarReadTools(
           }${redacted.checkIn ? `, map ${redacted.checkIn.mapProgress}` : ""})`,
         },
       });
+      // The portrait goes FIRST so the model meets grade level before the
+      // strand counts, which list foundational strands (counting) first.
       return JSON.stringify({
+        ...(portrait && isParent
+          ? { mathPortrait: parentMathPortrait(portrait, parentAideFluentSkills) }
+          : {}),
         scholar: scholar.name,
         ...redacted,
+        ...(mathLevel ? { mathLevel } : {}),
       });
     },
   });
@@ -754,7 +848,9 @@ export async function makeScholarReadTools(
     name: "get_school_calendar",
     description: institutionId
       ? "Get the current school's upcoming no-school days — holidays, breaks, and staff-development days — plus its calendar-subscription address. Use it for any question about days off, holidays, breaks, when school is closed, whether there's school on a given date, or how to add the school calendar to a phone or calendar app. The caller's school is already resolved, so do not look up or supply a scholar. `kind: \"staffOnly\"` means no school for scholars but faculty are in-service. Only closures are on this calendar; it is not a class schedule or an assignment due-date list."
-      : "Get the school's upcoming no-school days — holidays, breaks, and staff-development days — for the school a named scholar attends, plus the calendar-subscription address for that school. Use it for any question about days off, holidays, breaks, when school is closed, whether there's school on a given date, or how to add the school calendar to a phone or calendar app. `kind: \"staffOnly\"` means no school for scholars but faculty are in-service. Only closures are on this calendar; it is not a class schedule or an assignment due-date list.",
+      : isParent
+        ? "Get the school's upcoming no-school days — holidays, breaks, and staff-development days — for the school a named child attends, the calendar-subscription address for that school, and the child's homework plan (`homeworkPlan`: every homework item the child's teachers have given that is due from last week on, or with no due date and given from last week on, finished or not, with its title, subject, teacher, due day, and whether it is done away from the BunnyPad). Use it for any question about days off, whether there's school on a given date, adding the school calendar to a phone, or what homework is coming up and when it is due. `kind: \"staffOnly\"` means no school for scholars but faculty are in-service. The plan carries no done or late status, so never say whether the child has done something."
+        : "Get the school's upcoming no-school days — holidays, breaks, and staff-development days — for the school a named scholar attends, plus the calendar-subscription address for that school. Use it for any question about days off, holidays, breaks, when school is closed, whether there's school on a given date, or how to add the school calendar to a phone or calendar app. `kind: \"staffOnly\"` means no school for scholars but faculty are in-service. Only closures are on this calendar; it is not a class schedule or an assignment due-date list.",
     inputSchema: calendarInputSchema,
     run: async (input) => {
       const scholar = institutionId
@@ -796,12 +892,59 @@ export async function makeScholarReadTools(
         },
       });
       const siteBase = process.env.CONVEX_SITE_URL ?? "";
+      // A parent's calendar also carries the child's homework plan: the same
+      // list the portal's Homework tab shows (parents.homeworkPlanForScholar),
+      // plan only, with no done or late status. `scholar` is already confined
+      // to this parent's own children by resolveScholar.
+      const homeworkPlan =
+        isParent && scholar
+          ? await ctx.runQuery(internal.parents.getChildHomeworkPlan, {
+              scholarId: scholar.id as Id<"users">,
+            })
+          : null;
+      // Each item's week is worked out here, by the child's own week rule,
+      // so the aide never does date arithmetic (TRA-621: left to it, the
+      // model put Friday's work in "next week").
+      const planNowMs = Date.now();
+      const planTimeZone = homeworkPlan?.timeZone || calendar.timeZone;
       return JSON.stringify({
         scholar: scholar?.name,
         school: calendar.schoolName,
         today: calendar.today,
         timeZone: calendar.timeZone,
         upcomingClosures: calendar.upcoming,
+        ...(homeworkPlan
+          ? {
+              homeworkPlan: homeworkPlan.items.map((item) => ({
+                title: item.title,
+                subject: item.subject,
+                teacher: item.teacherName,
+                due: item.dueAt
+                  ? new Intl.DateTimeFormat("en-US", {
+                      timeZone: homeworkPlan.timeZone || calendar.timeZone,
+                      weekday: "short",
+                      month: "short",
+                      day: "numeric",
+                    }).format(new Date(item.dueAt))
+                  : null,
+                // Open until that day, then gone from the child's list (never late).
+                ...(item.openUntil
+                  ? {
+                      openUntil: new Intl.DateTimeFormat("en-US", {
+                        timeZone: homeworkPlan.timeZone || calendar.timeZone,
+                        weekday: "short",
+                        month: "short",
+                        day: "numeric",
+                      }).format(new Date(item.openUntil - 1)),
+                    }
+                  : {}),
+                // "this week", "next week", …; undated work has none, and
+                // JSON.stringify leaves an undefined key out.
+                week: homeworkPlanWeek(item, planNowMs, planTimeZone) ?? undefined,
+                awayFromBunnyPad: item.awayFromBunnyPad,
+              })),
+            }
+          : {}),
         // Per-school by construction — never hand out the bare /calendar.ics.
         subscriptionUrl: siteBase
           ? withBase(

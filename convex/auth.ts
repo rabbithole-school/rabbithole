@@ -134,16 +134,19 @@ const convexAuthExports = convexAuth({
     // signIn("mcp", { code, codeVerifier, clientId, redirectUri }); we
     // consume the one-shot authorization code minted by mcpOauth.approve
     // (so it's bound to the user who consented), verify the PKCE S256
-    // challenge, and return that userId — which mints a normal Convex Auth
-    // session. The MCP access token IS a standard Convex JWT; refresh runs
-    // through the stock `auth:signIn { refreshToken }` path. No password,
-    // no bearer table — the session is revocable like any other.
+    // challenge, then mint the session together with its `mcpSessions` row
+    // (mcpOauth.openSession) and hand Convex Auth that session id, so the
+    // row exists from the instant the session does. The MCP access token IS
+    // a standard Convex JWT; refresh runs through the stock
+    // `auth:signIn { refreshToken }` path, after which the token endpoint
+    // renews the session (mcpOauth.recordMySession). No password, no bearer
+    // table — the session is revocable like any other.
     ConvexCredentials({
       id: "mcp",
       authorize: async (
         credentials,
         ctx,
-      ): Promise<{ userId: Id<"users"> } | null> => {
+      ): Promise<{ userId: Id<"users">; sessionId: Id<"authSessions"> } | null> => {
         const { code, codeVerifier, clientId, redirectUri } = credentials;
         if (
           typeof code !== "string" ||
@@ -166,7 +169,11 @@ const convexAuthExports = convexAuth({
         const challenge = await pkceChallengeFromVerifier(codeVerifier);
         if (challenge !== grant.codeChallenge) return null;
 
-        return { userId: grant.userId };
+        const sessionId = await ctx.runMutation(internal.mcpOauth.openSession, {
+          userId: grant.userId,
+          clientId: grant.clientId,
+        });
+        return { userId: grant.userId, sessionId };
       },
     }),
 

@@ -22,11 +22,14 @@ import {
   deliverableStatusFor,
   type AppRole,
 } from "../../../vendor/shared/appSurface";
+import { missionLines } from "../../../vendor/shared/missionFlair";
 
 export type BuilderDeliverable = {
   /** The activity's deliverable kind, when it has one. */
   kind: string | null;
   mode: DeliverableMode | null;
+  missionApp: boolean;
+  missionLines: string[];
   criteria: Criterion[];
   criteriaPending: boolean;
   criteriaFailed: boolean;
@@ -63,6 +66,7 @@ export function useBuilderDeliverable({
     activityId ? { id: activityId } : "skip",
   );
   const spec = activity?.deliverable ?? null;
+  const missionApp = activity?.missionApp === true;
   const snapshot = useQuery(
     api.sessions.getDeliverableSnapshot,
     activityId ? { sessionId } : "skip",
@@ -111,6 +115,8 @@ export function useBuilderDeliverable({
   return {
     kind: spec?.kind ?? null,
     mode: spec?.mode ?? null,
+    missionApp,
+    missionLines: missionApp ? missionLines(criteria) : [],
     criteria,
     criteriaPending: !!criteriaPending,
     criteriaFailed: !!criteriaFailed,

@@ -303,7 +303,6 @@ function buildPrompt(opts: {
     enduringUnderstandings: null,
   };
   return buildSystemPrompt(
-    null, // teacherWhisper
     null, // readingLevel
     "Kai", // scholarName
     unitContext,

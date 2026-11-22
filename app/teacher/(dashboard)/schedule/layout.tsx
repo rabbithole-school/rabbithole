@@ -10,6 +10,7 @@ import { HappeningNow } from "@/components/MasterSchedule/HappeningNow";
 import { AssignmentsListDetail } from "../_components/AssignmentsListDetail";
 import { assignmentIdFromPathname } from "../_components/assignmentsPath";
 import { ProgramSchedule } from "@/components/ProgramSchedule";
+import { HomeworkPlanner } from "@/components/MasterSchedule/HomeworkPlanner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isTeacherRole } from "@/convex/lib/roles";
@@ -26,7 +27,7 @@ const StartAssignmentDialog = dynamic(
 // stub. The aide is the global header Robot → docked panel (general scope on
 // this tab), not a per-tab dock.
 //
-// Four top-level views via the Now | Day | Week | List toggle:
+// Five top-level views via the Now | Day | Week | List | Homework toggle:
 //   • Week (default) / Day → MasterScheduleView (the term timetable).
 //   • Now → HappeningNow (the live cross-section of the schedule).
 //   • List → AssignmentsListDetail, the exhaustive assignments + standing-
@@ -35,7 +36,9 @@ const StartAssignmentDialog = dynamic(
 //     placed on the timetable. A deep-linked assignment id also resolves here
 //     (it selects that row), so a link to one assignment's Run page lands
 //     meaningfully. `?view=list` requests it with no selection; the legacy
-//     `?view=now`/`?view=schedule` params still resolve. The path parser lives
+//     `?view=now`/`?view=schedule` params still resolve.
+//   • Homework → HomeworkPlanner: each group's homework by school week
+//     (TRA-581), a view over gives. The path parser lives
 //     in `_components/assignmentsPath` — a layout file may only export its
 //     default.
 export default function ScheduleLayout({
@@ -65,7 +68,9 @@ export default function ScheduleLayout({
   const assignmentsView: AssignmentsView =
     viewParam === "now"
       ? "now"
-      : viewParam === "list"
+      : viewParam === "homework"
+        ? "homework"
+        : viewParam === "list"
         ? "list"
         : viewParam === "day"
           ? "day"
@@ -93,7 +98,7 @@ export default function ScheduleLayout({
   );
   const setProgramView = useCallback(
     (view: AssignmentsView) => {
-      if (view === "now") return;
+      if (view === "now" || view === "homework") return;
       const params = new URLSearchParams(searchParams.toString());
       params.set("view", view);
       router.replace(`/teacher/schedule?${params.toString()}`, { scroll: false });
@@ -127,6 +132,7 @@ export default function ScheduleLayout({
         view={programView}
         onChange={setProgramView}
         includeNow={false}
+        includeHomework={false}
       />
     );
 
@@ -224,6 +230,11 @@ export default function ScheduleLayout({
               <AssignmentsListDetail
                 onStartAssignment={() => setGlobalStartOpen(true)}
               />
+            ) : assignmentsView === "homework" ? (
+              // Homework = each group's homework by school week (TRA-581).
+              <Box flex={1} overflow="hidden">
+                <HomeworkPlanner />
+              </Box>
             ) : (
               // Now = the live "happening now" cross-section (the schedule's now
               // projection), not a flat list of assignments.

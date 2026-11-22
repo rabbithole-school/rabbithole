@@ -35,7 +35,7 @@ const DEMO_TRAILS = [
     earners: [
       { firstName: "Kai" },
       { firstName: "Lani" },
-      { firstName: "Oliver" },
+      { firstName: "Makoa" },
     ],
   },
 ];

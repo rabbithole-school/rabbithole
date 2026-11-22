@@ -1,0 +1,7 @@
+Put an aircraft carrier in the harbor bay.
+Make the bay a lot bigger so the carrier fits.
+Add a jet I can fly and land on the carrier.
+Add ladders on the side and all the rooms a carrier has.
+Make the windows portholes and add hatches.
+Add an elevator on the carrier.
+Make X pause time.

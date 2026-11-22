@@ -76,7 +76,7 @@ const scholar = {
 function seedFixtures() {
   convex.answers.clear();
   convex.answers.set("cohortPractice:crossDomainMasteryForScholars", {
-    scholars: [{ scholarId: SCHOLAR_ID, domains: [] }],
+    scholars: [{ scholarId: SCHOLAR_ID, domains: [], overallLevel: null }],
   });
   convex.answers.set("cohortPractice:masteryForScholars", {
     scholars: [{ scholarId: SCHOLAR_ID, readings: [] }],

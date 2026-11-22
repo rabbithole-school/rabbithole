@@ -232,7 +232,8 @@ export const settleRun = internalMutation({
 });
 
 /** Hourly dispatcher; institution-local morning filtering and durable per-week
- *  markers make it effectively weekly-per-institution. */
+ *  markers make it effectively weekly-per-institution. Once a week's batch is
+ *  complete, its write-ups go to the class channels (`selSynthesisSlack.ts`). */
 export const dispatchSelSyntheses = internalAction({
   args: {},
   handler: async (
@@ -255,25 +256,35 @@ export const dispatchSelSyntheses = internalAction({
         institutionId: candidate.institutionId,
         weekKey: candidate.weekKey,
       });
-      if (!proceed) continue;
-      claimed += 1;
-      const result = await ctx.runAction(
-        internal.selSynthesisActions.generateSelSynthesesForWeek,
-        {
+      if (proceed) {
+        claimed += 1;
+        const result = await ctx.runAction(
+          internal.selSynthesisActions.generateSelSynthesesForWeek,
+          {
+            institutionId: candidate.institutionId,
+            weekKey: candidate.weekKey,
+            window: candidate.window,
+          },
+        );
+        // Complete only on a clean run; a partial failure is left claimable so the
+        // next tick retries (bounded by SEL_SYNTHESIS_MAX_ATTEMPTS).
+        const settled = await ctx.runMutation(internal.selSynthesisCron.settleRun, {
           institutionId: candidate.institutionId,
           weekKey: candidate.weekKey,
-          window: candidate.window,
-        },
-      );
-      // Complete only on a clean run; a partial failure is left claimable so the
-      // next tick retries (bounded by SEL_SYNTHESIS_MAX_ATTEMPTS).
-      const settled = await ctx.runMutation(internal.selSynthesisCron.settleRun, {
-        institutionId: candidate.institutionId,
-        weekKey: candidate.weekKey,
-        failedCount: result.failedCount,
-      });
-      if (settled.retrying) retrying += 1;
-      else completed += 1;
+          failedCount: result.failedCount,
+        });
+        if (settled.retrying) retrying += 1;
+        else completed += 1;
+      }
+      // Runs whether or not this tick claimed: a week completed on an earlier
+      // tick still gets its post. A no-op until the run completes, and after
+      // it has posted once.
+      // A failed post must not skip the remaining institutions' batches.
+      try {
+        await ctx.runAction(internal.selSynthesisSlack.postForWeek, candidate);
+      } catch (error) {
+        console.error("[SelSynthesisSlack] post failed:", error);
+      }
     }
     return { candidates: candidates.length, claimed, completed, retrying };
   },

@@ -127,3 +127,13 @@ export async function markUnitBuiltInSession(
   }
   await ctx.db.patch(args.sessionId, { unitBuiltInChatAt: Date.now() });
 }
+
+/**
+ * Whether two Quest lesson/activity titles name the same thing — case,
+ * surrounding space, and runs of whitespace don't count. Keeps the planning
+ * tutor's create tools idempotent when it re-issues a plan it already built.
+ */
+export function sameQuestTitle(a: string, b: string): boolean {
+  const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  return norm(a) === norm(b);
+}

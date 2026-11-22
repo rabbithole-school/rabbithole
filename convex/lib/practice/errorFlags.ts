@@ -56,6 +56,8 @@ export type OpenErrorPattern = {
   count: number;
   /** Most-recent event timestamp for this pattern (inside the window). */
   lastAt: number;
+  /** When the flag opened: the ERROR_FLAG_MIN_COUNT-th earliest in-window event. */
+  openedAt: number;
   /** Growth-framed teacher phrasing. */
   phrasing: string;
 };
@@ -71,26 +73,74 @@ export function openErrorPatterns(
   now: number,
 ): OpenErrorPattern[] {
   const since = now - ERROR_FLAG_WINDOW_MS;
-  const byPattern = new Map<ErrorPattern, { count: number; lastAt: number }>();
+  const byPattern = new Map<ErrorPattern, number[]>();
 
   for (const e of events) {
     if (e.createdAt < since || e.createdAt > now) continue;
     const phrasing = PATTERN_PHRASING[e.pattern as ErrorPattern];
     if (!phrasing) continue; // unknown / retired pattern → skip
     const key = e.pattern as ErrorPattern;
-    const acc = byPattern.get(key) ?? { count: 0, lastAt: 0 };
-    acc.count += 1;
-    if (e.createdAt > acc.lastAt) acc.lastAt = e.createdAt;
-    byPattern.set(key, acc);
+    const times = byPattern.get(key) ?? [];
+    times.push(e.createdAt);
+    byPattern.set(key, times);
   }
 
   const open: OpenErrorPattern[] = [];
-  for (const [pattern, { count, lastAt }] of byPattern) {
-    if (count < ERROR_FLAG_MIN_COUNT) continue;
-    open.push({ pattern, count, lastAt, phrasing: PATTERN_PHRASING[pattern] });
+  for (const [pattern, times] of byPattern) {
+    if (times.length < ERROR_FLAG_MIN_COUNT) continue;
+    times.sort((a, b) => a - b);
+    open.push({
+      pattern,
+      count: times.length,
+      lastAt: times[times.length - 1],
+      openedAt: times[ERROR_FLAG_MIN_COUNT - 1],
+      phrasing: PATTERN_PHRASING[pattern],
+    });
   }
   open.sort((a, b) => b.lastAt - a.lastAt);
   return open;
+}
+
+/** An error event tagged with the node it happened on. */
+export type NodeErrorEvent = ErrorEvent & { nodeKey: string };
+
+/**
+ * One node's open practice flag. Every flag reader goes through this shape
+ * (via `openPracticeFlags` in convex/lib/practiceFlags.ts, or
+ * `practiceFlagsFromEvents` over rows a caller already holds), so a new
+ * opener only has to be added here once.
+ */
+export type OpenPracticeFlag = {
+  nodeKey: string;
+  /** The node's open patterns, most-recent-first (never empty). */
+  patterns: OpenErrorPattern[];
+};
+
+/**
+ * Group events by node and keep the nodes with at least one open pattern,
+ * most recently reinforced first (`patterns[0].lastAt` desc), ties by
+ * `nodeKey` ascending — so `[0]` is the node auto-remediation targets.
+ */
+export function practiceFlagsFromEvents(
+  events: readonly NodeErrorEvent[],
+  now: number,
+): OpenPracticeFlag[] {
+  const byNode = new Map<string, NodeErrorEvent[]>();
+  for (const e of events) {
+    const list = byNode.get(e.nodeKey);
+    if (list) list.push(e);
+    else byNode.set(e.nodeKey, [e]);
+  }
+  const flags: OpenPracticeFlag[] = [];
+  for (const [nodeKey, nodeEvents] of byNode) {
+    const patterns = openErrorPatterns(nodeEvents, now);
+    if (patterns.length > 0) flags.push({ nodeKey, patterns });
+  }
+  return flags.sort(
+    (a, b) =>
+      b.patterns[0].lastAt - a.patterns[0].lastAt ||
+      (a.nodeKey < b.nodeKey ? -1 : a.nodeKey > b.nodeKey ? 1 : 0),
+  );
 }
 
 /** True iff at least one pattern is open — the teacher-only node flag. */

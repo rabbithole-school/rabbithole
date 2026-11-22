@@ -1,7 +1,9 @@
 // THE message-access spec, as a pure decision function (the oracle).
 //
 // Who may read, reply to, list, open, and add people to a `parentThreads`
-// conversation of each kind — and who is ever sent a copy off-platform. The
+// conversation of each kind — and who is ever sent a copy off-platform.
+// "general", "workshop" and "about" are the three flavors of a scholar
+// conversation (`kind: "scholar"` + `flavor`; lib/scholarThreadAccess.ts). The
 // prose twin is the decision table in TRA-388; this module is the executable
 // form that `convex/__tests__/messageAccessMatrix.test.ts` checks EVERY real
 // messaging endpoint against. It encodes the product decisions, not the code:
@@ -20,7 +22,10 @@
 //               (teachers, school admins, platform
 //                admins, base staff with the grant)
 //             scholars, mentors (w/o ops)            ✗     ✗      —
-//   mentor    the thread's own scholar               ✓     ✓      ✗ (never opens one)
+//   general   the thread's own scholar               ✓     ✓      ✗ (opens one only by
+//                                                                 writing to ONE teacher
+//                                                                 at their school —
+//                                                                 decideScholarCompose)
 //             teaching team at the school + platform ✓     ✓      ✓ ("open door")
 //             admins
 //             a mentor whose live grant covers the   ✓     ✓      ✓
@@ -30,6 +35,7 @@
 //   workshop  the thread's own scholar               ✓     ✓      ✗
 //             teaching team + platform admins        ✓     ✓      ✗
 //             everyone else                          ✗     ✗      ✗
+//   about     (one thread per Quest or wonder) the same as workshop
 //
 // Transferred-school history (stamp ≠ the scholar's current school): read-only
 // for the teaching team at the STAMPED school + platform admins; nobody writes;
@@ -37,7 +43,7 @@
 //
 // Delivery: scholars in-app only, always. A family guardian is eligible for
 // email/SMS/WhatsApp per their own channel settings; a NAMED staff member who
-// can still reach a mentor thread gets the batched email; nobody is emailed
+// can still reach a general thread gets the batched email; nobody is emailed
 // about a workshop thread (Slack #workshop only).
 //
 // Withdrawn messages/attachments: staff readers see the original; scholars and
@@ -46,7 +52,7 @@
 //
 // An impersonation overlay reads exactly as its target and can never write.
 
-export type MessageThreadKind = "family" | "mentor" | "workshop";
+export type MessageThreadKind = "family" | "general" | "workshop" | "about";
 
 export type MessageViewerRole = "scholar" | "guardian" | "staff" | "platform_admin";
 
@@ -186,7 +192,7 @@ export function decideMessageAccess(f: MessageAccessFacts): MessageAccessDecisio
       : deny("no school:operations at the thread's school");
   }
 
-  // mentor / workshop
+  // general / workshop / about (a scholar conversation)
   if (!f.thread.stampLive) return deny("scholar thread at a suspended school");
   if (v.role === "guardian") return deny("guardians never see scholar threads");
 
@@ -209,11 +215,11 @@ export function decideMessageAccess(f: MessageAccessFacts): MessageAccessDecisio
     return grant(f, "teaching team / platform admin (open door)", {
       write: true,
       side: "staff",
-      addPeople: f.kind === "mentor",
-      offPlatform: { ...NONE, email: v.namedOnThread && f.kind === "mentor" },
+      addPeople: f.kind === "general",
+      offPlatform: { ...NONE, email: v.namedOnThread && f.kind === "general" },
     });
   }
-  if (f.kind === "mentor" && v.mentorCoversScholar && v.namedOnThread) {
+  if (f.kind === "general" && v.mentorCoversScholar && v.namedOnThread) {
     return grant(f, "named mentor with a covering grant", {
       write: true,
       side: "staff",
@@ -221,7 +227,7 @@ export function decideMessageAccess(f: MessageAccessFacts): MessageAccessDecisio
       offPlatform: { ...NONE, email: true },
     });
   }
-  if (f.kind === "mentor" && v.mentorCoversScholar) {
+  if (f.kind === "general" && v.mentorCoversScholar) {
     return deny("covering mentor, but not named on this thread");
   }
   return deny("no standing on this scholar thread");
@@ -243,7 +249,7 @@ export function mayEditMessage(
 // ── Opening a conversation ──────────────────────────────────────────────
 
 export type MessageOpenFacts = {
-  kind: "mentor" | "workshop";
+  kind: "general" | "workshop";
   /** The scholar's current school is live. */
   scholarSchoolLive: boolean;
   viewer: {
@@ -262,21 +268,64 @@ export function decideOpen(f: MessageOpenFacts): { open: boolean; reason: string
   if (v.suspendedOut) return { open: false, reason: "viewer suspended" };
   if (v.impersonating) return { open: false, reason: "impersonation is read-only" };
   if (!f.scholarSchoolLive) return { open: false, reason: "scholar's school suspended" };
-  if (v.role === "scholar") return { open: false, reason: "scholars never open threads" };
+  // A scholar's only way in is writing to a teacher (decideScholarCompose),
+  // never the staff open (a fan-out naming adults of their choosing).
+  if (v.role === "scholar") return { open: false, reason: "scholars use decideScholarCompose" };
   if (v.role === "guardian") {
     return { open: false, reason: "guardians never open scholar threads" };
   }
   const team =
     v.role === "platform_admin" || (v.role === "staff" && v.teachingTeamAtScholarSchool);
   if (team) return { open: true, reason: "teaching team / platform admin" };
-  if (f.kind === "mentor" && v.mentorCoversScholar) {
+  if (f.kind === "general" && v.mentorCoversScholar) {
     return { open: true, reason: "mentor grant covers the scholar" };
   }
   return { open: false, reason: "no standing with this scholar" };
 }
 
 /**
- * May `candidate` be NAMED on a mentor thread with this scholar (compose's
+ * May a SCHOLAR start (or add to) a general conversation with `recipient`?
+ * Only their own live school's teaching team (a teacher or school admin by
+ * membership) — never a mentor, base/ops staff, a platform admin with no
+ * membership there, a system account, a guardian or another scholar. A
+ * program guest reaches only their program teachers (owners of a group
+ * they're in), as a guest's family does.
+ */
+export function decideScholarCompose(f: {
+  scholarSchoolLive: boolean;
+  viewer: {
+    role: MessageViewerRole;
+    suspendedOut: boolean;
+    impersonating: boolean;
+    programGuest: boolean;
+  };
+  recipient: {
+    role: MessageViewerRole;
+    isSystem: boolean;
+    teachingTeamAtScholarSchool: boolean;
+    /** Owns a scholar group the viewer is in. */
+    ownsViewersGroup: boolean;
+  };
+}): { open: boolean; reason: string } {
+  const v = f.viewer;
+  if (v.role !== "scholar") return { open: false, reason: "scholars only" };
+  if (v.suspendedOut) return { open: false, reason: "viewer suspended" };
+  if (v.impersonating) return { open: false, reason: "impersonation is read-only" };
+  if (!f.scholarSchoolLive) return { open: false, reason: "scholar's school suspended" };
+  const r = f.recipient;
+  if (r.isSystem || r.role === "scholar" || r.role === "guardian") {
+    return { open: false, reason: "not a teacher" };
+  }
+  if (v.programGuest && !r.ownsViewersGroup) {
+    return { open: false, reason: "a program guest writes only to their program teachers" };
+  }
+  return r.teachingTeamAtScholarSchool
+    ? { open: true, reason: "teaching team at the scholar's school" }
+    : { open: false, reason: "not on the teaching team at the scholar's school" };
+}
+
+/**
+ * May `candidate` be NAMED on a general thread with this scholar (compose's
  * "Include staff", "Add people")? The teaching team at the scholar's school or
  * a mentor whose grant covers them — never a scholar, a guardian, a system
  * account, ops-only staff, or a platform admin with no membership there.

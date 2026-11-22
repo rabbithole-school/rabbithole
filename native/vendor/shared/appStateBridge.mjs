@@ -22,6 +22,7 @@ import {
   normalizeAppActionRegistry,
 } from "../shared/appActionPolicy.ts";
 import { DOM_TO_IMAGE_SOURCE } from "../shared/domToImageSource.ts";
+import { APP_STATE_DEFAULTS_KEY } from "../shared/appStateDefaults.ts";
 import { RABBITHOLE_APP_STYLE_ELEMENT } from "../shared/rabbitholeAppStyles.ts";
 import {
   MAX_APP_TUTOR_CONTEXT_BYTES,
@@ -37,6 +38,10 @@ import {
   normalizeAppAiContext,
 } from "../shared/appAiPolicy.ts";
 
+export {
+  APP_STATE_DEFAULTS_KEY,
+  withoutAppStateDefaults,
+} from "../shared/appStateDefaults.ts";
 export const APP_STATE_PROTOCOL = "rabbithole:app-state";
 export const APP_STATE_PROTOCOL_VERSION = 1;
 export const APP_STATE_WRITE_DEBOUNCE_MS = 250;
@@ -48,6 +53,12 @@ export const APP_SNAPSHOT_REQUEST_TYPE = "rabbithole:snapshot";
 export const APP_SNAPSHOT_RESULT_TYPE = "rabbithole:snapshot:result";
 export const APP_SNAPSHOT_MAX_WIDTH = 800;
 export const APP_SNAPSHOT_TIMEOUT_MS = 6_000;
+/** "Someone touched, pressed a key in, or scrolled the app." Frame→host only;
+ *  the host's play tracker (shared/appPlaySession.ts) turns these into active
+ *  time. Throttled in the frame to one per APP_ACTIVITY_PING_MS, which is far
+ *  finer than the two-minute active window it feeds. */
+export const APP_ACTIVITY_TYPE = "rabbithole:activity";
+export const APP_ACTIVITY_PING_MS = 5_000;
 
 export function hashAppSnapshotDataUrl(dataUrl) {
   let hash = 0x811c9dc5;
@@ -59,12 +70,50 @@ export function hashAppSnapshotDataUrl(dataUrl) {
 }
 
 const APP_SNAPSHOT_HASH_FUNCTION = `(${hashAppSnapshotDataUrl.toString()})`;
+
+// Which live nodes dom-to-image copies into a snapshot. Canvases stay where
+// they are, so whatever the app layers over one (a title, a score, the ring
+// around a minimap) lands on top of it in the picture as it does on screen
+// (TRA-592). A canvas that is not on screen is left out: a 0x0 one fails the
+// whole render (dom-to-image cannot load its empty image), and a hidden buffer
+// (p5's createGraphics, say) would only cost an encode, or fail the snapshot if
+// it holds a cross-origin picture. Scripts draw nothing. dom-to-image also downloads
+// every <img> again by its src, so an <img> that finished loading with no
+// pixels (no src yet because the app fills it in later, a relative path, a
+// source the sandbox CSP refused) failed that download and took the whole
+// snapshot with it (TRA-583). In the iPad's about:blank document
+// XMLHttpRequest.open("") throws "The string did not match the expected
+// pattern."; on web the request reaches the host page and CSP refuses it. Such
+// an image draws nothing, so it is left out too.
+export const APP_SNAPSHOT_NODE_FILTER_SOURCE =
+  '(n)=>n.tagName!=="SCRIPT"&&!(n.tagName==="CANVAS"&&!(n.width&&n.height&&n.getClientRects().length))&&!(n.tagName==="IMG"&&n.complete&&n.naturalWidth===0)';
+
+// Paints the SVG that dom-to-image renders onto a canvas and returns a JPEG.
+// WebKit decodes the images embedded in that SVG (each canvas's pixels, each
+// picture) only once the SVG is first drawn, so the first paint can come out
+// without them: a WebGL scene came back blank while the HUD over it showed.
+// One repaint after a pause picks them up. In a WKWebView a 16 ms pause was
+// enough and an immediate repaint was not; 100 ms leaves room for an iPad.
+// Every paint re-rasterizes the whole page, so it paints just twice. This and
+// the filter are source strings because the iPad runs Hermes, which does not
+// keep function source for toString() (TRA-299).
+export const APP_SNAPSHOT_PAINT_SOURCE =
+  '(async(u,w,h)=>{const i=new Image;await new Promise((a,j)=>{i.onload=a;i.onerror=()=>j(new Error("Render failed"));i.src=u});const o=document.createElement("canvas");o.width=w;o.height=h;const g=o.getContext("2d");if(!g)throw new Error("Canvas unavailable");const p=()=>{g.fillStyle="#fff";g.fillRect(0,0,w,h);g.drawImage(i,0,0)};p();await new Promise(r=>setTimeout(r,100));p();return o.toDataURL("image/jpeg",.7)})';
 // The vendored source is injected first. If that invariant is ever broken, the
 // legacy loader branch fails closed without making a network request.
 const DOM_TO_IMAGE_URL = "data:text/javascript,";
 
-export const RABBITHOLE_APP_SNAPSHOT_SDK = String.raw`(()=>{const P="${APP_STATE_PROTOCOL}",V=${APP_STATE_PROTOCOL_VERSION},R="${APP_SNAPSHOT_READY_TYPE}",Q="${APP_SNAPSHOT_REQUEST_TYPE}",O="${APP_SNAPSHOT_RESULT_TYPE}",N=!!window.ReactNativeWebView,B=N&&window.ReactNativeWebView.postMessage.bind(window.ReactNativeWebView),J=JSON.stringify,r=crypto.getRandomValues(new Uint32Array(4)).join("-"),H=${APP_SNAPSHOT_HASH_FUNCTION};let L=null;const x=(t,v={})=>{const m={protocol:P,version:V,nonce:r,type:t,...v};N?B(J(m)):parent.postMessage(m,"*")},d=(c,m)=>{if(!c.width||!c.height)throw new Error("Empty");if(c.width<=m)return c.toDataURL("image/jpeg",.7);const o=document.createElement("canvas"),s=m/c.width;o.width=m;o.height=Math.ceil(c.height*s);const g=o.getContext("2d");if(!g)throw new Error("Canvas unavailable");g.drawImage(c,0,0,o.width,o.height);return o.toDataURL("image/jpeg",.7)},k=(w,h)=>{const q=document.querySelectorAll("canvas");if(q.length!==1)return null;const c=q[0];return c.width*c.height>=w*h*.6?c:null},l=()=>window.domtoimage?Promise.resolve(window.domtoimage):L??=new Promise((a,j)=>{const s=document.createElement("script");s.integrity="sha384-zESinL+vR3OR5XGFqKjneclbVKOL8SfP+fKKO3K9BHAaPtboci56Vu3g5flevHk9";s.crossOrigin="anonymous";s.src="${DOM_TO_IMAGE_URL}";s.onload=()=>window.domtoimage?a(window.domtoimage):j(new Error("dom-to-image unavailable"));s.onerror=()=>j(new Error("dom-to-image load failed"));(document.head||document.documentElement).appendChild(s)}),c=async(m,w,h)=>{try{const f=await l(),b=document.body||document.documentElement,s=Math.min(1,m/w),W=Math.ceil(w*s),T=Math.ceil(h*s);if([...document.querySelectorAll("canvas")].some(c=>!(c.width&&c.height)&&c.getBoundingClientRect().width)){dispatchEvent(new Event("resize"));await new Promise(r=>setTimeout(r,1500))}const p=await f.toPng(b,{bgcolor:"#fff",width:W,height:T,filter:n=>n.tagName!=="CANVAS"&&n.tagName!=="SCRIPT",style:{transform:"scale("+s+")",transformOrigin:"top left",width:w+"px",height:h+"px"}}),i=new Image;await new Promise((a,j)=>{i.onload=a;i.onerror=()=>j(new Error("Render failed"));i.src=p});const o=document.createElement("canvas");o.width=W;o.height=T;const g=o.getContext("2d");if(!g)throw new Error("Canvas unavailable");g.drawImage(i,0,0);const M=[];for(const c of document.querySelectorAll("canvas")){const r=c.getBoundingClientRect();if(c.width&&c.height&&r.width&&r.height)try{g.drawImage(c,r.left*s,r.top*s,r.width*s,r.height*s);M.push([c.width,c.height,r.width,r.height,"ok"])}catch(e){M.push([c.width,c.height,String(e)])}else M.push([c.width,c.height,r.width,r.height,"skip"])}return{u:o.toDataURL("image/jpeg",.7),M}}catch(e){const q=k(w,h);if(q)return d(q,m);throw e}},z=m=>{const i=typeof m.requestId==="string"?m.requestId.trim():"";if(!i)return;const a=Number.isFinite(m.maxWidth)?Math.max(1,Math.min(1600,Math.round(m.maxWidth))):${APP_SNAPSHOT_MAX_WIDTH},E=document.documentElement,b=document.body,w=Number.isFinite(m.width)&&m.width>0?m.width:Math.max(innerWidth,E.clientWidth,b?.clientWidth||0)||800,h=Number.isFinite(m.height)&&m.height>0?m.height:Math.max(innerHeight,E.clientHeight,b?.clientHeight||0)||600;let t;Promise.race([c(a,w,h),new Promise((_,j)=>{t=setTimeout(()=>j(new Error("Timeout")),${APP_SNAPSHOT_TIMEOUT_MS})})]).then(v=>{const u=typeof v==="string"?v:v.u;x(O,{requestId:i,dataUrl:u,hash:H(u),meta:typeof v==="string"?null:v.M})},e=>x(O,{requestId:i,error:String(e&&e.message?e.message:e).slice(0,300)})).finally(()=>clearTimeout(t))},h=m=>{if(typeof m==="string")try{m=JSON.parse(m)}catch{return}if(!m||m.protocol!==P||m.version!==V||m.nonce!==r||m.type!==Q)return;z(m)},y=()=>x(R);if(N)Object.defineProperty(window,"__rabbitholeSnapshotReceive",{value:h});else addEventListener("message",e=>{if(e.source===parent)h(e.data)},true);addEventListener("DOMContentLoaded",y);addEventListener("load",y);y()})();true;`;
+export const RABBITHOLE_APP_SNAPSHOT_SDK = String.raw`(()=>{const P="${APP_STATE_PROTOCOL}",V=${APP_STATE_PROTOCOL_VERSION},R="${APP_SNAPSHOT_READY_TYPE}",Q="${APP_SNAPSHOT_REQUEST_TYPE}",O="${APP_SNAPSHOT_RESULT_TYPE}",N=!!window.ReactNativeWebView,B=N&&window.ReactNativeWebView.postMessage.bind(window.ReactNativeWebView),J=JSON.stringify,r=crypto.getRandomValues(new Uint32Array(4)).join("-"),H=${APP_SNAPSHOT_HASH_FUNCTION};let L=null;const x=(t,v={})=>{const m={protocol:P,version:V,nonce:r,type:t,...v};N?B(J(m)):parent.postMessage(m,"*")},d=(c,m)=>{if(!c.width||!c.height)throw new Error("Empty");if(c.width<=m)return c.toDataURL("image/jpeg",.7);const o=document.createElement("canvas"),s=m/c.width;o.width=m;o.height=Math.ceil(c.height*s);const g=o.getContext("2d");if(!g)throw new Error("Canvas unavailable");g.drawImage(c,0,0,o.width,o.height);return o.toDataURL("image/jpeg",.7)},k=(w,h)=>{const q=document.querySelectorAll("canvas");if(q.length!==1)return null;const c=q[0];return c.width*c.height>=w*h*.6?c:null},l=()=>window.domtoimage?Promise.resolve(window.domtoimage):L??=new Promise((a,j)=>{const s=document.createElement("script");s.integrity="sha384-zESinL+vR3OR5XGFqKjneclbVKOL8SfP+fKKO3K9BHAaPtboci56Vu3g5flevHk9";s.crossOrigin="anonymous";s.src="${DOM_TO_IMAGE_URL}";s.onload=()=>window.domtoimage?a(window.domtoimage):j(new Error("dom-to-image unavailable"));s.onerror=()=>j(new Error("dom-to-image load failed"));(document.head||document.documentElement).appendChild(s)}),c=async(m,w,h)=>{try{const f=await l(),b=document.body||document.documentElement,s=Math.min(1,m/w),W=Math.ceil(w*s),T=Math.ceil(h*s);if([...document.querySelectorAll("canvas")].some(c=>!(c.width&&c.height)&&c.getBoundingClientRect().width)){dispatchEvent(new Event("resize"));await new Promise(r=>setTimeout(r,1500))}const u=await f.toSvg(b,{bgcolor:"#fff",width:W,height:T,filter:${APP_SNAPSHOT_NODE_FILTER_SOURCE},style:{transform:"scale("+s+")",transformOrigin:"top left",width:w+"px",height:h+"px"}});return await ${APP_SNAPSHOT_PAINT_SOURCE}(u,W,T)}catch(e){const q=k(w,h);if(q)return d(q,m);throw e}},z=m=>{const i=typeof m.requestId==="string"?m.requestId.trim():"";if(!i)return;const a=Number.isFinite(m.maxWidth)?Math.max(1,Math.min(1600,Math.round(m.maxWidth))):${APP_SNAPSHOT_MAX_WIDTH},E=document.documentElement,b=document.body,w=Number.isFinite(m.width)&&m.width>0?m.width:Math.max(innerWidth,E.clientWidth,b?.clientWidth||0)||800,h=Number.isFinite(m.height)&&m.height>0?m.height:Math.max(innerHeight,E.clientHeight,b?.clientHeight||0)||600;let t;Promise.race([c(a,w,h),new Promise((_,j)=>{t=setTimeout(()=>j(new Error("Timeout")),${APP_SNAPSHOT_TIMEOUT_MS})})]).then(v=>{x(O,{requestId:i,dataUrl:v,hash:H(v)})},e=>x(O,{requestId:i,error:String(e&&e.message?e.message:e).slice(0,300)})).finally(()=>clearTimeout(t))},h=m=>{if(typeof m==="string")try{m=JSON.parse(m)}catch{return}if(!m||m.protocol!==P||m.version!==V||m.nonce!==r||m.type!==Q)return;z(m)},y=()=>x(R);if(N)Object.defineProperty(window,"__rabbitholeSnapshotReceive",{value:h});else addEventListener("message",e=>{if(e.source===parent)h(e.data)},true);addEventListener("DOMContentLoaded",y);addEventListener("load",y);y()})();true;`;
 
+// On `init`, the last change to each value wins. App code runs before the
+// host can answer `ready`, so whatever it writes then is its boot-time default.
+// The saved doc remembers each version's defaults under APP_STATE_DEFAULTS_KEY:
+// - a key the saved doc lacks takes the new default;
+// - an unchanged default keeps the saved value (the scholar's change);
+// - a changed default wins, because the designer changed it on purpose;
+// - a doc saved before defaults were recorded keeps its saved values.
+// The app never sees the recorded defaults.
+//
 // `character.say` and `judge` share one request/response pair: the frame posts
 // `request` {requestId, method, params}; the host answers `response`
 // {requestId, ok, result|error}. One call per method in flight, a client-side
@@ -73,8 +122,17 @@ export const RABBITHOLE_APP_SNAPSHOT_SDK = String.raw`(()=>{const P="${APP_STATE
 // as a JSON-safe copy; the host parser is where its rules are enforced.
 // Tutor-spoken character lines arrive on init/update as `characterLine` and
 // fire `character.onLine` once per id per page load.
-export const RABBITHOLE_APP_STATE_SDK = String.raw`(()=>{const P="${APP_STATE_PROTOCOL}",V=${APP_STATE_PROTOCOL_VERSION},N=!!window.ReactNativeWebView,B=N&&window.ReactNativeWebView.postMessage.bind(window.ReactNativeWebView),J=JSON.stringify,r=crypto.getRandomValues(new Uint32Array(4)).join("-"),R=${APP_ACTION_NAME_PATTERN},Q=${FORBIDDEN_APP_ACTION_NAME_PATTERN},Y=navigator.userActivation;let s={},i=false,p={},l=[],f=new Set,u={},a=false,d=null,g={},w=new Set,e=[],z=new Set,M=new Map,L=null,G=new Map,U=new Set,W=new Set,X=0;const o=x=>x&&typeof x==="object"&&!Array.isArray(x),n=()=>f.forEach(c=>c(s)),q=()=>w.forEach(c=>c(u)),k=()=>z.forEach(c=>c(e)),x=(t,v={})=>{const m={protocol:P,version:V,nonce:r,type:t,...v};N?B(J(m)):parent.postMessage(m,"*")},Z=(c,j)=>Object.assign(new Error(j),{code:c}),K=(c,j)=>Promise.reject(Z(c,j)),O=v=>{try{return{context:JSON.parse(J(v.context))}}catch{return{}}},E=(m,v)=>{if(Y&&Y.hasBeenActive===false)return K("needs-gesture","rabbithole."+m+" must follow a tap or key press");for(const c of G.values())if(c.m===m)return K("busy","rabbithole."+m+" is already waiting for a reply");const c="q"+ ++X;return new Promise((b,j)=>{G.set(c,{m,b,j,t:setTimeout(()=>{G.delete(c);j(Z("timeout","rabbithole."+m+" timed out"))},${APP_REQUEST_TIMEOUT_MS})});x("request",{requestId:c,method:m,params:v})})},D=v=>{if(!o(v)||typeof v.id!=="string"||typeof v.line!=="string"||U.has(v.id))return;U.add(v.id);W.forEach(c=>c(v))},F=()=>x("actions",{actions:[...M].map(([name,v])=>({name,description:v.description}))}),y=()=>{if(!i){x("ready");F()}},C=v=>{const j=J(v===undefined?null:v);if(j===undefined||new TextEncoder().encode(j).length>${MAX_APP_ACTION_RESULT_BYTES})throw new Error("Action result is too large or not JSON-serializable");return JSON.parse(j)},T=(m,v={})=>{m=typeof m==="string"?m.trim():"";if(!m||m.length>${MAX_APP_TUTOR_MESSAGE_CHARS})throw new TypeError("rabbithole.askTutor requires a short message");const c=v&&v.context;if(c!==undefined&&!o(c))throw new TypeError("rabbithole.askTutor context must be an object");let j;if(c!==undefined){try{j=J(c)}catch{}if(j===undefined||new TextEncoder().encode(j).length>${MAX_APP_TUTOR_CONTEXT_BYTES})throw new TypeError("rabbithole.askTutor context is too large or not JSON-serializable")}x("askTutor",{message:m,...(j===undefined?{}:{context:JSON.parse(j)})})},I=async v=>{if(!o(v)||typeof v.id!=="string"||typeof v.name!=="string"||v.id===L)return;L=v.id;const c=M.get(v.name);if(!c){x("actionResult",{requestId:v.id,ok:false,error:"Action is no longer registered"});return}try{x("actionResult",{requestId:v.id,ok:true,result:C(await c.fn(v.args))})}catch(t){x("actionResult",{requestId:v.id,ok:false,error:String(t&&t.message?t.message:t).slice(0,${MAX_APP_ACTION_ERROR_CHARS})})}},A=m=>{if(m.shared===null){d=null;u={};e=[];a=false;q();k();return}if(!o(m.shared))return;d=typeof m.shared.roomId==="string"?m.shared.roomId:null;u={...(o(m.shared.doc)?m.shared.doc:{}),...g};e=Array.isArray(m.shared.presence)?m.shared.presence:[];a=!!d;q();k();if(a&&Object.keys(g).length)x("sharedChange",{roomId:d,patch:g});g={}},h=m=>{if(typeof m==="string")try{m=JSON.parse(m)}catch{return}if(!m||m.protocol!==P||m.version!==V||m.nonce!==r)return;if(m.type==="init"&&!i){s={...(o(m.doc)?m.doc:{}),...p};i=true;n();A(m);I(m.actionRequest);D(m.characterLine);if(Object.keys(p).length||l.length)x("change",{patch:p,logs:l});p={};l=[]}else if(m.type==="update"&&i){s=o(m.doc)?m.doc:{};n();A(m);I(m.actionRequest);D(m.characterLine)}else if(m.type==="response"){const c=G.get(m.requestId);if(c){G.delete(m.requestId);clearTimeout(c.t);m.ok?c.b(m.result):c.j(Z(m.error?.code||"failed",m.error?.message||"Request failed"))}}};const S={getState:()=>u,setState:v=>{if(!o(v))throw new TypeError("rabbithole.shared.setState expects an object patch");if(!a||!d)throw new Error("No shared room is connected");u={...u,...v};q();x("sharedChange",{roomId:d,patch:v})},subscribe:c=>{w.add(c);if(a)c(u);return()=>w.delete(c)},getPresence:()=>e,subscribePresence:c=>{z.add(c);if(a)c(e);return()=>z.delete(c)},isAvailable:()=>a,connect:v=>{if(typeof v!=="string"||!v.trim())throw new TypeError("rabbithole.shared.connect expects a room id");d=v.trim();u={};e=[];a=false;q();k();x("sharedSelect",{roomId:d})}};window.rabbithole={getState:()=>s,setState:v=>{if(!o(v))throw new TypeError("rabbithole.setState expects an object patch");s={...(o(s)?s:{}),...v};if(i){n();x("change",{patch:v})}else p={...p,...v}},subscribe:c=>{f.add(c);if(i)c(s);return()=>f.delete(c)},askTutor:T,registerAction:(name,description,fn)=>{name=typeof name==="string"?name.trim():"";description=typeof description==="string"?description.trim():"";if(!name||name.length>${MAX_APP_ACTION_NAME_CHARS}||!R.test(name)||Q.test(name))throw new TypeError("rabbithole.registerAction requires a stage-setting identifier name");if(!description||description.length>${MAX_APP_ACTION_DESCRIPTION_CHARS})throw new TypeError("rabbithole.registerAction requires a short description");if(typeof fn!=="function")throw new TypeError("rabbithole.registerAction requires a function");if(!M.has(name)&&M.size>=${MAX_APP_ACTIONS})throw new Error("Too many registered app actions");M.set(name,{description,fn});F();return()=>{if(M.get(name)?.fn===fn){M.delete(name);F()}}},shared:S,character:{say:(t,v)=>{t=typeof t==="string"?t.trim():"";return t?E("character.say",{text:t.slice(0,${MAX_CHARACTER_LINE_CHARS}),...O(v)}):K("invalid","rabbithole.character.say requires text")},onLine:c=>{if(typeof c!=="function")throw new TypeError("rabbithole.character.onLine requires a function");W.add(c);return()=>W.delete(c)}},judge:(c,t,v)=>{c=typeof c==="string"?c.trim():"";t=typeof t==="string"?t.trim():"";return ${APP_JUDGE_ID_PATTERN}.test(c)&&t?E("judge",{judgeId:c,answer:t.slice(0,${MAX_JUDGE_ANSWER_CHARS}),...O(v)}):K("invalid","rabbithole.judge requires a judge id and an answer")}};["log","warn","error"].forEach(t=>{const c=console[t].bind(console);console[t]=(...b)=>{c(...b);const v={level:t,message:b.map(j=>{if(typeof j==="string")return j;try{const m=J(j);return m===undefined?String(j):m}catch{return String(j)}}).join(" ").slice(0,${APP_STATE_MAX_LOG_CHARS})};if(i)x("change",{logs:[v]});else{l.push(v);l=l.slice(-${APP_STATE_MAX_LOG_ENTRIES})}}});if(N)Object.defineProperty(window,"__rabbitholeReceive",{value:h});else addEventListener("message",v=>{if(v.source===parent)h(v.data)},true);addEventListener("DOMContentLoaded",y);addEventListener("load",y);y()})();true;`;
+export const RABBITHOLE_APP_STATE_SDK = String.raw`(()=>{const P="${APP_STATE_PROTOCOL}",V=${APP_STATE_PROTOCOL_VERSION},N=!!window.ReactNativeWebView,B=N&&window.ReactNativeWebView.postMessage.bind(window.ReactNativeWebView),J=JSON.stringify,r=crypto.getRandomValues(new Uint32Array(4)).join("-"),R=${APP_ACTION_NAME_PATTERN},Q=${FORBIDDEN_APP_ACTION_NAME_PATTERN},Y=navigator.userActivation;let s={},i=false,p={},l=[],f=new Set,M=new Map,L=null,G=new Map,U=new Set,W=new Set,X=0;const o=x=>x&&typeof x==="object"&&!Array.isArray(x),j=(a,b)=>a===b||!!(a&&b&&typeof a==="object"&&typeof b==="object"&&(Array.isArray(a)?Array.isArray(b)&&a.length===b.length&&a.every((v,k)=>j(v,b[k])):o(b)&&Object.keys(a).length===Object.keys(b).length&&Object.keys(a).every(k=>Object.hasOwn(b,k)&&j(a[k],b[k])))),H=v=>{v=o(v)?{...v}:{};delete v.${APP_STATE_DEFAULTS_KEY};return v},n=()=>f.forEach(c=>c(s)),x=(t,v={})=>{const m={protocol:P,version:V,nonce:r,type:t,...v};N?B(J(m)):parent.postMessage(m,"*")},Z=(c,j)=>Object.assign(new Error(j),{code:c}),K=(c,j)=>Promise.reject(Z(c,j)),O=v=>{try{return{context:JSON.parse(J(v.context))}}catch{return{}}},E=(m,v)=>{if(Y&&Y.hasBeenActive===false)return K("needs-gesture","rabbithole."+m+" must follow a tap or key press");for(const c of G.values())if(c.m===m)return K("busy","rabbithole."+m+" is already waiting for a reply");const c="q"+ ++X;return new Promise((b,j)=>{G.set(c,{m,b,j,t:setTimeout(()=>{G.delete(c);j(Z("timeout","rabbithole."+m+" timed out"))},${APP_REQUEST_TIMEOUT_MS})});x("request",{requestId:c,method:m,params:v})})},D=v=>{if(!o(v)||typeof v.id!=="string"||typeof v.line!=="string"||U.has(v.id))return;U.add(v.id);W.forEach(c=>c(v))},F=()=>x("actions",{actions:[...M].map(([name,v])=>({name,description:v.description}))}),y=()=>{if(!i){x("ready");F()}},C=v=>{const j=J(v===undefined?null:v);if(j===undefined||new TextEncoder().encode(j).length>${MAX_APP_ACTION_RESULT_BYTES})throw new Error("Action result is too large or not JSON-serializable");return JSON.parse(j)},T=(m,v={})=>{m=typeof m==="string"?m.trim():"";if(!m||m.length>${MAX_APP_TUTOR_MESSAGE_CHARS})throw new TypeError("rabbithole.askTutor requires a short message");const c=v&&v.context;if(c!==undefined&&!o(c))throw new TypeError("rabbithole.askTutor context must be an object");let j;if(c!==undefined){try{j=J(c)}catch{}if(j===undefined||new TextEncoder().encode(j).length>${MAX_APP_TUTOR_CONTEXT_BYTES})throw new TypeError("rabbithole.askTutor context is too large or not JSON-serializable")}x("askTutor",{message:m,...(j===undefined?{}:{context:JSON.parse(j)})})},I=async v=>{if(!o(v)||typeof v.id!=="string"||typeof v.name!=="string"||v.id===L)return;L=v.id;const c=M.get(v.name);if(!c){x("actionResult",{requestId:v.id,ok:false,error:"Action is no longer registered"});return}try{x("actionResult",{requestId:v.id,ok:true,result:C(await c.fn(v.args))})}catch(t){x("actionResult",{requestId:v.id,ok:false,error:String(t&&t.message?t.message:t).slice(0,${MAX_APP_ACTION_ERROR_CHARS})})}},h=m=>{if(typeof m==="string")try{m=JSON.parse(m)}catch{return}if(!m||m.protocol!==P||m.version!==V||m.nonce!==r)return;if(m.type==="init"&&!i){const v=o(m.doc)?m.doc:{},t=o(v.${APP_STATE_DEFAULTS_KEY})?v.${APP_STATE_DEFAULTS_KEY}:null,b={};s=H(v);for(const c in p)if(!(c in s)||t&&c in t&&!j(t[c],p[c]))b[c]=p[c];s={...s,...b};if(Object.keys(p).length)b.${APP_STATE_DEFAULTS_KEY}={...t,...p};p=b;i=true;n();I(m.actionRequest);D(m.characterLine);if(Object.keys(p).length||l.length)x("change",{patch:p,logs:l});p={};l=[]}else if(m.type==="update"&&i){s=H(m.doc);n();I(m.actionRequest);D(m.characterLine)}else if(m.type==="response"){const c=G.get(m.requestId);if(c){G.delete(m.requestId);clearTimeout(c.t);m.ok?c.b(m.result):c.j(Z(m.error?.code||"failed",m.error?.message||"Request failed"))}}};window.rabbithole={getState:()=>s,setState:v=>{if(!o(v))throw new TypeError("rabbithole.setState expects an object patch");s={...(o(s)?s:{}),...v};if(i){n();x("change",{patch:v})}else p={...p,...v}},subscribe:c=>{f.add(c);if(i)c(s);return()=>f.delete(c)},askTutor:T,registerAction:(name,description,fn)=>{name=typeof name==="string"?name.trim():"";description=typeof description==="string"?description.trim():"";if(!name||name.length>${MAX_APP_ACTION_NAME_CHARS}||!R.test(name)||Q.test(name))throw new TypeError("rabbithole.registerAction requires a stage-setting identifier name");if(!description||description.length>${MAX_APP_ACTION_DESCRIPTION_CHARS})throw new TypeError("rabbithole.registerAction requires a short description");if(typeof fn!=="function")throw new TypeError("rabbithole.registerAction requires a function");if(!M.has(name)&&M.size>=${MAX_APP_ACTIONS})throw new Error("Too many registered app actions");M.set(name,{description,fn});F();return()=>{if(M.get(name)?.fn===fn){M.delete(name);F()}}},character:{say:(t,v)=>{t=typeof t==="string"?t.trim():"";return t?E("character.say",{text:t.slice(0,${MAX_CHARACTER_LINE_CHARS}),...O(v)}):K("invalid","rabbithole.character.say requires text")},onLine:c=>{if(typeof c!=="function")throw new TypeError("rabbithole.character.onLine requires a function");W.add(c);return()=>W.delete(c)}},judge:(c,t,v)=>{c=typeof c==="string"?c.trim():"";t=typeof t==="string"?t.trim():"";return ${APP_JUDGE_ID_PATTERN}.test(c)&&t?E("judge",{judgeId:c,answer:t.slice(0,${MAX_JUDGE_ANSWER_CHARS}),...O(v)}):K("invalid","rabbithole.judge requires a judge id and an answer")}};["log","warn","error"].forEach(t=>{const c=console[t].bind(console);console[t]=(...b)=>{c(...b);const v={level:t,message:b.map(j=>{if(typeof j==="string")return j;try{const m=J(j);return m===undefined?String(j):m}catch{return String(j)}}).join(" ").slice(0,${APP_STATE_MAX_LOG_CHARS})};if(i)x("change",{logs:[v]});else{l.push(v);l=l.slice(-${APP_STATE_MAX_LOG_ENTRIES})}}});if(N)Object.defineProperty(window,"__rabbitholeReceive",{value:h});else addEventListener("message",v=>{if(v.source===parent)h(v.data)},true);if(!N)addEventListener("keydown",v=>{if(v.key==="/"&&v.metaKey&&!v.ctrlKey&&!v.altKey&&!v.shiftKey){v.preventDefault();if(!v.repeat)x("composeKey")}},true);addEventListener("DOMContentLoaded",y);addEventListener("load",y);y()})();true;`;
 
+// Trusted (user-generated) events only: an app that animates, scrolls itself
+// or dispatches synthetic events is not a person. Capture phase on window so
+// an app that stops propagation still counts. No `scroll`: a programmatic
+// scroll fires it too; a finger scroll starts with touchstart, a trackpad
+// scroll is `wheel`.
+export const RABBITHOLE_APP_ACTIVITY_SDK = String.raw`(()=>{const N=!!window.ReactNativeWebView,B=N&&window.ReactNativeWebView.postMessage.bind(window.ReactNativeWebView),m={protocol:"${APP_STATE_PROTOCOL}",version:${APP_STATE_PROTOCOL_VERSION},nonce:crypto.getRandomValues(new Uint32Array(2)).join("-"),type:"${APP_ACTIVITY_TYPE}"};let t=-1/0;const p=e=>{if(!e.isTrusted)return;const n=Date.now();if(n-t<${APP_ACTIVITY_PING_MS})return;t=n;N?B(JSON.stringify(m)):parent.postMessage(m,"*")};["pointerdown","touchstart","keydown","wheel"].forEach(k=>addEventListener(k,p,{capture:true,passive:true}))})();true;`;
+
+export const RABBITHOLE_APP_ACTIVITY_SDK_BYTES =
+  new TextEncoder().encode(RABBITHOLE_APP_ACTIVITY_SDK).byteLength;
 export const RABBITHOLE_APP_STATE_SDK_BYTES =
   new TextEncoder().encode(RABBITHOLE_APP_STATE_SDK).byteLength;
 export const RABBITHOLE_APP_SNAPSHOT_SDK_BYTES =
@@ -158,23 +216,14 @@ export function parseAppStateBridgeMessage(value) {
     }
     return null;
   }
+  if (message.type === APP_ACTIVITY_TYPE) {
+    return { type: APP_ACTIVITY_TYPE, nonce: message.nonce };
+  }
   if (message.type === "ready") {
     return { type: "ready", nonce: message.nonce };
   }
-  if (message.type === "sharedSelect") {
-    const roomId =
-      typeof message.roomId === "string" ? message.roomId.trim() : "";
-    return roomId
-      ? { type: "sharedSelect", nonce: message.nonce, roomId }
-      : null;
-  }
-  if (message.type === "sharedChange") {
-    const roomId =
-      typeof message.roomId === "string" ? message.roomId.trim() : "";
-    const patch = isObject(message.patch) ? message.patch : undefined;
-    return roomId && patch
-      ? { type: "sharedChange", nonce: message.nonce, roomId, patch }
-      : null;
+  if (message.type === "composeKey") {
+    return { type: "composeKey", nonce: message.nonce };
   }
   if (message.type === "actions") {
     if (!Array.isArray(message.actions)) return null;
@@ -316,7 +365,6 @@ export function createAppStateHostMessage(
   type,
   doc,
   nonce,
-  shared,
   actionRequest,
   characterLine,
 ) {
@@ -333,19 +381,6 @@ export function createAppStateHostMessage(
     type,
     doc: isObject(doc) ? doc : {},
   };
-  if (shared === null) {
-    message.shared = null;
-  } else if (
-    isObject(shared) &&
-    typeof shared.roomId === "string" &&
-    shared.roomId
-  ) {
-    message.shared = {
-      roomId: shared.roomId,
-      doc: isObject(shared.doc) ? shared.doc : {},
-      presence: Array.isArray(shared.presence) ? shared.presence : [],
-    };
-  }
   if (
     isObject(actionRequest) &&
     typeof actionRequest.id === "string" &&
@@ -437,7 +472,6 @@ export function appStateHostInjectionScript(
   type,
   doc,
   nonce,
-  shared,
   actionRequest,
   characterLine,
 ) {
@@ -446,7 +480,6 @@ export function appStateHostInjectionScript(
       type,
       doc,
       nonce,
-      shared,
       actionRequest,
       characterLine,
     ),
@@ -465,6 +498,7 @@ export function injectAppStateSdk(html) {
   const script =
     `<script>${DOM_TO_IMAGE_SOURCE}</script>` +
     `<script>${RABBITHOLE_APP_SNAPSHOT_SDK}</script>` +
+    `<script>${RABBITHOLE_APP_ACTIVITY_SDK}</script>` +
     `<script>${RABBITHOLE_APP_STATE_SDK}</script>`;
   const doctype = html.match(/^\s*<!doctype[^>]*>/i);
   const prefix = doctype?.[0] ?? "";

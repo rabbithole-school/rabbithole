@@ -24,7 +24,7 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
-import { api } from "../_generated/api";
+import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { launcherShowsApp } from "../lib/appAudiences";
 import {
@@ -32,6 +32,7 @@ import {
   seedTestInstitution,
   seedStaffWithMembership,
 } from "./institutionTestHelpers";
+import { storedTiming } from "./pushTimingFixture";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -66,6 +67,7 @@ type PushState =
   // boundary has passed, so it stops showing with no database write.
   | "yesterday"
   | "homework"
+  | "untilCleared"
   | "planned"
   | "cleared";
 
@@ -115,14 +117,17 @@ async function seedPushedApp(
       audience: { kind: "group", groupId },
       pushedBy: teacherId,
       // A block-scoped focus: the placement's window.
-      timing:
+      ...storedTiming(
         state === "homework"
           ? { kind: "homework" as const, dueAt: now + 24 * 60 * 60 * 1000 }
+          : state === "untilCleared"
+            ? { kind: "untilCleared" as const }
           : state === "overrun"
             ? { kind: "focus" as const, endsAt: now - 30 * 60 * 1000 }
             : state === "yesterday"
               ? { kind: "focus" as const, endsAt: now - 2 * DAY_MS }
               : { kind: "focus" as const, endsAt: now + 60 * 60 * 1000 },
+      ),
       blocking: false,
       // `setAt` stamped = live to scholars; absent = planned, agenda-only.
       ...(state === "planned"
@@ -322,19 +327,50 @@ describe("the push authority's edges", () => {
     ).rejects.toThrow(/not available to you/i);
   });
 
-  test("a HOMEWORK-timed app push has no window — documenting a clockless authority", async () => {
-    // `isPushShowing` returns true unconditionally for homework timing ("a
-    // deadline to meet, not a window that shuts"), so an app pushed as
-    // homework grants the tile until someone clears it. For an ACTIVITY that
-    // is right; for an APP it is a standing grant wearing a different hat —
-    // the exact shape the 2026-09-02 ruling deletes. Pinned here so the
-    // behaviour is a decision rather than a discovery (TRA-336).
-    const t = convexTest(schema, modules);
-    const { scholarId, appId } = await seedPushedApp(t, "homework");
-    const asScholar = await withUser(t, scholarId);
+  test.each(["homework", "untilCleared"] as const)(
+    "a %s-timed app push grants nothing on any surface (TRA-336)",
+    async (state) => {
+      // An app give without a finite end would be a standing grant in
+      // disguise: the tile, the launch gates, the autofill and the MDM
+      // allowlist with no end. No writer can create one (`assertPushAllowed`),
+      // and `isPushShowing` refuses a legacy or hand-inserted row, so every
+      // surface built on it agrees the row grants nothing.
+      const t = convexTest(schema, modules);
+      const { scholarId, appId, pushId } = await seedPushedApp(t, state);
+      const asScholar = await withUser(t, scholarId);
 
-    const tiles = await asScholar.query(api.scholarApps.listForLauncher, {});
-    expect(tiles.map((tile) => tile.appId)).toEqual([appId]);
+      expect(await asScholar.query(api.scholarApps.listForLauncher, {})).toEqual([]);
+      await expect(
+        asScholar.mutation(api.webActivitySessions.start, { appId }),
+      ).rejects.toThrow(/not available to you/i);
+      expect(
+        await asScholar.query(api.scholarApps.credentialsForApp, { appId }),
+      ).toBeNull();
+      expect(await asScholar.query(api.pushes.livePushesForMe, {})).toEqual([]);
+
+      // The inventory the QB runs on prod finds exactly this row.
+      const page = await t.run((ctx) =>
+        ctx.runQuery(internal.pushes.inventoryEndlessAppPushes, {
+          paginationOpts: { numItems: 100, cursor: null },
+        }),
+      );
+      expect(page.isDone).toBe(true);
+      expect(page.violations).toEqual([
+        expect.objectContaining({ pushId, reason: state, open: true, live: true }),
+      ]);
+    },
+  );
+
+  test("the inventory ignores a timed app push", async () => {
+    const t = convexTest(schema, modules);
+    await seedPushedApp(t, "live");
+    const page = await t.run((ctx) =>
+      ctx.runQuery(internal.pushes.inventoryEndlessAppPushes, {
+        paginationOpts: { numItems: 100, cursor: null },
+      }),
+    );
+    expect(page.scanned).toBe(1);
+    expect(page.violations).toEqual([]);
   });
 });
 

@@ -72,7 +72,7 @@ describe("roundsFigureSlots", () => {
     expect(math.value).toBe("Not yet");
     // The slot label survives so the row keeps its shape on a projector.
     expect(days.label).toBe("Practice days");
-    expect(math.label).toBe("Demonstrated math grade");
+    expect(math.label).toBe("Math level");
   });
 
   it("says so when the scholar has never been placed", () => {

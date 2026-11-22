@@ -2,7 +2,11 @@
 
 // One-click "connect Google Drive" entry point.
 //
-//   /connect-google?returnTo=<path>
+//   /connect-google?returnTo=<path>[&purpose=sheets]
+//
+// `purpose=sheets` also asks for Google Sheets editing (lib/google.ts
+// SHEETS_EDIT_SCOPE); the bot links to it the first time someone's sheet edit
+// needs that permission.
 //
 // The Connect button normally lives inside the profile modal, which means it
 // can't be linked to. Surfaces OUTSIDE the app — notably the Slack bot, which
@@ -49,6 +53,8 @@ function ConnectGoogleRunner() {
   const params = useSearchParams();
   const router = useRouter();
   const returnTo = safeReturnTo(params.get("returnTo"));
+  // Only the one extra purpose the bot links to; anything else is the default connection.
+  const purpose = params.get("purpose") === "sheets" ? ("sheets" as const) : undefined;
 
   const { user, isLoading } = useCurrentUser();
   const beginOAuth = useAction(api.googleAccountsActions.beginOAuth);
@@ -62,7 +68,7 @@ function ConnectGoogleRunner() {
     if (!user) {
       startedRef.current = true;
       router.replace(`/sign-in?next=${encodeURIComponent(
-        `/connect-google?returnTo=${returnTo}`,
+        `/connect-google?returnTo=${encodeURIComponent(returnTo)}${purpose ? `&purpose=${purpose}` : ""}`,
       )}`);
       return;
     }
@@ -70,13 +76,13 @@ function ConnectGoogleRunner() {
     startedRef.current = true;
     void (async () => {
       try {
-        const { url } = await beginOAuth({ returnTo });
+        const { url } = await beginOAuth({ returnTo, ...(purpose ? { purpose } : {}) });
         window.location.assign(url);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     })();
-  }, [beginOAuth, isLoading, returnTo, router, user]);
+  }, [beginOAuth, isLoading, purpose, returnTo, router, user]);
 
   return (
     <Box

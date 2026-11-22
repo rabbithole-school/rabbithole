@@ -58,13 +58,13 @@ export const FOUNDATION_DEPENDENT_COUNT = 8;
 export const CHALLENGE_OVERFLOW_CAP = 2;
 const DAY_MS = 86_400_000;
 
-/** Grade-band ordinal: "K"=0, "1"=1 ... "9"=9; anything else is unknown. The
+/** Grade-band ordinal: "K"=0, "1"=1 ... "11"=11; anything else is unknown. The
  *  input is shape-normalized first ("Grade 2" ≡ "2") so a legacy/seed long-form
  *  enrolled grade still yields the intended enrolled-grade protection. */
 export function gradeOrdinal(grade: string | undefined): number | undefined {
   const g = normalizeGradeTag(grade);
   if (g === "K") return 0;
-  if (g !== undefined && /^[1-9]$/.test(g)) return Number(g);
+  if (g !== undefined && /^(?:[1-9]|1[01])$/.test(g)) return Number(g);
   return undefined;
 }
 

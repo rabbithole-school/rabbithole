@@ -46,6 +46,7 @@ const submitAnswerKeys = new Set([
   "breakerEasyTriggerAttemptId",
   "predictedConfidence",
   "servedLane",
+  "formNudgesUsed",
 ]);
 
 function assertSubmitAnswerValidatorShape(payload: object): void {
@@ -406,5 +407,28 @@ describe("manipulative hosts arm the first-interaction clock", () => {
     expect(read("native/src/components/practice/ChatPracticeItem.tsx")).toMatch(
       /onTouchStart=\{onManipulativeTouchStart\}/,
     );
+  });
+});
+
+describe("form nudges through the web submitter", () => {
+  it("sends formNudgesUsed as given live, and at the cap for a drained answer", async () => {
+    const { FORM_NUDGE_CAP } = await import("@/convex/lib/practice/answers");
+    const scholarId = "scholar-web" as Id<"users">;
+    const mutation = serverValidatorMutation();
+    const submit = createWebPracticeSubmitter(scholarId, mutation);
+    const base = {
+      scholarId: String(scholarId),
+      itemId: "item-1",
+      answer: "√18",
+      clientEventId: "evt-web",
+      record: true,
+      replay: false,
+      formNudgesUsed: 0,
+    };
+    await submit(base);
+    expect(mutation.mock.calls[0]![0]).toMatchObject({ formNudgesUsed: 0 });
+    await submit({ ...base, replay: true, fromOutbox: true });
+    expect(mutation.mock.calls[1]![0]).toMatchObject({ formNudgesUsed: FORM_NUDGE_CAP });
+    expect("fromOutbox" in mutation.mock.calls[1]![0]).toBe(false);
   });
 });

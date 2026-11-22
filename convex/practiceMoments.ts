@@ -430,6 +430,9 @@ export const storyMomentForScholar = authedQuery({
           q.eq("scholarId", args.scholarId).eq("status", "active"),
         )
         .order("desc")
+        // A scholar's own wonders are never cards, and must not crowd the
+        // scan window (isWonderSeed).
+        .filter((q) => q.neq(q.field("origin"), "wonder"))
         .take(RECENT_ACTIVE_SEED_SCAN_CAP)
     ).find(
       (candidate) =>

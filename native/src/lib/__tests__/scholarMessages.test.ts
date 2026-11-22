@@ -7,6 +7,7 @@ import {
   threadSubtitle,
   ideaPreview,
   kindFilterFrom,
+  mergeThreadLists,
   pickedPhotoFileName,
   previewLine,
   splitThreadSections,
@@ -19,6 +20,7 @@ import {
 function summary(over: Partial<ScholarThreadSummary>): ScholarThreadSummary {
   return {
     _id: "t1" as Id<"parentThreads">,
+    flavor: "general",
     kind: "mentor",
     title: "Pat Rivera",
     suggestionTitle: null,
@@ -38,12 +40,12 @@ function summary(over: Partial<ScholarThreadSummary>): ScholarThreadSummary {
 }
 
 describe("thread copy", () => {
-  it("subtitles a mentor thread plainly and a Workshop thread by its idea", () => {
-    expect(threadSubtitle({ kind: "mentor", suggestion: null })).toBe("Mentor");
-    expect(threadSubtitle({ kind: "workshop", suggestion: { title: "Text color" } })).toBe(
+  it("gives a general thread no subtitle and a Workshop thread its idea", () => {
+    expect(threadSubtitle({ flavor: "general", suggestion: null })).toBeNull();
+    expect(threadSubtitle({ flavor: "workshop", suggestion: { title: "Text color" } })).toBe(
       "Text color",
     );
-    expect(threadSubtitle({ kind: "workshop", suggestion: null })).toBeNull();
+    expect(threadSubtitle({ flavor: "workshop", suggestion: null })).toBeNull();
   });
 });
 
@@ -70,32 +72,33 @@ describe("previews", () => {
 });
 
 describe("thread list", () => {
-  it("puts mentors before Workshop, keeping server order within each", () => {
-    const a = summary({ _id: "a" as Id<"parentThreads">, kind: "workshop" });
-    const b = summary({ _id: "b" as Id<"parentThreads">, kind: "mentor" });
-    const c = summary({ _id: "c" as Id<"parentThreads">, kind: "workshop" });
-    const { mentors, workshop } = splitThreadSections([a, b, c]);
-    expect(mentors.map((t) => t._id)).toEqual(["b"]);
+  it("puts people before Workshop, keeping server order within each", () => {
+    const a = summary({ _id: "a" as Id<"parentThreads">, flavor: "workshop", kind: "workshop" });
+    const b = summary({ _id: "b" as Id<"parentThreads">, flavor: "general", kind: "mentor" });
+    const c = summary({ _id: "c" as Id<"parentThreads">, flavor: "workshop", kind: "workshop" });
+    const { people, workshop } = splitThreadSections([a, b, c]);
+    expect(people.map((t) => t._id)).toEqual(["b"]);
     expect(workshop.map((t) => t._id)).toEqual(["a", "c"]);
   });
 
   it("titles a Workshop row by its idea, then its topic", () => {
-    expect(threadHeadline(summary({ kind: "workshop", suggestionTitle: "Text color" }))).toBe(
+    expect(threadHeadline(summary({ flavor: "workshop", kind: "workshop", suggestionTitle: "Text color" }))).toBe(
       "Text color",
     );
-    expect(threadHeadline(summary({ kind: "workshop", topic: "About your report" }))).toBe(
+    expect(threadHeadline(summary({ flavor: "workshop", kind: "workshop", topic: "About your report" }))).toBe(
       "About your report",
     );
-    expect(threadHeadline(summary({ kind: "mentor" }))).toBe("Pat Rivera");
+    expect(threadHeadline(summary({ flavor: "general", kind: "mentor" }))).toBe("Pat Rivera");
   });
 
   it("finds only team-started Workshop threads with no idea behind them", () => {
-    const team = summary({ kind: "workshop", startedByStaff: true, topic: "Hi" });
+    const team = summary({ flavor: "workshop", kind: "workshop", startedByStaff: true, topic: "Hi" });
     const idea = summary({
+      flavor: "workshop",
       kind: "workshop",
       suggestionId: "s1" as Id<"scholarSuggestions">,
     });
-    const mentor = summary({ kind: "mentor", startedByStaff: true });
+    const mentor = summary({ flavor: "general", kind: "mentor", startedByStaff: true });
     expect(teamStartedWorkshopThreads([team, idea, mentor])).toEqual([team]);
     expect(teamStartedWorkshopThreads(undefined)).toEqual([]);
   });
@@ -129,8 +132,47 @@ describe("attachments", () => {
 describe("kind filter", () => {
   it("reads ?kind= leniently, defaulting to all", () => {
     expect(kindFilterFrom("workshop")).toBe("workshop");
-    expect(kindFilterFrom("mentor")).toBe("mentor");
+    expect(kindFilterFrom("people")).toBe("people");
+    // The People filter's old name, from older links.
+    expect(kindFilterFrom("mentor")).toBe("people");
     expect(kindFilterFrom("family")).toBe("all");
     expect(kindFilterFrom(undefined)).toBe("all");
+  });
+});
+
+describe("about threads", () => {
+  const wonder = summary({
+    _id: "w" as Id<"parentThreads">,
+    flavor: "about",
+    kind: "about",
+    title: "Your teachers",
+    about: { type: "wonder", seedId: "s1" as Id<"seeds"> },
+    aboutTitle: "Why do owls turn their heads so far?",
+    lastMessageAt: 20,
+  });
+
+  it("heads an about row with its subject and sorts it into its own section", () => {
+    expect(threadHeadline(wonder)).toBe("Why do owls turn their heads so far?");
+    expect(threadHeadline({ ...wonder, aboutTitle: undefined })).toBe("Your teachers");
+    expect(splitThreadSections([wonder]).about).toEqual([wonder]);
+  });
+
+  it("names the subject at the top of the open thread", () => {
+    expect(
+      threadSubtitle({
+        flavor: "about",
+        suggestion: null,
+        about: { type: "quest" },
+        aboutTitle: "Angle croc",
+      }),
+    ).toBe("About your Quest · Angle croc");
+    expect(threadSubtitle({ flavor: "about", suggestion: null, about: { type: "wonder" } })).toBe(
+      "About your wonder",
+    );
+  });
+
+  it("merges the plain and about lists newest first", () => {
+    const mentor = summary({ _id: "m" as Id<"parentThreads">, lastMessageAt: 10 });
+    expect(mergeThreadLists([mentor], [wonder]).map((t) => t._id)).toEqual(["w", "m"]);
   });
 });

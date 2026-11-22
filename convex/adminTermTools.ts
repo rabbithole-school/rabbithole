@@ -10,6 +10,8 @@ import { internalMutation } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { settlePlacementAppPush } from "./masterSchedule";
+import { closeScheduleForAssignment } from "./lib/scheduleStore";
+import { syncClassesForGroupPeriod, syncClassesForPlacements } from "./lib/classLink";
 
 async function periodByExactLabel(
   ctx: MutationCtx,
@@ -140,6 +142,7 @@ export const createTestTerm = internalMutation({
         groupId: placement.groupId,
       });
     }
+    await syncClassesForGroupPeriod(ctx, periodId, group._id);
 
     return {
       periodId,
@@ -193,6 +196,7 @@ export const endTestTerm = internalMutation({
         await settlePlacementAppPush(ctx, placement);
         await ctx.db.delete(placement._id);
       }
+      await syncClassesForPlacements(ctx, placements);
       for (const block of blocks) {
         await ctx.db.delete(block._id);
       }
@@ -310,6 +314,8 @@ export const unassignAssignment = internalMutation({
       await settlePlacementAppPush(ctx, placement);
       await ctx.db.delete(placement._id);
     }
+    await syncClassesForPlacements(ctx, placements);
+    await closeScheduleForAssignment(ctx, assignment._id);
     await ctx.db.delete(assignment._id);
     return {
       deletedPlacements: placements.length,

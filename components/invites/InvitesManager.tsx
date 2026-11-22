@@ -178,7 +178,7 @@ export function InvitesManager({ variant }: { variant: "admin" | "school" }) {
         borderWidth="1px"
         borderColor="gray.200"
         borderRadius="xl"
-        overflow="hidden"
+        overflowX="auto"
         bg="white"
       >
         <Table.Root size="sm">

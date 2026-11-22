@@ -118,8 +118,9 @@ describe("elective domains — never a forced pre-test", () => {
     expect(dm).toBeDefined();
     expect(dm!.status).toBe("ineligible");
     // …and it never inflates the teacher-facing denominator (grade 9 would
-    // make all 8 core domains eligible; the elective must not be a 9th).
-    expect(row.eligibleCount).toBe(8);
+    // make all 9 core domains eligible — algebra-2 joined 2026-11-20; the
+    // elective must not be a 10th).
+    expect(row.eligibleCount).toBe(9);
   });
 
   test("discrete-math is registered elective", () => {
@@ -135,16 +136,17 @@ describe("elective domains — never a forced pre-test", () => {
     expect(dm).toBeDefined();
     expect(dm!.eligible).toBe(false);
     expect(dm!.status).toBe("ineligible");
-    // The denominator counts only the 8 core domains.
-    expect(map.filter((d: { eligible: boolean }) => d.eligible)).toHaveLength(8);
+    // The denominator counts only the 9 core domains (algebra-2 joined 2026-11-20).
+    expect(map.filter((d: { eligible: boolean }) => d.eligible)).toHaveLength(9);
   });
 
-  test("map COMPLETION ignores an unopened elective: converging the 8 core domains completes the map", async () => {
+  test("map COMPLETION ignores an unopened elective: converging the 9 core domains completes the map", async () => {
     const t = sharedSeeded();
     const scholar = await seedScholar(t, "elective_complete", "9");
     const core = [
       WNA, "fraction-arithmetic", "probability", "geometry-measurement",
       "ratio-proportion-percent", "integers-coordinates", "early-algebra", "algebra-1",
+      "algebra-2",
     ];
     await convergeDomains(t, scholar, core);
     const as = await asUser(t, scholar);

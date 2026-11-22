@@ -27,6 +27,12 @@ import {
   offlineHomeworkFinishCopy,
   offlineHomeworkMarkedText,
 } from "@/shared/offlineHomework";
+import {
+  HOMEWORK_DONE_CONFIRMED,
+  HOMEWORK_DONE_LABEL,
+  HOMEWORK_DONE_UNDO,
+} from "@/shared/homeworkFraming";
+import { useNow } from "@/hooks/useNow";
 import { toaster } from "@/lib/toaster";
 import { ResourceShareCard } from "@/components/ResourceShareCard";
 
@@ -48,6 +54,7 @@ export function OfflineSessionView({
   onBack?: () => void;
 }) {
   const data = useQuery(api.portfolio.offlineSessionView, { sessionId });
+  const nowMs = useNow();
 
   if (data === undefined) {
     return (
@@ -67,13 +74,15 @@ export function OfflineSessionView({
   }
 
   const context = offlineHomeworkContext(data);
-  const dueText = offlineHomeworkDueText(data.dueAt, data.timeZone);
+  const dueText = offlineHomeworkDueText(data.dueAt, nowMs, data.timeZone);
   // The finish block replaces the big paper cue with one quiet line: some
   // offline homework is a worksheet, but most of it (a read-aloud) has no
   // paper at all, and the old cue was the only thing on the page.
   const showFinish =
     !data.viewerCanGrade && (data.canMarkDone || data.selfMark != null);
-  const finishCopy = offlineHomeworkFinishCopy(data.teacherName);
+  const finishCopy = offlineHomeworkFinishCopy(data.teacherName, {
+    isHomework: data.isHomework,
+  });
 
   return (
     <Flex flex={1} flexDir="column" overflow="hidden" bg="white">
@@ -160,7 +169,6 @@ export function OfflineSessionView({
                   ? offlineHomeworkMarkedText(
                       data.selfMark.completedAt,
                       data.timeZone,
-                      data.teacherName,
                     )
                   : null
               }
@@ -430,7 +438,7 @@ function OfflineHomeworkFinishBlock({
         </Box>
         <Stack gap={0} flex={1} minW={0}>
           <Text fontFamily="heading" fontWeight="600" color="navy.500" fontSize="md">
-            You marked this done
+            {HOMEWORK_DONE_CONFIRMED}
           </Text>
           {markedText && (
             <Text fontFamily="body" color="charcoal.500" fontSize="sm">
@@ -449,7 +457,7 @@ function OfflineHomeworkFinishBlock({
               void run(() => undo({ completionId: selfMark.completionId }))
             }
           >
-            Undo
+            {HOMEWORK_DONE_UNDO}
           </Button>
         )}
       </HStack>
@@ -480,7 +488,7 @@ function OfflineHomeworkFinishBlock({
         loading={busy}
         onClick={() => void run(() => markDone({ assignmentId, activityId }))}
       >
-        I did it
+        {HOMEWORK_DONE_LABEL}
       </Button>
     </Stack>
   );

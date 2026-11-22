@@ -231,24 +231,28 @@ function ThreadHeader({
   styles: Styles;
 }) {
   const colors = useColors();
-  const mentor = detail.kind === "mentor";
-  const person = mentor ? detail.staffParticipants[0] : undefined;
+  const withPeople = detail.flavor === "general";
+  const person = withPeople ? detail.staffParticipants[0] : undefined;
   const subtitle = threadSubtitle(detail);
 
   return (
     <View style={styles.header}>
-      {mentor ? (
+      {withPeople ? (
         <ScholarAvatar
           name={person?.name ?? detail.title}
           image={resolveUserImageUri(person?.image)}
           size={40}
         />
       ) : (
-        <View style={styles.workshopTile} accessible accessibilityLabel="Workshop">
+        <View
+          style={styles.workshopTile}
+          accessible
+          accessibilityLabel={detail.flavor === "about" ? "About" : "Workshop"}
+        >
           <SymbolView
-            name="wrench.and.screwdriver.fill"
+            name={detail.flavor === "about" ? "bubble.left.fill" : "wrench.and.screwdriver.fill"}
             size={19}
-            tintColor={colors.orange}
+            tintColor={detail.flavor === "about" ? colors.violet : colors.orange}
           />
         </View>
       )}
@@ -597,7 +601,10 @@ function removeAttachmentConfirmBody(fileName: string, copiedOutside: boolean): 
 
 /** A message body with its `[label](url)` links and bare http(s) URLs tappable — the web bubble's
  *  tokenizer (vendored lib/messageLinks.ts) and the tutor chat's tap path
- *  (openMarkdownLink: YouTube in the locked-down player, else outbound). */
+ *  (openMarkdownLink: YouTube in the locked-down player, else the link viewer).
+ *  Links in the reader's OWN messages stay plain text: the link viewer opens
+ *  whatever site a link names, so a tappable link the scholar typed would turn
+ *  Messages into an address bar on a locked BunnyPad (TRA-643). */
 function LinkifiedBody({
   body,
   mine,
@@ -608,7 +615,9 @@ function LinkifiedBody({
   styles: Styles;
 }) {
   return tokenizeMessageLinks(body).map((token, i) =>
-    token.type !== "text" ? (
+    mine && token.type !== "text" ? (
+      token.type === "link" ? token.label : token.value
+    ) : token.type !== "text" ? (
       <Text
         key={i}
         accessibilityRole="link"
@@ -617,7 +626,7 @@ function LinkifiedBody({
             ? openMarkdownLink(token.url, token.label)
             : openMarkdownLink(token.value, token.value)
         }
-        style={mine ? styles.linkMine : styles.link}
+        style={styles.link}
       >
         {token.type === "link" ? token.label : token.value}
       </Text>
@@ -942,7 +951,6 @@ function makeStyles(c: Colors) {
       paddingVertical: 7,
     },
     link: { color: c.violet, textDecorationLine: "underline" },
-    linkMine: { color: c.white, textDecorationLine: "underline" },
     attachmentRemove: {
       position: "absolute",
       top: -8,

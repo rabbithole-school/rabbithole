@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * FocusStrip — the scholar-facing card strip for a live "class focus" push
+ * Pushed rows — the scholar-facing rows for a live "class focus" push
  * (see convex/pushes.ts, convex/schema.ts `pushes`). Modeled on
  * RoomCueBanner's calm-chrome-around-teacher-content idiom, but rendered as
  * a row of cards rather than a single dismissible banner: a push isn't
@@ -26,74 +26,102 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useExternalApp } from "@/hooks/useExternalApp";
 import { useRemote } from "@/hooks/useRemote";
 import { toaster } from "@/lib/toaster";
-import { ScholarHomeSectionHeader } from "@/components/ui/ScholarHomeSectionHeader";
 import { AppTileIcon } from "@/components/ui/AppTileIcon";
 import {
-  FOCUS_STRIP_HEADING,
   pushActionLabel,
   pushGlyph,
-  pushTimeLeftLabel,
+  pushMetaLine,
   type PushForDisplay,
 } from "@/shared/pushCopy";
+import { openUntilPhrase } from "@/shared/openUntil";
 
-/** How often the countdown re-renders. A push's own liveness is still
- * decided server-side (isPushLive) — this only keeps the label fresh. */
-const TICK_MS = 15_000;
+/** The minute re-arm for the live read. A push's own liveness is decided
+ * server-side (isPushLive); the row shows its end as a time, so nothing on
+ * it ticks. */
+const TICK_MS = 60_000;
 
-export function FocusStrip() {
+export type LivePush = NonNullable<
+  ReturnType<typeof useSmoothedQuery<typeof api.pushes.livePushesForMe>>
+>[number];
+
+/** The scholar's live pushes (an app, a resource, a link, an activity). The
+ *  page reads them once, so the class section knows whether to show. */
+export function useLivePushes(enabled: boolean): LivePush[] {
   const [now, setNow] = useState(() => Date.now());
-
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), TICK_MS);
     return () => clearInterval(id);
   }, []);
   const minuteNow = Math.floor(now / 60_000) * 60_000;
-  // Smoothed so the minute re-arm doesn't blank the strip for a round-trip.
-  const pushes = useSmoothedQuery(api.pushes.livePushesForMe, { now: minuteNow });
+  // Smoothed so the minute re-arm doesn't blank the rows for a round-trip.
+  const pushes = useSmoothedQuery(
+    api.pushes.livePushesForMe,
+    enabled ? { now: minuteNow } : "skip",
+  );
+  return pushes ?? [];
+}
 
-  // Loading or empty: render nothing, matching AppLauncher's no-layout-shift
-  // convention for a section that may legitimately be absent.
-  if (!pushes || pushes.length === 0) return null;
-
+/**
+ * The pushes as rows at the top of the class section ("In class now" /
+ * "From class today"), above its activity rows: the same row grid and emoji
+ * column, each with its own glyph or app tile, its note and "until …", and
+ * its action on the right. There is no separate heading. An open-until give
+ * (`openUntil` set) is drawn under "Open from class" instead and reads
+ * "Open until Fri", worded against the page's `nowMs` like the rows there.
+ */
+export function PushRows({
+  pushes,
+  timeZone,
+  nowMs,
+}: {
+  pushes: LivePush[];
+  timeZone: string;
+  nowMs: number;
+}) {
+  if (pushes.length === 0) return null;
   return (
-    <Box display="flex" flexDirection="column" gap={3}>
-      <ScholarHomeSectionHeader>{FOCUS_STRIP_HEADING}</ScholarHomeSectionHeader>
-      <Flex direction="column" gap={2}>
-        {pushes.map((push) => (
-          <FocusCard
-            key={push._id}
-            push={{
-              pushId: push._id,
-              kind: push.kind,
-              title: push.title,
-              subtitle: push.subtitle ?? null,
-              url: push.url ?? null,
-              iconUrl: push.iconUrl ?? null,
-              iconEmoji: push.iconEmoji ?? null,
-              color: push.color ?? null,
-              media: push.media ?? null,
-              note: push.note ?? null,
-              blocking: push.blocking,
-              endsAt: push.endsAt,
-            }}
-            now={now}
-            activityId={push.activityId}
-            externalAppId={push.externalAppId}
-          />
-        ))}
-      </Flex>
-    </Box>
+    <Flex direction="column" gap={2}>
+      {pushes.map((push) => (
+        <FocusCard
+          key={push._id}
+          push={{
+            pushId: push._id,
+            kind: push.kind,
+            title: push.title,
+            subtitle: push.subtitle ?? null,
+            url: push.url ?? null,
+            iconUrl: push.iconUrl ?? null,
+            iconEmoji: push.iconEmoji ?? null,
+            color: push.color ?? null,
+            media: push.media ?? null,
+            note: push.note ?? null,
+            blocking: push.blocking,
+            endsAt: push.endsAt,
+          }}
+          timeZone={timeZone}
+          openUntilLabel={
+            push.openUntil != null
+              ? openUntilPhrase(push.openUntil, timeZone, nowMs)
+              : null
+          }
+          activityId={push.activityId}
+          externalAppId={push.externalAppId}
+        />
+      ))}
+    </Flex>
   );
 }
 
 function FocusCard({
   push,
-  now,
+  timeZone,
+  openUntilLabel,
   activityId,
   externalAppId,
 }: {
   push: PushForDisplay;
-  now: number;
+  timeZone: string;
+  openUntilLabel: string | null;
   activityId?: Id<"activities">;
   externalAppId?: Id<"externalApps">;
 }) {
@@ -103,7 +131,7 @@ function FocusCard({
   const createSession = useMutation(api.sessions.create);
   const [starting, setStarting] = useState(false);
 
-  const timeLeft = pushTimeLeftLabel(push.endsAt, now);
+  const meta = pushMetaLine(push, timeZone, openUntilLabel);
   const actionLabel = pushActionLabel(push);
   const busy =
     starting || (push.kind === "app" && launchingId === externalAppId && launchingId !== null);
@@ -169,75 +197,74 @@ function FocusCard({
       gap={3}
       w="full"
       textAlign="left"
-      px={4}
+      px="14px"
       py={3}
       bg="white"
-      borderRadius="lg"
+      borderRadius="xl"
       borderWidth="1px"
-      borderColor="violet.200"
-      boxShadow="0 2px 6px rgba(20,24,50,0.06)"
+      borderColor="gray.200"
       cursor={clickable ? "pointer" : "default"}
       opacity={busy ? 0.6 : 1}
       transition="transform 0.08s ease"
+      _hover={clickable ? { bg: "gray.50" } : undefined}
       _active={clickable ? { transform: "scale(0.99)" } : undefined}
     >
-      {push.kind === "app" ? (
-        // An app's identity already has ONE rendering (shared/appTileMark.ts:
-        // logo → the staff-chosen emoji → the initial, on the app's own tint),
-        // and the launcher tile for this very app is usually on screen right
-        // below. The generic "▶" that used to sit here was a second vocabulary
-        // for the same signal, so this substitutes the canonical mark into the
-        // slot the glyph already occupied — same slot, no extra tile. Sized to
-        // native's card (native/src/components/FocusStrip.tsx), which is what
-        // makes the two surfaces the same card.
-        <AppTileIcon
-          name={push.title}
-          iconUrl={push.iconUrl}
-          iconEmoji={push.iconEmoji}
-          color={push.color}
-          boxSize="44px"
-          radius="22%"
-          markFontSize="16px"
-          imagePadding="14%"
-          // The card's own title names the app immediately to the right.
-          decorative
-        />
-      ) : (
-        // A video, link or activity has no catalog tile: the glyph names the
-        // KIND of thing, and shared/pushCopy.ts owns that choice so web and
-        // iPad can't drift.
-        <Box fontSize="lg" color="violet.500" flexShrink={0} aria-hidden>
-          {pushGlyph(push)}
+      {/* The class rows' emoji column (18px, 10px gap), so a push's glyph or
+          app tile lines up with the activity rows' emoji below it. */}
+      <HStack gap="10px" align="flex-start" flex={1} minW={0}>
+        <Box w="18px" flexShrink={0} display="flex" justifyContent="center" pt="1px">
+          {push.kind === "app" ? (
+            // An app's identity has ONE rendering (shared/appTileMark.ts:
+            // logo → the staff-chosen emoji → the initial, on the app's own
+            // tint), the same mark as its launcher tile.
+            <AppTileIcon
+              name={push.title}
+              iconUrl={push.iconUrl}
+              iconEmoji={push.iconEmoji}
+              color={push.color}
+              boxSize="18px"
+              radius="22%"
+              markFontSize="10px"
+              imagePadding="10%"
+              // The row's own title names the app immediately to the right.
+              decorative
+            />
+          ) : (
+            // A video, link or activity has no catalog tile: the glyph names
+            // the KIND of thing (shared/pushCopy.ts), so web and iPad agree.
+            <Box fontSize="sm" lineHeight="1.43" color="violet.500" aria-hidden>
+              {pushGlyph(push)}
+            </Box>
+          )}
         </Box>
-      )}
       <Box flex={1} minW={0}>
         <Text
           fontFamily="heading"
           fontSize="sm"
-          fontWeight="700"
-          color="charcoal.500"
+          fontWeight="600"
+          color="charcoal.600"
           lineClamp={1}
         >
           {push.title}
         </Text>
-        {push.note && (
-          <Text fontSize="xs" color="charcoal.400" fontFamily="body" lineClamp={2}>
-            {push.note}
+        {meta && (
+          <Text fontSize="xs" color="charcoal.400" fontFamily="heading" lineClamp={2}>
+            {meta}
           </Text>
         )}
       </Box>
-      <HStack gap={2} flexShrink={0} align="center">
-        {timeLeft && (
-          <Text fontSize="2xs" color="charcoal.400" fontFamily="heading" fontWeight="600">
-            {timeLeft}
-          </Text>
-        )}
-        {clickable && (
-          <Text fontSize="xs" color="violet.500" fontFamily="heading" fontWeight="700">
-            {actionLabel}
-          </Text>
-        )}
       </HStack>
+      {clickable && (
+        <Text
+          flexShrink={0}
+          fontSize="xs"
+          color="violet.500"
+          fontFamily="heading"
+          fontWeight="700"
+        >
+          {actionLabel}
+        </Text>
+      )}
     </Flex>
   );
 }

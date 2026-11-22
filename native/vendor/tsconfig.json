@@ -13,9 +13,11 @@
   // reported as a smaller *passing* suite (205 tests instead of 378) rather
   // than as missing coverage. CI hid it by running native's `npm ci`.
   //
-  // vendor/ is framework-free TypeScript — no JSX, no decorators, no path
-  // aliases — so the transform needs nothing beyond the language level.
+  // vendor/ is framework-free TypeScript — no decorators, no path aliases —
+  // so the transform needs only the language level. The one exception is the
+  // keypad package's React Native components, hence `jsx`.
   "compilerOptions": {
+    "jsx": "react-jsx",
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "bundler",

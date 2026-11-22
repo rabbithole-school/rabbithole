@@ -11,7 +11,6 @@ import {
 } from "react-native";
 import ExternalDisplay, { useExternalDisplay } from "react-native-external-display";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { useKeepAwake } from "expo-keep-awake";
 import * as Print from "expo-print";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -25,15 +24,18 @@ import {
   clipsOverflow,
   verticalAlignToJustify,
 } from "../../../vendor/shared/slidesRenderContract";
-import { usePresentationSystemUI } from "@/hooks/usePresentationSystemUI";
+import { useTvButton } from "@/hooks/usePresentationSystemUI";
 import {
-  CONNECT_TV_GUIDANCE,
-  CONNECT_TV_LABEL,
   getPresentationDisplayState,
   type ExternalScreen,
 } from "@/lib/presentationExternalDisplay";
 import { fonts, useColors } from "@/theme";
 import { SlideElementContentNative } from "./SlideElementContentNative";
+import { useKeepAwakeUnlessBedtime } from "@/hooks/useKeepAwakeUnlessBedtime";
+import type { MicFrameListener } from "@/hooks/usePresentingMic";
+import type { TalkTake } from "@/hooks/useTalkTake";
+import { formatClock } from "@/lib/rehearsalTake";
+import { TALK_COPY } from "@/components/talk/talkCopy";
 
 const NO_PLAYING_VIDEOS: ReadonlySet<string> = new Set();
 
@@ -47,6 +49,22 @@ export type SlidesPresentationNativeProps = {
   onExit: () => void;
   /** Resolves a scene image asset id to a URL suitable for Expo Image. */
   resolveAsset?: (assetId: string) => string | null;
+  /**
+   * Recording a take (SlidesTalkNative): Start/Record and Finish/Stop in the
+   * header, and who is watching from the back of the room below the notes.
+   * Without it the presenter is the plain speaker view.
+   */
+  talk?: PresentingTalk;
+};
+
+/** The recording controls a talk hands the speaker view. */
+export type PresentingTalk = {
+  mode: "present" | "rehearse";
+  take: Pick<TalkTake, "status" | "notice" | "start" | "subscribe">;
+  /** Stops the take; the talk then shows its review. */
+  onStop: () => void;
+  listener: { name: string } | null;
+  onDropListener: () => void;
 };
 
 export function SlidesPresentationNative({
@@ -56,18 +74,17 @@ export function SlidesPresentationNative({
   onSlideIndexChange,
   onExit,
   resolveAsset,
+  talk,
 }: SlidesPresentationNativeProps) {
-  useKeepAwake();
+  useKeepAwakeUnlessBedtime();
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { requestSystemUI, restoreSystemUI } = usePresentationSystemUI();
   const [uncontrolledIndex, setUncontrolledIndex] = useState(initialSlideIndex);
   const [printing, setPrinting] = useState(false);
   const [videoPlayback, setVideoPlayback] = useState<{
     slideId: string | null;
     ids: ReadonlySet<string>;
   }>(() => ({ slideId: null, ids: NO_PLAYING_VIDEOS }));
-  const [showConnectionGuidance, setShowConnectionGuidance] = useState(false);
   const previousConnected = useRef<boolean | null>(null);
   const screens: Readonly<Record<string, ExternalScreen>> = useExternalDisplay();
   const index = clampIndex(slideIndex ?? uncontrolledIndex, deck.slides.length);
@@ -84,6 +101,19 @@ export function SlidesPresentationNative({
     canPrintNotes,
     mainScreenMode,
   } = getPresentationDisplayState(screens);
+  const tvButton = useTvButton(hasExternalScreen);
+  const { restoreSystemUI } = tvButton;
+
+  // Recording a take. Rehearsing starts ready to record ("Start"); presenting
+  // offers "Record" beside the usual buttons. Either way stopping hands the
+  // take to the talk, which shows its review.
+  const rehearsing = talk?.mode === "rehearse";
+  const takeStatus = talk?.take.status ?? "idle";
+  const recordingTake = takeStatus !== "idle";
+  const stopTake = useCallback(() => {
+    restoreSystemUI();
+    talk?.onStop();
+  }, [restoreSystemUI, talk]);
 
   const setIndex = useCallback(
     (nextIndex: number) => {
@@ -123,12 +153,7 @@ export function SlidesPresentationNative({
       );
     }
     previousConnected.current = connected;
-    if (connected) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- an external display connection must immediately close this transient hint.
-      setShowConnectionGuidance(false);
-      restoreSystemUI();
-    }
-  }, [connected, restoreSystemUI]);
+  }, [connected]);
 
   const swipe = useMemo(
     () =>
@@ -148,7 +173,7 @@ export function SlidesPresentationNative({
     if (!canPrintNotes) {
       Alert.alert(
         "Print notes unavailable",
-        "Disconnect screen mirroring before opening speaker notes.",
+        "Tap Disconnect TV to stop screen mirroring before opening speaker notes.",
       );
       return;
     }
@@ -162,11 +187,6 @@ export function SlidesPresentationNative({
     }
   }, [canPrintNotes, deck, printing]);
 
-  const connectTV = useCallback(() => {
-    requestSystemUI();
-    setShowConnectionGuidance(true);
-  }, [requestSystemUI]);
-
   const finish = useCallback(() => {
     Alert.alert(
       "End presentation?",
@@ -178,13 +198,18 @@ export function SlidesPresentationNative({
         {
           text: "Done",
           onPress: () => {
+            // A take still recording ends here too, and its review opens.
+            if (recordingTake) {
+              stopTake();
+              return;
+            }
             restoreSystemUI();
             onExit();
           },
         },
       ],
     );
-  }, [connected, onExit, restoreSystemUI]);
+  }, [connected, onExit, recordingTake, restoreSystemUI, stopTake]);
 
   if (!currentSlide) {
     return (
@@ -230,29 +255,84 @@ export function SlidesPresentationNative({
             >
               Slide {index + 1} of {deck.slides.length}
             </Text>
-            <Text
-              style={[
-                styles.connection,
-                { color: colors.fgMuted, fontFamily: fonts.medium },
-              ]}
-            >
-              {mainScreenMode === "speaker"
-                ? "Showing on the TV"
-                : mainScreenMode === "connecting"
-                  ? "Connecting to the TV"
-                  : "On this iPad only"}
-            </Text>
-            {!hasExternalScreen && (
-              <PresentationButton label={CONNECT_TV_LABEL} onPress={connectTV} colors={colors} />
+            {talk && (rehearsing || recordingTake) ? (
+              <Text
+                style={[
+                  styles.connection,
+                  styles.timer,
+                  { color: colors.fg, fontFamily: fonts.medium },
+                ]}
+              >
+                {takeStatus === "stopping"
+                  ? TALK_COPY.saving
+                  : takeStatus === "recording"
+                    ? <RecordingClock subscribe={talk.take.subscribe} />
+                    : takeStatus === "starting"
+                      ? TALK_COPY.starting
+                      : TALK_COPY.readyToRehearse}
+              </Text>
+            ) : (
+              <Text
+                style={[
+                  styles.connection,
+                  { color: colors.fgMuted, fontFamily: fonts.medium },
+                ]}
+              >
+                {mainScreenMode === "speaker"
+                  ? "Showing on the TV"
+                  : mainScreenMode === "connecting"
+                    ? "Connecting to the TV"
+                    : "On this iPad only"}
+              </Text>
             )}
             <PresentationButton
-              disabled={printing}
-              label={printing ? "Preparing notes…" : "Print notes"}
-              onPress={printNotes}
+              label={tvButton.label}
+              onPress={tvButton.press}
               colors={colors}
             />
-            <PresentationButton label="Done" onPress={finish} colors={colors} />
+            {talk ? (
+              <PresentationButton
+                disabled={takeStatus === "starting" || takeStatus === "stopping"}
+                label={
+                  recordingTake
+                    ? rehearsing
+                      ? TALK_COPY.finish
+                      : TALK_COPY.stop
+                    : rehearsing
+                      ? TALK_COPY.start
+                      : TALK_COPY.record
+                }
+                onPress={recordingTake ? stopTake : talk.take.start}
+                colors={colors}
+              />
+            ) : null}
+            {rehearsing ? (
+              recordingTake ? null : (
+                <PresentationButton label="Done" onPress={onExit} colors={colors} />
+              )
+            ) : (
+              <>
+                <PresentationButton
+                  disabled={printing}
+                  label={printing ? "Preparing notes…" : "Print notes"}
+                  onPress={printNotes}
+                  colors={colors}
+                />
+                <PresentationButton label="Done" onPress={finish} colors={colors} />
+              </>
+            )}
           </View>
+
+          {tvButton.guidance ? (
+            <Text
+              style={[
+                styles.tvGuidance,
+                { color: colors.fgMuted, fontFamily: fonts.regular },
+              ]}
+            >
+              {tvButton.guidance}
+            </Text>
+          ) : null}
 
           {mainScreenMode === "speaker" ? (
             <View style={styles.presentationBody}>
@@ -335,16 +415,6 @@ export function SlidesPresentationNative({
             </View>
           ) : mainScreenMode === "slide" ? (
             <View style={styles.onDevicePresentation}>
-              {showConnectionGuidance && (
-                <Text
-                  style={[
-                    styles.onDeviceGuidance,
-                    { color: colors.fgMuted, fontFamily: fonts.regular },
-                  ]}
-                >
-                  {CONNECT_TV_GUIDANCE}
-                </Text>
-              )}
               <View testID="slides-ipad-presentation" style={styles.onDeviceStage}>
                 <SlideCanvas
                   slide={currentSlide}
@@ -385,6 +455,7 @@ export function SlidesPresentationNative({
               onPress={goPrevious}
               colors={colors}
             />
+            {talk ? <BackRowStatus talk={talk} colors={colors} /> : null}
             <PresentationButton
               disabled={index === deck.slides.length - 1}
               label="Next"
@@ -398,21 +469,78 @@ export function SlidesPresentationNative({
   );
 }
 
-function PresentationButton({
+/**
+ * "Recording 1:05" on the recording's own clock. It follows the mic's frames
+ * itself and redraws once a second, so the presenter around it doesn't.
+ */
+export function RecordingClock({
+  subscribe,
+}: {
+  subscribe: (listener: MicFrameListener) => () => void;
+}) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(
+    () => subscribe((frame) => setSeconds(Math.floor(frame.atMs / 1000))),
+    [subscribe],
+  );
+  return <>{TALK_COPY.recordingClock(formatClock(seconds * 1000))}</>;
+}
+
+/**
+ * Below the notes: who is watching from the back of the room (with a way to
+ * disconnect them), why recording can't start, or, before a take, how a
+ * friend joins.
+ */
+function BackRowStatus({
+  talk,
+  colors,
+}: {
+  talk: PresentingTalk;
+  colors: ReturnType<typeof useColors>;
+}) {
+  const text = [styles.backRow, { color: colors.fgMuted, fontFamily: fonts.regular }];
+  if (talk.take.notice) return <Text style={text}>{talk.take.notice}</Text>;
+  if (talk.listener) {
+    return (
+      <View style={styles.backRowLine}>
+        <Text numberOfLines={1} style={[...text, styles.backRowName]}>
+          {TALK_COPY.watching(talk.listener.name)}
+        </Text>
+        <PresentationButton
+          label={TALK_COPY.disconnect}
+          onPress={talk.onDropListener}
+          colors={colors}
+        />
+      </View>
+    );
+  }
+  if (talk.take.status === "idle") {
+    return <Text style={text}>{TALK_COPY.howToWatch}</Text>;
+  }
+  return null;
+}
+
+/** The presenter's button (and on/off switch), shared with the rehearsal review. */
+export function PresentationButton({
   label,
   onPress,
   disabled = false,
   colors,
+  switchOn,
 }: {
   label: string;
   onPress: () => void;
   disabled?: boolean;
   colors: ReturnType<typeof useColors>;
+  /** Makes the button an on/off switch, drawn with a small switch beside the label. */
+  switchOn?: boolean;
 }) {
+  const isSwitch = switchOn !== undefined;
   return (
     <Pressable
-      accessibilityRole="button"
+      accessibilityRole={isSwitch ? "switch" : "button"}
       accessibilityLabel={label}
+      accessibilityState={isSwitch ? { checked: switchOn } : undefined}
       disabled={disabled}
       onPress={onPress}
       style={[
@@ -421,6 +549,22 @@ function PresentationButton({
         disabled && styles.disabled,
       ]}
     >
+      {isSwitch ? (
+        <View
+          style={[
+            styles.switchTrack,
+            { backgroundColor: switchOn ? colors.fg : colors.border },
+          ]}
+        >
+          <View
+            style={[
+              styles.switchThumb,
+              { backgroundColor: colors.bg },
+              switchOn && styles.switchThumbOn,
+            ]}
+          />
+        </View>
+      ) : null}
       <Text style={[styles.buttonText, { color: colors.fg, fontFamily: fonts.medium }]}>{label}</Text>
     </Pressable>
   );
@@ -473,7 +617,8 @@ function ExternalSlideStage({
   );
 }
 
-function SlideCanvas({
+/** One slide drawn to fit its box, as the presenter and the rehearsal review show it. */
+export function SlideCanvas({
   slide,
   resolveAsset,
   playingVideoIds,
@@ -625,9 +770,10 @@ const styles = StyleSheet.create({
   header: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: 16 },
   count: { flex: 1, fontSize: 18 },
   connection: { fontSize: 16 },
+  timer: { minWidth: 150, fontVariant: ["tabular-nums"] },
   presentationBody: { flex: 1, minHeight: 0, flexDirection: "row", gap: 20 },
   onDevicePresentation: { flex: 1, minHeight: 0, gap: 10 },
-  onDeviceGuidance: { fontSize: 17, lineHeight: 23, textAlign: "center" },
+  tvGuidance: { fontSize: 17, lineHeight: 23, textAlign: "center" },
   onDeviceStage: { flex: 1, minHeight: 0, backgroundColor: "#000" },
   connectState: {
     flex: 1,
@@ -648,16 +794,36 @@ const styles = StyleSheet.create({
   preview: { flex: 1, minHeight: 0, backgroundColor: "#000" },
   noNext: { flex: 1, alignItems: "center", justifyContent: "center", borderWidth: 1 },
   noNextText: { fontSize: 16 },
-  controls: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
+  controls: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  backRow: { flexShrink: 1, maxWidth: 640, fontSize: 17, textAlign: "center" },
+  backRowLine: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+    minWidth: 0,
+  },
+  backRowName: { flexShrink: 1 },
   button: {
     minWidth: 96,
     minHeight: 44,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 10,
     borderWidth: 1,
     borderRadius: 8,
     paddingHorizontal: 16,
   },
+  switchTrack: { width: 36, height: 22, borderRadius: 11, padding: 2 },
+  switchThumb: { width: 18, height: 18, borderRadius: 9 },
+  switchThumbOn: { marginLeft: 14 },
   buttonText: { fontSize: 17 },
   disabled: { opacity: 0.4 },
   externalStage: { flex: 1, backgroundColor: "#000" },

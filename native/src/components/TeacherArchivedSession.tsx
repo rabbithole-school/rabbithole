@@ -18,14 +18,15 @@ export function TeacherArchivedSession({ title }: { title: string }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const goHome = () => {
-    if (router.canDismiss()) router.dismissAll();
-    else router.replace("/");
+    router.dismissTo("/");
   };
   return (
     <>
       {/* Screen options MERGE: when an archive lands on an open builder, its
           Edit/Play, History, Present and Chat header controls would stay up
-          unless every slot it set is reset here. */}
+          unless every slot it set is reset here. The builder's pills and the
+          session's compass and homework pill are header ITEMS, which iOS
+          draws over `headerRight`, so both are cleared. */}
       <Stack.Screen
         options={{
           title,
@@ -33,6 +34,7 @@ export function TeacherArchivedSession({ title }: { title: string }) {
           headerTitle: title,
           headerLeft: undefined,
           headerRight: () => null,
+          unstable_headerRightItems: undefined,
         }}
       />
       <View style={styles.root}>

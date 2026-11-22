@@ -312,7 +312,7 @@ describe("parseEditorialToolResponse accepts valid shapes", () => {
       ],
       clue: [],
     };
-    const slipLine = "You noticed everybody agreed it took forever, Lily said.";
+    const slipLine = "You noticed everybody agreed it took forever, Kawika said.";
     // Without the name, the line passes the parser and is written.
     const noName = parseEditorialToolResponse(
       toolResponse({
@@ -329,7 +329,7 @@ describe("parseEditorialToolResponse accepts valid shapes", () => {
         clue: { decision: "decline", reason: "coherence" },
       }),
       nameRailCandidates,
-      "Lily",
+      "Kawika",
     );
     expect(withName.lookBack.kind).toBe("decline");
   });

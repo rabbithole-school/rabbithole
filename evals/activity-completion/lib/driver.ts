@@ -47,6 +47,7 @@ export async function runCompletionSession(
   let completionTurnText: string | null = null;
   let completionToolWasFirst: boolean | null = null;
   let completionHadPostToolText: boolean | null = null;
+  let completedOnOpenQuestion: boolean | null = null;
   const goalEvidencePatterns = testCase.goalEvidencePatterns?.map(
     (pattern) => new RegExp(pattern, "i"),
   );
@@ -68,10 +69,22 @@ export async function runCompletionSession(
 
   if (testCase.script) {
     const scriptedTurns = testCase.script.slice(0, maxTurns);
+    const openQuestionTurns = new Set(testCase.openQuestionTurns ?? []);
     for (let i = 0; i < scriptedTurns.length; i++) {
       const reply = { text: scriptedTurns[i], stop: null };
       push({ role: "scholar", content: reply.text });
       scholarTurns++;
+      // A scripted scholar reaches the goal only through the fixture's own
+      // evidence patterns (accumulated as below); otherwise never.
+      goalEvidencePatterns?.forEach((pattern, i) => {
+        if (pattern.test(reply.text)) goalEvidenceSeen.add(i);
+      });
+      const scholarReachedGoal =
+        !!goalEvidencePatterns?.length &&
+        goalEvidenceSeen.size === goalEvidencePatterns.length;
+      if (scholarReachedGoal && arcCompleteAtScholarTurn === null) {
+        arcCompleteAtScholarTurn = scholarTurns;
+      }
 
       const tutor = await generateTutorTurn(
         profile,
@@ -79,7 +92,7 @@ export async function runCompletionSession(
         turns,
         scholarTurns,
         offline,
-        false,
+        scholarReachedGoal,
       );
       push({ role: "tutor", content: tutor.text });
 
@@ -88,6 +101,8 @@ export async function runCompletionSession(
         completionTurnText = tutor.text;
         completionToolWasFirst = tutor.completionToolWasFirst ?? null;
         completionHadPostToolText = tutor.completionHadPostToolText ?? null;
+        completedOnOpenQuestion = openQuestionTurns.has(scholarTurns);
+        break; // Activity closed — session over.
       }
       if (
         tutor.called &&
@@ -163,6 +178,7 @@ export async function runCompletionSession(
       completionTurnText,
       completionToolWasFirst,
       completionHadPostToolText,
+      completedOnOpenQuestion,
     },
   };
 }

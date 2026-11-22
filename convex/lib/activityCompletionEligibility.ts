@@ -20,6 +20,7 @@
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
 import { effectiveActivityKind } from "../../shared/appSurface";
+import { readSchedule } from "./scheduleStore";
 
 /**
  * Is this activity completable via the conversation-completion path?
@@ -50,7 +51,7 @@ export async function isConversationCompletable(
   if (!session.assignmentId || !session.activityId) return false;
   const assignment = await ctx.db.get(session.assignmentId);
   if (!assignment || assignment.kind !== "adHocDispatch") return false;
-  const schedule = assignment.activitySchedule ?? [];
+  const schedule = await readSchedule(ctx, assignment);
   return schedule.some(
     (e) => String(e.activityId) === String(session.activityId),
   );

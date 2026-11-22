@@ -17,6 +17,11 @@
  * has an activity. Exploration (open chat, seed explorations, discussion-only
  * activities, Quest planning chats) resolves none and is never alerted.
  *
+ * In an app activity, a non-empty mission line gives the observer something
+ * to notice drift from; a blank line does not page drift. A scholar with no
+ * app can still be stuck and pages separately. The app's run state never
+ * determines whether the mission is met or blocks an alert.
+ *
  * Called from `analysisHelpers.saveAnalysis`, in the same transaction that
  * writes the reading, so it sees exactly the rows the observer has written.
  */
@@ -29,6 +34,7 @@ import { CONCERN_ON_TASK } from "./lib/rosterPulse";
 import { isTeacherRole } from "./lib/roles";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
 import { scholarHasCompletedActivity } from "./lib/workshopPolicy";
+import { isAppActivity } from "../shared/appSurface";
 import { escapeSlackText } from "./lib/slackApi";
 
 export const OFF_MISSION_ALERT_KIND = "off_mission";
@@ -38,6 +44,15 @@ export const OFF_MISSION_ALERT_KIND = "off_mission";
  * is not alerted again inside the same window.
  */
 export const APP_OFF_TRACK_ALERT_KIND = "app_off_track";
+/**
+ * The same off-track readings in an app activity whose session has no app at
+ * all: the scholar has nothing to play or change, so the product stopped
+ * them, and calling that "off mission" accuses a stuck child of drifting. A
+ * 7-year-old with no app and no reply from the builder was paged as off
+ * mission (prod, 2026-11-06). Its own kind, so a teacher reads it as "help
+ * this scholar get going", never as drift.
+ */
+export const APP_STUCK_ALERT_KIND = "app_stuck";
 
 /**
  * How many CONSECUTIVE off-track readings it takes to alert. One observer
@@ -119,19 +134,16 @@ async function owningTeacher(
 }
 
 
-/** The mission line of the post: an authored gate as written, any other gate
- * (the kind's default — including an authored contract with no gate — or a
- * Quest's) marked "(default)". */
+/** Non-app default missions retain their existing marker. App mission lines
+ * are always shown as written. */
 function missionLine(mission: OffMissionAlertMission): string {
   const gate = escapeSlackText(mission.gate.trim());
-  return mission.gateAuthored
-    ? `Mission: ${gate}`
-    : `Mission: (default) ${gate}`;
+  return `Mission: ${mission.defaultMission ? "(default) " : ""}${gate}`;
 }
 
 export type OffMissionAlertMission = Pick<SessionMission, "gate"> & {
-  /** The activity's own contract carries this gate. */
-  gateAuthored: boolean;
+  /** Only non-app missions without an authored gate use the default marker. */
+  defaultMission?: boolean;
 };
 
 /** The parts of the Slack post, kept pure so the shape is testable. */
@@ -148,16 +160,35 @@ export function buildOffMissionAlert(args: {
     args.teacherSlackUserId && SLACK_MEMBER_ID.test(args.teacherSlackUserId)
       ? `<@${args.teacherSlackUserId}> `
       : "";
-  const lines = [
-    `${mention}${escapeSlackText(args.observerSummary.trim())}`,
-    missionLine(args.mission),
-  ];
+  const summary = escapeSlackText(args.observerSummary.trim());
+  const lines = [`${mention}${summary}`, missionLine(args.mission)];
   if (args.parkedIdeas && args.parkedIdeas > 0) {
     lines.push(
       `The tutor has saved ${args.parkedIdeas} ${args.parkedIdeas === 1 ? "idea" : "ideas"} for later this session.`,
     );
   }
   return { title, body: lines.join("\n") };
+}
+
+/** The Slack post for a scholar stuck in an app activity with no app. */
+export function buildAppStuckAlert(args: {
+  scholarName: string;
+  activityTitle: string;
+  observerSummary: string;
+  teacherSlackUserId?: string | null;
+}): { title: string; body: string } {
+  const title = `${escapeSlackText(args.scholarName)} looks stuck in ${escapeSlackText(args.activityTitle)}`;
+  const mention =
+    args.teacherSlackUserId && SLACK_MEMBER_ID.test(args.teacherSlackUserId)
+      ? `<@${args.teacherSlackUserId}> `
+      : "";
+  return {
+    title,
+    body: [
+      `${mention}${escapeSlackText(args.observerSummary.trim())}`,
+      "There is no app in this session yet, so there is nothing for them to play or change.",
+    ].join("\n"),
+  };
 }
 
 /**
@@ -188,11 +219,12 @@ export async function maybeRaiseOffMissionAlert(
       ctx.db.get(session.activityId),
       session.unitId ? ctx.db.get(session.unitId) : null,
     ]);
-    // No mission, no "off": exploration sessions are never alerted.
+    // No mission, no "off": exploration sessions are never alerted. An app
+    // without an authored contract can still page if it has no app yet.
     const mission = activity
       ? resolveSessionMission(session, activity, unit)
       : null;
-    if (!activity || !mission) return undefined;
+    if (!activity || (!mission && !isAppActivity(activity))) return undefined;
     // The activity's work is done: there is no mission left to be off.
     if (
       await scholarHasCompletedActivity(ctx, {
@@ -203,7 +235,6 @@ export async function maybeRaiseOffMissionAlert(
     ) {
       return undefined;
     }
-
     const readings = await ctx.db
       .query("analyses")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
@@ -211,8 +242,9 @@ export async function maybeRaiseOffMissionAlert(
       .take(OFF_TRACK_CONSECUTIVE_READINGS + 1);
     if (!entersOffTrack(readings)) return undefined;
 
-    // One window per session across BOTH kinds: a session already paged under
-    // the old app-only kind stays quiet until that window passes.
+    // A session already paged under the old app-only kind stays quiet until
+    // that window passes. (off_mission and app_stuck each dedup on their own
+    // key below.)
     const legacyKey = `${APP_OFF_TRACK_ALERT_KIND}:${sessionId}`;
     const legacy = await ctx.db
       .query("alerts")
@@ -230,22 +262,47 @@ export async function maybeRaiseOffMissionAlert(
     // "Owned" session: no teacher in the scholar's school owns it → no alert.
     if (!teacher) return undefined;
 
-    const { title, body } = buildOffMissionAlert({
-      scholarName: scholar?.name ?? "A scholar",
-      activityTitle: activity.title,
-      observerSummary: readings[0]?.summary ?? "",
-      mission: {
-        gate: mission.gate,
-        gateAuthored:
-          mission.source === "authored" &&
-          !!activity.buildContract?.gate?.trim(),
-      },
-      teacherSlackUserId: teacher.slackUserId,
-      parkedIdeas: session.parkingLot?.length ?? 0,
-    });
+    // An app activity with no app in the session: the scholar is stuck, not
+    // drifting (APP_STUCK_ALERT_KIND).
+    const stuckWithoutApp =
+      isAppActivity(activity) &&
+      (await ctx.db
+        .query("artifacts")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .filter((q) => q.eq(q.field("type"), "code"))
+        .first()) === null;
+    // Without a mission line there is nothing to drift from, but no app
+    // still means the scholar is stuck.
+    if (
+      !stuckWithoutApp &&
+      (!mission || (isAppActivity(activity) && !mission.gate.trim()))
+    )
+      return undefined;
+    const kind = stuckWithoutApp ? APP_STUCK_ALERT_KIND : OFF_MISSION_ALERT_KIND;
+    const { title, body } = stuckWithoutApp
+      ? buildAppStuckAlert({
+          scholarName: scholar?.name ?? "A scholar",
+          activityTitle: activity.title,
+          observerSummary: readings[0]?.summary ?? "",
+          teacherSlackUserId: teacher.slackUserId,
+        })
+      : buildOffMissionAlert({
+          scholarName: scholar?.name ?? "A scholar",
+          activityTitle: activity.title,
+          observerSummary: readings[0]?.summary ?? "",
+          mission: {
+            gate: mission?.gate ?? "",
+            defaultMission:
+              !isAppActivity(activity) &&
+              (mission?.source !== "authored" ||
+                !activity.buildContract?.gate?.trim()),
+          },
+          teacherSlackUserId: teacher.slackUserId,
+          parkedIdeas: session.parkingLot?.length ?? 0,
+        });
 
     return await raiseAlert(ctx, {
-      kind: OFF_MISSION_ALERT_KIND,
+      kind,
       severity: "warning",
       source: "observer",
       audience: "institution",
@@ -257,7 +314,7 @@ export async function maybeRaiseOffMissionAlert(
       deepLink: withBase(siteUrl(), sessionPath(sessionId, session.userId)),
       // The fabric's default 12h window is the "once per school day" cap: a
       // session that clears and drifts again the same day stays at one post.
-      dedupKey: `${OFF_MISSION_ALERT_KIND}:${sessionId}`,
+      dedupKey: `${kind}:${sessionId}`,
     });
   } catch (err) {
     console.error("maybeRaiseOffMissionAlert failed (ignored):", err);

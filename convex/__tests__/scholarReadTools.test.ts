@@ -745,6 +745,7 @@ describe("institution-lens scoping (the staff aide)", () => {
     // default stated explicitly).
     expect(runQuery).toHaveBeenCalledWith(expect.anything(), {
       includeProgramGuests: false,
+      includeWithdrawn: false,
       allowedScholarIds: ["u_kai"],
     });
     expect(emit).toHaveBeenCalledWith({

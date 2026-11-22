@@ -157,6 +157,24 @@ const call = (
   input: { recipient: string; message: string },
 ) => as.action(api.mcp.callCurriculumTool, { name: "send_slack_dm", input });
 
+type PostedBlock = { type: string; text?: string; elements?: Array<{ text: string }> };
+
+/** The relay's full-size text: its `markdown` blocks, as the recipient reads them. */
+function mainText(body: Record<string, unknown>): string {
+  // A relay with no footer has nothing grey, so it posts as markdown_text.
+  if (!body.blocks) return String(body.markdown_text ?? "");
+  return (body.blocks as PostedBlock[])
+    .filter((block) => block.type === "markdown")
+    .map((block) => block.text ?? "")
+    .join("\n\n");
+}
+
+/** The relay's grey line (the bot's footer), or null when it has none. */
+function greyText(body: Record<string, unknown>): string | null {
+  const grey = ((body.blocks ?? []) as PostedBlock[]).filter((block) => block.type === "context");
+  return grey.length > 0 ? grey.map((block) => block.elements?.[0]?.text ?? "").join("\n") : null;
+}
+
 describe("send_slack_dm aide tool", () => {
   test("happy path: opens a group DM with BOTH people, attributes in real bold, and returns the permalink", async () => {
     const t = convexTest(schema, modules);
@@ -196,10 +214,30 @@ describe("send_slack_dm aide tool", () => {
     const posts = fetchStub.posts();
     expect(posts).toHaveLength(1);
     expect(posts[0].body.channel).toBe("C_GROUP");
-    // `**` not `*`: markdown_text is CommonMark, where a single asterisk is
+    // `**` not `*`: a markdown block is CommonMark, where a single asterisk is
     // EMPHASIS. A live relay shipped its "bold" attribution in italics.
-    expect(posts[0].body.markdown_text).toBe(
-      "**From <@U_TESS> (via Rabbithole):**\n\nMeeting &lt; 3pm &amp; bring notes &gt;\n\n_Relayed by Rabbithole — reply here and <@U_TESS> will see it._",
+    // The attribution and the words are one full-size block; the bot's footer
+    // is the grey line under them.
+    expect(posts[0].body.markdown_text).toBeUndefined();
+    expect(posts[0].body.blocks).toEqual([
+      {
+        type: "markdown",
+        text: "**From <@U_TESS> (via Rabbithole):**\n\nMeeting &lt; 3pm &amp; bring notes &gt;",
+      },
+      {
+        type: "context",
+        block_id: "rh_grey_0",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: "_Relayed by Rabbithole — reply here and <@U_TESS> will see it._",
+          },
+        ],
+      },
+    ]);
+    // Notifications still carry every word, attribution first.
+    expect(posts[0].body.text).toBe(
+      "*From <@U_TESS> (via Rabbithole):*\n\nMeeting &lt; 3pm &amp; bring notes &gt;\n\n_Relayed by Rabbithole — reply here and <@U_TESS> will see it._",
     );
 
     // The receipt carries the permalink, and tells the model to hand it over:
@@ -247,8 +285,9 @@ describe("send_slack_dm aide tool", () => {
     expect(posts[0].body.channel).toBe("U_AVERY");
     // Plain escaped name (no mention id to use), and the recipient is told a
     // reply here goes nowhere — the alternative is typing into a void.
-    expect(posts[0].body.markdown_text).toBe(
-      "**From Tess Teacher (via Rabbithole):**\n\nhi\n\n_Relayed by Rabbithole. Tess Teacher isn't in this conversation, so a reply here won't reach them._",
+    expect(mainText(posts[0].body)).toBe("**From Tess Teacher (via Rabbithole):**\n\nhi");
+    expect(greyText(posts[0].body)).toBe(
+      "_Relayed by Rabbithole. Tess Teacher isn't in this conversation, so a reply here won't reach them._",
     );
     expect(result).toContain("1:1 DM");
     expect(result).toContain("/admin");
@@ -320,11 +359,14 @@ describe("send_slack_dm aide tool", () => {
     expect(fetchStub.calls.some((c) => c.method === "conversations.open")).toBe(
       false,
     );
-    const posted = String(fetchStub.posts()[0].body.markdown_text);
+    const body = fetchStub.posts()[0].body;
+    const posted = mainText(body);
     expect(posted).toContain("**From Tess Teacher (via Rabbithole):**");
     expect(posted).toContain("note to self");
-    // The absence footer would be nonsense here — they ARE the conversation.
-    expect(posted).not.toContain("isn't in this conversation");
+    // The absence footer would be nonsense here — they ARE the conversation —
+    // so there is no grey line at all.
+    expect(greyText(body)).toBeNull();
+    expect(String(body.text)).not.toContain("isn't in this conversation");
     expect(result).not.toContain("won't come back");
   });
 
@@ -395,7 +437,11 @@ describe("send_slack_dm aide tool", () => {
       delete process.env.SLACK_BOT_TOKEN;
     }
 
-    const posted = String(fetchStub.posts()[0].body.markdown_text);
+    const body = fetchStub.posts()[0].body;
+    // The footer names the sender too, so the grey line is read with the rest.
+    const posted = `${mainText(body)}\n\n${greyText(body) ?? ""}`;
+    // The grey line is mrkdwn, where a single `*` is bold: none may survive.
+    expect(greyText(body)).not.toMatch(/[*\\]/);
     // Exactly ONE attribution line, and the injected one is inert.
     expect(posted.match(/\*\*From /g)).toHaveLength(1);
     expect(posted).not.toContain("\n\n**From Avery Stone");

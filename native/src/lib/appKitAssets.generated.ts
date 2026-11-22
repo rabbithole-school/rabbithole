@@ -23,6 +23,7 @@ export const APP_KIT_SOURCE_ASSETS = {
   "three.iife.min.js": { version: "v2", module: require("../../assets/app-kit/v2/three.iife.min.js.kit") },
   "rh-expression-editor.js": { version: "v2", module: require("../../assets/app-kit/v2/rh-expression-editor.js.kit") },
   "rh-expression-editor.css": { version: "v2", module: require("../../assets/app-kit/v2/rh-expression-editor.css.kit") },
+  "highlight-python.min.js": { version: "v2", module: require("../../assets/app-kit/v2/highlight-python.min.js.kit") },
 } as const satisfies Readonly<
   Record<AppKitFile, { module: number; version: AppKitVersion }>
 >;

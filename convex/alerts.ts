@@ -22,6 +22,10 @@
  *   "improvement-loops" — single private platform-wide channel for generic
  *                    cadence pointers and redacted proposal threads. Never
  *                    receives scholar data or alert content.
+ *   "claude-dispatch" — single private platform-wide channel where automatic
+ *                    work with no human in the conversation is handed to Claude
+ *                    Tag as one top-level `@Claude` message
+ *                    (convex/claudeDispatch.ts). Redacted briefs only.
  *
  * Every alert declares one explicit `audience`:
  *   "institution" → an institution-facing alert. Resolve the institution from
@@ -46,9 +50,11 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { isPlatformAdminRole } from "./lib/roles";
-import { teacherQuery } from "./lib/customFunctions";
+import { authedMutation, teacherQuery } from "./lib/customFunctions";
+import { registrableHost } from "./lib/externalAppsResolve";
 import { requireActiveScholarAccess } from "./lib/access";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
+import { slackWhisperRefusal } from "./lib/teacherWhisper";
 
 const ALERT_SEVERITY = v.union(
   v.literal("critical"),
@@ -69,6 +75,10 @@ const ALERT_KIND_EMOJI: Readonly<Record<string, string>> = {
   app_off_track: "🧭",
   // The same steer for any activity that has a mission (TRA-519 B3).
   off_mission: "🧭",
+  // Stuck in an app activity with no app: the product stopped them.
+  app_stuck: "🧩",
+  // The BunnyPad link viewer kept a scholar on the page (reportBlockedLink).
+  link_blocked: "🔗",
 };
 
 export function alertEmoji(
@@ -121,11 +131,12 @@ export interface RaiseAlertArgs {
  * Legacy: institutionId set → "scoped"; institutionId absent → "catchall".
  */
 export function effectiveRole(ch: {
-  role?: "scoped" | "catchall" | "platform-ops" | "improvement-loops";
+  role?: "scoped" | "catchall" | "platform-ops" | "improvement-loops" | "claude-dispatch";
   institutionId?: Id<"institutions">;
-}): "scoped" | "catchall" | "platform-ops" | "improvement-loops" {
+}): "scoped" | "catchall" | "platform-ops" | "improvement-loops" | "claude-dispatch" {
   if (ch.role === "platform-ops") return "platform-ops";
   if (ch.role === "improvement-loops") return "improvement-loops";
+  if (ch.role === "claude-dispatch") return "claude-dispatch";
   if (ch.role === "scoped") return "scoped";
   if (ch.role === "catchall") return "catchall";
   // Legacy row: derive from institutionId presence.
@@ -356,6 +367,89 @@ export const deliveryAllowed = internalQuery({
   },
 });
 
+async function alertForThread(
+  ctx: QueryCtx,
+  channelId: string,
+  threadTs: string,
+) {
+  return await ctx.db
+    .query("alerts")
+    .withIndex("by_slack_message", (q) =>
+      q.eq("slackChannelId", channelId).eq("slackMessageTs", threadTs),
+    )
+    .first();
+}
+
+/**
+ * Whether a Slack thread hangs under one of our alerts. `recordSlackDelivery`
+ * stamped the root's coordinates on the row when the bot posted it, so a match
+ * needs no Slack call.
+ */
+export const isAlertThread = internalQuery({
+  args: { channelId: v.string(), threadTs: v.string() },
+  handler: async (ctx, args): Promise<boolean> =>
+    (await alertForThread(ctx, args.channelId, args.threadTs)) !== null,
+});
+
+/**
+ * The alert a Slack thread hangs under, as the bot needs it on every reply in
+ * that thread: which scholar, and, for a caller allowed to whisper there, the
+ * session id plus whatever whisper is still waiting (the model doesn't see its
+ * own earlier tool results, so it must not have to remember). A caller who may
+ * not whisper gets the reason and none of the session's details: an alert
+ * channel can carry another school's alerts.
+ */
+export const threadBinding = internalQuery({
+  args: {
+    channelId: v.string(),
+    threadTs: v.string(),
+    callerUserId: v.id("users"),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    kind: string;
+    title: string;
+    scholarName: string | null;
+    session:
+      | null
+      | { refusal: string }
+      | {
+          refusal: null;
+          sessionId: Id<"sessions">;
+          pendingWhisper: string | null;
+          lastMessageAt: number | null;
+        };
+  } | null> => {
+    const alert = await alertForThread(ctx, args.channelId, args.threadTs);
+    if (!alert) return null;
+    const [scholar, session, caller] = await Promise.all([
+      alert.scholarId ? ctx.db.get(alert.scholarId) : null,
+      alert.sessionId ? ctx.db.get(alert.sessionId) : null,
+      ctx.db.get(args.callerUserId),
+    ]);
+    const refusal = session
+      ? await slackWhisperRefusal(ctx, caller, session)
+      : null;
+    return {
+      kind: alert.kind,
+      title: alert.title,
+      scholarName: scholar?.name ?? scholar?.username ?? null,
+      session: !session
+        ? null
+        : refusal
+          ? { refusal }
+          : {
+              refusal: null,
+              sessionId: session._id,
+              pendingWhisper: session.pendingWhisper ?? null,
+              lastMessageAt: session.lastMessageAt ?? null,
+            },
+    };
+  },
+});
+
 /** Whether a Slack channel is one of Rabbithole's configured alert lanes. */
 export const isLinkedAlertChannel = internalQuery({
   args: { channelId: v.string() },
@@ -394,6 +488,7 @@ const ALERT_CHANNEL_ROLE = v.optional(
     v.literal("catchall"),
     v.literal("platform-ops"),
     v.literal("improvement-loops"),
+    v.literal("claude-dispatch"),
   ),
 );
 
@@ -411,6 +506,8 @@ const ALERT_CHANNEL_ROLE = v.optional(
  *                    can be linked at a time.
  *   "improvement-loops" — no institution; receives generic Rounds/Coherence
  *                    pointers and redacted proposal threads. Only one can be linked.
+ *   "claude-dispatch" — no institution; automatic work handed to Claude Tag as
+ *                    one top-level mention per item. Only one can be linked.
  *
  * Gated to ADMIN since it's a school-wide setting.
  */
@@ -421,7 +518,7 @@ export const linkAlertsChannel = internalMutation({
     unlink: v.boolean(),
     // Scope by institution id OR slug (slug is resolved here; id takes
     // precedence). Required for "scoped" role; ignored for "catchall" and
-    // "platform-ops" and "improvement-loops".
+    // "platform-ops", "improvement-loops" and "claude-dispatch".
     institutionId: v.optional(v.id("institutions")),
     institutionSlug: v.optional(v.string()),
     // Explicit role. Defaults to "scoped" if institutionId/institutionSlug is
@@ -436,7 +533,7 @@ export const linkAlertsChannel = internalMutation({
     message: string;
     // On a successful LINK: the effective role + (for scoped) the institution
     // name, so the Slack tool can stamp a role-appropriate channel topic.
-    role?: "scoped" | "catchall" | "platform-ops" | "improvement-loops";
+    role?: "scoped" | "catchall" | "platform-ops" | "improvement-loops" | "claude-dispatch";
     institutionName?: string;
   }> => {
     const caller = await ctx.db.get(args.callerUserId);
@@ -466,7 +563,7 @@ export const linkAlertsChannel = internalMutation({
     }
 
     // Determine the effective role.
-    const role: "scoped" | "catchall" | "platform-ops" | "improvement-loops" =
+    const role: "scoped" | "catchall" | "platform-ops" | "improvement-loops" | "claude-dispatch" =
       args.role ??
       (institutionId !== undefined ? "scoped" : "catchall");
 
@@ -480,7 +577,8 @@ export const linkAlertsChannel = internalMutation({
     if (
       (role === "catchall" ||
         role === "platform-ops" ||
-        role === "improvement-loops") &&
+        role === "improvement-loops" ||
+        role === "claude-dispatch") &&
       institutionId
     ) {
       return {
@@ -502,7 +600,11 @@ export const linkAlertsChannel = internalMutation({
       if (row && effectiveRole(row) === "scoped") {
         existing = row;
       }
-    } else if (role === "platform-ops" || role === "improvement-loops") {
+    } else if (
+      role === "platform-ops" ||
+      role === "improvement-loops" ||
+      role === "claude-dispatch"
+    ) {
       // Exactly one channel per platform-wide role; look up by the role index.
       existing =
         (await ctx.db
@@ -529,7 +631,9 @@ export const linkAlertsChannel = internalMutation({
       const scopeDesc =
         role === "scoped"
           ? "that institution's"
-          : role === "platform-ops" || role === "improvement-loops"
+          : role === "platform-ops" ||
+              role === "improvement-loops" ||
+              role === "claude-dispatch"
             ? role
             : "catchall";
       return {
@@ -564,6 +668,8 @@ export const linkAlertsChannel = internalMutation({
         ? "as the platform-ops channel (firm-wide cost/usage reports and system alerts)"
         : role === "improvement-loops"
           ? "as the improvement-loops channel (generic cadence and redacted proposal threads)"
+        : role === "claude-dispatch"
+          ? "as the Claude dispatch channel (automatic work handed to Claude)"
         : institutionName
           ? `for ${institutionName} scholars`
           : "as the catchall channel for institutions without a dedicated channel";
@@ -575,6 +681,8 @@ export const linkAlertsChannel = internalMutation({
         ? "The weekly cost/usage report and system alerts now post here."
         : role === "improvement-loops"
           ? "Generic improvement pointers and redacted proposal threads now post here; learner data never does."
+        : role === "claude-dispatch"
+          ? "Automatic work with no person in the conversation is now handed to Claude here, one message per item; learner data never is."
         : "Urgent safety alerts and the weekly reports now post here.";
     return {
       ok: true,
@@ -607,6 +715,20 @@ export const improvementLoopsChannelId = internalQuery({
     const ch = await ctx.db
       .query("alertChannel")
       .withIndex("by_role", (q) => q.eq("role", "improvement-loops"))
+      .first();
+    return ch?.slackChannelId ?? null;
+  },
+});
+
+/** The private platform-wide channel where automatic work is handed to
+ * Claude Tag (convex/claudeDispatch.ts). Null until an admin binds one; the
+ * dispatch then refuses loudly rather than falling back to anything. */
+export const claudeDispatchChannelId = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<string | null> => {
+    const ch = await ctx.db
+      .query("alertChannel")
+      .withIndex("by_role", (q) => q.eq("role", "claude-dispatch"))
       .first();
     return ch?.slackChannelId ?? null;
   },
@@ -739,5 +861,50 @@ export const recentByScholar = teacherQuery({
     return rows
       .filter((a) => a.kind === args.kind)
       .slice(0, args.limit ?? 20);
+  },
+});
+
+/**
+ * A link reduced to what a platform-ops post may carry: its host, never the
+ * path, query or fragment. Share links carry their access in all three (a
+ * Google Doc id, a Dropbox token, a username in a path), and the platform-ops
+ * channel never names a scholar or school. Also its site, for grouping. Null
+ * for anything that isn't http(s).
+ */
+function linkForAlert(raw: string): { host: string; site: string } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw.trim().slice(0, 2048));
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  const host = parsed.hostname.toLowerCase().slice(0, 120);
+  return { host, site: registrableHost(host) };
+}
+
+/**
+ * The BunnyPad link viewer (native lib/linkViewer.ts, TRA-643) reports a
+ * navigation it kept on the page, so the platform-ops channel shows whether
+ * its fence is too tight (Andy, 2026-11-10). Platform audience: the post
+ * names no scholar or school, only the two hosts (`linkForAlert`). The same
+ * pair of sites posts at most once per alert dedup window.
+ */
+export const reportBlockedLink = authedMutation({
+  args: { fromUrl: v.string(), toUrl: v.string() },
+  handler: async (ctx, { fromUrl, toUrl }) => {
+    const to = linkForAlert(toUrl);
+    if (!to) return null;
+    const from = linkForAlert(fromUrl);
+    await raiseAlert(ctx, {
+      kind: "link_blocked",
+      severity: "info",
+      title: "BunnyPad link viewer blocked a tap",
+      body: `From: ${from?.host ?? "an unknown page"}\nTo: ${to.host}`,
+      source: "native_link_viewer",
+      audience: "platform",
+      dedupKey: `link_blocked:${from?.site ?? "unknown"}>${to.site}`,
+    });
+    return null;
   },
 });

@@ -13,6 +13,7 @@
  * list-detail layout already shows the list, no back arrow needed).
  */
 
+import { WritingWithItalics } from "@/components/WritingWithItalics";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ActivityKind } from "@/lib/activityKinds";
 import { useRouter } from "next/navigation";
@@ -22,6 +23,7 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Flex,
   HStack,
   Popover,
@@ -42,9 +44,12 @@ import {
   Play,
   ArrowClockwise,
   WarningCircle,
+  HandArrowUp,
 } from "@phosphor-icons/react";
-import { ActivityModeBadge, ActivityModeIcon } from "@/lib/activityMode";
+import { ActivityModeBadge } from "@/lib/activityMode";
+import { giveBadge } from "@/lib/giveBadge";
 import { api } from "@/convex/_generated/api";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import type { Id } from "@/convex/_generated/dataModel";
 import { formatCaptureDuration } from "@/shared/captureMedia";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -66,15 +71,23 @@ import {
 } from "@/components/skeletons/PanelSkeletons";
 import { formatRelative } from "@/lib/relativeTime";
 import { toaster } from "@/lib/toaster";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import {
   formatRoomTurnTime,
   isClassFocusRunningLong,
 } from "@/shared/roomTurn";
 import { plannedReleaseArgs } from "@/shared/plannedRelease";
+import { isScheduleEntryActive } from "@/shared/focusShowing";
+import {
+  isOpenUntil,
+  openUntilClosedLine,
+  openUntilClosesAt,
+  openUntilPhrase,
+} from "@/shared/openUntil";
 import {
   DEFAULT_TIMEZONE,
+  dayKeyForTimezone,
   dayStartForDayKey,
-  dueStatus,
   shiftDayKey,
 } from "@/shared/institutionDay";
 import {
@@ -83,9 +96,11 @@ import {
   type TurnedPush,
 } from "@/components/ScholarsStillWorkingNotice";
 import { ScheduleActivityDialog } from "@/components/ScheduleActivityDialog";
+import { GiveDialog } from "@/components/GiveDialog";
 import { DeliverableWorkActions } from "@/components/DeliverableWorkActions";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isTeacherRole } from "@/convex/lib/roles";
+import { runSchedule } from "@/components/runSchedule";
 
 /**
  * Whether this viewer reads the cohort's LEARNING RECORD here — the class
@@ -182,10 +197,14 @@ function AssignmentPageBody({
     );
     return () => clearInterval(timer);
   }, []);
-  const dueDateOptions = useQuery(api.assignments.homeworkDueDateOptions, {
-    assignmentId,
-    nowMs: dueOptionsNowMs,
-  });
+  // Smoothed so the minute re-arm doesn't collapse an open "Send as homework"
+  // popover body to a spinner (TRA-424); keyed on the assignment so another
+  // cohort's due options never show under this one.
+  const dueDateOptions = useSmoothedQuery(
+    api.assignments.homeworkDueDateOptions,
+    { assignmentId, nowMs: dueOptionsNowMs },
+    { resetKey: assignmentId },
+  );
   // World cohorts get live classroom controls in the header (plan §8 Assign).
   // Detected from the already-loaded activity progress (no separate query) —
   // its lessons carry each activity's kind.
@@ -204,8 +223,13 @@ function AssignmentPageBody({
   const pushActivity = useMutation(api.assignments.pushActivity);
   const [starting, setStarting] = useState(false);
 
-  const classFocusCount = data.classFocusCount;
+  // Counted by finish on the server (TRA-722). `?? 0` covers a backend that
+  // hasn't deployed `openUntilCount` yet.
   const homeworkCount = data.homeworkCount;
+  const liveCounts = {
+    inClass: data.classFocusCount,
+    openUntil: data.openUntilCount ?? 0,
+  };
   // The eyebrow asks a PARTITION question ("sent, or still planned?"), so it
   // reads `sentCount`, not the chip counts below it. Those two disagree for
   // an overrun-but-unwrapped class focus: it drops out of the chips (its
@@ -228,7 +252,7 @@ function AssignmentPageBody({
   // `pushActivity`, rather than forcing the teacher to recreate the task.
   const plannedEntry =
     !isArchived && data.unitId == null
-      ? (data.activitySchedule.find((e) => e.setAt == null) ?? null)
+      ? (runSchedule(data).find((e) => e.setAt == null) ?? null)
       : null;
 
   const onStartNow = async () => {
@@ -238,11 +262,16 @@ function AssignmentPageBody({
       const releaseArgs = plannedReleaseArgs(
         {
           mode: plannedEntry.mode,
+          startsAt: plannedEntry.startsAt ?? null,
           endsAt: plannedEntry.endsAt ?? null,
           dueAt: plannedEntry.dueAt ?? null,
           scholarIds: plannedEntry.scholarIds ?? null,
+          // The stored finish (TRA-726), so open-until work started on its
+          // closing day keeps that day.
+          openUntilKind: plannedEntry.openUntilKind ?? null,
         },
         Date.now(),
+        data.timeZone ?? DEFAULT_TIMEZONE,
       );
       await pushActivity({
         assignmentId,
@@ -254,12 +283,13 @@ function AssignmentPageBody({
           plannedEntry.mode,
           releaseArgs.endsAt,
           data.timeZone,
+          releaseArgs.openUntilKind,
         ),
       });
     } catch (error) {
       toaster.error({
         title: "Couldn't start that activity",
-        description: error instanceof Error ? error.message : String(error),
+        description: serverErrorMessage(error, "Check your connection and try again."),
       });
     } finally {
       setStarting(false);
@@ -316,10 +346,14 @@ function AssignmentPageBody({
                     Started {formatRelative(data.startedAt)}
                   </Text>
                 </HStack>
-                {classFocusCount > 0 && (
+                {liveCounts.inClass > 0 && (
                   <Badge bg="violet.100" color="violet.700">
-                    {classFocusCount} class focus
-                    {classFocusCount === 1 ? "" : "es"}
+                    {liveCounts.inClass} in class
+                  </Badge>
+                )}
+                {liveCounts.openUntil > 0 && (
+                  <Badge bg="gray.100" color="charcoal.600">
+                    {liveCounts.openUntil} open until
                   </Badge>
                 )}
                 {homeworkCount > 0 && (
@@ -607,7 +641,6 @@ function OutlineSection({
             activityId={a.activityId}
             title={a.title}
             kind={a.kind}
-            defaultMode={a.defaultMode}
             schedule={a.schedule}
             completedCount={a.completedScholarIds.length}
             completedScholarIds={a.completedScholarIds}
@@ -650,8 +683,7 @@ function OutlineSection({
                 activityId={a.activityId}
                 title={a.title}
                 kind={a.kind}
-                defaultMode={a.defaultMode}
-                schedule={a.schedule}
+                    schedule={a.schedule}
                 completedCount={a.completedScholarIds.length}
                 completedScholarIds={a.completedScholarIds}
                 selfMarked={a.selfMarked}
@@ -705,7 +737,11 @@ function PlannedWorkLine({
       // Sequential on purpose: every push patches the SAME assignment doc, so
       // firing them together just buys write conflicts and retries.
       for (const entry of planned) {
-        const releaseArgs = plannedReleaseArgs(entry.schedule, now);
+        const releaseArgs = plannedReleaseArgs(
+          entry.schedule,
+          now,
+          timeZone ?? DEFAULT_TIMEZONE,
+        );
         await pushActivity({
           assignmentId,
           activityId: entry.activityId,
@@ -719,7 +755,7 @@ function PlannedWorkLine({
     } catch (error) {
       toaster.error({
         title: "Couldn't start the planned activities",
-        description: error instanceof Error ? error.message : String(error),
+        description: serverErrorMessage(error, "Check your connection and try again."),
       });
     } finally {
       setStarting(false);
@@ -857,9 +893,17 @@ export function homeworkDueToastDescription(
 function classFocusLiveToast(
   endsAt: number | null | undefined,
   timeZone: string | null,
+  openUntilKind?: boolean,
 ): string {
-  if (endsAt == null) return "Live now · fades after today";
-  const time = formatRoomTurnTime(endsAt, timeZone ?? DEFAULT_TIMEZONE);
+  if (endsAt == null) return "Live now · leaves their screens when this class ends";
+  const zone = timeZone ?? DEFAULT_TIMEZONE;
+  // Open-until work kept its day on release: name the day, since a bare time
+  // would read as today. The release says which it is (TRA-726), so one
+  // released on its closing day still reads "open until today".
+  if (isOpenUntil({ mode: "classFocus", setAt: Date.now(), endsAt, openUntilKind }, zone)) {
+    return `Live now · ${openUntilPhrase(endsAt, zone, Date.now()).replace(/^Open/, "open")}`;
+  }
+  const time = formatRoomTurnTime(endsAt, zone);
   return time ? `Live now · until ${time}` : "Live now";
 }
 
@@ -869,10 +913,11 @@ function startedToastTitle(
   mode: "classFocus" | "homework",
   endsAt: number | null | undefined,
   timeZone: string | null,
+  openUntilKind?: boolean,
 ): string {
   return mode === "homework"
     ? "Sent — scholars can start it now"
-    : classFocusLiveToast(endsAt, timeZone);
+    : classFocusLiveToast(endsAt, timeZone, openUntilKind);
 }
 
 function bulkStartToastDescription(
@@ -884,34 +929,26 @@ function bulkStartToastDescription(
     new Set(
       planned
         .filter((entry) => entry.schedule.mode === "classFocus")
-        .map((entry) =>
-          classFocusLiveToast(
-            plannedReleaseArgs(entry.schedule, now).endsAt,
-            timeZone,
-          ),
-        ),
+        .map((entry) => {
+          const release = plannedReleaseArgs(entry.schedule, now, timeZone ?? DEFAULT_TIMEZONE);
+          return classFocusLiveToast(release.endsAt, timeZone, release.openUntilKind);
+        }),
     ),
   );
   if (focusLabels.length === 0) return undefined;
   return focusLabels.length === 1
     ? focusLabels[0]
-    : "Class focuses use their planned lifetimes";
+    : "Live now. Each one leaves scholars' screens when its planned time ends.";
 }
 
-function HomeworkDueDatePopover({
-  options,
-  onConfirm,
-}: {
-  options: HomeworkDueDateOptions | null;
-  onConfirm: (dueAt: number) => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
+type DueSelection = ReturnType<typeof useDueSelection>;
+
+/** The due-date choice both homework popovers share. */
+function useDueSelection(options: HomeworkDueDateOptions | null) {
   const [choice, setChoice] = useState<"nextOpen" | "endOfWeek" | "custom">(
     "nextOpen",
   );
   const [customDayKey, setCustomDayKey] = useState("");
-  const [saving, setSaving] = useState(false);
-
   const selectedDueAt = useMemo(() => {
     if (!options) return null;
     if (choice === "nextOpen") return options.nextOpen.dueAt;
@@ -921,15 +958,105 @@ function HomeworkDueDatePopover({
       dayStartForDayKey(shiftDayKey(customDayKey, 1), options.timeZone) - 1
     );
   }, [choice, customDayKey, options]);
+  const reset = () => {
+    setChoice("nextOpen");
+    setCustomDayKey("");
+  };
+  return { choice, setChoice, customDayKey, setCustomDayKey, selectedDueAt, reset };
+}
+
+function DueChoices({
+  options,
+  selection,
+}: {
+  options: HomeworkDueDateOptions;
+  selection: DueSelection;
+}) {
+  const { choice, setChoice, customDayKey, setCustomDayKey } = selection;
+  return (
+    <>
+      <DueChoice
+        selected={choice === "nextOpen"}
+        onClick={() => setChoice("nextOpen")}
+        label={options.nextOpen.label}
+        detail={formatDueDate(options.nextOpen.dueAt, options.timeZone)}
+      />
+      <DueChoice
+        selected={choice === "endOfWeek"}
+        onClick={() => setChoice("endOfWeek")}
+        label="End of the week"
+        detail={formatDueDate(options.endOfWeek.dueAt, options.timeZone)}
+      />
+      <DueChoice
+        selected={choice === "custom"}
+        onClick={() => setChoice("custom")}
+        label="Pick a date…"
+      />
+      {choice === "custom" && (
+        <chakra.input
+          type="date"
+          value={customDayKey}
+          onChange={(event) => setCustomDayKey(event.target.value)}
+          aria-label="Homework due date"
+          px={3}
+          py={2}
+          borderWidth="1px"
+          borderColor="gray.200"
+          borderRadius="md"
+          fontFamily="heading"
+          fontSize="sm"
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * "Give more time": send this activity as homework to the scholars picked
+ * here, ADDED to whoever already has it live (`addToLiveAudience`), so
+ * nothing is taken from anyone else. Each scholar reopens their existing session on this
+ * assignment, work intact.
+ */
+function GiveMoreTimePopover({
+  candidates,
+  options,
+  onConfirm,
+}: {
+  candidates: { scholarId: Id<"users">; name: string }[];
+  options: HomeworkDueDateOptions | null;
+  onConfirm: (scholarIds: Id<"users">[], dueAt: number) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const selection = useDueSelection(options);
+  const { selectedDueAt } = selection;
+  const [saving, setSaving] = useState(false);
+  const pickedScholars = candidates.filter((c) => picked.has(String(c.scholarId)));
+
+  const toggle = (id: Id<"users">) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(String(id))) next.delete(String(id));
+      else next.add(String(id));
+      return next;
+    });
 
   const confirm = async () => {
-    if (selectedDueAt == null) return;
+    if (selectedDueAt == null || pickedScholars.length === 0) return;
     setSaving(true);
     try {
-      await onConfirm(selectedDueAt);
+      await onConfirm(
+        pickedScholars.map((c) => c.scholarId),
+        selectedDueAt,
+      );
       setOpen(false);
-      setChoice("nextOpen");
-      setCustomDayKey("");
+      setPicked(new Set());
+      selection.reset();
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't give more time",
+        description: serverErrorMessage(error, "Check your connection and try again."),
+      });
     } finally {
       setSaving(false);
     }
@@ -938,18 +1065,24 @@ function HomeworkDueDatePopover({
   return (
     <Popover.Root
       open={open}
-      onOpenChange={(details) => setOpen(details.open)}
-      positioning={{ placement: "bottom-end" }}
+      onOpenChange={(details) => {
+        setOpen(details.open);
+        if (!details.open) setPicked(new Set());
+      }}
+      positioning={{ placement: "bottom-start" }}
     >
       <Popover.Trigger asChild>
         <Button
           size="xs"
-          variant="ghost"
-          color="orange.500"
+          variant="outline"
+          color="orange.600"
+          borderColor="orange.200"
           _hover={{ bg: "orange.50" }}
           fontFamily="heading"
+          alignSelf="flex-start"
         >
-          Send as homework
+          <Clock size={11} style={{ marginRight: 3 }} />
+          Give more time
         </Button>
       </Popover.Trigger>
       <Portal>
@@ -966,6 +1099,30 @@ function HomeworkDueDatePopover({
             <Popover.Arrow />
             <Popover.Body p={4}>
               <Stack gap={3}>
+                <Stack gap={1}>
+                  <Text fontFamily="heading" fontWeight="700" color="navy.600">
+                    Who needs more time?
+                  </Text>
+                  <Text fontSize="xs" color="charcoal.500">
+                    They get it as homework and pick up their own work.
+                  </Text>
+                </Stack>
+                <Stack gap={1.5}>
+                  {candidates.map((c) => (
+                    <Checkbox.Root
+                      key={String(c.scholarId)}
+                      size="sm"
+                      checked={picked.has(String(c.scholarId))}
+                      onCheckedChange={() => toggle(c.scholarId)}
+                    >
+                      <Checkbox.HiddenInput />
+                      <Checkbox.Control />
+                      <Checkbox.Label fontFamily="heading" fontSize="sm">
+                        {c.name}
+                      </Checkbox.Label>
+                    </Checkbox.Root>
+                  ))}
+                </Stack>
                 <Text fontFamily="heading" fontWeight="700" color="navy.600">
                   Due when?
                 </Text>
@@ -975,59 +1132,30 @@ function HomeworkDueDatePopover({
                   </Flex>
                 ) : (
                   <>
-                    <DueChoice
-                      selected={choice === "nextOpen"}
-                      onClick={() => setChoice("nextOpen")}
-                      label={options.nextOpen.label}
-                      detail={formatDueDate(
-                        options.nextOpen.dueAt,
-                        options.timeZone,
-                      )}
-                    />
-                    <DueChoice
-                      selected={choice === "endOfWeek"}
-                      onClick={() => setChoice("endOfWeek")}
-                      label="End of the week"
-                      detail={formatDueDate(
-                        options.endOfWeek.dueAt,
-                        options.timeZone,
-                      )}
-                    />
-                    <DueChoice
-                      selected={choice === "custom"}
-                      onClick={() => setChoice("custom")}
-                      label="Pick a date…"
-                    />
-                    {choice === "custom" && (
-                      <chakra.input
-                        type="date"
-                        value={customDayKey}
-                        onChange={(event) => setCustomDayKey(event.target.value)}
-                        aria-label="Homework due date"
-                        px={3}
-                        py={2}
-                        borderWidth="1px"
-                        borderColor="gray.200"
-                        borderRadius="md"
-                        fontFamily="heading"
-                        fontSize="sm"
-                      />
-                    )}
+                    <DueChoices options={options} selection={selection} />
                     <Button
                       size="sm"
                       bg="orange.500"
                       color="white"
                       _hover={{ bg: "orange.600" }}
-                      disabled={selectedDueAt == null || saving}
+                      disabled={
+                        selectedDueAt == null ||
+                        pickedScholars.length === 0 ||
+                        saving
+                      }
                       onClick={confirm}
                     >
                       {saving && <Spinner size="xs" />}
-                      {selectedDueAt == null
-                        ? "Choose a due date"
-                        : `Send for ${formatDueDate(
-                            selectedDueAt,
-                            options.timeZone,
-                          )}`}
+                      {pickedScholars.length === 0
+                        ? "Pick a scholar"
+                        : selectedDueAt == null
+                          ? "Choose a due date"
+                          : `Send to ${giveMoreTimeAudience(
+                              pickedScholars.map((c) => c.name),
+                            )} for ${formatDueDate(
+                              selectedDueAt,
+                              options.timeZone,
+                            )}`}
                     </Button>
                   </>
                 )}
@@ -1038,6 +1166,13 @@ function HomeworkDueDatePopover({
       </Portal>
     </Popover.Root>
   );
+}
+
+/** "Hoku" / "Hoku and Lehua" / "3 scholars" — the confirm button's who. */
+export function giveMoreTimeAudience(names: string[]): string {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.length} scholars`;
 }
 
 function DueChoice({
@@ -1093,7 +1228,6 @@ function ActivityRow({
   activityId,
   title,
   kind,
-  defaultMode,
   schedule,
   completedCount,
   completedScholarIds,
@@ -1109,7 +1243,6 @@ function ActivityRow({
   activityId: Id<"activities">;
   title: string;
   kind: ActivityKind;
-  defaultMode: "classFocus" | "homework" | "either";
   schedule: ActivityScheduleRow | null;
   completedCount: number;
   completedScholarIds: string[];
@@ -1163,34 +1296,70 @@ function ActivityRow({
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, []);
+  // An open-until window that has closed (shared/openUntil.ts): the row says
+  // so with the count, and the names are in the drill-in below.
+  // The assignment's clock, else the homework calendar's (an assignment with
+  // no institution of its own has no timeZone).
+  const windowClock = timeZone ?? dueDateOptions?.timeZone ?? null;
+  const closedLine =
+    schedule && sent && windowClock
+      ? openUntilClosedLine(schedule, {
+          rosterIds: roster.map((r) => String(r.scholarId)),
+          completedScholarIds,
+          nowMs: now,
+          timeZone: windowClock,
+        })
+      : null;
+  // While the window is open the row says "Open until Tue", not "Class
+  // focus": scholars see it on their list, not in class.
+  const openUntilEnd =
+    schedule && sent && windowClock && closedLine == null
+      ? openUntilClosesAt(schedule, windowClock)
+      : null;
+  // The one badge, in the words of the finish the teacher picked (TRA-722).
+  // A closed open-until window keeps its "Closed Sat · 4 of 6 finished" line
+  // above instead.
+  const badge =
+    schedule && closedLine == null
+      ? giveBadge(schedule, { nowMs: now, timeZone: windowClock ?? DEFAULT_TIMEZONE })
+      : null;
   const runningLong =
+    closedLine == null &&
+    openUntilEnd == null &&
     pushedMode === "classFocus" &&
     schedule?.setAt != null &&
     isClassFocusRunningLong(now, schedule.setAt, schedule.endsAt);
 
-  const onPushClassFocus = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    await pushActivity({
-      assignmentId,
-      activityId,
-      mode: "classFocus",
-    });
-    toaster.success({
-      title: classFocusLiveToast(undefined, timeZone),
-    });
-  };
-  const onPushHomework = async (dueAt: number) => {
-    await pushActivity({
-      assignmentId,
-      activityId,
-      mode: "homework",
-      dueAt,
-    });
-    toaster.success({
-      title: "Sent as homework",
-      description: homeworkDueToastDescription(dueAt, dueDateOptions),
-    });
-  };
+  // Who has this activity in front of them right now: null = no one,
+  // "everyone" = the whole roster, else the named subset. "Give more time"
+  // (always homework) offers the rest only where the server would merge
+  // without changing anything for anyone else — so not over a plan, a
+  // whole-cohort entry, or a live class focus (mergeIntoLiveAudience).
+  // Liveness reads the homework calendar's clock, the one that merge uses.
+  const liveClock = dueDateOptions?.timeZone ?? null;
+  const liveFor: "everyone" | Set<string> | null =
+    sent &&
+    liveClock != null &&
+    isScheduleEntryActive(schedule, now, dayKeyForTimezone(now, liveClock), liveClock)
+      ? schedule.scholarIds?.length
+        ? new Set(schedule.scholarIds.map(String))
+        : "everyone"
+      : null;
+  const liveForNames =
+    liveFor instanceof Set
+      ? roster.filter((r) => liveFor.has(String(r.scholarId))).map((r) => r.name)
+      : [];
+  const canGiveMoreTime =
+    liveClock != null &&
+    !planned &&
+    (liveFor === null || (liveFor instanceof Set && pushedMode === "homework"));
+  const moreTimeCandidates = canGiveMoreTime
+    ? roster.filter((r) => !(liveFor instanceof Set && liveFor.has(String(r.scholarId))))
+    : [];
+
+  // Giving work asks when it shows up and when it's finished (TRA-571):
+  // one "Give…" opens that form instead of picking a mode on the row.
+  const [giveOpen, setGiveOpen] = useState(false);
   // Release this planned entry: the same go-live path the header's ad-hoc
   // "Start now" already uses (`pushActivity`), so there is exactly one
   // activation mutation. A planned row on a UNIT assignment used to offer no
@@ -1200,7 +1369,11 @@ function ActivityRow({
     if (!schedule) return;
     setStarting(true);
     try {
-      const releaseArgs = plannedReleaseArgs(schedule, Date.now());
+      const releaseArgs = plannedReleaseArgs(
+        schedule,
+        Date.now(),
+        windowClock ?? DEFAULT_TIMEZONE,
+      );
       await pushActivity({
         assignmentId,
         activityId,
@@ -1211,12 +1384,13 @@ function ActivityRow({
           schedule.mode,
           releaseArgs.endsAt,
           timeZone,
+          releaseArgs.openUntilKind,
         ),
       });
     } catch (error) {
       toaster.error({
         title: "Couldn't start that activity",
-        description: error instanceof Error ? error.message : String(error),
+        description: serverErrorMessage(error, "Check your connection and try again."),
       });
     } finally {
       setStarting(false);
@@ -1234,8 +1408,27 @@ function ActivityRow({
       activityId,
       mode: "classFocus",
       endsAt: (schedule?.endsAt ?? Date.now()) + 10 * 60_000,
+      // Extend is offered only on an in-class give running long (TRA-726).
+      openUntilKind: false,
     });
     toaster.success({ title: "Extended 10 minutes" });
+  };
+  const onGiveMoreTime = async (scholarIds: Id<"users">[], dueAt: number) => {
+    await pushActivity({
+      assignmentId,
+      activityId,
+      mode: "homework",
+      dueAt,
+      scholarIds,
+      addToLiveAudience: true,
+    });
+    const names = roster
+      .filter((r) => scholarIds.includes(r.scholarId))
+      .map((r) => r.name);
+    toaster.success({
+      title: `More time for ${giveMoreTimeAudience(names)}`,
+      description: homeworkDueToastDescription(dueAt, dueDateOptions),
+    });
   };
   const onWrap = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1260,7 +1453,8 @@ function ActivityRow({
       shadow="xs"
       borderWidth="1px"
       borderColor={
-        sent && pushedMode === "classFocus"
+        // A closed open-until window is no longer in front of anyone.
+        sent && pushedMode === "classFocus" && closedLine == null
           ? "violet.300"
           : sent && pushedMode === "homework"
             ? "orange.300"
@@ -1306,37 +1500,28 @@ function ActivityRow({
             <Text fontFamily="heading" fontWeight="600" color="navy.500" fontSize="sm">
               {title}
             </Text>
-            {pushedMode === "classFocus" && (
+            {closedLine && (
+              <Badge bg="gray.100" color="charcoal.600" fontFamily="heading" fontSize="2xs">
+                {closedLine}
+              </Badge>
+            )}
+            {badge?.kind === "openUntil" && (
+              <Badge bg="gray.100" color="charcoal.600" fontFamily="heading" fontSize="2xs">
+                {badge.text}
+                {planned ? " · planned" : ""}
+              </Badge>
+            )}
+            {schedule && badge && badge.kind !== "openUntil" && (
               <ActivityModeBadge
-                mode="classFocus"
+                mode={schedule.mode}
                 variant={planned ? "soft" : "solid"}
+                label={badge.text}
                 suffix={planned ? " · planned" : ""}
               />
             )}
             {runningLong && (
               <Badge bg="gray.100" color="charcoal.500" fontFamily="heading" fontSize="2xs">
                 running long
-              </Badge>
-            )}
-            {pushedMode === "homework" && (
-              <ActivityModeBadge
-                mode="homework"
-                variant={planned ? "soft" : "solid"}
-                suffix={`${planned ? " · planned" : ""}${
-                  schedule?.dueAt && timeZone
-                    ? ` · ${dueStatus(schedule.dueAt, now, timeZone)?.phrase ?? ""}`
-                    : ""
-                }`}
-              />
-            )}
-            {!schedule && defaultMode === "homework" && (
-              <Badge bg="gray.100" color="charcoal.500" fontFamily="heading" fontSize="2xs">
-                intended as homework
-              </Badge>
-            )}
-            {!schedule && defaultMode === "classFocus" && (
-              <Badge bg="gray.100" color="charcoal.500" fontFamily="heading" fontSize="2xs">
-                intended for class
               </Badge>
             )}
           </HStack>
@@ -1381,29 +1566,26 @@ function ActivityRow({
                 Start now
               </Button>
             )}
-            {pushedMode !== "classFocus" && (
+            {!schedule && (
               <Button
                 size="xs"
                 variant="ghost"
-                color="violet.500"
+                color="violet.600"
                 _hover={{ bg: "violet.50" }}
                 fontFamily="heading"
-                onClick={onPushClassFocus}
+                onClick={() => setGiveOpen(true)}
               >
                 <span style={{ marginRight: 3, display: "inline-flex" }}>
-                  <ActivityModeIcon mode="classFocus" size={11} />
+                  <HandArrowUp size={11} />
                 </span>
-                Set as class focus
+                Give…
               </Button>
-            )}
-            {pushedMode !== "homework" && (
-              <HomeworkDueDatePopover
-                options={dueDateOptions}
-                onConfirm={onPushHomework}
-              />
             )}
             {sent && pushedMode === "classFocus" ? (
               <>
+                {/* +10 minutes means nothing on a window that runs to the
+                    end of a day (open until), open or closed. */}
+                {closedLine == null && openUntilEnd == null && (
                 <Button
                   size="xs"
                   variant="ghost"
@@ -1417,6 +1599,10 @@ function ActivityRow({
                   </span>
                   Extend +10
                 </Button>
+                )}
+                {/* A closed window has nothing to wrap, and wrapping would
+                    clear the entry that carries its "Closed Sat" line. */}
+                {closedLine == null && (
                 <Button
                   size="xs"
                   variant="ghost"
@@ -1427,6 +1613,7 @@ function ActivityRow({
                 >
                   Wrap now
                 </Button>
+                )}
               </>
             ) : (
               schedule && (
@@ -1505,6 +1692,23 @@ function ActivityRow({
                     every name), so the fallback reads "No one". */}
                 {completionNames.notDone.join(", ") || "No one"}
               </Text>
+              {liveForNames.length > 0 && (
+                <Text fontSize="xs" color="charcoal.500">
+                  <Text as="span" fontWeight="700">
+                    Live for:
+                  </Text>{" "}
+                  {liveForNames.join(", ")}
+                </Text>
+              )}
+              {moreTimeCandidates.length > 0 && (
+                <Box pt={1}>
+                  <GiveMoreTimePopover
+                    candidates={moreTimeCandidates}
+                    options={dueDateOptions}
+                    onConfirm={onGiveMoreTime}
+                  />
+                </Box>
+              )}
             </Stack>
           )}
           {isShareBack && !readsLearningRecord ? null : isShareBack ? (
@@ -1545,6 +1749,14 @@ function ActivityRow({
           )}
         </Box>
       )}
+      <GiveDialog
+        open={giveOpen}
+        onClose={() => setGiveOpen(false)}
+        assignmentId={assignmentId}
+        activityId={activityId}
+        activityTitle={title}
+        audienceLabel={`${rosterSize} scholar${rosterSize === 1 ? "" : "s"}`}
+      />
       <ScheduleActivityDialog
         open={editScheduleOpen}
         onClose={() => setEditScheduleOpen(false)}
@@ -1870,7 +2082,7 @@ function SubmissionsActivityPanel({
                   WebkitBoxOrient: "vertical",
                 }}
               >
-                {r.textContent.slice(0, 200)}
+                <WritingWithItalics content={r.textContent} maxChars={200} />
               </Text>
             ) : isPortfolio ? (
               <Text fontSize="2xs" color="charcoal.400" fontStyle="italic">

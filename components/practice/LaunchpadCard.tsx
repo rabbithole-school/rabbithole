@@ -18,8 +18,8 @@
  *
  * Fire-once, exactly like StoryMomentCard: on mount we CLAIM the impression via
  * `claimInstructionShown` (a query can't write, so the client claims). If the
- * claim is refused (already shown/terminal in another tab, or the ≤1/day cap is
- * hit) we proceed straight to practice rather than showing a card we shouldn't.
+ * claim is refused (already shown/terminal in another tab) we proceed straight
+ * to practice rather than showing a card we shouldn't.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";

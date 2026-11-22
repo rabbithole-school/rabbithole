@@ -32,7 +32,7 @@ export type ActivityMode = "classFocus" | "homework";
 export const ACTIVITY_MODE: Record<
   ActivityMode,
   {
-    /** Capitalized label for badges/headings: "Class focus". */
+    /** Capitalized label for badges/headings: "In class". */
     label: string;
     /** Lowercase noun for count chips: "2 in class". */
     countNoun: string;
@@ -42,7 +42,7 @@ export const ACTIVITY_MODE: Record<
   }
 > = {
   classFocus: {
-    label: "Class focus",
+    label: "In class",
     countNoun: "in class",
     tone: "violet",
     Icon: Target,

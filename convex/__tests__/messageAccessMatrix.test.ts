@@ -26,6 +26,7 @@ import {
   decideIncludable,
   decideMessageAccess,
   decideOpen,
+  decideScholarCompose,
   type MessageAccessDecision,
   type MessageAccessFacts,
   type MessageThreadKind,
@@ -153,6 +154,15 @@ const VIEWERS = (Object.keys(USERS) as UserKey[]).filter((k) => decl(k).viewer !
 
 /** Scholars in each mentor group at A. */
 const GROUPS: Record<"in" | "out", ScholarKey[]> = { in: ["sE", "sG", "sT"], out: ["sO"] };
+/** Who runs each group (its `ownerId`): a guest's program teacher. */
+const GROUP_OWNER: Record<"in" | "out", UserKey | undefined> = { in: "tA", out: undefined };
+
+/** `owner` runs a group that `scholar` is in. */
+function ownsGroupOf(owner: UserKey, scholar: UserKey): boolean {
+  return (["in", "out"] as const).some(
+    (g) => GROUP_OWNER[g] === owner && (GROUPS[g] as UserKey[]).includes(scholar),
+  );
+}
 
 type ThreadDecl = {
   key: string;
@@ -183,8 +193,9 @@ const SUBJECTS: { subject: ScholarKey; stamp: School; guardian: UserKey; named: 
 
 const THREADS: ThreadDecl[] = SUBJECTS.flatMap(({ subject, stamp, guardian, named }) => [
   { key: `family:${subject}`, kind: "family", subject, stamp, guardian },
-  { key: `mentor:${subject}`, kind: "mentor", subject, stamp, named },
+  { key: `general:${subject}`, kind: "general", subject, stamp, named },
   { key: `workshop:${subject}`, kind: "workshop", subject, stamp, idea: subject === "sE" },
+  { key: `about:${subject}`, kind: "about", subject, stamp },
 ]);
 
 // ── Facts from the declaration (independent of the product code) ─────────
@@ -300,7 +311,23 @@ type Seeded = {
 
 const LINK = "https://example.com/tank-notes";
 
-async function seedWorld(t: T): Promise<Seeded> {
+/**
+ * How scholar threads are STORED: "current" (`kind: "scholar"` + `flavor`) or
+ * "legacy" (the flavor's old name in `kind`, as rows written before the
+ * widen are until migrations:runScholarThreadKinds rewrites them). The matrix
+ * runs on both, against the same oracle, so the two shapes cannot drift.
+ */
+type StoredShape = "current" | "legacy";
+const LEGACY_KIND = { general: "mentor", workshop: "workshop", about: "about" } as const;
+
+function storedKind(kind: MessageThreadKind, shape: StoredShape) {
+  if (kind === "family") return {};
+  return shape === "legacy"
+    ? { kind: LEGACY_KIND[kind] }
+    : { kind: "scholar" as const, flavor: kind };
+}
+
+async function seedWorld(t: T, shape: StoredShape = "current"): Promise<Seeded> {
   return await t.run(async (ctx) => {
     const now = Date.now();
     const schools = {
@@ -330,6 +357,8 @@ async function seedWorld(t: T): Promise<Seeded> {
         institutionId: schools.A,
         name: `Group ${g}`,
         scholarIds: GROUPS[g].map((s) => users[s]),
+        // A program guest's program teacher is a group owner (GROUP_OWNER).
+        ...(GROUP_OWNER[g] ? { ownerId: users[GROUP_OWNER[g]!] } : {}),
       });
     }
     for (const key of Object.keys(USERS) as UserKey[]) {
@@ -398,13 +427,30 @@ async function seedWorld(t: T): Promise<Seeded> {
           updatedAt: now,
         });
       }
+      // An about thread is about one of its scholar's wonders.
+      const about =
+        th.kind === "about"
+          ? {
+              type: "wonder" as const,
+              seedId: await ctx.db.insert("seeds", {
+                scholarId: subject,
+                origin: "teacher",
+                status: "active",
+                topic: "Why do owls turn their heads so far?",
+                suggestionType: "teacher_suggestion",
+                rationale: "Teacher-facing note.",
+              }),
+            }
+          : undefined;
       const threadId = await ctx.db.insert("parentThreads", {
         parentUserId: th.kind === "family" ? users[th.guardian!] : subject,
         scholarId: subject,
         institutionId,
         lastMessageAt: now,
-        ...(th.kind === "family" ? { teacherId: staffAuthor } : { kind: th.kind, teacherId: staffAuthor }),
+        teacherId: staffAuthor,
+        ...storedKind(th.kind, shape),
         ...(suggestionId ? { suggestionId } : {}),
+        ...(about ? { about } : {}),
       });
       threads[th.key] = threadId;
       if (suggestionId) {
@@ -694,13 +740,13 @@ function compare(
 
 // ── The matrix ──────────────────────────────────────────────────────────
 
-describe("message access matrix (every endpoint vs. the oracle)", () => {
+describe.each(["current", "legacy"] as const)("message access matrix (every endpoint vs. the oracle), %s stored shape", (shape) => {
   let t: T;
   let w: Seeded;
   const sessions = new Map<UserKey, As>();
   beforeAll(async () => {
     t = makeT();
-    w = await seedWorld(t);
+    w = await seedWorld(t, shape);
     for (const viewer of VIEWERS) sessions.set(viewer, (await sessionFor(t, w.users[viewer])).as);
   });
 
@@ -708,9 +754,17 @@ describe("message access matrix (every endpoint vs. the oracle)", () => {
   test.each(VIEWERS)("reads and lists: %s", async (viewer) => {
     const as = sessions.get(viewer)!;
     const mismatches: string[] = [];
-    const scholarList = new Set(
+    // About threads are listed only when asked for, so older clients'
+    // lists stay as they were; the oracle's "list" spans both calls.
+    const defaultList = new Set(
       ((await value(() => as.query(api.scholarMessages.listThreads, {})))?.threads ?? []).map((x) => x._id),
     );
+    const aboutList = new Set(
+      ((await value(() => as.query(api.scholarMessages.listThreads, { flavor: "about" })))?.threads ?? []).map(
+        (x) => x._id,
+      ),
+    );
+    const scholarList = new Set([...defaultList, ...aboutList]);
     const familyList = new Set([
       ...((await value(() => as.query(api.parentMessages.listMyThreads, { scope: "all" }))) ?? []).map((x) => x._id),
       ...((await value(() => as.query(api.parentMessages.listMyGuardianThreads, {}))) ?? []).map((x) => x._id),
@@ -722,6 +776,12 @@ describe("message access matrix (every endpoint vs. the oracle)", () => {
         compare(mismatches, viewer, `${th.key}@${routeName(route)}`, expectedVia(decision, th, route), observed, decision.reason);
       }
       const listed = (th.kind === "family" ? familyList : scholarList).has(w.threads[th.key]);
+      if (th.kind === "about" && defaultList.has(w.threads[th.key])) {
+        mismatches.push(`${viewer} ${th.key}: an about thread is in the default list`);
+      }
+      if (th.kind !== "about" && aboutList.has(w.threads[th.key])) {
+        mismatches.push(`${viewer} ${th.key}: listed as an about thread`);
+      }
       const wrongList = (th.kind === "family" ? scholarList : familyList).has(w.threads[th.key]);
       compare(mismatches, viewer, th.key, { list: decision.list }, { list: listed || wrongList }, decision.reason);
     }
@@ -755,7 +815,7 @@ describe("message access matrix (every endpoint vs. the oracle)", () => {
     const eleven = Date.now() - 11 * 60 * 1000;
     const stale = await t.run(async (ctx) => ({
       teacher: await ctx.db.insert("parentMessages", {
-        threadId: w.threads["mentor:sE"], authorType: "teacher", authorUserId: w.users.tA, body: "old", sentAt: eleven,
+        threadId: w.threads["general:sE"], authorType: "teacher", authorUserId: w.users.tA, body: "old", sentAt: eleven,
       }),
       scholar: await ctx.db.insert("parentMessages", {
         threadId: w.threads["workshop:sE"], authorType: "scholar", authorUserId: w.users.sE, body: "old", sentAt: eleven,
@@ -798,10 +858,10 @@ describe("opening conversations and naming staff", () => {
         teachingTeamAtScholarSchool: teachingTeamAt(viewer, school),
         mentorCoversScholar: mentorCovers(viewer, subject),
       };
-      for (const kind of ["mentor", "workshop"] as const) {
+      for (const kind of ["general", "workshop"] as const) {
         const expected = decideOpen({ kind, scholarSchoolLive: LIVE[school], viewer: viewerFacts });
         const actual =
-          kind === "mentor"
+          kind === "general"
             ? await ok(() =>
                 as.mutation(api.scholarMessages.startMentorThreads, { scholarIds: [w.users[subject]], body: "Aloha" }),
               )
@@ -810,7 +870,7 @@ describe("opening conversations and naming staff", () => {
               );
         compare(mismatches, viewer, `open-${kind}:${subject}`, { open: expected.open }, { open: actual }, expected.reason);
       }
-      const canOpenMentor = decideOpen({ kind: "mentor", scholarSchoolLive: LIVE[school], viewer: viewerFacts }).open;
+      const canOpenMentor = decideOpen({ kind: "general", scholarSchoolLive: LIVE[school], viewer: viewerFacts }).open;
       const expectedIncludable = canOpenMentor
         ? (Object.keys(USERS) as UserKey[])
             .filter((c) => c !== viewer)
@@ -834,6 +894,66 @@ describe("opening conversations and naming staff", () => {
         mismatches.push(`${key}: expected [${expectedIncludable}] got [${actualIncludable}]`);
       }
     }
+    expect(mismatches).toEqual([]);
+  });
+});
+
+// ── A scholar writes to a teacher ───────────────────────────────────────
+
+describe("a scholar writing to a teacher", () => {
+  let t: T;
+  let w: Seeded;
+  beforeAll(async () => {
+    t = makeT();
+    w = await seedWorld(t);
+  });
+
+  test.each(VIEWERS)("compose + teacher list: %s", async (viewer) => {
+    const { as } = await sessionFor(t, w.users[viewer]);
+    const mismatches: string[] = [];
+    const school = decl(viewer).home;
+    const viewerFacts = {
+      role: roleOf(viewer),
+      suspendedOut: suspendedOut(viewer),
+      impersonating: false,
+      programGuest: decl(viewer).guest === true,
+    };
+    const expectedList: UserKey[] = [];
+    for (const recipient of Object.keys(USERS) as UserKey[]) {
+      if (recipient === viewer) continue;
+      const expected = decideScholarCompose({
+        scholarSchoolLive: school ? LIVE[school] : false,
+        viewer: viewerFacts,
+        recipient: {
+          role: roleOf(recipient),
+          isSystem: decl(recipient).isSystem === true,
+          teachingTeamAtScholarSchool: school ? teachingTeamAt(recipient, school) : false,
+          ownsViewersGroup: ownsGroupOf(recipient, viewer),
+        },
+      });
+      if (expected.open) expectedList.push(recipient);
+      const actual = await ok(() =>
+        as.mutation(api.scholarMessages.startConversationWithTeacher, {
+          teacherId: w.users[recipient],
+          body: "Aloha",
+        }),
+      );
+      compare(mismatches, viewer, `compose:${recipient}`, { open: expected.open }, { open: actual }, expected.reason);
+    }
+    const rows = (await value(() => as.query(api.scholarMessages.listTeachersForScholar, {}))) ?? [];
+    const byId = new Map((Object.keys(USERS) as UserKey[]).map((k) => [w.users[k], k]));
+    const actualList = rows.map((r) => byId.get(r._id) ?? String(r._id)).sort();
+    if (JSON.stringify(actualList) !== JSON.stringify(expectedList.sort())) {
+      mismatches.push(`${viewer}|teacher-list: expected [${expectedList}] got [${actualList}]`);
+    }
+    // Pin the oracle on two rows so the matrix can't pass vacuously: a
+    // scholar reaches their school's teaching team (no mentor, ops staff,
+    // system account), and a moved scholar their NEW school's.
+    if (viewer === "sE") expect(expectedList.sort()).toEqual(["saA", "tA"]);
+    if (viewer === "sT") expect(expectedList).toEqual(["tC"]);
+    // A program guest: only the teacher who runs their group, never the
+    // school admin.
+    if (viewer === "sG") expect(expectedList).toEqual(["tA"]);
     expect(mismatches).toEqual([]);
   });
 });
@@ -884,7 +1004,7 @@ describe("delivery recipients", () => {
     return VIEWERS.filter((v) => decideMessageAccess(factsFor(v, th)).offPlatform.email).sort();
   }
 
-  test.each(["mentor:sE", "mentor:sG", "workshop:sE", "workshop:sG"])(
+  test.each(["general:sE", "general:sG", "workshop:sE", "workshop:sG"])(
     "a scholar's message in %s emails exactly the oracle's named staff — never a scholar",
     async (threadKey) => {
       const scholar = threadKey.endsWith("sE") ? "sE" : "sG";
@@ -900,7 +1020,7 @@ describe("delivery recipients", () => {
   );
 
   test("the batch claim re-checks reach: a grant revoked after queueing drops out", async () => {
-    const threadId = w.threads["mentor:sE"];
+    const threadId = w.threads["general:sE"];
     await t.run(async (ctx) => {
       const grant = (
         await ctx.db
@@ -913,7 +1033,7 @@ describe("delivery recipients", () => {
       await ctx.db.patch(grant._id, { revokedAt: 3, revokedBy: w.users.pa });
     });
     const batch = await t.mutation(internal.scholarMessages.claimMentorEmailBatch, { threadId });
-    const expected = oracleEmailees("mentor:sE")
+    const expected = oracleEmailees("general:sE")
       .filter((k) => k !== "mInstNamed")
       .map((k) => `${k.toLowerCase()}@fixture.test`)
       .sort();
@@ -985,6 +1105,14 @@ describe("impersonation overlay", () => {
           compare(mismatches, target, `impersonated:${th.key}@${routeName(route)}`, expectedVia(decision, th, route), writes, decision.reason);
         }
       }
+      // Writing to a teacher is a write too: refused under the overlay, even
+      // for a scholar target and a teacher they could reach themselves.
+      await expect(
+        as.mutation(api.scholarMessages.startConversationWithTeacher, {
+          teacherId: w.users.tA,
+          body: "Aloha",
+        }),
+      ).rejects.toThrow(/Read-only while viewing as another user/);
       expect(mismatches).toEqual([]);
     },
   );

@@ -207,7 +207,9 @@ export function TopNavTabs<Key extends string>({
               fontSize="sm"
               fontWeight={active ? "600" : "500"}
               color={active ? "violet.600" : "charcoal.400"}
-              px={4}
+              // Tighter below 2xl so a parent's eight tabs fit beside the
+              // two-child switcher on a 1280px laptop (2026-11-18).
+              px={{ base: 4, lg: 3, "2xl": 4 }}
               py={3}
               borderBottom="2px solid"
               borderColor={active ? "violet.500" : "transparent"}

@@ -3,6 +3,7 @@
 // and the relaunch rule that makes archiving assigned work from Home safe — a
 // launch resumes the session the scholar archived instead of a blank copy.
 import { convexTest } from "convex-test";
+import { insertAssignmentWithSchedule, setSchedule } from "./scheduleFixtures";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -41,7 +42,7 @@ async function seedWorld(t: T) {
     username: "avery-stone",
   });
   const scholarId = await seedScholarInInstitution(t, { institutionId });
-  return await t.run(async (ctx) => {
+  const __mirrored = await t.run(async (ctx) => {
     // Assigned science work, pushed as homework.
     const unitId = await ctx.db.insert("units", {
       teacherId,
@@ -61,7 +62,7 @@ async function seedWorld(t: T) {
       kind: "vibecode",
       order: 0,
     });
-    const assignmentId = await ctx.db.insert("assignments", {
+    const assignmentId = await insertAssignmentWithSchedule(ctx, {
       teacherId,
       unitId,
       scholarIds: [scholarId],
@@ -113,6 +114,7 @@ async function seedWorld(t: T) {
       chatId,
     };
   });
+  return __mirrored;
 }
 
 describe("finishedForScholar tab fields", () => {
@@ -263,8 +265,7 @@ describe("one origin rule for active and archived rows", () => {
     const t = convexTest(schema, modules);
     const w = await seedWorld(t);
     await t.run((ctx) =>
-      ctx.db.patch(w.assignmentId, {
-        activitySchedule: [
+      setSchedule(ctx, w.assignmentId, [
           {
             activityId: w.activityId,
             mode: "homework" as const,
@@ -277,8 +278,7 @@ describe("one origin rule for active and archived rows", () => {
             setAt: Date.now() - 60_000,
             endsAt: Date.now() + 60 * 60_000,
           },
-        ],
-      }),
+        ]),
     );
     const asScholar = await asUser(t, w.scholarId);
     const plate = await asScholar.query(api.scholarPlate.activeForMe, {
